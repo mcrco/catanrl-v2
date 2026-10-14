@@ -125,16 +125,14 @@ def _scenarios(suite: Any, scenarios: Sequence[Any] | None, turn_limit: int | No
     return out
 
 
-def _agents(lineup: Sequence[Any], fill: Any, *, device: str, infer_rows: int) -> list[Any]:
+def _agents(lineup: Sequence[Any], fill: Any, *, device: str, infer_rows: int, mode: str) -> list[Any]:
     """One agent per lineup slot, then the fill agent (if any)."""
     built = []
     for entry in [*lineup, *([fill] if fill is not None else [])]:
         if isinstance(entry, (NativeAgent, BotAgent)):
             built.append(entry)
-        elif hasattr(entry, "native") and entry.key not in ("F", "R"):
-            built.append(entry.native(device=device, infer_rows=infer_rows))
         else:
-            built.append(make_native_agent(entry, device=device, infer_rows=infer_rows))
+            built.append(make_native_agent(entry, device=device, infer_rows=infer_rows, mode=mode))
     return built
 
 
@@ -387,14 +385,16 @@ def play_schedule(
 
     ``fill`` plays the seats whose slot is ``len(lineup)``. ``suite`` (or
     ``scenarios`` and ``turn_limit``) gives each ``ScheduledGame.scenario``
-    its game config. ``on_game(row)`` gets ``game_id``, ``seats`` (slot per
+    its game config; a suite's ``determinism`` (``strict`` by default, ``fast``
+    for dev suites) sets how networks batch. ``on_game(row)`` gets ``game_id``, ``seats`` (slot per
     seat), ``winner`` (slot or None), ``winner_seat``, ``turns``,
     ``truncated``, ``stuck``, ``scores`` (per slot: 1 for a win, 1/N per
     seat for a truncation), ``forfeits`` (per slot) and ``decisions`` (per
     seat).
     """
     table = _scenarios(suite, scenarios, turn_limit)
-    agents = _agents(lineup, fill, device=device, infer_rows=infer_rows)
+    mode = str(getattr(suite, "determinism", "strict"))
+    agents = _agents(lineup, fill, device=device, infer_rows=infer_rows, mode=mode)
     dims = dims_for([s.game for s in table])
     for agent in agents:
         agent.bind(dims)
