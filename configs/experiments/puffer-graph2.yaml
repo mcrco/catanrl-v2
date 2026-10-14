@@ -59,16 +59,20 @@ sweep:
         eval.final:
           - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
           - {suite: heldout-2p, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
-          - {suite: {name: heldout-2p, boards: 250}, lineup: ["POLICY:ckpt=${run}@best", F]}   # pairs with the MCTS rows
-          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=64:oracle=true", F]}
-          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=256:oracle=true", F]}
+          # Against a strong policy, 64-256 simulations barely move off its moves; gains come from
+          # 1024 up (v1's experience). Each MCTS row pairs with the POLICY row on the same boards.
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=1024:oracle=true", F]}
+          - {suite: {name: heldout-2p, boards: 100}, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: {name: heldout-2p, boards: 100}, lineup: ["MCTS:ckpt=${run}@best:sims=4096:oracle=true", F]}
       public:                   # the fair one in 2p: every resource movement is seen by both seats, so the
         obs.level: public       # opponent's exact hand is public (a perfect card counter's knowledge)
         eval.final:
           - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
-          - {suite: {name: heldout-2p, boards: 250}, lineup: ["POLICY:ckpt=${run}@best", F]}   # pairs with the MCTS rows
-          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=64:dets=1", F]}
-          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=256:dets=1", F]}
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=1024:dets=1", F]}
+          - {suite: {name: heldout-2p, boards: 100}, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: {name: heldout-2p, boards: 100}, lineup: ["MCTS:ckpt=${run}@best:sims=4096:dets=1", F]}
   name: "{obs}"
 meta:
   v1: {run: puffer_catan_graph2, repo: catanrl-puffer, epochs: 3786, agent_steps: 500_115_456, hours: 9.5,
