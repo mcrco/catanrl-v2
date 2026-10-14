@@ -7,3 +7,4 @@ build/
 runs/
 wandb/
 *.so
+resources
