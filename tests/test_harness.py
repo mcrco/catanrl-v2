@@ -149,3 +149,13 @@ def test_mcts_add_failure_leaks_no_search():
         mcts.act(rows, rows[:, -mcts.action_space.size:], np.arange(2, dtype=np.uint64), games=games,
                  trackers=[good, wrong])
     assert len(mcts.pool) == 0
+
+
+@pytest.mark.parametrize("backend", ["stepper", "vecenv"])
+@pytest.mark.parametrize("num_envs, threads", [(0, 1), (-2, 1), (4, 0)])
+def test_non_positive_envs_or_threads_raise(backend, num_envs, threads):
+    """The stepper used to spin forever with num_envs <= 0 while the VecEnv clamped it."""
+    suite = Suite(({"game": "base-2p"},), turn_limit=50)
+    with pytest.raises(ValueError, match="positive"):
+        play([agent("R"), agent("F")], suite, schedule(suite, 2, boards=1), backend=backend,
+             num_envs=num_envs, threads=threads)

@@ -291,7 +291,7 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
                      turn_limit=s.turn_limit, value_enemies=value_enemies)
         for s in scenarios
     ]
-    num_envs = max(1, min(int(num_envs), len(games)))
+    num_envs = min(int(num_envs), max(1, len(games)))
     vec = cpp.VecEnv(cpp_scenarios, num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
                      seed=0, num_threads=int(threads), auto_reset=False)
     buffers = vec.allocate()
@@ -392,6 +392,8 @@ def play_schedule(
     seat for a truncation), ``forfeits`` (per slot) and ``decisions`` (per
     seat).
     """
+    if int(num_envs) < 1 or int(threads) < 1:
+        raise ValueError(f"num_envs and threads must be positive, not {num_envs} and {threads}")
     table = _scenarios(suite, scenarios, turn_limit)
     mode = str(getattr(suite, "determinism", "strict"))
     agents = _agents(lineup, fill, device=device, infer_rows=infer_rows, mode=mode)
