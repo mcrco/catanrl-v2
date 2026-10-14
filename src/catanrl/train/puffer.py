@@ -351,22 +351,22 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
     trainer = CatanPuffeRL(config, vecenv, policy, writer=writer, select=select, eval_runtime=eval_runtime,
                            lr_schedule=_lr_schedule(train))
-    trainer.extra_state["map_pool"] = plan.pool["hash"]
-    torch.manual_seed(_derive_seed(seed, "sample", launch))
-
-    state = writer.load_trainer_state() if getattr(writer, "mode", "new") == "resume" else None
-    if state is not None:
-        if state.get("map_pool") not in (None, plan.pool["hash"]):
-            raise RuntimeError("the map pool changed since the run started; refusing to resume")
-        trainer.restore(state)
-        trainer.selector.restore()
-    else:
-        trainer.save_checkpoint()  # e000000
-    for ref in writer.pending_selects():
-        trainer.selector.run(ref, model)
-
     status = "finished"
-    try:
+    try:  # from here on, close() stops PuffeRL's non-daemon utilization thread
+        trainer.extra_state["map_pool"] = plan.pool["hash"]
+        torch.manual_seed(_derive_seed(seed, "sample", launch))
+
+        state = writer.load_trainer_state() if getattr(writer, "mode", "new") == "resume" else None
+        if state is not None:
+            if state.get("map_pool") not in (None, plan.pool["hash"]):
+                raise RuntimeError("the map pool changed since the run started; refusing to resume")
+            trainer.restore(state)
+            trainer.selector.restore()
+        else:
+            trainer.save_checkpoint()  # e000000
+        for ref in writer.pending_selects():
+            trainer.selector.run(ref, model)
+
         while trainer.global_step < config["total_timesteps"]:
             if writer.should_stop():
                 status = getattr(writer, "stop_reason", None) or "interrupted"

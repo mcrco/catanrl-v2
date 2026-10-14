@@ -10,6 +10,8 @@ does: open the run, train (``train.algo``), then play ``eval.final``.
 
 from __future__ import annotations
 
+import contextlib
+import signal
 import statistics
 import subprocess
 import sys
@@ -79,6 +81,34 @@ def final_evals(run: Any) -> list:
     return records
 
 
+def run_child(argv: Sequence[str]) -> tuple[int, bool]:
+    """Run a variant's process; SIGINT/SIGTERM go to it, once each, and we wait.
+
+    The child has its own process group, so a terminal Ctrl-C reaches it only
+    through this forward: the first signal asks the trainer to stop at its next
+    epoch (off-interval checkpoint, status interrupted), a second one interrupts
+    it. Returns (exit code, whether a stop was asked)."""
+    child = subprocess.Popen(list(argv), process_group=0)
+    stopped = False
+
+    def forward(signum, frame):
+        nonlocal stopped
+        stopped = True
+        with contextlib.suppress(ProcessLookupError):
+            child.send_signal(signum)
+
+    previous = {sig: signal.signal(sig, forward) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        while True:
+            try:
+                return child.wait(), stopped
+            except InterruptedError:
+                continue
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 def _child_argv(plan: Plan, v: Variant, overrides: Sequence[str], allow_code_change: bool) -> list[str]:
     argv = [sys.executable, "-P", "-m", "catanrl.cli", "run", str(plan.source), "--variant", v.name, "--inline"]
     for item in overrides:
@@ -107,11 +137,13 @@ def run_plan(plan: Plan, *, next_: bool = False, allow_code_change: bool = False
             if next_ and status == "running":
                 continue  # another terminal has it
             print(f"== {v.ref}", flush=True)
-            result = subprocess.run(_child_argv(plan, v, overrides, allow_code_change), check=False)
-            if result.returncode == 3 and next_:
+            code, stopped = run_child(_child_argv(plan, v, overrides, allow_code_change))
+            if stopped:
+                raise SystemExit(130)  # the child stopped gracefully; do not start the next variant
+            if code == 3 and next_:
                 continue  # locked: someone else claimed it
-            if result.returncode != 0:
-                raise SystemExit(result.returncode)
+            if code != 0:
+                raise SystemExit(code)
             ran = True
             if next_:
                 break
