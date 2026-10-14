@@ -22,6 +22,7 @@ docs/experiments-implementation.md are handled here:
 from __future__ import annotations
 
 import contextlib
+import copy
 import math
 import time
 from collections.abc import Mapping
@@ -111,8 +112,10 @@ def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows:
         use_rnn=False,
         torch_deterministic=bool(strict),
         cpu_offload=False,
-        compile=bool(runtime.get("compile", False)),
-        compile_mode=str(runtime.get("compile_mode", "default")),
+        # runtime.compile compiles the network inside PufferPolicy; PuffeRL's own compile
+        # would trace the acting-row selection too.
+        compile=False,
+        compile_mode="default",
         batch_size=int(rows) * int(config["bptt_horizon"]),
     )
     missing = PUFFERL_KEYS - set(config)
@@ -122,6 +125,26 @@ def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows:
     if config["update_epochs"] * config["batch_size"] < config["minibatch_size"]:
         raise ValueError("minibatch_size exceeds the batch")
     return config
+
+
+def select_eval(select: Mapping[str, Any], ref: Any, eval_runtime: Mapping[str, Any]) -> tuple[Any, float]:
+    """Run ``eval.select`` on a checkpoint: (record, metric).
+
+    Isolated from training: autocast off (PuffeRL leaks bf16 autocast), a
+    forked torch RNG and strict determinism.
+    """
+    from catanrl.eval.results import evaluate
+
+    try:
+        from catanrl.seeding import determinism
+    except ImportError:
+        determinism = None
+    lineup = [str(spec).replace("${self}", str(ref)) for spec in select["lineup"]]
+    devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+    guard = determinism("strict") if determinism else contextlib.nullcontext()
+    with torch.autocast("cuda", enabled=False), torch.random.fork_rng(devices=devices), guard:
+        record = evaluate(lineup, select["suite"], fill=select.get("fill"), **eval_runtime)
+    return record, float(record.summary[select.get("metric", "score_rate")])
 
 
 class _CaptureLogger:
@@ -188,9 +211,10 @@ class CatanPuffeRL(pufferl.PuffeRL):
             "epoch": self.epoch,
             "global_step": self.global_step,
             "decisions": self.decisions,
-            "model": {k: v.detach().cpu() for k, v in self.model.state_dict().items()},
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
+            # Copies: on CPU, .cpu() and state_dict() alias the live tensors.
+            "model": {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()},
+            "optimizer": copy.deepcopy(self.optimizer.state_dict()),
+            "scheduler": copy.deepcopy(self.scheduler.state_dict()),
             "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
             "best_metric": self.best_metric,
             "rng": rng,
@@ -231,21 +255,10 @@ class CatanPuffeRL(pufferl.PuffeRL):
 
     def run_select(self, ref: Any) -> None:
         """The select eval of a checkpoint, isolated from training state; moves ``best``."""
-        from catanrl.eval.results import evaluate
-
-        try:
-            from catanrl.seeding import determinism
-        except ImportError:
-            determinism = None
-        lineup = [str(spec).replace("${self}", str(ref)) for spec in self.select["lineup"]]
-        devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
-        guard = determinism("strict") if determinism else contextlib.nullcontext()
         was_training = self.model.training
         self.model.eval()
-        with torch.autocast("cuda", enabled=False), torch.random.fork_rng(devices=devices), guard:
-            record = evaluate(lineup, self.select["suite"], fill=self.select.get("fill"), **self.eval_runtime)
+        record, metric = select_eval(self.select, ref, self.eval_runtime)
         self.model.train(was_training)
-        metric = float(record.summary[self.select.get("metric", "score_rate")])
         if self.best_metric is None or metric > self.best_metric:
             self.best_metric = metric
             self.writer.set_alias("best", ref, record=record)
@@ -379,7 +392,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
         threads=int(runtime.get("threads", 1)), seed=rollout_seed,
         log_interval=int(train.get("log_interval", 32)),
     )
-    policy = PufferPolicy(model, num_rows=vecenv.num_agents)
+    policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)))
     config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
                            data_dir=str(getattr(writer, "path", ".")), strict=strict)
     select = (cfg.get("eval") or {}).get("select")

@@ -12,7 +12,9 @@ model's device:
   use. Graph-s is launch-bound at small batches (about 200 kernels per
   forward), so graphs cut most of the per-call overhead.
 
-On CPU there are no graphs; strict mode still pads.
+On CPU there are no graphs, and strict mode evaluates rows one at a time:
+CPU GEMM kernels make a row's result depend (in the last bits) on its
+position in the batch, which CUDA's do not.
 """
 
 from __future__ import annotations
@@ -58,6 +60,8 @@ class BatchEvaluator:
     # ------------------------------------------------------------ shapes
 
     def bucket(self, rows: int) -> int:
+        if self.mode == "strict" and self.device.type == "cpu":
+            return 1
         if self.mode == "strict":
             return self.infer_rows
         size = 1
@@ -98,8 +102,9 @@ class BatchEvaluator:
             raise RuntimeError("evaluate with autocast off (PuffeRL leaks bf16 autocast)")
         logits = np.empty((n, self.num_actions), dtype=np.float32)
         values = np.empty((n, self.num_players), dtype=np.float32)
-        for start in range(0, n, self.infer_rows):
-            chunk = observations[start : start + self.infer_rows]
+        step = 1 if self.mode == "strict" and self.device.type == "cpu" else self.infer_rows
+        for start in range(0, n, step):
+            chunk = observations[start : start + step]
             out_logits, out_values = self._run(chunk)
             logits[start : start + len(chunk)] = out_logits
             values[start : start + len(chunk)] = out_values

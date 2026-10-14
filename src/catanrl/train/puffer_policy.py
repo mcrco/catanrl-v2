@@ -59,9 +59,12 @@ def seat_rows(rows: torch.Tensor, present: torch.Tensor, max_players: int) -> tu
 class PufferPolicy(nn.Module):
     """The model behind PufferLib's ``forward_eval`` / ``forward`` / ``value_loss``."""
 
-    def __init__(self, model: CatanModel, *, num_rows: int) -> None:
+    def __init__(self, model: CatanModel, *, num_rows: int, compile: bool = False) -> None:
         super().__init__()
         self.model = model
+        # torch.compile fuses the many small elementwise ops (about 1.45x on graph-s); dynamic
+        # shapes because the number of acting rows varies.
+        self._heads = torch.compile(model.heads, dynamic=True) if compile else model.heads
         self.max_players = model.num_players
         self.num_rows = int(num_rows)
         if self.num_rows % self.max_players:
@@ -83,7 +86,7 @@ class PufferPolicy(nn.Module):
         logits = self.model.waiting_logits(rows, observations.device)
         values = torch.zeros(rows, device=observations.device, dtype=torch.float32)
         if acting.numel():
-            act_logits, value_logits, present = self.model.heads(observations.index_select(0, acting))
+            act_logits, value_logits, present = self._heads(observations.index_select(0, acting))
             logits.index_copy_(0, acting, act_logits.float())
             probs = torch.sigmoid(value_logits.float()) * present
             target, valid = seat_rows(acting, present, self.max_players)
@@ -120,7 +123,7 @@ class PufferPolicy(nn.Module):
         rows = observations.shape[0]
         acting = torch.nonzero(self.model.acting(observations)).squeeze(1)
         logits = self.model.waiting_logits(rows, observations.device)
-        act_logits, value_logits, present = self.model.heads(observations.index_select(0, acting))
+        act_logits, value_logits, present = self._heads(observations.index_select(0, acting))
         logits = logits.index_copy(0, acting, act_logits.float())
         return logits, ValueBatch(acting, value_logits.float(), present, rows)
 
