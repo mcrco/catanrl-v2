@@ -13,11 +13,11 @@ checkpoint = pytest.importorskip("catanrl.checkpoint")
 spec = pytest.importorskip("catanrl.agents.spec")
 provenance = pytest.importorskip("catanrl.provenance")
 
-from cppanatron import parity  # noqa: E402
-from cppanatron.catanatron import from_catanatron_action  # noqa: E402
+from cppanatron import parity
+from cppanatron.catanatron import from_catanatron_action
 
-from catanrl import games  # noqa: E402
-from catanrl.agents.native import make_native_agent  # noqa: E402
+from catanrl import games
+from catanrl.agents.native import make_native_agent
 
 
 def tiny_checkpoint(tmp_path):

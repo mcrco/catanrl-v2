@@ -27,8 +27,8 @@ import pufferlib.vector
 
 from catanrl import games
 from catanrl.envs.encoding import (
-    covering_dims,
     check_dims,
+    covering_dims,
     critic_level_of,
     dims_for,
     encoder_dims,

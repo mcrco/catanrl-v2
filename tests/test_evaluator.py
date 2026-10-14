@@ -3,12 +3,12 @@ depend on their batch, and fast mode pads to powers of two."""
 
 from __future__ import annotations
 
+import cppanatron as cpp
 import numpy as np
 import pytest
 import torch
 from eval_standins import tiny_model
 
-import cppanatron as cpp
 from catanrl import games
 from catanrl.search import BatchEvaluator
 
