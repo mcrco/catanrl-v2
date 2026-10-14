@@ -23,7 +23,8 @@ _EXPORTS = {
     "load_suite": "catanrl.eval.suites",
 }
 
-__all__ = sorted(_EXPORTS)
+__all__ = ["evaluate", "list_runs", "load_checkpoint", "load_experiment", "load_suite", "player",
+           "resolve_agent"]
 
 
 def __getattr__(name):

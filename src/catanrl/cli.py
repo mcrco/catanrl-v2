@@ -146,7 +146,7 @@ def _cmd_ls(args) -> int:
         if best and ckpts and best["epoch"] == 0 and run.config.get("init_from"):
             flags.append("best is still the parent's weights")
         best_text = f"best e{best['epoch']} {best['metric']:.3f}" if best and best.get("metric") is not None else "-"
-        print(f"{run.ref:<45} {str(run.status):<12} {('e%d' % ckpts[-1].epoch) if ckpts else '-':>8}  "
+        print(f"{run.ref:<45} {run.status!s:<12} {f'e{ckpts[-1].epoch}' if ckpts else '-':>8}  "
               f"{best_text}  {'; '.join(flags)}")
     return 0
 

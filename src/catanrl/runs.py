@@ -36,7 +36,7 @@ import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 import torch
 
@@ -347,7 +347,7 @@ def check_runs(pattern: str = "*") -> list[dict]:
                 ckpt = run.checkpoint(which)
                 ckpt.self_test()
                 row["ref"] = str(ckpt.ref)
-            except Exception as error:  # report every failure, do not stop at the first
+            except Exception as error:  # noqa: BLE001  (report every failure, do not stop at the first)
                 row.update(ok=False, error=f"{type(error).__name__}: {error}")
             rows.append(row)
     return rows
@@ -494,7 +494,7 @@ class RunWriter(Run):
             pass
         return writer
 
-    def __enter__(self) -> RunWriter:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

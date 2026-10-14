@@ -19,7 +19,6 @@ import ast
 import enum
 import hashlib
 import json
-import math
 import os
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -227,7 +226,3 @@ def read_jsonl(path: str | Path) -> list[dict]:
                 break
             raise
     return rows
-
-
-def is_finite(x: Any) -> bool:
-    return isinstance(x, (int, float)) and math.isfinite(x)

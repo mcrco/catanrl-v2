@@ -311,7 +311,7 @@ def _check_entries(value: Any, path: str) -> Any:
             raise ConfigError(f"{path}: expected a mapping, got {entry!r}")
         unknown = set(entry) - ENTRY_KEYS[path]
         if unknown:
-            key = sorted(unknown)[0]
+            key = min(unknown)
             raise ConfigError(f"unknown key {path}.{key}{_suggest(key, sorted(ENTRY_KEYS[path]))}")
     return value
 

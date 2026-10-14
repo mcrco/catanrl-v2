@@ -129,7 +129,7 @@ def _missing_finals(v: Variant) -> bool:
         try:
             if find(lineup, entry["suite"], fill=entry.get("fill")) is None:
                 return True
-        except Exception:
+        except (RuntimeError, ValueError):  # unresolvable now: the child run reports why
             return True
     return False
 
@@ -162,8 +162,9 @@ def summarize(experiment: str) -> Path:
         finals = [r for r in run.evals() if r.data["specs"][0].startswith(("POLICY", "MCTS", "BELIEF"))
                   and load_suite_purpose(r) == "heldout"]
         final = "; ".join(f"{r.data['suite']} {r.summary['score_rate']:.3f}" for r in finals)
+        best_text = f"e{best['epoch']} {best['metric'] or 0:.3f}" if best else "-"
         lines.append(f"| {run.manifest['variant']} | {run.status} | {ckpts[-1].epoch if ckpts else '-'} | "
-                     f"{'e%d %.3f' % (best['epoch'], best['metric'] or 0) if best else '-'} | {final or '-'} |")
+                     f"{best_text} | {final or '-'} |")
         labels = {k: v for k, v in run.manifest.get("labels", {}).items() if k != "seed"}
         key = ", ".join(f"{k}={v}" for k, v in labels.items()) + (f" .{run.manifest['stage']}"
                                                                  if run.manifest.get("stage") else "")

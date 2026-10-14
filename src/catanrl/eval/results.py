@@ -251,7 +251,7 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, allow_mixed, device,
         "fair": [a.fair for a in agents], "labels": labels,
         "allow_drift": any(bool(getattr(a.params, "allow_drift", False)) for a in agents),
         "valid": summary["forfeits"] == 0, "mixed": mixed,
-        "games_sha256": canon.digest([{k: v for k, v in r.items() if k != "segment"} for r in ordered], 64),
+        "games_sha256": canon.digest([_strip(r) for r in ordered], 64),
         "segments": canon.read_jsonl(segments_path), "created": time.time(),
     }
     canon.write_once_json(path, record)
@@ -284,7 +284,7 @@ def verify(record: EvalRecord | str | Path, *, games: int | None = 16, device: s
     if not isinstance(record, EvalRecord):
         record = EvalRecord.load(record)
     data = record.data
-    suite = load_suite(data["suite"]) if isinstance(data["suite"], str) else load_suite(data["suite"])
+    suite = load_suite(data["suite"])
     suite = Suite(**{**suite.__dict__, "boards": record.key["suite"]["boards"]})
     agents, fill_agent = _resolve(data["specs"], suite, data.get("fill"), record.key["harness"])
     stored = {r["game_id"]: r for r in record.games()}
@@ -300,19 +300,22 @@ def verify(record: EvalRecord | str | Path, *, games: int | None = 16, device: s
                   suite=suite)
 
     def same(x: dict, y: dict) -> bool:
-        strip = lambda r: {k: v for k, v in r.items() if k != "segment"}  # noqa: E731
-        return canon.canonical_json(strip(x)) == canon.canonical_json(strip(y))
+        return canon.canonical_json(_strip(x)) == canon.canonical_json(_strip(y))
 
     differing = [g.game_id for g in chosen if not same(found[g.game_id], stored[g.game_id])]
     return {"identical": len(chosen) - len(differing), "of": len(chosen), "differing": differing}
 
 
+def _strip(row: Mapping[str, Any]) -> dict:
+    return {k: v for k, v in row.items() if k != "segment"}
+
+
 def stale(pattern: str = "*") -> list[EvalRecord]:
     """Records whose outcome code differs from this checkout's."""
+    import fnmatch
+
     from catanrl.provenance import code_id
     from catanrl.runs import runs_root
-
-    import fnmatch
 
     root = runs_root()
     pattern = pattern if "/" in pattern else f"{pattern}/*"

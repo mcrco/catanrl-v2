@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import pickle
 import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -313,7 +314,7 @@ class Checkpoint:
         path = Path(path)
         try:
             payload = torch.load(path, map_location="cpu", weights_only=True)
-        except Exception as error:  # a torn or foreign file
+        except (RuntimeError, OSError, EOFError, ValueError, pickle.UnpicklingError) as error:  # torn or foreign
             raise WeightsCorrupt(f"{path}: cannot be read as a checkpoint ({error})") from None
         if not isinstance(payload, dict) or payload.get("format") != FORMAT:
             raise SchemaMismatch(f"{path} is not a catanrl checkpoint")
@@ -363,13 +364,13 @@ class Checkpoint:
             model = _rebuild(self.header["model"], dims, levels, self.state_dict)
             logits, values = _outputs(model, test["obs"])
             legal = test["logits"] > -1e8
-            if part in ("actor", "all"):
-                if not torch.equal(legal, logits > -1e8) or not torch.allclose(
-                        logits[legal], test["logits"][legal], rtol=LOGIT_TOL, atol=LOGIT_TOL):
-                    raise ModelDrift(f"{self.ref}: the rebuilt network's logits differ from its self-test")
-            if part in ("critic", "all"):
-                if not torch.allclose(values, test["value"], rtol=VALUE_TOL, atol=VALUE_TOL):
-                    raise ModelDrift(f"{self.ref}: the rebuilt network's values differ from its self-test")
+            logits_ok = torch.equal(legal, logits > -1e8) and torch.allclose(
+                logits[legal], test["logits"][legal], rtol=LOGIT_TOL, atol=LOGIT_TOL)
+            if part in ("actor", "all") and not logits_ok:
+                raise ModelDrift(f"{self.ref}: the rebuilt network's logits differ from its self-test")
+            values_ok = torch.allclose(values, test["value"], rtol=VALUE_TOL, atol=VALUE_TOL)
+            if part in ("critic", "all") and not values_ok:
+                raise ModelDrift(f"{self.ref}: the rebuilt network's values differ from its self-test")
         self._tested.add((part, allow_drift))
 
     def model(self, part: Literal["actor", "critic", "all"] = "actor", device: str = "cpu", *,
