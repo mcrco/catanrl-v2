@@ -1,0 +1,12 @@
+[submodule "engine/cppanatron"]
+	path = engine/cppanatron
+	url = https://github.com/mcrco/cppanatron
+	branch = v2
+[submodule "third_party/catanatron"]
+	path = third_party/catanatron
+	url = https://github.com/mcrco/catanatron
+	branch = v2
+[submodule "third_party/pufferlib"]
+	path = third_party/pufferlib
+	url = https://github.com/PufferAI/PufferLib
+	branch = catanrl-v2

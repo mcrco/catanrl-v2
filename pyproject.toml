@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "catanrl"
+version = "2.0.0.dev0"
+description = "Catan bots for any map and player count: cppanatron + PufferLib + Catanatron"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "numpy<2.0",
+    "pyyaml>=6.0",
+    "torch",
+    "pufferlib",
+    "cppanatron",
+    "catanatron",
+    "textual>=1.0",
+    "websockets>=13",
+    "cryptography>=42",
+]
+
+[project.scripts]
+catanrl = "catanrl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["catanrl*"]
+
+[tool.uv]
+no-build-isolation-package = ["pufferlib"]
+
+[tool.uv.extra-build-dependencies]
+pufferlib = [{ requirement = "torch", match-runtime = true }, "numpy<2.0", "setuptools", "wheel", "Cython"]
+
+[tool.uv.extra-build-variables]
+pufferlib = { NO_OCEAN = "1" }
+
+[tool.uv.sources]
+pufferlib = { path = "third_party/pufferlib", editable = true }
+catanatron = { path = "third_party/catanatron", editable = true }
+cppanatron = { path = "engine/cppanatron", editable = true }
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+# pufferlib's setup.py computes its requirements; uv needs them statically to
+# build it against the same torch it installs.
+[[tool.uv.dependency-metadata]]
+name = "pufferlib"
+version = "3.0.0"
+requires-dist = [
+    "setuptools", "numpy<2.0", "shimmy[gym-v21]", "gym==0.23", "gymnasium>=0.29.1",
+    "pettingzoo>=1.24.1", "torch", "psutil", "nvidia-ml-py", "rich", "rich_argparse",
+    "imageio", "gpytorch", "scikit-learn", "heavyball>=2.2.0", "neptune", "wandb",
+]
+
+[dependency-groups]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
