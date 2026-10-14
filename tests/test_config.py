@@ -150,8 +150,8 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: Pinned: a change here means every existing run of these configs refuses to resume.
 GOLDEN = {
     "fx-lineage": {
-        "graph-tiny-s42.dagger": "3f950ff65aff3360", "graph-tiny-s42.warm": "b98ad2aca9f60a58",
-        "graph-tiny-s42.g1": "a5a7490459332231", "mlp-s43.g1": "c5eda8724ed73ed8",
+        "graph-tiny-s42.dagger": "9ff8d660e3109701", "graph-tiny-s42.warm": "7bbcefe0278b778e",
+        "graph-tiny-s42.g1": "5f433089b1b7a768", "mlp-s43.g1": "c513cec62c79b0d0",
     },
     "fx-mcts": {"s16-oracle": "3ee08aa7d06abdcb", "s64-d4": "aaa5309ffd128cac"},
 }
@@ -164,21 +164,78 @@ def test_golden_fixture_hashes(name):
     assert {k: found[k] for k in GOLDEN[name]} == GOLDEN[name]
 
 
+def _keyed(key: str, algo: str | None) -> str:
+    return key.replace("train.", f"train.{algo}.", 1) if algo else key
+
+
 def test_migrations_keep_hashes_and_cover_new_keys(monkeypatch, tmp_path):
     snapshot = json.loads((ROOT / "tests" / "data" / "config_schema.json").read_text())
-    migrated = {key for schema, key, _ in config.MIGRATIONS if schema > snapshot["schema"]}
-    new = config.schema_keys() - set(snapshot["keys"])
+    known_algos = {k.split(".")[1] for k in snapshot["keys"] if k.startswith("train.")}
+    migrated = {_keyed(key, algo) for schema, key, _, algo in config.MIGRATIONS if schema > snapshot["schema"]}
+    migrated |= {f"train.{a}.{key[6:]}" for schema, key, _, algo in config.MIGRATIONS
+                 if algo is None and key.startswith("train.") for a in known_algos}
+    new = {k for k in config.schema_keys() - set(snapshot["keys"])
+           if not k.startswith("train.") or k.split(".")[1] in known_algos}  # a new algo has no old configs
     assert new <= migrated, f"new config keys without a MIGRATIONS entry: {sorted(new - migrated)}"
     # An old stored config plus a new key at its legacy value hashes like the new resolution.
     stored = load_plan(write(tmp_path)).variants[0].config
     old = json.loads(json.dumps(stored))
     del old["train"]["ent_coef"]
-    monkeypatch.setattr(config, "MIGRATIONS", [(config.SCHEMA + 1, "train.ent_coef", 0.01)])
+    monkeypatch.setattr(config, "MIGRATIONS", [(config.SCHEMA + 1, "train.ent_coef", 0.01, "ppo")])
     assert config_hash(migrate(old, from_schema=config.SCHEMA)) == config_hash(stored)
     assert config_hash(migrate(old, from_schema=config.SCHEMA + 1)) != config_hash(stored)
+    # A PPO key's migration leaves other algos' configs alone.
+    dagger = load_plan(write(tmp_path, train={"algo": "imitation"})).variants[0].config
+    assert "ent_coef" not in migrate(dagger, from_schema=config.SCHEMA)["train"]
+
+
+def test_tied_axes_on_one_section_merge(tmp_path):
+    sweep = {"axes": {"gam": {"lo": {"train": {"gamma": 0.9}}, "hi": {"train": {"gamma": 0.999}}},
+                      "ent": {"e0": {"train": {"ent_coef": 0.0}}, "e1": {"train": {"ent_coef": 0.1}}}},
+             "name": "{gam}-{ent}"}
+    plan = load_plan(write(tmp_path, sweep=sweep))
+    got = {v.name: (v.config["train"]["gamma"], v.config["train"]["ent_coef"]) for v in plan.variants}
+    assert got == {"lo-e0": (0.9, 0.0), "lo-e1": (0.9, 0.1), "hi-e0": (0.999, 0.0), "hi-e1": (0.999, 0.1)}
+    assert len({v.config_hash for v in plan.variants}) == 4
+
+
+def test_set_on_a_sweep_axis_is_refused(tmp_path):
+    path = write(tmp_path, sweep={"axes": {"seed": [1, 2]}, "name": "s{seed}"})
+    with pytest.raises(ConfigError, match="--set and a sweep axis"):
+        load_plan(path, overrides=["seed=9"])
+
+
+def test_excludes_are_checked(tmp_path):
+    axes = {"train.learning_rate": [1.0e-3, 3.0e-4], "seed": [1, 2]}
+    plan = load_plan(write(tmp_path, sweep={"axes": axes, "exclude": [{"train.learning_rate": "1e-3", "seed": 2}]}))
+    assert len(plan.variants) == 3
+    with pytest.raises(ConfigError, match="names no axis"):
+        load_plan(write(tmp_path, sweep={"axes": axes, "exclude": [{"seeed": 1}]}))
+    with pytest.raises(ConfigError, match="matches no cell"):
+        load_plan(write(tmp_path, sweep={"axes": axes, "exclude": [{"seed": 3}]}))
+
+
+def test_game_definitions_are_hashed(tmp_path):
+    game = tmp_path / "g.yaml"
+    game.write_text("name: g\nnum_players: 2\nmap: {type: BASE}\nvictory_points_to_win: 15\n")
+    path = write(tmp_path, env={"scenarios": [{"game": str(game)}]})
+    first = load_plan(path).variants[0]
+    assert first.config["env"]["scenarios"][0]["game"]["victory_points_to_win"] == 15
+    game.write_text("name: g\nnum_players: 2\nmap: {type: BASE}\nvictory_points_to_win: 10\n")
+    assert load_plan(path).variants[0].config_hash != first.config_hash
 
 
 def test_execution_keys_cover_the_runners():
     from catanrl.train.puffer import RUNNER_KEYS
 
     assert RUNNER_KEYS <= config.EXECUTION_KEYS
+
+
+def test_heldout_overlap_compares_generated_maps(tmp_path):
+    mini = {"name": "mini2", "num_players": 2, "map": {"type": "MINI"}}
+    spelled = {**mini, "map": {"type": "MINI", "number_placement": "official_spiral"}}  # the same boards
+    suite = {"purpose": "heldout", "seed": 5, "boards": 300, "turn_limit": 500}
+    final = [{"suite": {**suite, "scenarios": [{"game": g}]}, "lineup": ["F", "R"]} for g in (mini, spelled)]
+    path = write(tmp_path, env={"scenarios": [{"game": mini, "maps": 1024}]}, eval={"final": final})
+    problems = config.validate_plan(path)
+    assert len(problems) == 2 and all("training pool" in p for p in problems)

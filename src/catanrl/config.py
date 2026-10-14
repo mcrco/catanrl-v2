@@ -42,8 +42,9 @@ from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
 SCHEMA = 1
-#: (schema that added it, dotted key, the value configs written before it meant).
-MIGRATIONS: list[tuple[int, str, Any]] = []
+#: (schema that added it, dotted key, the value configs written before it meant, and for a
+#: ``train.*`` key the algo it belongs to, or None for every algo).
+MIGRATIONS: list[tuple[int, str, Any, str | None]] = []
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
 ALGOS = ("ppo", "imitation", "alphazero")
@@ -131,10 +132,10 @@ def train_defaults(algo: str) -> dict:
 
 
 def schema_keys() -> set[str]:
-    """Every dotted leaf key of the schema (defaults and every train algo)."""
-    keys = set(_flatten(defaults()))
+    """Every dotted leaf key of the schema; train keys per algo, as ``train.<algo>.<key>``."""
+    keys = {k for k in _flatten(defaults()) if not k.startswith("train.")}
     for algo in ALGOS:
-        keys |= {f"train.{k}" for k in train_defaults(algo)}
+        keys |= {f"train.{algo}.{k}" for k in train_defaults(algo)}
     return keys
 
 
@@ -365,15 +366,31 @@ def _check_semantics(cfg: dict) -> None:
             raise ConfigError("every eval.final entry needs suite and lineup")
 
 
+def _resolve_scenario(entry: Any) -> dict:
+    """A scenario with its game's full definition, so the config hash covers the rules and map."""
+    from catanrl.games import load_game
+
+    entry = {"game": entry} if not isinstance(entry, Mapping) else dict(entry)
+    if "game" not in entry:
+        raise ConfigError(f"env.scenarios entry {entry} names no game")
+    try:
+        entry["game"] = load_game(entry["game"]).to_dict()
+    except (OSError, ValueError, TypeError) as error:
+        raise ConfigError(f"env.scenarios: {error}") from None
+    return entry
+
+
 def migrate(cfg: dict, *, from_schema: int) -> dict:
     """A stored config of ``from_schema`` with every later key at its legacy value."""
     cfg = copy.deepcopy(cfg)
-    for schema, path, legacy in MIGRATIONS:
-        if schema > from_schema:
-            try:
-                get_path(cfg, path)
-            except KeyError:
-                _set_path(cfg, path, copy.deepcopy(legacy))
+    algo = (cfg.get("train") or {}).get("algo")
+    for schema, path, legacy, for_algo in MIGRATIONS:
+        if schema <= from_schema or (path.startswith("train.") and for_algo not in (None, algo)):
+            continue
+        try:
+            get_path(cfg, path)
+        except KeyError:
+            _set_path(cfg, path, copy.deepcopy(legacy))
     return cfg
 
 
@@ -434,31 +451,50 @@ def _cells(sweep: Mapping[str, Any]) -> list[tuple[dict[str, str], dict[str, Any
             for label, layer in values.items():
                 if not isinstance(layer, Mapping):
                     raise ConfigError(f"sweep axis {axis}: {label} needs a mapping of keys")
-                options.append((str(label), dict(layer)))
+                options.append((str(label), dict(layer), str(label)))
         elif isinstance(values, list):
-            options = [(_label(v), {axis: v}) for v in values]
+            options = [(_label(v), {axis: v}, v) for v in values]
         else:
             raise ConfigError(f"sweep axis {axis}: expected a list or a mapping")
         if not options:
             raise ConfigError(f"sweep axis {axis} is empty")
-        choices.append([(axis, label, layer) for label, layer in options])
-    excludes = sweep.get("exclude") or []
+        choices.append([(axis, label, layer, value) for label, layer, value in options])
+    excludes = [dict(ex) for ex in sweep.get("exclude") or []]
+    for ex in excludes:
+        unknown = set(ex) - set(axes)
+        if unknown:
+            raise ConfigError(f"sweep.exclude names no axis {sorted(unknown)}; axes: {sorted(axes)}")
+    used = [False] * len(excludes)
     cells = []
     for combo in itertools.product(*choices):
-        labels = {axis: label for axis, label, _ in combo}
-        if any(all(str(labels.get(k)) == _label(v) for k, v in ex.items()) for ex in excludes):
+        values = {axis: value for axis, _, _, value in combo}
+        hits = [all(_same(values[k], v) for k, v in ex.items()) for ex in excludes]
+        used = [u or h for u, h in zip(used, hits)]
+        if any(hits):
             continue
-        layer: dict[str, Any] = {}
         paths: set[str] = set()
-        for axis, _, over in combo:
+        for _, _, over, _ in combo:
             new = _set_paths(over)
             clash = [p for p in new for q in paths if _overlaps(p, q)]
             if clash:
                 raise ConfigError(f"sweep axes set the same key {clash[0]!r}")
             paths |= new
-            layer.update(over)
-        cells.append((labels, layer, paths))
+        layer = merge(*(over for _, _, over, _ in combo))
+        cells.append(({axis: label for axis, label, _, _ in combo}, layer, paths))
+    unmatched = [ex for ex, u in zip(excludes, used) if not u]
+    if unmatched:
+        raise ConfigError(f"sweep.exclude {unmatched[0]} matches no cell")
     return cells
+
+
+def _same(a: Any, b: Any) -> bool:
+    """Axis value equality, numbers compared as numbers (YAML reads 1e-3 as a string)."""
+    if a == b or _label(a) == _label(b):
+        return True
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return False
 
 
 def _label(value: Any) -> str:
@@ -545,6 +581,7 @@ def resolve(raw: Mapping[str, Any], *, experiment: str, variant: str,
     merged.pop("name", None)
     cfg = _check(merged, defaults())
     cfg["train"] = _check_train(cfg["train"])
+    cfg["env"]["scenarios"] = [_resolve_scenario(e) for e in cfg["env"]["scenarios"]]
     if cfg["model"] is not None or cfg["kind"] == "train":
         cfg["model"] = _check_model(cfg["model"])
     scope = {"__config__": cfg, "__stages__": dict(stages or {}), "run": f"{experiment}/{variant}",
@@ -593,9 +630,10 @@ def load_plan(path: str | Path, *, overrides: Sequence[str] = (), only: str | No
         stage_refs: dict[str, str] = {}
         for stage, stage_layer in (stages.items() if stages else [(None, {})]):
             stage_layer = dict(stage_layer or {})
-            clash = [p for p in _set_paths(stage_layer) for q in cell_paths if _overlaps(p, q)]
-            if clash:
-                raise ConfigError(f"stage {stage} and a sweep axis both set {clash[0]!r}")
+            for what, layer in ((f"stage {stage}", stage_layer), ("--set", cli)):
+                clash = [p for p in _set_paths(layer) for q in cell_paths if _overlaps(p, q)]
+                if clash:
+                    raise ConfigError(f"{what} and a sweep axis both set {clash[0]!r}")
             name = cell if stage is None else f"{cell}.{stage}"
             if not NAME_RE.match(name):
                 raise ConfigError(f"variant name {name!r} must match {NAME_RE.pattern}")
@@ -669,7 +707,8 @@ def validate_plan(path: str | Path) -> list[str]:
                 if problem:
                     problems.append(f"{v.name}: {spec}: {problem}")
             if cfg["kind"] == "train" and suite.purpose == "heldout":
-                key = (suite.name, digest(cfg["env"]), cfg["seed"])
+                key = (digest([suite.seed, suite.purpose, [suite._scenario(i) for i in range(len(suite.scenarios))]]),
+                       digest(cfg["env"]), cfg["seed"])
                 if key not in checked:
                     checked.add(key)
                     problems += [f"{v.name}: {p}" for p in _heldout_overlap(cfg, suite)]
@@ -694,24 +733,21 @@ def _ref_problem(spec: str) -> str | None:
 
 
 def _heldout_overlap(cfg: Mapping[str, Any], suite: Any, boards: int = 64) -> list[str]:
-    """Training pool maps that a heldout suite also plays (only for seeded generators)."""
+    """Training pool maps (generated) that the first ``boards`` boards of a heldout suite also play."""
+    from catanrl.eval.suites import map_hash
     from catanrl.games import load_game
     from catanrl.seeding import derive_seed
 
     pool_seed = cfg["env"]["map_pool"]["seed"]
     pool_seed = derive_seed(cfg["seed"], "map_pool") if pool_seed is None else int(pool_seed)
-    suite_games = {digest(load_game(s["game"]).map): s for s in suite.scenarios}
+    first = type(suite)(**{**suite.__dict__, "boards": min(suite.boards, boards)})
+    held = {g.map_hash for g in first.schedule(1, fill=True)}
     problems = []
     for i, entry in enumerate(cfg["env"]["scenarios"]):
-        entry = {"game": entry} if isinstance(entry, str) else entry
         game = load_game(entry["game"])
-        if digest(game.map) not in suite_games:
-            continue
-        if digest(game.map_spec(0)) == digest(game.map_spec(1)):
+        if map_hash(game.map_spec(0)) == map_hash(game.map_spec(1)):
             continue  # a fixed board: every game is on it
-        pool = {digest(game.map_spec(derive_seed(pool_seed, i, j))) for j in range(int(entry.get("maps", 1024)))}
-        first = type(suite)(**{**suite.__dict__, "boards": min(suite.boards, boards)})
-        held = {g.map_hash for g in first.schedule(1, fill=True)}
+        pool = {map_hash(game.map_spec(derive_seed(pool_seed, i, j))) for j in range(int(entry.get("maps", 1024)))}
         if pool & held:
             problems.append(f"{len(pool & held)} heldout maps of {suite.name} are in the training pool of "
                             f"scenario {i}")
