@@ -12,6 +12,8 @@
     catanrl results ['arch-lineage/*'] [--stale]        catanrl verify EVAL_ID [--games 16]
     catanrl check-runs ['*']    catanrl summarize arch-lineage    catanrl validate arch-lineage
     catanrl report-data [report/results.yaml] [--run-missing] [--update] [--final]
+    catanrl bot --spec MCTS:arch-lineage/graph-s-s42.g1@ref:sims=256:dets=4 ws://HOST:PORT/room/ID
+    catanrl play --seats human,POLICY:arch-lineage/graph-s-s42.g1@ref,F,F
 """
 
 from __future__ import annotations
@@ -87,6 +89,26 @@ def _parser() -> argparse.ArgumentParser:
     rep.add_argument("--update", action="store_true", help="accept refs that now resolve differently")
     rep.add_argument("--final", action="store_true", help="refuse dagger rows and re-play games of each record")
     rep.add_argument("--verify-games", type=int, default=16)
+
+    bot = sub.add_parser("bot", help="play a catanatron-server seat with a fair agent spec")
+    bot.add_argument("url", help="ws://HOST:PORT/room/ID, or the server with --new-room")
+    bot.add_argument("--spec", required=True)
+    bot.add_argument("--new-room", type=json.loads, metavar="JSON", help='a room config, or {"config", "seats", "name"}')
+    bot.add_argument("--seat", type=int)
+    bot.add_argument("--transcripts", default="transcripts", help="where the verified transcript is saved")
+    bot.add_argument("--name")
+    bot.add_argument("--device", default="cpu")
+    bot.add_argument("--infer-rows", type=int, default=1)
+    bot.add_argument("--server-key", help="pin the server's public key (hex)")
+    bot.add_argument("--key", dest="key_path", help="this bot's identity key file")
+    bot.add_argument("--no-verify", dest="verify", action="store_false")
+
+    play = sub.add_parser("play", help="a local TUI game against our agents and Catanatron bots")
+    play.add_argument("--seats", required=True, help="comma-separated: human, Catanatron specs, POLICY/MCTS/BELIEF specs")
+    play.add_argument("--config", type=json.loads, metavar="JSON", help="a game config (players, map, rules)")
+    play.add_argument("--seed", type=int)
+    play.add_argument("--device", default="cpu")
+    play.add_argument("--infer-rows", type=int, default=1)
     return p
 
 
@@ -167,6 +189,17 @@ def _cmd_results(args) -> int:
     return 0
 
 
+def _cmd_bot(args) -> int:
+    from catanrl.bridge.server_bot import run_bot
+
+    options = {k: v for k, v in (("name", args.name), ("server_key", args.server_key),
+                                 ("key_path", args.key_path)) if v is not None}
+    result = run_bot(args.spec, args.url, new_room=args.new_room, seat=args.seat, transcript_dir=args.transcripts,
+                     device=args.device, infer_rows=args.infer_rows, verify=args.verify, **options)
+    print(json.dumps(result.summary(), default=str, indent=2))
+    return 0 if result.verified or not args.verify else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     from catanrl._puffer import install_signal_handlers
 
@@ -183,6 +216,14 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_ls(args)
         if args.command == "results":
             return _cmd_results(args)
+        if args.command == "bot":
+            return _cmd_bot(args)
+        if args.command == "play":
+            from catanrl.bridge.server_bot import play_tui
+
+            play_tui(args.seats.split(","), device=args.device, infer_rows=args.infer_rows, config=args.config,
+                     seed=args.seed)
+            return 0
         if args.command == "pin":
             from catanrl.runs import pin
 
