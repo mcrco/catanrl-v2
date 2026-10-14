@@ -1,6 +1,6 @@
 """Play native agents in games where they see one seat's view only.
 
-A catanatron-server room (protocol 4) or the Catanatron TUI hands a bot its
+A catanatron-server room (its PROTOCOL.md) or the Catanatron TUI hands a bot its
 seat's ``client_view`` and the actions it may play. The bridge turns that into
 what the native agents read, using nothing but that seat's information:
 

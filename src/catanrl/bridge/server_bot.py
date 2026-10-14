@@ -1,6 +1,6 @@
 """Our agents as catanatron-server seats and TUI players.
 
-:func:`run_bot` takes a seat in a catanatron-server room (protocol 4) with a
+:func:`run_bot` takes a seat in a catanatron-server room (see its PROTOCOL.md) with a
 :class:`~catanrl.bridge.agent.ViewAgent` and plays it to the end, through
 ``catanatron.server.client.GameClient``, which does the protocol's fairness
 work: it commits to and reveals its seed (signing the commitments' digest),
