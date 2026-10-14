@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import enum
+import fcntl
 import hashlib
 import json
 import os
@@ -195,18 +196,25 @@ def write_once_json(path: str | Path, obj: Any) -> None:
 
 
 def append_jsonl(path: str | Path, row: Mapping[str, Any]) -> None:
-    """Append one row with a single ``write`` on an ``O_APPEND`` descriptor."""
+    """Append one row under an flock. A torn tail (a crash mid-append) is cut
+    back to the last newline first, so it never becomes an interior line."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = (json.dumps(_plain(dict(row)), sort_keys=True, ensure_ascii=False, allow_nan=True) + "\n").encode()
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        written = os.write(fd, line)
-        if written != len(line):
-            raise OSError(f"short append to {path}")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        size = os.fstat(fd).st_size
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            data = os.pread(fd, size, 0)
+            os.ftruncate(fd, data.rfind(b"\n") + 1)
+        os.lseek(fd, 0, os.SEEK_END)
+        view = memoryview(line)
+        while view:
+            view = view[os.write(fd, view):]
         os.fsync(fd)
     finally:
-        os.close(fd)
+        os.close(fd)  # releases the flock
 
 
 def read_jsonl(path: str | Path) -> list[dict]:

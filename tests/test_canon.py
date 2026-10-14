@@ -76,3 +76,13 @@ def test_ast_digest_ignores_comments_and_docstrings(tmp_path):
     assert ast_digest([a]) == first
     a.write_text("x = 2\n\ndef f():\n    return x\n")
     assert ast_digest([a]) != first
+
+
+def test_an_append_after_a_torn_tail_repairs_it(tmp_path):
+    path = tmp_path / "a.jsonl"
+    append_jsonl(path, {"n": 1})
+    with open(path, "ab") as f:
+        f.write(b'{"n": 2, "torn')  # a crash mid-append
+    append_jsonl(path, {"n": 3})
+    append_jsonl(path, {"n": 4})
+    assert read_jsonl(path) == [{"n": 1}, {"n": 3}, {"n": 4}]
