@@ -259,6 +259,9 @@ class CatanPuffeRL(pufferl.PuffeRL):
         elapsed = time.time() - start
         rows = self.global_step - steps
         logs = {key: value for key, value in logs.items() if key not in ("SPS", "uptime")}
+        # PuffeRL logs before it stores this epoch's losses, so its logs carry the previous
+        # epoch's; self.losses now holds this one's.
+        logs.update({f"losses/{key}": value for key, value in self.losses.items()})
         logs.update({
             "decisions": self.decisions,
             "throughput/agent_steps_per_s": rows / elapsed,

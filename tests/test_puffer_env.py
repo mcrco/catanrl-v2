@@ -180,3 +180,34 @@ def test_map_pools_must_hold_maps(maps):
     """An empty pool would silently train on BASE boards instead of the game's generator."""
     with pytest.raises(ValueError, match="maps"):
         scenario_specs([{"game": "random-4p", "maps": maps}])
+
+
+def test_logged_losses_and_kl_adaptation_use_the_current_epoch(tmp_path, monkeypatch):
+    """PuffeRL logs losses one epoch late; the trainer must log and adapt on this epoch's."""
+    import sys
+
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    from learning_standins import LocalVariant, LocalWriter
+    from train_configs import tiny_ppo
+
+    from catanrl.train import puffer
+
+    computed, lrs = {}, {}
+    original = puffer.CatanPuffeRL.train
+
+    def train(self):
+        lrs[self.epoch + 1] = self.optimizer.param_groups[0]["lr"]
+        result = original(self)
+        computed[self.epoch] = self.losses["approx_kl"]
+        return result
+
+    monkeypatch.setattr(puffer.CatanPuffeRL, "train", train)
+    config = tiny_ppo(epochs=4, lr_schedule="kl_adaptive", kl_target=1e-4, lr_min=1e-5, lr_max=1e-1)
+    writer = LocalWriter(tmp_path / "kl")
+    puffer.train_ppo(LocalVariant(config), writer)
+    for row in writer.metrics:
+        assert row["losses/approx_kl"] == computed[row["epoch"]]
+    for epoch in range(1, 4):  # epoch e+1's LR follows epoch e's KL
+        kl, lr = computed[epoch], lrs[epoch]
+        expected = lr / 1.5 if kl > 2e-4 else lr * 1.5 if kl < 5e-5 else lr
+        assert lrs[epoch + 1] == pytest.approx(min(max(expected, 1e-5), 1e-1))
