@@ -1,0 +1,4 @@
+# 3 players on BASE under the standard rules.
+name: base-3p
+num_players: 3
+map: {type: BASE}

@@ -1,0 +1,4 @@
+# Three players on a shuffled base-shaped board (random numbers, generated harbors).
+name: hexagon-3p
+num_players: 3
+map: {type: hexagon, radius: 2}

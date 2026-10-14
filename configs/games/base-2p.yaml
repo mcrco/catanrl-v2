@@ -1,0 +1,6 @@
+# v1's reference game: two players on BASE, 15 VP to win, discard limit 9.
+name: base-2p
+num_players: 2
+map: {type: BASE}
+victory_points_to_win: 15
+discard_limit: 9

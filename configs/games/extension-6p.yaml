@@ -1,0 +1,7 @@
+# The 5-6 player extension: 30 tiles, 11 harbors, bigger bank and deck.
+# The special building phase is not implemented.
+name: extension-6p
+num_players: 6
+map: {type: extension}
+resource_bank: 24
+development_deck: {knight: 20, year_of_plenty: 3, monopoly: 3, road_building: 3, victory_point: 5}

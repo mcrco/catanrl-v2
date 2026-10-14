@@ -1,0 +1,4 @@
+# Four players on random islands of 15-30 land tiles.
+name: random-4p
+num_players: 4
+map: {type: blob, land_tiles: [15, 30]}
