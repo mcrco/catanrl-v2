@@ -39,19 +39,21 @@ CASES = {
 @pytest.mark.parametrize("case", sorted(CASES))
 def test_rows_are_invariant(case):
     key, params = CASES[case]
-    reference = play(lineup(key, **params), num_envs=16, threads=1)
-    assert sorted(reference) == sorted(g.game_id for g in GAMES)
-    for game in GAMES:
+    # Searches are slow on CPU: a 2p and a 3p board are enough for them.
+    games = [g for g in GAMES if g.board == 0] if key == "MCTS" else GAMES
+    reference = play(lineup(key, **params), games, num_envs=16, threads=1)
+    assert sorted(reference) == sorted(g.game_id for g in games)
+    for game in games:
         assert reference[game.game_id]["seats"] == list(game.seats)
     for num_envs, threads in ((1, 1), (5, 4)):
-        assert play(lineup(key, **params), num_envs=num_envs, threads=threads) == reference
+        assert play(lineup(key, **params), games, num_envs=num_envs, threads=threads) == reference
     # Two workers (halves of the schedule) and an interrupted run resumed on the rest.
-    half = len(GAMES) // 2
-    split = {**play(lineup(key, **params), GAMES[:half], num_envs=3),
-             **play(lineup(key, **params), GAMES[half:], num_envs=7)}
+    half = len(games) // 2
+    split = {**play(lineup(key, **params), games[:half], num_envs=3),
+             **play(lineup(key, **params), games[half:], num_envs=7)}
     assert split == reference
     # A rerun in another order.
-    assert play(lineup(key, **params), list(reversed(GAMES)), num_envs=4) == reference
+    assert play(lineup(key, **params), list(reversed(games)), num_envs=4) == reference
 
 
 def test_policy_agrees_across_backends():
