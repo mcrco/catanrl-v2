@@ -10,17 +10,18 @@
 
 becomes ``report/data/results.json`` (rate, interval, n, p, eval id,
 canonical specs, ``run@eN#sha``, flags), which Typst reads with ``json()``.
-The same file pins every ref: a ref or wildcard that now resolves
-differently is a diff that needs ``update``. Refused: non-heldout suites,
-unfair slots under test (unless ``oracle_ok``), invalid or drift-allowed
-records, and checkpoints whose training lineage predates a ``supersedes``
-commit. Dirty, mixed or ``fast`` rows are marked † and ``final`` refuses
-them (and re-plays ``verify_games`` games of every cited record).
+The same file pins every entry's specs, refs and eval ids: a ref or wildcard
+that now resolves differently is a diff that needs ``update``. Refused:
+non-heldout suites, unfair slots under test (unless ``oracle_ok``), invalid
+or drift-allowed records, and checkpoints with a training launch (in the run
+or any ``init_from`` ancestor) that predates a ``supersedes`` commit. Rows
+that cannot be rebuilt from commits (dirty or moved code at eval or training
+time, mixed-code training, mixed execution, ``fast`` suites) are marked †
+and ``final`` refuses them (and re-plays ``verify_games`` games of each).
 """
 
 from __future__ import annotations
 
-import re
 import statistics
 import subprocess
 import time
@@ -40,13 +41,17 @@ class ReportError(RuntimeError):
 
 def _expand(lineup: list[str]) -> list[tuple[Any, list[str]]]:
     """Slot 0's wildcard run (``exp/*.g1``) over finished runs: [(run or None, lineup)]."""
+    from catanatron.registry import parse_spec
+
     from catanrl.runs import list_runs
 
-    m = re.search(r"(?:ckpt=|^[A-Z]+:)([^:@#]*\*[^:@#]*)", lineup[0])
-    if not m:
+    key, args, named = parse_spec(lineup[0])
+    ckpt = named.get("ckpt") or (args[0] if args else "")
+    pattern = ckpt.split("@")[0].split("#")[0]
+    if "*" not in pattern:
         return [(None, lineup)]
-    runs = list_runs(m.group(1), status="finished")
-    return [(run, [lineup[0].replace(m.group(1), run.ref), *lineup[1:]]) for run in runs]
+    return [(run, [lineup[0].replace(pattern, run.ref, 1), *lineup[1:]])
+            for run in list_runs(pattern, status="finished")]
 
 
 def _descends(commit: str, head: str, repo: Path) -> bool:
@@ -54,27 +59,40 @@ def _descends(commit: str, head: str, repo: Path) -> bool:
                           capture_output=True, check=False).returncode == 0
 
 
-def _lineage_heads(agent: Any) -> list[str]:
-    """The superproject HEAD of every launch of the checkpoint's run and its init_from ancestors."""
-    from catanrl.runs import load_experiment
+def _training(agent: Any, problems: list[str], name: str) -> tuple[list[str], list[str]]:
+    """(superproject HEAD of every training launch over the lineage, training-side flags)."""
+    from catanrl import provenance
+    from catanrl.checkpoint import Checkpoint
+    from catanrl.runs import RunError, load_experiment
 
     ref = agent.checkpoint
-    if ref.run is None:
-        from catanrl.checkpoint import Checkpoint
+    if ref.run is None:  # a free-standing .pt: its header is all there is
+        code = Checkpoint.load(ref.path).header.get("code") or {}
+        return [code.get("git")], ["dirty-train"] if code.get("dirty") else []
+    try:
+        run = load_experiment(ref.run)
+        runs = [run] + [load_experiment(r.run) for r in run.lineage() if r.run and r.run != run.ref]
+    except RunError as error:
+        problems.append(f"{name}: the training lineage of {ref} is not here ({error})")
+        return [], []
+    heads, flags = [], set()
+    for r in runs:
+        for prov in r.provenance():
+            heads.append(prov["git"]["repos"]["catanrl-v2"]["head"])
+            if provenance.any_dirty(prov):
+                flags.add("dirty-train")
+        if any(launch.get("mixed_code") for launch in r._run_json()["launches"]):
+            flags.add("mixed-code")
+    return heads, sorted(flags)
 
-        return [Checkpoint.load(ref.path).header["code"].get("git")]
-    run = load_experiment(ref.run)
-    runs = [run] + [load_experiment(r.run) for r in run.lineage() if r.run]
-    return [p["git"]["repos"]["catanrl-v2"]["head"] for r in runs for p in r.provenance()]
 
-
-def _flags(record: Any) -> list[str]:
+def _eval_flags(record: Any) -> list[str]:
     flags = []
     if record.data.get("mixed"):
         flags.append("mixed")
     if record.key.get("determinism") == "fast":
         flags.append("fast")
-    if any(s["provenance"]["git"]["repos"]["catanrl-v2"]["dirty"] for s in record.data.get("segments", [])):
+    if any(s.get("dirty", True) for s in record.data.get("segments", [])):
         flags.append("dirty")
     return flags
 
@@ -91,8 +109,10 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
     agents, fill = _resolve(lineup, suite, entry.get("fill"), "native")
     if not agents[0].fair and not entry.get("oracle_ok"):
         problems.append(f"{name}: {agents[0].label} sees hidden information (add oracle_ok: true to cite it)")
+    train_flags: list[str] = []
     if agents[0].checkpoint is not None:
-        for head in _lineage_heads(agents[0]):
+        heads, train_flags = _training(agents[0], problems, name)
+        for head in heads:
             for commit in supersedes:
                 if not head or not _descends(commit, head, repo):
                     problems.append(f"{name}: {agents[0].label} was trained at {str(head)[:12]}, before {commit}")
@@ -108,7 +128,7 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
         problems.append(f"{name}: record {record.eval_id} is invalid (a bot forfeited)")
     if record.data.get("allow_drift"):
         problems.append(f"{name}: record {record.eval_id} was made with allow_drift")
-    flags = _flags(record)
+    flags = _eval_flags(record) + train_flags
     if final:
         if flags:
             problems.append(f"{name}: --final refuses {', '.join(flags)} record {record.eval_id}")
@@ -117,13 +137,14 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
             problems.append(f"{name}: {len(check['differing'])} of {check['of']} games differ on replay")
     slot = record.summary["slots"][0]
     return {"rate": slot["score_rate"], "interval": slot["wilson"], "n": slot["games"],
-            "p": slot.get("win_share_p"), "eval_id": record.eval_id, "specs": record.data["specs"],
-            "refs": record.data["refs"], "suite": suite.name, "flags": flags, "dagger": bool(flags),
-            "record": record}
+            "p": slot.get("win_share_p"), "decided": slot.get("decided"), "truncated": record.summary["truncated"],
+            "eval_id": record.eval_id, "specs": record.data["specs"], "refs": record.data["refs"],
+            "suite": suite.name, "flags": flags, "dagger": bool(flags), "record": record}
 
 
 def report_data(spec: str | Path, *, run_missing: bool = False, update: bool = False, final: bool = False,
                 verify_games: int = 16) -> Path:
+    from catanrl.config import get_path
     from catanrl.eval.results import paired
     from catanrl.provenance import repo_root
 
@@ -133,8 +154,9 @@ def report_data(spec: str | Path, *, run_missing: bool = False, update: bool = F
     repo = repo_root()
     problems: list[str] = []
     entries: dict[str, Any] = {}
-    records: dict[str, Any] = {}
-    for name, entry in (data.get("cite") or {}).items():
+    single: dict[str, Any] = {}
+    cite = data.get("cite") or {}
+    for name, entry in cite.items():
         unknown = set(entry) - ENTRY_KEYS
         if unknown:
             problems.append(f"{name}: unknown keys {sorted(unknown)}")
@@ -147,15 +169,14 @@ def report_data(spec: str | Path, *, run_missing: bool = False, update: bool = F
                        verify_games=verify_games, problems=problems)
             if row is not None:
                 if entry.get("group_by") and run is not None:
-                    from catanrl.config import get_path
-
                     row["group"] = str(get_path(run.config, entry["group_by"]))
                 rows.append(row)
         if not rows:
             if "*" in str(entry["lineup"][0]):
                 problems.append(f"{name}: the wildcard matches no finished run")
             continue
-        records[name] = rows[0]["record"]
+        if len(rows) == 1 and not entry.get("group_by"):
+            single[name] = rows[0]["record"]
         for row in rows:
             row.pop("record")
         if entry.get("group_by"):
@@ -167,20 +188,20 @@ def report_data(spec: str | Path, *, run_missing: bool = False, update: bool = F
                 for g, r in sorted(groups.items())}}
         else:
             entries[name] = rows[0] if len(rows) == 1 else {"rows": rows}
-    for name, entry in (data.get("cite") or {}).items():
+    for name, entry in cite.items():
         if "paired" not in entry:
             continue
         a, b = entry["paired"]
-        if a not in records or b not in records:
-            problems.append(f"{name}: pairs {a} and {b}, which are not both cited single records")
+        if a not in single or b not in single:
+            problems.append(f"{name}: pairs {a} and {b}; only entries citing exactly one record can be paired")
             continue
         try:
-            entries[name] = {k: v for k, v in paired(records[a], records[b]).items()}
+            entries[name] = paired(single[a], single[b])
         except ValueError as error:
             problems.append(f"{name}: {error}")
     out = spec.parent / "data" / "results.json"
-    pins = {name: [r["specs"] for r in (e.get("rows") or [e])] for name, e in entries.items() if "specs" in e
-            or "rows" in e}
+    pins = {name: [{"specs": r["specs"], "refs": r["refs"], "eval_id": r["eval_id"]} for r in e.get("rows") or [e]]
+            for name, e in entries.items() if "specs" in e or "rows" in e}
     if out.exists() and not update:
         old = canon.read_json(out).get("pins", {})
         moved = [f"{name}: {old[name]} -> {pins[name]}" for name in pins if name in old and old[name] != pins[name]]

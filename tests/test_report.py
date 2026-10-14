@@ -151,3 +151,25 @@ def test_paired_entries(env):
                             "d": {"paired": ["a0", "a2"]}})
     data = yaml.safe_load(report_data(spec, run_missing=True).read_text())
     assert data["entries"]["d"]["games"] == 4
+
+
+def test_ckpt_wildcards_and_paired_groups(env):
+    make_run("a.g1")
+    make_run("b.g1")
+    spec = write_spec(env, {"w": cite("POLICY:ckpt=exp/*.g1@best", group_by="seed"), "x": cite("POLICY:exp/a.g1@e2"),
+                            "d": {"paired": ["w", "x"]}})
+    with pytest.raises(ReportError, match="only entries citing exactly one record"):
+        report_data(spec, run_missing=True)
+    data = yaml.safe_load(report_data(write_spec(env, {"w": cite("POLICY:ckpt=exp/*.g1@best")}),
+                                      run_missing=True).read_text())
+    assert len(data["entries"]["w"]["rows"]) == 2  # the documented ckpt= form expands
+
+
+def test_training_side_dirt_and_mixed_code_are_marked(env):
+    env.state.dirty = True
+    make_run("a")  # trained from a dirty tree
+    env.state.dirty = False
+    out = report_data(write_spec(env, {"x": cite()}), run_missing=True)
+    assert yaml.safe_load(out.read_text())["entries"]["x"]["flags"] == ["dirty-train"]
+    with pytest.raises(ReportError, match="--final refuses dirty-train"):
+        report_data(write_spec(env, {"x": cite()}), final=True)
