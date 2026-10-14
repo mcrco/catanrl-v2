@@ -67,3 +67,9 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = '-m "not train and not gpu and not runs"'
+markers = [
+    "train: slow training runs (-m train)",
+    "gpu: needs CUDA (-m gpu)",
+    "runs: checks the real runs directory (-m runs)",
+]

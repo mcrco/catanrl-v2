@@ -40,13 +40,24 @@ def wilson_interval(successes: float, trials: int, z: float = Z_95) -> tuple[flo
     return (max(0.0, center - half), min(1.0, center + half))
 
 
+def _log_pmf(k: int, n: int, p: float) -> float:
+    if p in (0.0, 1.0):
+        return 0.0 if k == (0 if p == 0.0 else n) else -math.inf
+    return (math.lgamma(n + 1) - math.lgamma(k + 1) - math.lgamma(n - k + 1)
+            + k * math.log(p) + (n - k) * math.log1p(-p))
+
+
 def binomial_two_sided(successes: int, trials: int, p: float = 0.5) -> float:
-    """Exact two-sided binomial test (sum of outcomes no likelier than the observed)."""
+    """Exact two-sided binomial test (sum of outcomes no likelier than the observed).
+
+    The pmf is computed in log space (``math.lgamma``): the direct product
+    overflows a float above about 1,030 trials.
+    """
     if trials == 0:
         return 1.0
-    pmf = [math.comb(trials, k) * p**k * (1 - p) ** (trials - k) for k in range(trials + 1)]
-    observed = pmf[successes]
-    return min(1.0, sum(q for q in pmf if q <= observed * (1 + 1e-9)))
+    observed = _log_pmf(successes, trials, p) + math.log1p(1e-7)  # scipy's relative tolerance
+    total = math.fsum(math.exp(q) for q in (_log_pmf(k, trials, p) for k in range(trials + 1)) if q <= observed)
+    return min(1.0, total)
 
 
 def mcnemar_exact(only_a: int, only_b: int) -> float:
@@ -54,8 +65,12 @@ def mcnemar_exact(only_a: int, only_b: int) -> float:
     return binomial_two_sided(only_a, only_a + only_b, 0.5)
 
 
-def paired_comparison(wins_a: list[bool], wins_b: list[bool]) -> dict[str, float]:
-    """Two agents on the same games: their rates, the delta and McNemar's p."""
+def _paired_comparison(wins_a: list[bool], wins_b: list[bool]) -> dict[str, float]:
+    """Two agents on the same games: their rates, the delta and McNemar's p.
+
+    Private: pair records through :func:`catanrl.eval.results.paired`, which
+    checks that both played the same schedule against the same opponents.
+    """
     if len(wins_a) != len(wins_b):
         raise ValueError("paired results need the same games")
     only_a = sum(a and not b for a, b in zip(wins_a, wins_b))
