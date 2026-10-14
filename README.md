@@ -105,8 +105,12 @@ against that network, `${init}`), and player-count and map generalization
   policy). Next attempt: targets from ≥ 1024 simulations. A run from a
   network is now judged head to head against that network, raw policy and
   search, with vs F as a secondary number (DESIGN 6.2).
-- **Server:** protocol 4 with commit–reveal seeds, signed and hash-chained
-  messages, signed moves, receipts and an independent verifier; hardening
-  continues (see the threat model in the server README).
+- **Server:** protocol 5, specified in `PROTOCOL.md` as invariants, each with a
+  client check, a verifier check and tests: commit–reveal seeds bound to the
+  room and server key, signed hash-chained messages, signed moves with
+  receipts, and a total verifier whose verdicts separate provable server
+  misbehaviour from the client's word. Six adversarial review rounds, then a
+  transcript-mutation fuzzer in the default test tier. The server still sees
+  hidden state during a game (see the threat model).
 - **TUI:** `catanatron-tui` / `catanrl play`, local games with debug controls
   and remote server play.
