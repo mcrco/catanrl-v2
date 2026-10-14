@@ -7,7 +7,8 @@ name from any cwd or worktree.
       config.json      write-once: resolved config, its hash, bound refs
       run.json         trainer-owned, atomic: status, launches, committed checkpoints
       aliases.jsonl    append-only: best (cites its select eval), pins
-      metrics.jsonl    one row per epoch
+      bindings.jsonl   append-only: refs to other runs pinned after creation
+      metrics.jsonl    one row per epoch (rows a resume rolled back are hidden)
       provenance/      launch<n>.json and a patch per dirty repo
       checkpoints/     e000600.pt ...; orphaned/launch<n>/ after a crash
       trainer_state.pt the commit point
@@ -17,18 +18,13 @@ At a checkpoint the trainer writes the ``.pt``, then ``trainer_state.pt``
 (the commit), then ``run.json``; then the select eval runs and ``best``
 moves. A resume moves any ``.pt`` newer than the trainer state to
 ``orphaned/``, so it is never ``latest`` nor an epoch ref.
-
-Readers::
-
-    run = load_experiment("arch-lineage/graph-s-s42.g1")
-    net = run.build_policy("best")            # net.catanrl_ref == "...g1@e600#41f2a9c07d11"
-    ckpt = load_checkpoint("arch-lineage/graph-s-s42.g1@e600")
 """
 
 from __future__ import annotations
 
 import dataclasses
 import fcntl
+import fnmatch
 import os
 import re
 import shutil
@@ -60,6 +56,8 @@ Status = Literal["running", "finished", "time_limit", "interrupted", "failed", "
 RESERVED = {"best", "latest", "init"}
 REF_RE = re.compile(r"^(?P<run>[a-z0-9][a-z0-9._+-]*(?:/[a-z0-9][a-z0-9._+-]*)?)"
                     r"(?:@(?P<which>[A-Za-z0-9._+-]+))?(?:#(?P<sha>[0-9a-f]{6,64}))?$")
+#: How long a writer waits for a lock that a status probe may hold for an instant.
+LOCK_WAIT_S = 2.0
 
 
 class RunError(RuntimeError):
@@ -95,6 +93,27 @@ def _ckpt_name(epoch: int) -> str:
     return f"e{int(epoch):06d}.pt"
 
 
+def _lock(path: Path, what: str, wait: float = LOCK_WAIT_S) -> int:
+    """The run's exclusive flock (retried briefly: readers probe it for an instant)."""
+    path.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path / ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+    deadline = time.time() + wait
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.time() >= deadline:
+                os.close(fd)
+                raise RunLocked(f"{what} is locked by a live process") from None
+            time.sleep(0.05)
+
+
+def _unlock(fd: int) -> None:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+
 def _lock_free(path: Path) -> bool:
     lock = path / ".lock"
     if not lock.exists():
@@ -111,6 +130,16 @@ def _lock_free(path: Path) -> bool:
         os.close(fd)
 
 
+def _rebase(value: Any, old: str, new: str) -> Any:
+    """Replace refs to run ``old`` by refs to ``new`` in every string of a config."""
+    pattern = re.compile(rf"(?<![\w/.+-]){re.escape(old)}(?=[@#:]|$)")
+    if isinstance(value, Mapping):
+        return {k: _rebase(v, old, new) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_rebase(v, old, new) for v in value]
+    return pattern.sub(new, value) if isinstance(value, str) else value
+
+
 # ---------------------------------------------------------------- reading
 
 
@@ -124,12 +153,10 @@ class Run:
         self.manifest: dict = canon.read_json(self.path / "config.json")
         self.ref = f"{self.manifest['experiment']}/{self.manifest['variant']}"
         self.config: dict = migrate(self.manifest["config"], from_schema=self.manifest["schema"])
-        self.config_hash: str = self.manifest["config_hash"]
+        self.config_hash: str = config_hash(self.config)  # migrated, like every plan it is compared with
 
     def __repr__(self) -> str:
         return f"Run({self.ref!r}, {self.status})"
-
-    # ---------------------------------------------------------- state
 
     def _run_json(self) -> dict:
         path = self.path / "run.json"
@@ -154,15 +181,11 @@ class Run:
                 for c in sorted(self._run_json()["checkpoints"], key=lambda c: c["epoch"])]
 
     def aliases(self) -> dict[str, dict]:
-        out: dict[str, dict] = {}
-        for row in canon.read_jsonl(self.path / "aliases.jsonl"):
-            out[row["name"]] = row
-        return out
+        return {row["name"]: row for row in canon.read_jsonl(self.path / "aliases.jsonl")}
 
     def resolve(self, which: str | int = "best") -> CheckpointRef:
         """A selector (best, latest, init, an alias, N or eN, optionally #sha) as a pinned ref."""
-        text = str(which)
-        which, _, sha = text.partition("#")
+        which, _, sha = str(which).partition("#")
         ckpts = self.checkpoints()
         by_epoch = {c.epoch: c for c in ckpts}
         aliases = self.aliases()
@@ -204,35 +227,50 @@ class Run:
     def evals(self, suite: str | None = None) -> list:
         from catanrl.eval.results import EvalRecord
 
-        root = self.path / "evals"
-        pattern = f"{suite}/*.json" if suite else "*/*.json"
-        return [EvalRecord.load(p) for p in sorted(root.glob(pattern))]
+        return [EvalRecord.load(p) for p in sorted((self.path / "evals").glob(f"{suite or '*'}/*.json"))]
 
-    def metrics(self, *, lineage: bool = False) -> list[dict]:
-        rows = canon.read_jsonl(self.path / "metrics.jsonl")
+    def bindings(self) -> dict[str, str]:
+        """Specs naming other runs, as pinned (at creation, or when a later final eval first ran)."""
+        out = dict((self.manifest.get("resolved") or {}).get("specs") or {})
+        out.update({row["spec"]: row["bound"] for row in canon.read_jsonl(self.path / "bindings.jsonl")})
+        return out
+
+    def metrics(self, *, lineage: bool = False, until: int | None = None) -> list[dict]:
+        """Epoch rows; rows of epochs a later launch rolled back (it resumed from an
+        earlier commit) are dropped. ``lineage`` prepends every ancestor's rows up to
+        the epoch this run started from."""
+        resumed = {l["launch"]: l["resumed_from"] for l in self._run_json()["launches"] if "resumed_from" in l}
+
+        def kept(row: dict) -> bool:
+            epoch = row.get("epoch")
+            if epoch is None:
+                return True
+            later = [e for launch, e in resumed.items() if launch > row.get("launch", 0)]
+            return all(epoch <= e for e in later) and (until is None or epoch <= until)
+
+        rows = [r for r in canon.read_jsonl(self.path / "metrics.jsonl") if kept(r)]
         if not lineage:
             return rows
-        parents = [load_experiment(ref.run) for ref in self.lineage() if ref.run and ref.run != self.ref]
-        return [r for parent in reversed(parents) for r in parent.metrics()] + rows
+        out, seen = [], set()
+        for ref in reversed(self.lineage()):
+            if ref.run and ref.run not in seen and ref.run != self.ref:
+                seen.add(ref.run)
+                out += load_experiment(ref.run).metrics(until=ref.epoch)
+        return out + rows
 
     def lineage(self) -> list[CheckpointRef]:
-        """The bound ``init_from`` checkpoints back to the root (nearest first)."""
+        """Every bound ``init_from`` checkpoint of this run and its ancestors (breadth first)."""
         out: list[CheckpointRef] = []
-        run: Run | None = self
-        seen = set()
-        while run is not None and run.ref not in seen:
-            seen.add(run.ref)
-            bound = (run.manifest.get("resolved") or {}).get("init_from") or {}
-            refs = list(bound.values())
-            if not refs:
-                break
-            parents = []
-            for text in refs:
+        queue, seen = [self], {self.ref}
+        while queue:
+            run = queue.pop(0)
+            for text in ((run.manifest.get("resolved") or {}).get("init_from") or {}).values():
                 ckpt = load_checkpoint(text)
-                out.append(ckpt.ref)
-                if ckpt.ref.run:
-                    parents.append(ckpt.ref.run)
-            run = load_experiment(parents[0]) if parents else None
+                if str(ckpt.ref) not in {str(r) for r in out}:
+                    out.append(ckpt.ref)
+                if ckpt.ref.run and ckpt.ref.run not in seen:
+                    seen.add(ckpt.ref.run)
+                    queue.append(load_experiment(ckpt.ref.run))
         return out
 
     def provenance(self) -> list[dict]:
@@ -241,11 +279,12 @@ class Run:
 
 
 def load_experiment(ref: str | Path) -> Run:
-    """``"exp/variant"``, ``"exp"`` (one variant), or a run directory."""
-    path = Path(ref)
-    if path.is_dir() and (path / "config.json").exists():
-        return Run(path)
-    run, which, sha = parse_ref(str(ref))
+    """``"exp/variant"``, ``"exp"`` (one variant), or an explicit run directory
+    (a Path, or a string starting with ``/``, ``./`` or ``../``)."""
+    text = str(ref)
+    if isinstance(ref, Path) or text.startswith(("/", "./", "../")):
+        return Run(ref)
+    run, which, sha = parse_ref(text)
     if which or sha:
         raise RunError(f"{ref}: load_experiment takes a run, not a checkpoint (use load_checkpoint)")
     root = runs_root()
@@ -263,25 +302,23 @@ def load_experiment(ref: str | Path) -> Run:
 
 def list_runs(pattern: str = "*", *, status: Status | None = None) -> list[Run]:
     """Runs whose ``experiment/variant`` matches ``pattern`` (``*`` matches one name)."""
-    import fnmatch
-
-    root = runs_root()
-    if "/" not in pattern:
-        pattern = f"{pattern}/*"
-    runs = [Run(p.parent) for p in sorted(root.glob("*/*/config.json"))
+    pattern = pattern if "/" in pattern else f"{pattern}/*"
+    runs = [Run(p.parent) for p in sorted(runs_root().glob("*/*/config.json"))
             if not p.parent.parent.name.startswith("_")]
-    runs = [r for r in runs if fnmatch.fnmatchcase(r.ref, pattern)]
-    return [r for r in runs if status is None or r.status == status]
+    return [r for r in runs if fnmatch.fnmatchcase(r.ref, pattern) and (status is None or r.status == status)]
 
 
 def load_checkpoint(ref: str | Path) -> Checkpoint:
-    """``"exp/var@which[#sha]"`` (default ``best``) or a ``.pt`` path."""
+    """``"exp/var@which[#sha]"`` (default ``best``) or a ``.pt`` path (``path.pt#sha`` pins its weights)."""
     text = str(ref)
-    if text.endswith(".pt"):
-        return Checkpoint.load(text)
+    path, _, sha = text.partition("#")
+    if path.endswith(".pt"):
+        ckpt = Checkpoint.load(path)
+        if sha and not ckpt.ref.weights_sha256.startswith(sha):
+            raise RunError(f"{path} holds #{ckpt.ref.weights_sha256[:12]}, not #{sha}")
+        return ckpt
     run, which, sha = parse_ref(text)
-    selector = (which or "best") + (f"#{sha}" if sha else "")
-    return load_experiment(run).checkpoint(selector)
+    return load_experiment(run).checkpoint((which or "best") + (f"#{sha}" if sha else ""))
 
 
 def pin(ref: str, name: str, note: str = "") -> CheckpointRef:
@@ -302,46 +339,98 @@ def _append_alias(path: Path, name: str, ref: CheckpointRef, *, by: str, note: s
         "eval_id": eval_id, "metric": metric, "note": note, "by": by, "time": time.time()})
 
 
+def check_stored(variant: Variant) -> Run | None:
+    """The existing run of ``variant``, after checking it was made from the same
+    config (``ConfigConflict`` with the diff otherwise); None if there is none.
+    Every launch path calls this, whatever the run's status."""
+    path = runs_root() / variant.experiment / variant.name
+    if not (path / "config.json").exists():
+        return None
+    run = Run(path)
+    if run.config_hash != variant.config_hash:
+        diff = "\n  ".join(config_diff(run.config, variant.config)) or "(hash differs)"
+        raise ConfigConflict(f"{variant.ref} exists with another config:\n  {diff}\n"
+                             "use --variant NAME or catanrl fork")
+    return run
+
+
 def fork(ref: str, *, as_: str, overrides: Sequence[str] = ()) -> Variant:
-    """A new variant continuing ``ref``'s latest checkpoint (weights and optimizer)."""
+    """A new variant continuing a stopped run's latest commit (weights and optimizer).
+
+    The parent's trainer state is copied into the fork now, under the parent's
+    lock, so a later relaunch of the parent cannot invalidate the fork. Refs to
+    the parent in the parent's config (``${run}`` in eval.final) become refs to
+    the fork."""
     run_ref, which, _ = parse_ref(ref)
     parent = load_experiment(run_ref)
     experiment, _, name = as_.rpartition("/")
     experiment = experiment or parent.manifest["experiment"]
     if not NAME_RE.match(name):
         raise RunError(f"bad variant name {name!r}")
-    raw = merge(parent.config, parse_overrides(overrides))
-    raw["init_from"] = {"ckpt": f"{parent.ref}@{which or 'latest'}", "parts": ["actor", "critic"],
-                        "restore": "weights+optimizer"}
-    cfg = resolve(raw, experiment=experiment, variant=name)
-    variant = Variant(experiment=experiment, name=name, stage=None, labels={"fork": parent.ref}, config=cfg,
-                      config_hash=config_hash(cfg), depends_on=())
     path = runs_root() / experiment / name
     if (path / "config.json").exists():
-        raise RunError(f"{variant.ref} exists")
-    _write_manifest(path, variant, source=None)
+        raise RunError(f"{experiment}/{name} exists")
+    fd = _lock(parent.path, parent.ref, wait=0)
+    try:
+        target = parent.resolve(which or "latest")
+        state_path = parent.path / "trainer_state.pt"
+        state = torch.load(state_path, map_location="cpu", weights_only=False) if state_path.exists() else None
+        if state is None or int(state["epoch"]) != target.epoch:
+            raise RunError(f"{parent.ref}'s committed trainer state is at "
+                           f"{'nothing' if state is None else 'e' + str(state['epoch'])}, not e{target.epoch}: "
+                           "a fork continues the latest commit")
+        raw = merge(_rebase(parent.config, parent.ref, f"{experiment}/{name}"), parse_overrides(overrides))
+        raw["init_from"] = {"ckpt": str(target), "parts": ["actor", "critic"], "restore": "weights+optimizer"}
+        cfg = resolve(raw, experiment=experiment, variant=name)
+        variant = Variant(experiment=experiment, name=name, stage=None, labels={"fork": parent.ref}, config=cfg,
+                          config_hash=config_hash(cfg), depends_on=())
+        _write_manifest(path, variant, source=None)
+        shutil.copyfile(state_path, path / "fork_state.pt")
+    finally:
+        _unlock(fd)
     return variant
 
 
 def finish(ref: str) -> None:
-    """End a stopped run (time_limit, interrupted, dead): its dependents may use it."""
+    """End a stopped run (time_limit, interrupted, dead, failed) so dependents may use it.
+
+    Under the run's lock, the commit is reconciled as a resume would (orphans
+    moved, committed checkpoints listed); a run whose committed checkpoints
+    still lack select evals must be resumed first."""
     run = load_experiment(ref)
     if run.status not in ("time_limit", "interrupted", "dead", "failed"):
         raise RunError(f"{run.ref} is {run.status}; only a stopped run can be finished")
-    if not _lock_free(run.path):
-        raise RunLocked(f"{run.ref} is locked by a live process")
-    state = run._run_json()
-    state["status"] = "finished"
-    state["finished_by"] = "catanrl finish"
-    canon.atomic_write_json(run.path / "run.json", state)
+    fd = _lock(run.path, run.ref, wait=0)
+    try:
+        state = _reconcile(run.path, launch=len(run._run_json()["launches"]))
+        missing = [str(r) for r in _missing_selects(run)]
+        if missing:
+            raise RunError(f"{run.ref}: committed checkpoints lack select evals ({', '.join(missing)}); "
+                           "resume it (catanrl run) before finishing")
+        state["status"] = "finished"
+        state["finished_by"] = "catanrl finish"
+        canon.atomic_write_json(run.path / "run.json", state)
+    finally:
+        _unlock(fd)
+
+
+def _missing_selects(run: Run) -> list[CheckpointRef]:
+    select = (run.config.get("eval") or {}).get("select")
+    if not select:
+        return []
+    from catanrl.eval.results import find
+
+    every = int(select.get("every", 1))
+    return [ref for ref in run.checkpoints() if ref.epoch % every == 0
+            and find([str(s).replace("${self}", str(ref)) for s in select["lineup"]], select["suite"],
+                     fill=select.get("fill")) is None]
 
 
 def check_runs(pattern: str = "*") -> list[dict]:
     """Load, verify and self-test every alias and the latest checkpoint of every run."""
     rows = []
     for run in list_runs(pattern):
-        selectors = sorted(set(run.aliases()) | ({"latest"} if run.checkpoints() else set()))
-        for which in selectors:
+        for which in sorted(set(run.aliases()) | ({"latest"} if run.checkpoints() else set())):
             row = {"run": run.ref, "which": which, "ok": True, "error": None}
             try:
                 ckpt = run.checkpoint(which)
@@ -353,9 +442,23 @@ def check_runs(pattern: str = "*") -> list[dict]:
     return rows
 
 
+# ---------------------------------------------------------------- binding refs
+
+
+def bind_spec(spec: str, own: str | None) -> str | None:
+    """The canonical form of a lineup spec naming another run's checkpoint, or None
+    when it names no run (a bot, ``${...}``) or the run ``own`` (bound at eval time)."""
+    if "${" in spec or not spec.startswith(("POLICY", "MCTS", "BELIEF")):
+        return None
+    if own and re.search(rf"(^|[:=]){re.escape(own)}(@|#|:|$)", spec):
+        return None
+    from catanrl.agents import resolve_agent
+
+    return resolve_agent(spec).canonical
+
+
 def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
-    """Refs to other runs, pinned once at creation: ``init_from`` per part and eval
-    lineups (refs to ``own``, the run being created, resolve when its evals run)."""
+    """Refs to other runs, pinned once at creation: ``init_from`` per part and eval.final specs."""
     out: dict[str, Any] = {}
     init = cfg.get("init_from")
     if init:
@@ -363,23 +466,24 @@ def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
         parts = list(init.get("parts") or (ckpt.keys() if isinstance(ckpt, Mapping) else ("actor", "critic")))
         out["init_from"] = {part: str(load_checkpoint(ckpt[part] if isinstance(ckpt, Mapping) else ckpt).ref)
                             for part in parts}
-    lineups = []
-    for entry in (cfg.get("eval") or {}).get("final") or []:
-        lineups.append([_bind_spec(spec, own) for spec in entry["lineup"]])
-    if lineups:
-        out["lineups"] = lineups
+    specs = {spec: bind_spec(spec, own) for entry in (cfg.get("eval") or {}).get("final") or []
+             for spec in entry["lineup"]}
+    out["specs"] = {spec: bound for spec, bound in specs.items() if bound is not None}
     return out
 
 
-def _bind_spec(spec: str, own: str | None) -> str:
-    """A lineup spec with another run's checkpoint pinned; own-run refs stay for eval time."""
-    if "${" in spec or not spec.startswith(("POLICY", "MCTS", "BELIEF")):
-        return spec
-    if own and re.search(rf"(^|[:=]){re.escape(own)}(@|#|:|$)", spec):
-        return spec
-    from catanrl.agents import resolve_agent
-
-    return resolve_agent(spec).canonical
+def bound_lineup(run: Run, lineup: Sequence[str]) -> list[str]:
+    """``lineup`` with refs to other runs as first pinned for ``run`` (pinning new ones now)."""
+    known = run.bindings()
+    out = []
+    for spec in lineup:
+        if spec not in known:
+            bound = bind_spec(spec, run.ref)
+            if bound is not None:
+                canon.append_jsonl(run.path / "bindings.jsonl", {"spec": spec, "bound": bound, "time": time.time()})
+                known[spec] = bound
+        out.append(known.get(spec, spec))
+    return out
 
 
 def _write_manifest(path: Path, variant: Variant, *, source: Mapping[str, Any] | None) -> None:
@@ -391,6 +495,35 @@ def _write_manifest(path: Path, variant: Variant, *, source: Mapping[str, Any] |
     })
 
 
+def _reconcile(path: Path, *, launch: int) -> dict:
+    """run.json after a crash: checkpoints newer than the trainer state move to
+    orphaned/launch<n>/, committed ones missing from the index are listed.
+    Returns run.json (written)."""
+    state_path = path / "trainer_state.pt"
+    committed = -1
+    if state_path.exists():
+        committed = int(torch.load(state_path, map_location="cpu", weights_only=False)["epoch"])
+    run = canon.read_json(path / "run.json") if (path / "run.json").exists() else {
+        "status": None, "launches": [], "checkpoints": []}
+    listed = {c["epoch"]: c for c in run["checkpoints"]}
+    for file in sorted((path / "checkpoints").glob("e*.pt")):
+        epoch = int(file.stem[1:])
+        if epoch > committed:
+            dest = path / "checkpoints" / "orphaned" / f"launch{launch}"
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(file), dest / file.name)
+            listed.pop(epoch, None)
+        elif epoch not in listed:
+            header = Checkpoint.load(file).header
+            listed[epoch] = {"epoch": epoch, "agent_steps": header["agent_steps"], "file": file.name,
+                             "weights_sha256": header["weights_sha256"], "launch": None}
+    run["checkpoints"] = [listed[e] for e in sorted(listed)]
+    if committed >= 0:
+        run["trainer_state"] = {"epoch": committed, "time": time.time()}
+    canon.atomic_write_json(path / "run.json", run)
+    return run
+
+
 # ---------------------------------------------------------------- writing
 
 
@@ -398,7 +531,8 @@ class RunWriter(Run):
     """The trainer's side of a run: lock, launches, checkpoints, commits, aliases.
 
     A context manager; leaving it by an exception records ``failed`` (or
-    ``interrupted`` for KeyboardInterrupt) and releases the lock.
+    ``interrupted`` for KeyboardInterrupt) and releases the lock. A run that
+    had already finished stays finished: only its launch row records that.
     """
 
     mode: Literal["new", "resume", "done"]
@@ -410,79 +544,65 @@ class RunWriter(Run):
         self.launch = launch
         self.run_id = f"{self.ref}#launch{launch}"
         self.stop_reason: Literal["time_limit", "interrupted"] | None = None
-        self._lock_fd = lock_fd
+        self._lock_fd: int | None = lock_fd
         self._pending: list[CheckpointRef] = []
-        self._started = time.time()
         hours = (variant.config.get("runtime") or {}).get("time_limit_hours")
-        self._deadline = None if hours is None else self._started + float(hours) * 3600
+        self._deadline = None if hours is None else time.time() + float(hours) * 3600
         self._stop_requested = False
-
-    # ---------------------------------------------------------- opening
 
     @classmethod
     def open(cls, variant: Variant, *, argv: Sequence[str], allow_code_change: bool = False,
              source: Mapping[str, Any] | None = None) -> RunWriter:
         """Create, resume or reopen (``done``) the run of ``variant`` (DESIGN 6.4's table)."""
-        from catanrl import provenance
-
         path = runs_root() / variant.experiment / variant.name
-        path.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path / ".lock", os.O_RDWR | os.O_CREAT, 0o644)
+        fd = _lock(path, variant.ref)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(fd)
-            raise RunLocked(f"{variant.ref} is locked by a live process") from None
-        try:
-            return cls._open_locked(path, variant, argv, allow_code_change, source, fd, provenance)
+            return cls._open_locked(path, variant, argv, allow_code_change, source, fd)
         except BaseException:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            _unlock(fd)
             raise
 
     @classmethod
-    def _open_locked(cls, path, variant, argv, allow_code_change, source, fd, provenance) -> RunWriter:
-        kind = "train" if variant.kind == "train" else "eval"
-        if (path / "config.json").exists():
-            stored = canon.read_json(path / "config.json")
-            old = migrate(stored["config"], from_schema=stored["schema"])
-            if config_hash(old) != variant.config_hash:
-                diff = "\n  ".join(config_diff(old, variant.config)) or "(hash differs)"
-                raise ConfigConflict(f"{variant.ref} exists with another config:\n  {diff}\n"
-                                     "use --variant NAME or catanrl fork")
-        else:
+    def _open_locked(cls, path, variant, argv, allow_code_change, source, fd) -> RunWriter:
+        from catanrl import provenance
+
+        if check_stored(variant) is None:
             _write_manifest(path, variant, source=source)
         state = canon.read_json(path / "run.json") if (path / "run.json").exists() else None
         resolved = canon.read_json(path / "config.json").get("resolved") or {}
-        bound = _bound_variant(variant, resolved)
-        prov = provenance.capture(argv=argv, kind=kind)
+        prov = provenance.capture(argv=argv, kind="train" if variant.kind == "train" else "eval")
         mixed = False
         if state is None:
-            mode, launch = "new", 0
+            mode = "new"
             if (variant.config.get("init_from") or {}).get("restore") == "weights+optimizer":
-                _seed_fork_state(path, resolved)
+                if not (path / "fork_state.pt").exists():
+                    raise ConfigError("restore: weights+optimizer is made by catanrl fork, which copies the state")
+                shutil.copyfile(path / "fork_state.pt", path / "trainer_state.pt")
                 mode = "resume"
             state = {"status": None, "launches": [], "checkpoints": []}
         else:
-            launch = len(state["launches"])
             mode = "done" if state["status"] == "finished" else "resume"
-            if mode == "resume":
-                first = canon.read_json(path / "provenance" / "launch0.json")
+            if mode == "resume" and state["launches"]:
+                first = canon.read_json(path / "provenance" / f"launch{state['launches'][0]['launch']}.json")
                 diff = provenance.resume_diff({"code": first["code"], "python": first["python"]}, prov)
                 if diff and not allow_code_change:
                     raise provenance.ProvenanceError(
-                        f"{variant.ref}: the training code or uv.lock changed since launch 0:\n  " + "\n  ".join(diff)
-                        + "\nrefusing to resume (--allow-code-change records a mixed run)")
+                        f"{variant.ref}: the training code or uv.lock changed since its first launch:\n  "
+                        + "\n  ".join(diff) + "\nrefusing to resume (--allow-code-change records a mixed run)")
                 mixed = bool(diff)
-        for warning in provenance.check(prov):
-            print(f"warning: {warning}", flush=True)
+        provenance.check_launch(prov, variant.config.get("runtime") or {})
+        # A launch number no earlier attempt used, even one that died before its run.json row.
+        used = [l["launch"] for l in state["launches"]] + [
+            int(p.stem[6:]) for p in (path / "provenance").glob("launch*.json") if p.stem[6:].isdigit()]
+        launch = max(used, default=-1) + 1
         prov["run"]["launch_name"] = f"launch{launch}"
         provenance.save_patches(prov, path / "provenance")
         provenance.keep_commits(prov)
         canon.write_once_json(path / "provenance" / f"launch{launch}.json", prov)
-        writer = cls(path, bound, mode, launch, fd)
+        writer = cls(path, _bound_variant(variant, resolved), mode, launch, fd)
         state["launches"].append({"launch": launch, "mode": mode, "started": time.time(), "status": "running",
-                                  "argv": list(argv), "mixed_code": mixed})
+                                  "argv": list(argv), "mixed_code": mixed,
+                                  "runtime": dict(variant.config.get("runtime") or {})})
         if mode != "done":
             state["status"] = "running"
         canon.atomic_write_json(path / "run.json", state)
@@ -499,23 +619,31 @@ class RunWriter(Run):
 
     def __exit__(self, exc_type, exc, tb) -> None:
         try:
-            if exc_type is not None:
+            if exc_type is None:
+                if self.mode == "done":
+                    self._end_launch("finished")
+            elif self._run_json()["status"] == "finished":  # e.g. a final eval failed: the training stands
+                self._end_launch("interrupted" if issubclass(exc_type, KeyboardInterrupt) else "failed")
+            else:
                 self.finish("interrupted" if issubclass(exc_type, KeyboardInterrupt) else "failed")
-            elif self.mode == "done":
-                self._end_launch("finished")
         finally:
             self.release()
 
     def release(self) -> None:
         if self._lock_fd is not None:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-            os.close(self._lock_fd)
+            _unlock(self._lock_fd)
             self._lock_fd = None
 
     @property
     def variant_for_training(self) -> Variant:
         """The variant with ``init_from`` refs as bound at creation."""
         return self.bound_variant
+
+    def record_runtime(self, info: Mapping[str, Any]) -> None:
+        """What the trainer actually ran with (torch flags after PuffeRL's init, ...), on this launch's row."""
+        run = self._run_json()
+        run["launches"][-1].setdefault("effective", {}).update(dict(info))
+        canon.atomic_write_json(self.path / "run.json", run)
 
     # ---------------------------------------------------------- PufferLib logger
 
@@ -546,9 +674,8 @@ class RunWriter(Run):
         from catanrl import checkpoint, provenance
 
         prov = canon.read_json(self.path / "provenance" / f"launch{self.launch}.json")
-        repo = prov["git"]["repos"]["catanrl-v2"]
-        code = {"id": provenance.code_id("train"), "git": repo["head"], "dirty": repo["dirty"],
-                "launch": self.launch}
+        code = {"id": provenance.code_id("train"), "git": prov["git"]["repos"]["catanrl-v2"]["head"],
+                "dirty": provenance.any_dirty(prov), "launch": self.launch}
         ref = checkpoint.save(self.path / "checkpoints" / _ckpt_name(epoch), model, run=self.ref, epoch=epoch,
                               agent_steps=agent_steps, config=self.config, code=code)
         self._pending.append(ref)
@@ -575,25 +702,10 @@ class RunWriter(Run):
 
     def load_trainer_state(self) -> dict | None:
         """The committed state; moves newer checkpoints to orphaned/ and reconciles run.json."""
+        run = _reconcile(self.path, launch=self.launch)
         path = self.path / "trainer_state.pt"
         state = torch.load(path, map_location="cpu", weights_only=False) if path.exists() else None
-        committed = -1 if state is None else int(state["epoch"])
-        run = self._run_json()
-        listed = {c["epoch"]: c for c in run["checkpoints"]}
-        for file in sorted((self.path / "checkpoints").glob("e*.pt")):
-            epoch = int(file.stem[1:])
-            if epoch > committed:
-                dest = self.path / "checkpoints" / "orphaned" / f"launch{self.launch}"
-                dest.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(file), dest / file.name)
-                listed.pop(epoch, None)
-            elif epoch not in listed:
-                ckpt = Checkpoint.load(file)
-                listed[epoch] = {"epoch": epoch, "agent_steps": ckpt.header["agent_steps"], "file": file.name,
-                                 "weights_sha256": ckpt.header["weights_sha256"], "launch": None}
-        run["checkpoints"] = [listed[e] for e in sorted(listed)]
-        if state is not None:
-            run["trainer_state"] = {"epoch": committed, "launch": state.get("launch"), "time": time.time()}
+        run["launches"][-1]["resumed_from"] = -1 if state is None else int(state["epoch"])
         canon.atomic_write_json(self.path / "run.json", run)
         return state
 
@@ -604,18 +716,9 @@ class RunWriter(Run):
         ckpts = self.checkpoints()
         if not select or not ckpts:
             return []
-        from catanrl.eval.results import find
-
         every = int(select.get("every", 1))
-        last = ckpts[-1].epoch
-        out = []
-        for ref in ckpts:
-            if ref.epoch % every:
-                continue
-            lineup = [str(s).replace("${self}", str(ref)) for s in select["lineup"]]
-            if ref.epoch == last or find(lineup, select["suite"], fill=select.get("fill")) is None:
-                out.append(ref)
-        return out
+        missing = {r.epoch for r in _missing_selects(self)}
+        return [r for r in ckpts if r.epoch % every == 0 and (r.epoch in missing or r.epoch == ckpts[-1].epoch)]
 
     def set_alias(self, name: str, ref: CheckpointRef, *, record: Any = None, note: str = "") -> None:
         current = self.aliases().get(name)
@@ -631,14 +734,12 @@ class RunWriter(Run):
     def finish(self, status: Status) -> None:
         run = self._run_json()
         run["status"] = status
-        if run["launches"]:
-            run["launches"][-1].update(status=status, ended=time.time())
+        run["launches"][-1].update(status=status, ended=time.time())
         canon.atomic_write_json(self.path / "run.json", run)
 
     def _end_launch(self, status: str) -> None:
         run = self._run_json()
-        if run["launches"]:
-            run["launches"][-1].update(status=status, ended=time.time())
+        run["launches"][-1].update(status=status, ended=time.time())
         canon.atomic_write_json(self.path / "run.json", run)
 
 
@@ -649,20 +750,3 @@ def _bound_variant(variant: Variant, resolved: Mapping[str, Any]) -> Variant:
     cfg = dict(variant.config)
     cfg["init_from"] = {**init, "ckpt": dict(resolved["init_from"]), "parts": list(resolved["init_from"])}
     return dataclasses.replace(variant, config=cfg)
-
-
-def _seed_fork_state(path: Path, resolved: Mapping[str, Any]) -> None:
-    """A fork restores weights and optimizer: start from the parent's committed trainer state."""
-    refs = set((resolved.get("init_from") or {}).values())
-    if len(refs) != 1:
-        raise ConfigError("restore: weights+optimizer needs one checkpoint for every part")
-    ckpt = load_checkpoint(refs.pop())
-    if ckpt.ref.run is None:
-        raise ConfigError("restore: weights+optimizer needs a run checkpoint, not a .pt file")
-    parent = load_experiment(ckpt.ref.run)
-    state_path = parent.path / "trainer_state.pt"
-    state = torch.load(state_path, map_location="cpu", weights_only=False)
-    if int(state["epoch"]) != ckpt.ref.epoch:
-        raise ConfigError(f"{parent.ref}'s trainer state is at epoch {state['epoch']}, not e{ckpt.ref.epoch}: "
-                          "fork @latest")
-    shutil.copyfile(state_path, path / "trainer_state.pt")

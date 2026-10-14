@@ -49,7 +49,7 @@ def test_tiny_end_to_end(name, monkeypatch):
         raise AssertionError("a cached eval replayed games")
 
     monkeypatch.setattr(results, "play_schedule", no_play)
-    finals = final_evals(run)
+    finals = final_evals(run, v)
     assert len(finals) == 1 and finals[0].data["refs"][0] == best["ref"]
 
 

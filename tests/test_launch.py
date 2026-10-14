@@ -61,3 +61,92 @@ def test_a_refused_ppo_resume_closes_the_trainer(monkeypatch):
     with pytest.raises(RuntimeError, match="map pool"):
         train(puffer.train_ppo, config, "v")
     assert closed  # PuffeRL's utilization thread is stopped, so the process can exit
+
+
+def _fake_children(monkeypatch, plan, status="finished"):
+    """run_child stand-in: records the variant and leaves a run with a `best` in ``status``."""
+    from types import SimpleNamespace
+
+    from catanrl import runner
+    from catanrl.envs.encoding import action_size, dims_for, row_layout
+    from catanrl.models import build_model
+    from catanrl.runs import RunWriter
+
+    launched = []
+    dims = dims_for(["base-2p"])
+
+    def child(argv):
+        name = argv[argv.index("--variant") + 1]
+        launched.append(name)
+        with RunWriter.open(plan.variant(name), argv=["fake"]) as w:
+            model = build_model({"preset": "graph-tiny"}, dims=dims, levels="private",
+                                num_actions=action_size(dims), layout=row_layout(dims, "private"))
+            ref = w.save_checkpoint(model, epoch=0, agent_steps=0)
+            w.save_trainer_state({"epoch": 0})
+            w.set_alias("best", ref, record=SimpleNamespace(eval_id="x", summary={"score_rate": 0.5}))
+            w.finish(status)
+        return 0, False
+
+    monkeypatch.setattr(runner, "run_child", child)
+    monkeypatch.setattr(runner, "_missing_finals", lambda run, v: False)
+    return launched
+
+
+def test_every_launch_path_checks_the_stored_config(monkeypatch):
+    from catanrl import runner
+    from catanrl.config import ConfigConflict, load_plan
+
+    plan = load_plan("tiny", variant="2p", overrides=[])
+    launched = _fake_children(monkeypatch, plan)
+    runner.run_plan(plan)
+    assert launched == ["2p"]
+    runner.run_plan(plan)  # finished, nothing missing: skipped
+    assert launched == ["2p"]
+    changed = load_plan("tiny", variant="2p", overrides=["seed=99"])
+    for next_ in (False, True):
+        with pytest.raises(ConfigConflict, match="seed: 7 -> 99"):
+            runner.run_plan(changed, next_=next_)
+
+
+def test_next_leaves_stopped_runs_and_moves_on(monkeypatch):
+    from catanrl import runner
+    from catanrl.config import load_plan
+
+    plan = load_plan("tiny", overrides=[])
+    launched = _fake_children(monkeypatch, plan, status="time_limit")
+    runner.run_plan(plan, next_=True)
+    assert launched == ["2p", "4p"]  # each once: a time-limited run waits for an explicit `catanrl run`
+
+
+def test_a_later_stage_runs_alone_once_its_parents_are_done(monkeypatch):
+    from catanrl import runner
+    from catanrl.config import load_plan
+
+    path = "tests/fixtures/experiments/fx-lineage.yaml"
+    full = load_plan(path, only="graph-tiny-s42.*", overrides=[])
+    launched = _fake_children(monkeypatch, full)
+    for name in ("graph-tiny-s42.dagger", "graph-tiny-s42.warm"):
+        runner.run_plan(load_plan(path, variant=name, overrides=[]))
+    assert launched == ["graph-tiny-s42.dagger", "graph-tiny-s42.warm"]
+
+
+def test_yaml_outside_the_repo_is_refused(tmp_path):
+    from catanrl import runner
+    from catanrl.config import ConfigError, load_plan
+
+    source = tmp_path / "tiny.yaml"
+    source.write_text(open("configs/experiments/tiny.yaml").read())
+    with pytest.raises(ConfigError, match="outside"):
+        runner.run_plan(load_plan(source))
+
+
+def test_a_stored_variant_takes_set_through_the_config_check():
+    from catanrl.cli import main
+    from catanrl.config import load_plan
+    from catanrl.runs import RunWriter
+
+    v = load_plan("tiny", variant="2p").variants[0]
+    with RunWriter.open(v, argv=["t"]) as w:
+        w.finish("interrupted")
+    assert main(["run", "tiny/2p", "--set", "seed=99"]) == 2  # ConfigConflict, not silently ignored
+    assert main(["run", "tiny/2p", "--smoke"]) != 0

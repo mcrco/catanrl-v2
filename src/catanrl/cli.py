@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -48,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     ev.add_argument("--threads", type=int)
     ev.add_argument("--infer-rows", type=int)
     ev.add_argument("--allow-mixed", action="store_true")
+    ev.add_argument("--allow-stale-build", action="store_true", help="play on an engine built from another tree")
 
     ls = sub.add_parser("ls", help="list runs")
     ls.add_argument("pattern", nargs="?", default="*")
@@ -113,13 +115,11 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _find_record(text: str):
-    from catanrl.eval.results import EvalRecord
-    from catanrl.runs import runs_root
+    from catanrl.eval.results import EvalRecord, all_records
 
-    path = Path(text)
-    if path.exists():
-        return EvalRecord.load(path)
-    matches = sorted(runs_root().glob(f"**/evals/*/{text}*.json"))
+    if Path(text).exists():
+        return EvalRecord.load(text)
+    matches = [p for p in all_records() if p.name.startswith(text)]
     if len(matches) != 1:
         raise SystemExit(f"error: {len(matches)} records match {text!r}")
     return EvalRecord.load(matches[0])
@@ -128,13 +128,10 @@ def _find_record(text: str):
 def _cmd_run(args, argv) -> int:
     from catanrl import runner
     from catanrl.config import load_plan
-    from catanrl.runs import load_experiment
 
     target = Path(args.target)
     if "/" in args.target and not target.exists() and not args.target.endswith(".yaml"):
-        run = load_experiment(args.target)  # a stored variant (e.g. a fork)
-        print(runner.run_variant(run.variant(), argv=argv, allow_code_change=args.allow_code_change))
-        return 0
+        return _run_stored(args, argv)
     plan = load_plan(args.target, overrides=args.overrides, only=args.only, variant=args.variant, smoke=args.smoke)
     if args.inline:
         return runner.run_inline(plan, args.variant, argv=argv, allow_code_change=args.allow_code_change)
@@ -142,9 +139,27 @@ def _cmd_run(args, argv) -> int:
     return 0
 
 
+def _run_stored(args, argv) -> int:
+    """A stored variant (e.g. a fork): --set goes through the same config check as a plan."""
+    from catanrl import runner
+    from catanrl.config import ConfigError, Variant, config_hash, merge, parse_overrides, resolve
+    from catanrl.runs import load_experiment
+
+    if args.smoke or args.only or args.next_ or args.variant:
+        raise ConfigError("--smoke, --only, --next and --variant take an experiment, not a stored variant")
+    v = load_experiment(args.target).variant()
+    if args.overrides:
+        cfg = resolve(merge(v.config, parse_overrides(args.overrides)), experiment=v.experiment, variant=v.name)
+        v = Variant(v.experiment, v.name, v.stage, v.labels, cfg, config_hash(cfg), v.depends_on)
+    print(runner.run_variant(v, argv=argv, allow_code_change=args.allow_code_change))
+    return 0
+
+
 def _cmd_eval(args) -> int:
     from catanrl.eval.results import evaluate
 
+    if args.allow_stale_build:
+        os.environ["CATANRL_ALLOW_STALE_BUILD"] = "1"
     suite = {"name": args.suite, "boards": args.boards} if args.boards else args.suite
     record = evaluate(args.lineup, suite, fill=args.fill, device=args.device, num_envs=args.num_envs,
                       threads=args.threads, infer_rows=args.infer_rows, allow_mixed=args.allow_mixed)
@@ -174,15 +189,9 @@ def _cmd_ls(args) -> int:
 
 
 def _cmd_results(args) -> int:
-    from catanrl.eval.results import EvalRecord, stale
-    from catanrl.runs import runs_root
+    from catanrl.eval.results import EvalRecord, all_records, stale
 
-    if args.stale:
-        records = stale(args.pattern)
-    else:
-        root = runs_root()
-        pattern = args.pattern if "/" in args.pattern else f"{args.pattern}/*"
-        records = [EvalRecord.load(p) for p in sorted(root.glob(f"{pattern}/evals/*/*.json"))]
+    records = stale(args.pattern) if args.stale else [EvalRecord.load(p) for p in all_records(args.pattern)]
     for r in records:
         print(f"{r.eval_id}  {r.data['suite']:<16} {r.summary['score_rate']:.3f} n={r.summary['games']:<5} "
               f"{' vs '.join(r.data['labels'])}")

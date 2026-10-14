@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from catanrl import canon, runs
+from catanrl import canon, config, runs
 from catanrl.checkpoint import Checkpoint
 from catanrl.config import ConfigConflict, Variant, config_hash, resolve
 from catanrl.envs.encoding import action_size, dims_for, row_layout
@@ -189,12 +189,19 @@ def test_finish_and_fork_continue_a_time_limited_parent():
         w.finish("time_limit")
     assert load_experiment("exp/p").status == "time_limit"
     child = runs.fork("exp/p", as_="p+more", overrides=["train.total_timesteps=500"])
-    assert child.config["init_from"]["ckpt"] == "exp/p@latest"
-    with RunWriter.open(child, argv=["t"]) as w:
+    e4 = str(load_experiment("exp/p").resolve(4))
+    assert child.config["init_from"]["ckpt"] == e4
+    with RunWriter.open(load_experiment("exp/p").variant(), argv=["t"]) as w:  # the parent moves on
+        w.load_trainer_state()
+        commit(w, tiny(), 6)
+        w.finish("time_limit")
+    with RunWriter.open(child, argv=["t"]) as w:  # the fork still continues e4
         assert w.mode == "resume"
         assert w.load_trainer_state()["epoch"] == 4
-        assert w.variant_for_training.config["init_from"]["ckpt"]["actor"].startswith("exp/p@e4#")
-    assert [str(r) for r in load_experiment("exp/p+more").lineage()] == [str(load_experiment("exp/p").resolve(4))] * 2
+        assert w.variant_for_training.config["init_from"]["ckpt"]["actor"] == e4
+    assert [str(r) for r in load_experiment("exp/p+more").lineage()] == [e4]
+    with pytest.raises(RunError, match="latest commit"):
+        runs.fork("exp/p@e4", as_="p+old")
     runs.finish("exp/p")
     assert load_experiment("exp/p").status == "finished"
     with pytest.raises(RunError):
@@ -220,3 +227,143 @@ def test_missing_selects_rerun_after_a_crash(monkeypatch):
         results.evaluate([f"POLICY:ckpt={e2}", "R"], select["suite"])  # crash before the alias
         assert [r.epoch for r in w.pending_selects()] == [2]  # the last commit's alias decision is redone
         assert e1.epoch == 1 and w.resolve("best").epoch == 0
+
+
+def test_a_fork_evaluates_itself_not_its_parent():
+    final = [{"suite": "heldout-2p", "lineup": ["POLICY:ckpt=${run}@best", "F"]}]
+    with RunWriter.open(make_variant("p", eval={"final": final}), argv=["t"]) as w:
+        commit(w, tiny(), 0)
+        w.finish("time_limit")
+    child = runs.fork("exp/p", as_="p+more")
+    assert child.config["eval"]["final"][0]["lineup"][0] == "POLICY:ckpt=exp/p+more@best"
+    assert load_experiment("exp/p+more").manifest["resolved"]["specs"] == {}  # its own: bound at eval time
+
+
+def test_a_kill_between_provenance_and_run_json_keeps_the_run_openable(monkeypatch):
+    v = make_variant()
+    real = canon.atomic_write_json
+
+    def die_at_run_json(path, obj):
+        if path.name == "run.json":
+            raise KeyboardInterrupt  # a kill after provenance/launch0.json, before the launch row
+        real(path, obj)
+
+    monkeypatch.setattr(canon, "atomic_write_json", die_at_run_json)
+    with pytest.raises(KeyboardInterrupt):
+        RunWriter.open(v, argv=["t"])
+    monkeypatch.setattr(canon, "atomic_write_json", real)
+    with RunWriter.open(v, argv=["t"]) as w:
+        assert w.launch == 1 and w.mode == "new"
+        commit(w, tiny(), 0)
+        w.finish("interrupted")
+    with RunWriter.open(v, argv=["t"]) as w:  # the resume code check reads the first recorded launch
+        assert (w.mode, w.launch) == ("resume", 2)
+
+
+def test_a_failure_after_finishing_leaves_the_run_finished():
+    v = make_variant()
+    with RunWriter.open(v, argv=["t"]) as w:
+        commit(w, tiny(), 0)
+        w.finish("finished")
+    with pytest.raises(RuntimeError), RunWriter.open(v, argv=["t"]):
+        raise RuntimeError("a final eval failed")
+    state = canon.read_json(load_experiment("exp/v").path / "run.json")
+    assert state["status"] == "finished" and state["launches"][-1]["status"] == "failed"
+
+
+def test_finish_reconciles_and_refuses_missing_selects(monkeypatch):
+    from test_results import FakeHarness
+
+    from catanrl.eval import results
+
+    v = make_variant()
+    with RunWriter.open(v, argv=["t"]) as w:
+        commit(w, tiny(), 0)
+        w.save_checkpoint(tiny(1), epoch=2, agent_steps=2)
+        torch.save({"epoch": 2}, w.path / "trainer_state.pt")  # killed before run.json
+        w.save_checkpoint(tiny(2), epoch=4, agent_steps=4)  # never committed
+    runs.finish("exp/v")
+    run = load_experiment("exp/v")
+    assert run.status == "finished" and [c.epoch for c in run.checkpoints()] == [0, 2]
+    assert (run.path / "checkpoints" / "orphaned").exists()
+
+    monkeypatch.setattr(results, "play_schedule", FakeHarness())
+    select = {"suite": {"name": "select-2p", "boards": 1}, "lineup": ["POLICY:ckpt=${self}", "R"]}
+    sv = make_variant("s", eval={"select": select})
+    with RunWriter.open(sv, argv=["t"]) as w:
+        commit(w, tiny(), 0)
+        w.finish("time_limit")
+    with pytest.raises(RunError, match="lack select evals"):
+        runs.finish("exp/s")
+
+
+def test_stored_variants_survive_a_migration(monkeypatch):
+    with RunWriter.open(make_variant(), argv=["t"]) as w:
+        commit(w, tiny(), 0)
+        w.finish("interrupted")
+    monkeypatch.setattr(config, "MIGRATIONS", [(config.SCHEMA + 1, "train.new_key", 0.0, None)])
+    stored = load_experiment("exp/v").variant()
+    assert stored.config["train"]["new_key"] == 0.0
+    with RunWriter.open(stored, argv=["t"]) as w:
+        assert w.mode == "resume"
+
+
+def test_metrics_hide_rolled_back_epochs_and_cut_lineage():
+    v = make_variant()
+    with RunWriter.open(v, argv=["t"]) as w:
+        for epoch in (1, 2, 3):
+            w.log({"epoch": epoch, "x": 0}, epoch)
+            if epoch == 2:
+                commit(w, tiny(), 2)
+        w.finish("interrupted")
+    with RunWriter.open(v, argv=["t"]) as w:
+        w.load_trainer_state()
+        w.log({"epoch": 3, "x": 1}, 3)
+        w.finish("time_limit")
+    rows = load_experiment("exp/v").metrics()
+    assert [(r["launch"], r["epoch"]) for r in rows] == [(0, 1), (0, 2), (1, 3)]
+    runs.fork("exp/v", as_="v+more")
+    child = load_experiment("exp/v+more")
+    assert [r["epoch"] for r in child.metrics(lineage=True)] == [1, 2]  # the parent up to e2, once
+
+
+def test_lineage_walks_every_parent():
+    with RunWriter.open(make_variant("root"), argv=["t"]) as w:
+        commit(w, tiny(), 0)
+        w.finish("finished")
+    with RunWriter.open(make_variant("a", init_from={"ckpt": "exp/root@latest"}), argv=["t"]) as w:
+        commit(w, tiny(), 0)
+        w.finish("finished")
+    with RunWriter.open(make_variant("b"), argv=["t"]) as w:
+        commit(w, tiny(1), 0)
+        w.finish("finished")
+    hybrid = make_variant("h", init_from={"ckpt": {"actor": "exp/b@latest", "critic": "exp/a@latest"}})
+    with RunWriter.open(hybrid, argv=["t"]) as w:
+        w.finish("finished")
+    assert {r.run for r in load_experiment("exp/h").lineage()} == {"exp/a", "exp/b", "exp/root"}
+
+
+def test_names_resolve_in_the_runs_dir_not_the_cwd(tmp_path, monkeypatch):
+    with RunWriter.open(make_variant(), argv=["t"]) as w:
+        commit(w, tiny(), 0)
+    decoy = tmp_path / "decoy"
+    (decoy / "exp" / "v").mkdir(parents=True)
+    shutil.copy(load_experiment("exp/v").path / "config.json", decoy / "exp" / "v" / "config.json")
+    monkeypatch.chdir(decoy)
+    assert load_experiment("exp/v").path == load_experiment(runs.runs_root() / "exp" / "v").path
+
+
+def test_a_brief_status_probe_does_not_refuse_a_writer():
+    import fcntl
+    import os
+    import threading
+
+    v = make_variant()
+    with RunWriter.open(v, argv=["t"]) as w:
+        commit(w, tiny(), 0)
+        w.finish("interrupted")
+    fd = os.open(load_experiment("exp/v").path / ".lock", os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    threading.Timer(0.3, lambda: (fcntl.flock(fd, fcntl.LOCK_UN), os.close(fd))).start()
+    with RunWriter.open(v, argv=["t"]) as w:
+        assert w.mode == "resume"

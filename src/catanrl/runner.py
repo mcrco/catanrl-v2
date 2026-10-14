@@ -20,8 +20,17 @@ from pathlib import Path
 from typing import Any
 
 from catanrl import canon
-from catanrl.config import Plan, Variant
-from catanrl.runs import RunLocked, RunWriter, list_runs, load_experiment, runs_root
+from catanrl.config import ConfigError, Plan, Variant
+from catanrl.runs import (
+    RunLocked,
+    RunWriter,
+    bind_spec,
+    bound_lineup,
+    check_stored,
+    list_runs,
+    load_experiment,
+    runs_root,
+)
 
 #: Statuses a dependent stage may start from (a time_limit run pins its epoch).
 USABLE = ("finished", "time_limit")
@@ -43,8 +52,8 @@ def _trainer(algo: str):
     raise NotImplementedError(f"train.algo {algo!r} has no trainer yet")
 
 
-def _status(v: Variant) -> str | None:
-    path = runs_root() / v.experiment / v.name
+def _status(experiment: str, name: str) -> str | None:
+    path = runs_root() / experiment / name
     return load_experiment(path).status if (path / "config.json").exists() else None
 
 
@@ -52,33 +61,54 @@ def run_variant(v: Variant, *, argv: Sequence[str], allow_code_change: bool = Fa
                 source: dict | None = None) -> str:
     """Create or resume ``v``'s run, train it, then play its final evals. Returns the status."""
     with RunWriter.open(v, argv=argv, allow_code_change=allow_code_change, source=source) as writer:
-        cfg = writer.variant_for_training.config
         if v.kind == "train" and writer.mode != "done":
-            _trainer(cfg["train"]["algo"])(writer.variant_for_training, writer)
-        status = writer.status
-        if v.kind == "eval" or status == "finished":
-            final_evals(writer)
-            if v.kind == "eval" and status != "finished":
+            _trainer(v.config["train"]["algo"])(writer.variant_for_training, writer)
+        if v.kind == "eval" or writer.status == "finished":
+            final_evals(writer, v)
+            if v.kind == "eval" and writer.status != "finished":
                 writer.finish("finished")
         return writer.status
 
 
-def final_evals(run: Any) -> list:
-    """Every ``eval.final`` entry (bound lineups for refs to other runs), cached."""
+def final_evals(run: Any, v: Variant) -> list:
+    """The plan's ``eval.final`` entries for ``run`` (refs to other runs as first pinned), cached.
+
+    ``eval.final`` and ``runtime`` are outside the training config hash, so they
+    come from the plan, not from the run's stored config."""
     from catanrl.eval.results import evaluate
 
-    cfg = run.config
-    runtime = cfg.get("runtime") or {}
+    runtime = v.config.get("runtime") or {}
     options = {k: runtime[k] for k in ("device", "num_envs", "threads", "infer_rows") if k in runtime}
-    bound = (run.manifest.get("resolved") or {}).get("lineups") or []
     records = []
-    for i, entry in enumerate(cfg["eval"]["final"]):
-        lineup = bound[i] if i < len(bound) else entry["lineup"]
-        record = evaluate(lineup, entry["suite"], fill=entry.get("fill"), **options)
+    for entry in v.config["eval"]["final"]:
+        record = evaluate(bound_lineup(run, entry["lineup"]), entry["suite"], fill=entry.get("fill"),
+                          restart_partial=True, **options)
         print(f"{run.ref}: {record.data['specs'][0]} on {record.data['suite']}: "
               f"{record.summary['score_rate']:.3f} (n={record.summary['games']}) {record.eval_id}", flush=True)
         records.append(record)
     return records
+
+
+def _missing_finals(run: Any, v: Variant) -> bool:
+    from catanrl.eval.results import find
+
+    known = run.bindings()
+    for entry in v.config["eval"]["final"]:
+        try:
+            lineup = [known.get(s) or bind_spec(s, run.ref) or s for s in entry["lineup"]]
+            if find(lineup, entry["suite"], fill=entry.get("fill")) is None:
+                return True
+        except (RuntimeError, ValueError):  # unresolvable now: the child run reports why
+            return True
+    return False
+
+
+def _check_source(plan: Plan) -> None:
+    """Launches come from versioned YAML: the package's repo (DESIGN 6.7)."""
+    from catanrl.provenance import repo_root
+
+    if not plan.source.is_relative_to(repo_root()):
+        raise ConfigError(f"{plan.source} is outside {repo_root()}; experiments launch from the repo's YAML")
 
 
 def run_child(argv: Sequence[str]) -> tuple[int, bool]:
@@ -122,20 +152,25 @@ def _child_argv(plan: Plan, v: Variant, overrides: Sequence[str], allow_code_cha
 
 def run_plan(plan: Plan, *, next_: bool = False, allow_code_change: bool = False,
              overrides: Sequence[str] = ()) -> None:
-    """Run every unfinished variant (``next_``: claim free ones until none is left)."""
+    """Run every unfinished variant in order, resuming stopped ones. With ``next_``,
+    claim only new or dead variants (and finished ones missing final evals), one
+    at a time, until none is left: a time-limited, interrupted or failed run waits
+    for an explicit ``catanrl run``."""
+    _check_source(plan)
     while True:
         ran = False
         for v in plan.variants:
-            status = _status(v)
-            if status == "finished" and not _missing_finals(v):
+            run = check_stored(v)  # a changed config is a conflict, whatever the status
+            status = None if run is None else run.status
+            if status == "finished" and not _missing_finals(run, v):
                 continue
-            blocked = [d for d in v.depends_on if _status(plan.variant(d)) not in USABLE]
+            if next_ and status not in (None, "dead", "finished"):
+                continue
+            blocked = [d for d in v.depends_on if _status(v.experiment, d) not in USABLE]
             if blocked:
                 if not next_:
                     raise RuntimeError(f"{v.ref} waits for {blocked}; run them first (or use --next)")
                 continue
-            if next_ and status == "running":
-                continue  # another terminal has it
             print(f"== {v.ref}", flush=True)
             code, stopped = run_child(_child_argv(plan, v, overrides, allow_code_change))
             if stopped:
@@ -151,26 +186,11 @@ def run_plan(plan: Plan, *, next_: bool = False, allow_code_change: bool = False
             return
 
 
-def _missing_finals(v: Variant) -> bool:
-    from catanrl.eval.results import find
-
-    run = load_experiment(runs_root() / v.experiment / v.name)
-    bound = (run.manifest.get("resolved") or {}).get("lineups") or []
-    for i, entry in enumerate(run.config["eval"]["final"]):
-        lineup = bound[i] if i < len(bound) else entry["lineup"]
-        try:
-            if find(lineup, entry["suite"], fill=entry.get("fill")) is None:
-                return True
-        except (RuntimeError, ValueError):  # unresolvable now: the child run reports why
-            return True
-    return False
-
-
 def run_inline(plan: Plan, name: str, *, argv: Sequence[str], allow_code_change: bool = False) -> int:
     """The child's side: run one variant; exit 3 when it is locked."""
-    v = plan.variant(name)
+    _check_source(plan)
     try:
-        run_variant(v, argv=argv, allow_code_change=allow_code_change,
+        run_variant(plan.variant(name), argv=argv, allow_code_change=allow_code_change,
                     source={"path": str(plan.source), "sha256": plan.source_sha256})
     except RunLocked as error:
         print(f"skip: {error}", flush=True)
@@ -182,36 +202,39 @@ def run_inline(plan: Plan, name: str, *, argv: Sequence[str], allow_code_change:
 
 
 def summarize(experiment: str) -> Path:
-    """``runs/<experiment>/summary.md``: one row per variant, then mean ± sd over seeds."""
+    """``runs/<experiment>/summary.md``: one row per variant, then each final eval
+    entry's mean ± sd over seeds (only the runs' own final records, this code's)."""
+    from catanrl.eval.results import find
+
     runs = list_runs(f"{experiment}/*")
     if not runs:
         raise RuntimeError(f"no runs of {experiment}")
     lines = [f"# {experiment}", "", "| variant | status | epoch | best | final |", "|---|---|---|---|---|"]
-    groups: dict[str, list[float]] = {}
+    groups: dict[tuple, list[float]] = {}
     for run in runs:
-        ckpts = run.checkpoints()
-        best = run.aliases().get("best")
-        finals = [r for r in run.evals() if r.data["specs"][0].startswith(("POLICY", "MCTS", "BELIEF"))
-                  and load_suite_purpose(r) == "heldout"]
-        final = "; ".join(f"{r.data['suite']} {r.summary['score_rate']:.3f}" for r in finals)
+        ckpts, best, known = run.checkpoints(), run.aliases().get("best"), run.bindings()
+        finals = []
+        for i, entry in enumerate(run.config["eval"]["final"]):
+            try:
+                record = find([known.get(s, s) for s in entry["lineup"]], entry["suite"], fill=entry.get("fill"))
+            except (RuntimeError, ValueError):
+                record = None
+            if record is not None:
+                finals.append((i, entry["lineup"][0].split(":")[0], record))
+        final = "; ".join(f"{key} {r.data['suite']} {r.summary['score_rate']:.3f}" for _, key, r in finals)
         best_text = f"e{best['epoch']} {best['metric'] or 0:.3f}" if best else "-"
         lines.append(f"| {run.manifest['variant']} | {run.status} | {ckpts[-1].epoch if ckpts else '-'} | "
                      f"{best_text} | {final or '-'} |")
         labels = {k: v for k, v in run.manifest.get("labels", {}).items() if k != "seed"}
-        key = ", ".join(f"{k}={v}" for k, v in labels.items()) + (f" .{run.manifest['stage']}"
-                                                                 if run.manifest.get("stage") else "")
-        for r in finals:
-            groups.setdefault(f"{key} | {r.data['suite']}", []).append(r.summary["score_rate"])
+        cell = ", ".join(f"{k}={v}" for k, v in labels.items()) + (f" .{run.manifest['stage']}"
+                                                                  if run.manifest.get("stage") else "")
+        for i, key, r in finals:
+            groups.setdefault((cell or "-", f"{i}:{key}", r.data["suite"]), []).append(r.summary["score_rate"])
     if groups:
-        lines += ["", "| cell (over seeds) | suite | mean | sd | n |", "|---|---|---|---|---|"]
-        for key, rates in sorted(groups.items()):
-            cell, suite = key.split(" | ")
+        lines += ["", "| cell (over seeds) | final | suite | mean | sd | n |", "|---|---|---|---|---|---|"]
+        for (cell, entry, suite), rates in sorted(groups.items()):
             sd = statistics.stdev(rates) if len(rates) > 1 else float("nan")
-            lines.append(f"| {cell or '-'} | {suite} | {statistics.mean(rates):.3f} | {sd:.3f} | {len(rates)} |")
+            lines.append(f"| {cell} | {entry} | {suite} | {statistics.mean(rates):.3f} | {sd:.3f} | {len(rates)} |")
     path = runs_root() / experiment / "summary.md"
     canon.atomic_write_bytes(path, ("\n".join(lines) + "\n").encode())
     return path
-
-
-def load_suite_purpose(record: Any) -> str:
-    return record.key["suite"]["purpose"]
