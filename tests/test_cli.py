@@ -35,3 +35,17 @@ def test_validate_and_ls(tmp_path):
     proc = cli("pin", "nope/x@1", "ref", env=env)
     out, err = proc.communicate(timeout=300)
     assert proc.returncode == 2 and "error: RunError" in err
+
+
+def test_results_and_verify_find_records_under_evals(monkeypatch, capsys):
+    from test_results import SUITE, FakeHarness
+
+    from catanrl.cli import main
+    from catanrl.eval import results
+
+    monkeypatch.setattr(results, "play_schedule", FakeHarness())
+    record = results.evaluate(["R", "F"], SUITE)
+    assert (record.path.parent / "provenance" / f"{record.eval_id}.start0.json").exists()
+    assert main(["results"]) == 0 and record.eval_id in capsys.readouterr().out
+    assert main(["verify", record.eval_id, "--games", "2"]) == 0
+    assert '"identical": 2' in capsys.readouterr().out

@@ -48,6 +48,17 @@ def test_tiny_end_to_end(name, monkeypatch):
     def no_play(*args, **kwargs):
         raise AssertionError("a cached eval replayed games")
 
+    launch = canon.read_json(run.path / "run.json")["launches"][0]
+    assert launch["runtime"]["determinism"] == "strict"
+    assert launch["effective"]["torch"]["flags"]["deterministic_algorithms"] is True  # after PuffeRL's init
+
+    if name == "2p":  # an ad-hoc eval of another checkpoint is not a final: summarize skips it
+        catanrl.evaluate(["POLICY:tiny/2p@e1", "F"], {"name": "heldout-2p", "boards": 1})
+        from catanrl.runner import summarize
+
+        assert "| players=2p | 0:POLICY | heldout-2p |" in summarize("tiny").read_text()
+        assert summarize("tiny").read_text().rstrip().endswith("| 1 |")
+
     monkeypatch.setattr(results, "play_schedule", no_play)
     finals = final_evals(run, v)
     assert len(finals) == 1 and finals[0].data["refs"][0] == best["ref"]
