@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import cppanatron as cpp
+import numpy as np
 import pytest
 from eval_standins import Suite, agent, schedule, tiny_model
 
@@ -93,3 +94,58 @@ def test_policy_of_an_asymmetric_critic_model_plays_from_actor_rows():
     assert len(rows) == 2
     with pytest.raises(NotImplementedError):
         agent("MCTS", model, sims=4, oracle=True)
+
+
+class _FailingEvaluator:
+    """Fails on its n-th call with a recognizable error."""
+
+    def __init__(self, inner, fail_on):
+        self.inner, self.calls, self.fail_on = inner, 0, fail_on
+        self.obs_size, self.num_actions, self.num_players = inner.obs_size, inner.num_actions, inner.num_players
+
+    def __call__(self, rows):
+        self.calls += 1
+        if self.calls == self.fail_on:
+            raise MemoryError("evaluator failed")
+        return self.inner(rows)
+
+
+def _decisions(count=3):
+    from catanrl import games as game_configs
+
+    out = []
+    for seed in range(count):
+        game = game_configs.load_game("base-2p").cppanatron_game(seed, seed)
+        while len(game.playable_actions) < 2:
+            game.execute(game.playable_actions[0])
+        out.append(game)
+    return out
+
+
+def test_mcts_errors_propagate_and_leave_the_pool_usable():
+    mcts = agent("MCTS", tiny_model(), sims=8, oracle=True)
+    healthy = mcts.evaluator
+    games = _decisions()
+    rows = np.stack([mcts.encode(g, g.current_player_index) for g in games])
+    masks, seeds = rows[:, -mcts.action_space.size:], np.arange(len(games), dtype=np.uint64)
+    mcts.evaluator = _FailingEvaluator(healthy, fail_on=3)
+    with pytest.raises(MemoryError, match="evaluator failed"):  # the real error, not the pool's
+        mcts.act(rows, masks, seeds, games=games)
+    assert len(mcts.pool) == 0 and mcts.pool.pending == 0
+    mcts.evaluator = healthy
+    assert len(mcts.act(rows, masks, seeds, games=games)) == len(games)
+    assert len(mcts.pool) == 0
+
+
+def test_mcts_add_failure_leaks_no_search():
+    import cppanatron as cpp
+
+    mcts = agent("MCTS", tiny_model(), sims=4, dets=2)
+    games = _decisions(2)
+    rows = np.stack([mcts.encode(g, g.current_player_index) for g in games])
+    good = cpp.HandTracker(games[0], games[0].current_player_index)
+    wrong = cpp.HandTracker(games[1], 1 - games[1].current_player_index)  # follows the wrong seat
+    with pytest.raises(ValueError):
+        mcts.act(rows, rows[:, -mcts.action_space.size:], np.arange(2, dtype=np.uint64), games=games,
+                 trackers=[good, wrong])
+    assert len(mcts.pool) == 0

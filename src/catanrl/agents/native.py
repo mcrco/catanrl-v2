@@ -204,15 +204,19 @@ class MctsAgent(NativeAgent):
         if self.needs_trackers and trackers is None:
             raise ValueError("MCTS with dets searches worlds sampled from hand trackers")
         ids = []
-        for i, (game, seed) in enumerate(zip(games, decision_seeds)):
-            tracker = trackers[i] if self.needs_trackers else None
-            ids.append(self.pool.add(game, seed=int(seed), tracker=tracker))
         try:
+            for i, (game, seed) in enumerate(zip(games, decision_seeds)):
+                tracker = trackers[i] if self.needs_trackers else None
+                ids.append(self.pool.add(game, seed=int(seed), tracker=tracker))
             run_searches(self.pool, self.evaluator, batch_rows=len(ids) * self.config.max_pending)
             return np.array([self.pool.select(i, self.temperature) for i in ids], dtype=np.int64)
         finally:
+            # Leave the pool empty whatever failed, so the agent keeps working.
+            if self.pool.pending:
+                self.pool.cancel()
             for i in ids:
-                self.pool.remove(i)
+                if i in self.pool:
+                    self.pool.remove(i)
 
 
 class BotAgent:

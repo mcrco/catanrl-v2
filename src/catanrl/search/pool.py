@@ -73,7 +73,13 @@ def run_searches(pool: cpp.SearchPool, evaluator: BatchEvaluator, *, batch_rows:
     ids = np.empty(max(1, batch_rows), dtype=np.int64)
     total = 0
     while n := pool.collect(observations, ids):
-        logits, values = evaluator(observations[:n])
-        pool.apply(logits, values)
+        try:
+            logits, values = evaluator(observations[:n])
+            pool.apply(logits, values)
+        except BaseException:
+            # Withdraw the collected leaves, so the pool stays usable and the error is the real one.
+            if pool.pending:
+                pool.cancel()
+            raise
         total += n
     return total
