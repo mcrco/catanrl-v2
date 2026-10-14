@@ -127,3 +127,49 @@ def test_init_from_parts(tmp_path):
     assert not all(torch.equal(state[k], src[k]) for k in state if k.startswith("critic."))
     with pytest.raises(CheckpointError):
         load_parts(tiny("graph-s"), {"ckpt": str(path), "parts": ["actor"]})
+
+
+def test_every_policy_head_is_self_tested(tmp_path, monkeypatch):
+    """A change to logits of actions illegal in every stored position still drifts."""
+    from catanrl.envs.encoding import make_encoder
+    from catanrl.models import GraphModel
+
+    model = tiny()
+    path = saved(tmp_path, model).path
+    offset, (size,) = make_encoder(model.dims, "private").action_space.layout()["city"]
+    original = GraphModel.policy_logits
+
+    def shifted(self, obs):
+        out = original(self, obs).clone()
+        out[:, offset:offset + size] += 0.5
+        return out
+
+    monkeypatch.setattr(GraphModel, "policy_logits", shifted)
+    with pytest.raises(ModelDrift):
+        Checkpoint.load(path).model()
+
+
+def test_positions_carry_their_maps(tmp_path, monkeypatch):
+    from catanrl import maps
+
+    path = saved(tmp_path, tiny()).path
+    real = maps.generate
+    monkeypatch.setattr(maps, "generate", lambda config, seed: real(config, seed + 1))
+    Checkpoint.load(path).model()  # a map-generator change is not an encoder drift
+
+
+def test_self_tests_ignore_a_leaked_autocast(tmp_path):
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        ref = saved(tmp_path, tiny())
+    Checkpoint.load(ref.path).model()
+
+
+def test_positions_cover_prompts_and_full_tables():
+    from catanrl.envs.encoding import dims_for
+
+    kinds = {ck._kind(ck._position_game(p)) for p in ck.packaged_positions()}
+    assert kinds >= {"turn", "turn+rolled", "MOVE_ROBBER", "DISCARD", "BUILD_INITIAL_SETTLEMENT",
+                     "BUILD_INITIAL_ROAD", "road_building"}
+    chosen = ck.select_positions(dims_for(["base-4p"]), 8)
+    assert all(p["game"]["num_players"] == 4 for p in chosen)
+    assert all(p["seat"] == ck._position_game(p).current_player_index for p in chosen)

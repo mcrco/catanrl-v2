@@ -9,7 +9,7 @@ import hashlib
 from catanrl import checkpoint as ck
 from catanrl.envs.encoding import dims_for, make_encoder
 
-GOLDEN = {"private": "729b5f51f456c34c", "public": "d656a9615af4b0b2", "full": "9b85c0b9f2d32b9c"}
+GOLDEN = {"private": "61fb690913bbee48", "public": "eac7ddc6211e576a", "full": "02245e853ce33443"}
 
 
 def encodings(level: str) -> str:

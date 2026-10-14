@@ -109,13 +109,19 @@ def packaged_positions() -> tuple[dict, ...]:
 
 
 def _position_game(pos: Mapping[str, Any]):
+    """The declared game: its own map spec (older positions: the generator at their map seed)."""
     import cppanatron as cpp
 
     from catanrl.games import GameConfig
 
     cfg = GameConfig.from_dict(pos["game"])
-    game = cfg.cppanatron_game(int(pos["map_seed"]), int(pos["seed"]))
-    game.apply_setup([cpp.PlayerSetup(**p) for p in pos["players"]], **pos["options"])
+    spec = pos.get("map") or cfg.map_spec(int(pos["map_seed"]))
+    game = cpp.Game(cfg.num_players, map=cpp.CatanMap.from_spec(cpp.MapSpec.from_dict(spec)),
+                    rules=cfg.cppanatron_rules(), seed=int(pos["seed"]))
+    options = dict(pos["options"])
+    if "prompt" in options:
+        options["prompt"] = cpp.ActionPrompt[options["prompt"]]
+    game.apply_setup([cpp.PlayerSetup(**p) for p in pos["players"]], **options)
     return game
 
 
@@ -127,35 +133,48 @@ def _fits(pos: Mapping[str, Any], dims: Mapping[str, int]) -> bool:
     cfg = GameConfig.from_dict(pos["game"])
     if cfg.num_players > dims["max_players"]:
         return False
-    need = cpp.EncoderDims.covering([cpp.CatanMap.from_spec(cpp.MapSpec.from_dict(cfg.map_spec(pos["map_seed"])))],
-                                    cfg.num_players)
+    spec = pos.get("map") or cfg.map_spec(int(pos["map_seed"]))
+    need = cpp.EncoderDims.covering([cpp.CatanMap.from_spec(cpp.MapSpec.from_dict(spec))], cfg.num_players)
     return all(int(getattr(need, k)) <= int(dims[k]) for k in ("max_tiles", "max_nodes", "max_edges"))
 
 
-def generate_positions(game: Any, count: int, seed: int = 0) -> list[dict]:
-    """``count`` declarable turn positions of random games of ``game`` (a GameConfig)."""
-    import cppanatron as cpp
+#: The prompts self-test positions cycle through, so every head and phase is exercised.
+KINDS = ("turn", "turn+rolled", "MOVE_ROBBER", "BUILD_INITIAL_SETTLEMENT", "DISCARD", "road_building",
+         "BUILD_INITIAL_ROAD", "turn+rolled")
 
+
+def _kind(game) -> str:
+    prompt = game.current_prompt.name
+    if prompt != "PLAY_TURN":
+        return prompt
+    if game.free_roads_available:
+        return "road_building"
+    return "turn+rolled" if game.player(game.current_turn_index).has_rolled else "turn"
+
+
+def generate_positions(game: Any, count: int, seed: int = 0) -> list[dict]:
+    """``count`` declarable positions of random games of ``game`` (a GameConfig), cycling
+    through :data:`KINDS` of prompt, each seen by the seat to act."""
     rng = random.Random(f"{seed}|{game.name}")
     out: list[dict] = []
-    for _ in range(50 * count):
+    for _ in range(100 * count):
         if len(out) >= count:
             break
+        want = KINDS[len(out) % len(KINDS)]
         map_seed, game_seed = rng.randrange(10**6), rng.randrange(10**6)
         played = game.cppanatron_game(map_seed, game_seed)
-        target = rng.randrange(6, 60)
-        for _ in range(20000):
+        for _ in range(rng.randrange(1, 4000)):
             if played.winning_color is not None:
                 break
-            if (not played.is_initial_build_phase and played.current_prompt == cpp.ActionPrompt.PLAY_TURN
-                    and not played.is_road_building and played.num_turns >= target):
-                pos = {"game": game.to_dict(), "map_seed": map_seed, "seed": game_seed,
-                       "seat": rng.randrange(game.num_players), **_declare(played)}
+            if _kind(played) == want and rng.random() < 0.3:
+                pos = {"game": game.to_dict(), "map_seed": map_seed, "map": game.map_spec(map_seed),
+                       "seed": game_seed, "seat": played.current_player_index, **_declare(played)}
                 try:
                     declared = _position_game(pos)
                 except ValueError:
                     break
-                if set(map(str, declared.playable_actions)) == set(map(str, played.playable_actions)):
+                if (declared.current_player_index == played.current_player_index
+                        and sorted(map(str, declared.playable_actions)) == sorted(map(str, played.playable_actions))):
                     out.append(pos)
                 break
             played.execute(rng.choice(played.playable_actions))
@@ -166,21 +185,26 @@ def _declare(game) -> dict:
     def holder(flag: str) -> int:
         return next((seat for seat, p in enumerate(game.players) if getattr(p, flag)), -1)
 
-    current = game.current_player_index
+    turn = game.current_turn_index
     players = [{"settlements": list(p.settlements), "cities": list(p.cities), "roads": [list(r) for r in p.roads],
                 "resources": list(p.resources), "development_cards": list(p.development_cards),
-                "played_development_cards": list(p.played_development_cards)} for p in game.players]
-    options = {"robber": list(game.board.robber_coordinate), "current_player": current,
-               "has_rolled": game.player(current).has_rolled,
-               "has_played_development_card": game.player(current).has_played_development_card_in_turn,
+                "played_development_cards": list(p.played_development_cards),
+                "discards": int(game.remaining_discards(seat))} for seat, p in enumerate(game.players)]
+    options = {"robber": list(game.board.robber_coordinate), "current_player": turn,
+               "acting_player": game.current_player_index, "has_rolled": game.player(turn).has_rolled,
+               "has_played_development_card": game.player(turn).has_played_development_card_in_turn,
                "completed_turns": game.completed_turns, "longest_road": holder("has_road"),
-               "largest_army": holder("has_army")}
+               "largest_army": holder("has_army"), "prompt": game.current_prompt.name,
+               "free_roads": int(game.free_roads_available)}
     return {"players": players, "options": options}
 
 
 def select_positions(dims: Mapping[str, int], n: int = SELF_TEST_POSITIONS, games: Sequence[Any] = ()) -> list[dict]:
-    """The first ``n`` packaged positions that fit ``dims``, topped up from ``games``."""
-    chosen = [p for p in packaged_positions() if _fits(p, dims)][:n]
+    """``n`` packaged positions that fit ``dims``, games with all ``max_players`` seats
+    first, topped up from ``games``."""
+    fitting = [p for p in packaged_positions() if _fits(p, dims)]
+    fitting.sort(key=lambda p: p["game"]["num_players"] != dims["max_players"])
+    chosen = fitting[:n]
     for game in games:
         if len(chosen) >= n:
             break
@@ -208,12 +232,18 @@ def encode_positions(positions: Sequence[Mapping[str, Any]], dims: Mapping[str, 
     return np.stack(rows).astype(np.float32)
 
 
-def _outputs(model: nn.Module, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _outputs(model: nn.Module, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(logits, values, logits with every action legal): the last shows every policy head's output."""
     from catanrl.seeding import determinism
 
-    with determinism("strict"), torch.no_grad():
+    offset, (size,) = model.layout["action_mask"]
+    open_obs = obs.clone()
+    open_obs[:, offset:offset + size] = 1.0
+    with torch.autocast("cuda", enabled=False), torch.autocast("cpu", enabled=False), determinism("strict"), \
+            torch.no_grad():
         logits, values = model(obs)
-    return logits.float(), values.float()
+        open_logits, _ = model(open_obs)
+    return logits.float(), values.float(), open_logits.float()
 
 
 def make_self_test(model: nn.Module, dims: Mapping[str, int], level: str, n: int = SELF_TEST_POSITIONS,
@@ -222,9 +252,9 @@ def make_self_test(model: nn.Module, dims: Mapping[str, int], level: str, n: int
     positions = select_positions(dims, n, games)
     obs = torch.from_numpy(encode_positions(positions, dims, level, critic_level))
     cpu = _rebuild(model.spec, model.dims, model.levels, {k: v.detach().cpu() for k, v in model.state_dict().items()})
-    logits, values = _outputs(cpu, obs)
+    logits, values, open_logits = _outputs(cpu, obs)
     return {"positions": json.dumps(positions, separators=(",", ":")), "obs": obs, "logits": logits,
-            "value": values}
+            "value": values, "open_logits": open_logits}
 
 
 def _rebuild(spec: Mapping[str, Any], dims: Mapping[str, int], levels: Mapping[str, str],
@@ -362,10 +392,13 @@ class Checkpoint:
             if obs.shape != tuple(test["obs"].shape) or not np.array_equal(obs, test["obs"].numpy()):
                 raise EncoderDrift(f"{self.ref}: re-encoding its self-test positions gives other rows")
             model = _rebuild(self.header["model"], dims, levels, self.state_dict)
-            logits, values = _outputs(model, test["obs"])
+            logits, values, open_logits = _outputs(model, test["obs"])
             legal = test["logits"] > -1e8
             logits_ok = torch.equal(legal, logits > -1e8) and torch.allclose(
                 logits[legal], test["logits"][legal], rtol=LOGIT_TOL, atol=LOGIT_TOL)
+            if "open_logits" in test:  # every head, not only the legal actions' (older checkpoints lack it)
+                logits_ok = logits_ok and torch.allclose(open_logits, test["open_logits"], rtol=LOGIT_TOL,
+                                                         atol=LOGIT_TOL)
             if part in ("actor", "all") and not logits_ok:
                 raise ModelDrift(f"{self.ref}: the rebuilt network's logits differ from its self-test")
             values_ok = torch.allclose(values, test["value"], rtol=VALUE_TOL, atol=VALUE_TOL)
