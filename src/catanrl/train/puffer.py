@@ -351,8 +351,11 @@ def _lr_schedule(train: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"train.lr_schedule must be constant or kl_adaptive, not {kind!r}")
     if train.get("anneal_lr"):
         raise ValueError("kl_adaptive needs anneal_lr: false")
-    return {"kind": kind, "kl_target": train.get("kl_target", 0.01),
-            "lr_min": train.get("lr_min", 1e-5), "lr_max": train.get("lr_max", 3e-4)}
+    missing = [key for key in ("kl_target", "lr_min", "lr_max") if key not in train]
+    if missing:
+        raise ValueError(f"train.lr_schedule kl_adaptive needs {missing}")
+    return {"kind": kind, "kl_target": float(train["kl_target"]), "lr_min": float(train["lr_min"]),
+            "lr_max": float(train["lr_max"])}
 
 
 def train_ppo(variant: Any, writer: Any) -> None:
