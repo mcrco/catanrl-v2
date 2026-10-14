@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from catanrl.envs.encoding import action_size, row_layout
-from catanrl.envs.puffer import make_vecenv, plan_env, scenario_specs
+from catanrl.envs.puffer import CatanPufferEnv, make_vecenv, plan_env, scenario_specs
 from catanrl.models import CatanModel, build_model
 from catanrl.train.puffer_policy import PufferPolicy, ValueBatch, seat_rows
 
@@ -235,3 +235,31 @@ def test_logged_losses_and_kl_adaptation_use_the_current_epoch(tmp_path, monkeyp
         kl, lr = computed[epoch], lrs[epoch]
         expected = lr / 1.5 if kl > 2e-4 else lr * 1.5 if kl < 5e-5 else lr
         assert lrs[epoch + 1] == pytest.approx(min(max(expected, 1e-5), 1e-1))
+
+
+def roll_stats(log_interval: int, steps: int = 400) -> tuple[dict, int]:
+    plan = small_plan({"game": "base-2p", "weight": 0.9}, {"game": "base-2p", "seats": ["learner", "R"],
+                                                          "weight": 0.1, "name": "vsR"})
+    env = CatanPufferEnv(plan.scenarios, names=[s.name for s in plan.specs], num_envs=16, dims=plan.dims,
+                         threads=2, log_interval=log_interval, seed=9)
+    env.reset(9)
+    rng = np.random.default_rng(3)
+    ended = 0
+    size = env.single_action_space.n
+    for _ in range(steps):
+        mask = env.observations[:, -size:]
+        env.step((rng.random(mask.shape) * mask).argmax(1).astype(np.int32))
+        ended += int(env.terminals.reshape(-1, 2)[:, 0].sum())
+    return env.take_stats(), ended
+
+
+def test_episode_stats_weigh_every_episode_equally():
+    """Stats are epoch counts and means over episodes, whatever log_interval batches them
+    (PufferLib's info averaging used to weigh each interval, not each episode, equally)."""
+    every_step, ended = roll_stats(1)
+    batched, _ = roll_stats(37)
+    assert every_step["episodes"] == ended > 0
+    assert every_step.keys() == batched.keys()
+    for key, value in every_step.items():
+        assert batched[key] == pytest.approx(value, rel=1e-9), key
+    assert every_step["vsR/episodes"] + every_step["base-2p/episodes"] == ended

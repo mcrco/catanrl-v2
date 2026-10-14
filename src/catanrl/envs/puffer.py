@@ -154,8 +154,8 @@ class CatanPufferEnv(pufferlib.PufferEnv):
     Buffers: observations float32 [rows, obs], actions int32, rewards float32,
     terminals/truncations bool (PufferLib's) are bound zero-copy; the VecEnv's
     acting/learner/seat/env_index/num_players arrays are this env's own. Every
-    ``log_interval`` steps the episodes finished since the last pop are
-    reported as one info dict (nothing when none finished).
+    ``log_interval`` steps the engine's episode statistics are added up as
+    counts, which :meth:`take_stats` turns into the epoch's means.
     """
 
     def __init__(
@@ -212,6 +212,7 @@ class CatanPufferEnv(pufferlib.PufferEnv):
         )
         self.tick = 0
         self.decisions = 0
+        self._totals: dict[str, dict[str, float]] = {}
 
     def reset(self, seed=None):
         self.vec.reset(None if seed is None else int(seed))
@@ -224,34 +225,50 @@ class CatanPufferEnv(pufferlib.PufferEnv):
         self.decisions += int(self.acting.sum())
         self.vec.step()
         self.tick += 1
-        info = []
         if self.tick % self.log_interval == 0:
-            stats = self.episode_stats()
-            if stats:
-                info.append(stats)
-        return self.observations, self.rewards, self.terminals, self.truncations, info
+            self._accumulate(self.vec.pop_stats())
+        # Episode statistics leave through take_stats(), not PufferLib's infos, which it
+        # averages as a mean of per-interval means.
+        return self.observations, self.rewards, self.terminals, self.truncations, []
 
-    def episode_stats(self) -> dict[str, float]:
-        """Flat episode means since the last pop, overall and per scenario."""
-        stats = self.vec.pop_stats()
-        if not stats["episodes"]:
-            return {}
-        out = _bucket(stats, "")
-        for name, bucket in zip(self.scenario_names, stats["scenarios"]):
-            if bucket["episodes"]:
-                out.update(_bucket(bucket, f"{name}/"))
+    def _accumulate(self, stats: Mapping[str, Any]) -> None:
+        """Add the engine's episode means back up as counts, overall and per scenario."""
+        buckets = [("", stats), *((f"{name}/", bucket) for name, bucket in zip(self.scenario_names,
+                                                                               stats["scenarios"]))]
+        for prefix, bucket in buckets:
+            episodes = float(bucket["episodes"])
+            if not episodes:
+                continue
+            total = self._totals.setdefault(prefix, {})
+            total["episodes"] = total.get("episodes", 0.0) + episodes
+            for key in _MEAN_KEYS:
+                total[key] = total.get(key, 0.0) + float(bucket[key]) * episodes
+            for seat, rate in enumerate(bucket["seat_win"]):
+                key = f"seat_win_{seat}"
+                total[key] = total.get(key, 0.0) + float(rate) * episodes
+
+    def take_stats(self) -> dict[str, float]:
+        """Episodes finished since the last call: per bucket the count and the means over
+        those episodes (rates for truncated, stuck, learner_win and seat wins), overall and
+        per scenario (``<name>/<key>``). ``learner_win`` is per episode; divide by
+        ``learner_seats`` for a per-learner-seat rate."""
+        self._accumulate(self.vec.pop_stats())
+        out: dict[str, float] = {}
+        for prefix, total in self._totals.items():
+            episodes = total["episodes"]
+            out[f"{prefix}episodes"] = episodes
+            for key, value in total.items():
+                if key != "episodes":
+                    out[f"{prefix}{key}"] = value / episodes
+        self._totals = {}
         return out
 
     def close(self):
         pass
 
 
-def _bucket(bucket: Mapping[str, Any], prefix: str) -> dict[str, float]:
-    out = {f"{prefix}{key}": float(bucket[key])
-           for key in ("episodes", "truncated", "length", "decisions", "learner_win", "stuck")}
-    for seat, rate in enumerate(bucket["seat_win"]):
-        out[f"{prefix}seat_win_{seat}"] = float(rate)
-    return out
+#: The engine's per-episode means, added back up into counts by take_stats.
+_MEAN_KEYS = ("truncated", "length", "decisions", "learner_win", "learner_seats", "stuck")
 
 
 @dataclass

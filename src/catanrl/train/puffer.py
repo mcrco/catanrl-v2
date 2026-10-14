@@ -285,6 +285,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
             "throughput/collect_s": collected - start,
             "throughput/train_s": time.time() - collected,
         })
+        logs.update({f"environment/{k}": v for k, v in env.take_stats().items()})
         logs.update({f"critic/{k}": v for k, v in self.uncompiled_policy.pop_calibration().items()})
         self._adapt_lr(logs)
         if self._checkpoint_due:
