@@ -206,13 +206,13 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
     _ckpt_syntax(params.ckpt)
     try:
         ckpt = load_checkpoint(params.ckpt)
-    except Exception as error:
+    except (RuntimeError, OSError, ValueError) as error:  # no such run or checkpoint, or it fails to load
         raise SpecError(f"{key}: {params.ckpt}: {error}") from None
     ref = ckpt.ref
     part = "all" if key == "MCTS" else "actor"
     try:
         ckpt = _tested_checkpoint(str(ref.path), ref.weights_sha256, part, params.allow_drift)
-    except Exception as error:
+    except (RuntimeError, ValueError) as error:  # CheckpointError: drift, corruption, schema
         raise SpecError(f"{key}: {ref}: {error}") from None
     pinned = str(ref.path) if params.ckpt.endswith(".pt") else f"{ref.run}@e{ref.epoch}#{ref.weights_sha256[:12]}"
     params = dataclasses.replace(params, ckpt=pinned)
@@ -315,8 +315,9 @@ class CatanrlPlayer(Player):
         agent = self._agent()
         mirror = self._sync(game, agent)
         native_game, seat = mirror["game"], mirror["seat"]
-        from catanrl.seeding import derive_seed
         from cppanatron.catanatron import from_catanatron_action
+
+        from catanrl.seeding import derive_seed
 
         row = agent.encode(native_game, seat)[None]
         offset, (size,) = agent.encoder.layout()["action_mask"]
