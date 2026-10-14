@@ -97,6 +97,12 @@ def resolve_device(device: str) -> str:
     return device
 
 
+def rollout_bytes(rows: int, horizon: int, obs_size: int) -> int:
+    """GPU bytes of PuffeRL's experience buffers: every row's observations for
+    ``bptt_horizon`` steps (float32) plus eight float32 scalars per row-step."""
+    return int(rows) * int(horizon) * (int(obs_size) + 8) * 4
+
+
 def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows: int, seed: int,
                   data_dir: str, strict: bool = False) -> dict[str, Any]:
     """PuffeRL's config: the ``train`` section minus catanrl's keys, plus the runner's."""
@@ -395,6 +401,10 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)))
     config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
                            data_dir=str(getattr(writer, "path", ".")), strict=strict)
+    buffer = rollout_bytes(vecenv.num_agents, config["bptt_horizon"], vecenv.single_observation_space.shape[0])
+    if device.startswith("cuda") and buffer > torch.cuda.get_device_properties(device).total_memory:
+        raise ValueError(f"the rollout buffer needs {buffer / 2**30:.1f} GiB: lower env.num_envs or "
+                         "train.bptt_horizon")
     select = (cfg.get("eval") or {}).get("select")
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
     trainer = CatanPuffeRL(config, vecenv, policy, writer=writer, select=select, eval_runtime=eval_runtime,
@@ -422,6 +432,9 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
             logs = trainer.step_epoch()
             if logs is not None:
                 logs["map_pool"] = plan.pool["hash"]
+                logs["memory/rollout_GiB"] = buffer / 2**30
+                if device.startswith("cuda"):
+                    logs["memory/peak_GiB"] = torch.cuda.max_memory_allocated() / 2**30
                 writer.log(logs, trainer.global_step)
         if trainer.saved_epoch != trainer.epoch:
             trainer.save_checkpoint()  # the off-interval checkpoint

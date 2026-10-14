@@ -27,6 +27,7 @@ import pufferlib.vector
 
 from catanrl import games
 from catanrl.envs.encoding import (
+    covering_dims,
     check_dims,
     critic_level_of,
     dims_for,
@@ -260,14 +261,23 @@ class EnvPlan:
 
 
 def plan_env(env_cfg: Mapping[str, Any], *, pool_seed: int) -> EnvPlan:
-    """Scenarios, map pools and dims from an ``env`` config section."""
+    """Scenarios, map pools and dims from an ``env`` config section.
+
+    ``env.dims`` is ``auto`` (the generators' seed-independent bounds), ``pool``
+    (exactly the generated pool) or an explicit dims dict.
+    """
     specs = scenario_specs(env_cfg["scenarios"])
+    scenarios, pool = build_scenarios(specs, pool_seed)
     dims_cfg = env_cfg.get("dims", "auto")
     if dims_cfg in (None, "auto"):
         dims = dims_for([s.game for s in specs])
+    elif dims_cfg == "pool":
+        # Exactly the pool's maps: smaller rows than the generators' bounds for random
+        # shapes, but they depend on the pool seed.
+        dims = covering_dims([m for s in scenarios for m in s.maps],
+                             max(s.game.num_players for s in specs))
     else:
         dims = check_dims(dims_cfg)
-    scenarios, pool = build_scenarios(specs, pool_seed)
     return EnvPlan(specs=specs, scenarios=scenarios, dims=dims, pool=pool)
 
 
