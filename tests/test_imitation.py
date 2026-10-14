@@ -53,7 +53,7 @@ def test_short_run(tmp_path):
     writer = LocalWriter(tmp_path / "dagger")
     train_imitation(LocalVariant(CONFIG), writer)
     assert writer.status == "finished"
-    assert [ref.epoch for ref in writer.checkpoints] == [0, 1, 2]
+    assert [ref.epoch for ref in writer.saved] == [0, 1, 2]
     assert writer.metrics[-1]["beta"] == pytest.approx(0.9)
     assert "imitation/accuracy" in writer.metrics[-1]
     state = writer.load_trainer_state()

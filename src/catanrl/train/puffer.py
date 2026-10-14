@@ -35,6 +35,7 @@ from catanrl.envs.encoding import action_size, critic_level_of, dims_for, row_la
 from catanrl.envs.puffer import make_vecenv, plan_env
 from catanrl.models import CatanModel, build_model, normalize_levels
 from catanrl.train.puffer_policy import PufferPolicy
+from catanrl.train.select import Selector
 
 
 def import_pufferl():
@@ -133,26 +134,6 @@ def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows:
     return config
 
 
-def select_eval(select: Mapping[str, Any], ref: Any, eval_runtime: Mapping[str, Any]) -> tuple[Any, float]:
-    """Run ``eval.select`` on a checkpoint: (record, metric).
-
-    Isolated from training: autocast off (PuffeRL leaks bf16 autocast), a
-    forked torch RNG and strict determinism.
-    """
-    from catanrl.eval.results import evaluate
-
-    try:
-        from catanrl.seeding import determinism
-    except ImportError:
-        determinism = None
-    lineup = [str(spec).replace("${self}", str(ref)) for spec in select["lineup"]]
-    devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
-    guard = determinism("strict") if determinism else contextlib.nullcontext()
-    with torch.autocast("cuda", enabled=False), torch.random.fork_rng(devices=devices), guard:
-        record = evaluate(lineup, select["suite"], fill=select.get("fill"), **eval_runtime)
-    return record, float(record.summary[select.get("metric", "score_rate")])
-
-
 class _CaptureLogger:
     """PuffeRL's logger: keeps the last logs for train_ppo to complete and write."""
 
@@ -175,10 +156,8 @@ class CatanPuffeRL(pufferl.PuffeRL):
                  select: Mapping[str, Any] | None = None, eval_runtime: Mapping[str, Any] | None = None,
                  lr_schedule: Mapping[str, Any] | None = None) -> None:
         self.writer = writer
-        self.select = dict(select) if select else None
-        self.eval_runtime = dict(eval_runtime or {})
+        self.selector = Selector(select, writer, eval_runtime or {})
         self.lr_schedule = dict(lr_schedule or {"kind": "constant"})
-        self.best_metric: float | None = None
         self.decisions = 0
         self.saved_epoch: int | None = None
         #: Recorded in every trainer state and compared on resume.
@@ -222,7 +201,6 @@ class CatanPuffeRL(pufferl.PuffeRL):
             "optimizer": copy.deepcopy(self.optimizer.state_dict()),
             "scheduler": copy.deepcopy(self.scheduler.state_dict()),
             "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
-            "best_metric": self.best_metric,
             "rng": rng,
             **self.extra_state,
         }
@@ -236,7 +214,6 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.epoch = int(state["epoch"])
         self.global_step = int(state["global_step"])
         self.decisions = int(state["decisions"])
-        self.best_metric = state.get("best_metric")
         rng = state.get("rng")
         if rng is not None:
             try:
@@ -255,19 +232,9 @@ class CatanPuffeRL(pufferl.PuffeRL):
         ref = self.writer.save_checkpoint(self.model, epoch=self.epoch, agent_steps=self.global_step)
         self.writer.save_trainer_state(self.state())
         self.saved_epoch = self.epoch
-        if self.select and self.epoch % int(self.select.get("every", 1)) == 0:
-            self.run_select(ref)
+        if self.selector.due(self.epoch):
+            self.selector.run(ref, self.model)
         return str(getattr(ref, "path", ref))
-
-    def run_select(self, ref: Any) -> None:
-        """The select eval of a checkpoint, isolated from training state; moves ``best``."""
-        was_training = self.model.training
-        self.model.eval()
-        record, metric = select_eval(self.select, ref, self.eval_runtime)
-        self.model.train(was_training)
-        if self.best_metric is None or metric > self.best_metric:
-            self.best_metric = metric
-            self.writer.set_alias("best", ref, record=record)
 
     def close(self) -> None:
         self.vecenv.close()
@@ -435,11 +402,11 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
         if state.get("map_pool") not in (None, plan.pool["hash"]):
             raise RuntimeError("the map pool changed since the run started; refusing to resume")
         trainer.restore(state)
+        trainer.selector.restore()
     else:
         trainer.save_checkpoint()  # e000000
-    for ref in getattr(writer, "pending_selects", list)():
-        if select:
-            trainer.run_select(ref)
+    for ref in writer.pending_selects():
+        trainer.selector.run(ref, model)
 
     status = "finished"
     try:

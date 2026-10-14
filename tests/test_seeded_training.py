@@ -19,7 +19,7 @@ def run(tmp_path, name, seed):
                if k.startswith(("losses/", "environment/", "critic/"))}
     per_epoch = [{k: v for k, v in row.items() if k.startswith(("losses/", "environment/", "critic/"))}
                  for row in writer.metrics]
-    return [(ref.epoch, ref.weights_sha256) for ref in writer.checkpoints], per_epoch, outcome
+    return [(ref.epoch, ref.weights_sha256) for ref in writer.saved], per_epoch, outcome
 
 
 def test_same_seed_same_weights_and_metrics(tmp_path):

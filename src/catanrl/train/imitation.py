@@ -39,8 +39,8 @@ from catanrl.train.puffer import (
     build_policy_model,
     check_bindable,
     resolve_device,
-    select_eval,
 )
+from catanrl.train.select import Selector
 
 #: The ``train`` keys DAgger reads, with v1's values.
 IMITATION_KEYS: dict[str, Any] = {
@@ -247,16 +247,8 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
     torch.manual_seed(_derive_seed(seed, "sample", launch))  # policy samples during collection
     iteration, agent_steps = 0, 0
     beta = float(train["beta0"])
-    select = (cfg.get("eval") or {}).get("select")
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
-    best: list[float | None] = [None]
-
-    def run_select(ref) -> None:
-        model.eval()
-        record, metric = select_eval(select, ref, eval_runtime)
-        if best[0] is None or metric > best[0]:
-            best[0] = metric
-            writer.set_alias("best", ref, record=record)
+    selector = Selector((cfg.get("eval") or {}).get("select"), writer, eval_runtime)
 
     def save() -> None:
         ref = writer.save_checkpoint(model, epoch=iteration, agent_steps=agent_steps)
@@ -265,11 +257,11 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
         writer.save_trainer_state({
             "epoch": iteration, "agent_steps": agent_steps, "beta": beta, "decisions": collector.decisions,
             "model": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
-            "optimizer": copy.deepcopy(optimizer.state_dict()), "map_pool": plan.pool["hash"], "best_metric": best[0],
+            "optimizer": copy.deepcopy(optimizer.state_dict()), "map_pool": plan.pool["hash"],
             "dataset": dataset.state(), "rng": rng_state(),
         })
-        if select and iteration % int(select.get("every", 1)) == 0:
-            run_select(ref)
+        if selector.due(iteration):
+            selector.run(ref, model)
 
     state = writer.load_trainer_state() if getattr(writer, "mode", "new") == "resume" else None
     if state is not None:
@@ -278,15 +270,14 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
         iteration, agent_steps, beta = int(state["epoch"]), int(state["agent_steps"]), float(state["beta"])
-        best[0] = state.get("best_metric")
         dataset.restore(state["dataset"])
         collector.decisions = int(state["decisions"])
         set_rng_state(state["rng"])
+        selector.restore()
     else:
         save()
-    for ref in getattr(writer, "pending_selects", list)():
-        if select:
-            run_select(ref)
+    for ref in writer.pending_selects():
+        selector.run(ref, model)
     status = "finished"
     saved = iteration
     while iteration < int(train["iterations"]):

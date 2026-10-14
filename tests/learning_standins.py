@@ -64,7 +64,7 @@ class LocalWriter:
         self.launch = launch
         self.stop_reason = None
         self.metrics: list[dict] = []
-        self.checkpoints: list[LocalRef] = []
+        self.saved: list[LocalRef] = []
         self.aliases: dict[str, Any] = {}
         self.status: str | None = None
         self.stop_after_epochs = stop_after_epochs
@@ -77,8 +77,20 @@ class LocalWriter:
         torch.save({"model": getattr(model, "spec", None), "state_dict": state, "epoch": epoch,
                     "agent_steps": agent_steps}, path)
         ref = LocalRef("local", epoch, agent_steps, path, weights_digest(state))
-        self.checkpoints.append(ref)
+        self.saved.append(ref)
         return ref
+
+    def checkpoints(self) -> list[LocalRef]:
+        """Committed checkpoints: every .pt up to the trainer state's epoch."""
+        state = self.load_trainer_state()
+        last = -1 if state is None else int(state["epoch"])
+        refs = []
+        for path in sorted((self.path / "checkpoints").glob("e*.pt")):
+            saved = torch.load(path, weights_only=False)
+            if saved["epoch"] <= last:
+                refs.append(LocalRef("local", saved["epoch"], saved["agent_steps"], path,
+                                     weights_digest(saved["state_dict"])))
+        return refs
 
     def save_trainer_state(self, state: dict) -> None:
         torch.save(state, self.path / "trainer_state.pt")
