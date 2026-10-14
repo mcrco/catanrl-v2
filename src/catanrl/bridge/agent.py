@@ -179,7 +179,14 @@ class ViewAgent:
         """Take in a server message (``GameClient.on_message``): ``before``
         names the room's supply, and every game message shows the hand sizes
         after its step (so monopolies are exact). Cheap and thread-safe: the
-        work happens at the next decision."""
+        work happens at the next decision. Raises :class:`UnfairAgent` (which
+        stops the client) when the room's player count makes the agent
+        unfair (a PUBLIC POLICY beyond two players)."""
+        if body.get("type") in ("commitments", "before"):
+            # Refuse a seat the agent cannot play fairly before the game starts.
+            players = (body.get("config") or {}).get("num_players")
+            if isinstance(players, int):
+                check_fair(self.native, players)
         if body.get("type") in GAME_MESSAGES:
             self._inbox.append(dict(body))
 

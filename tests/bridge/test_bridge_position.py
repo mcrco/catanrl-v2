@@ -162,6 +162,8 @@ def _equivalence(name: str, index: int, every: int) -> int:
         over = ls.truth.winning_color() is not None
         syncing = [seat for seat in range(n) if not step % every or over or ls.current_seat == seat]
         views = ls.views() if len(syncing) > 1 else {seat: ls.view(seat) for seat in syncing}
+        if ls.native_diverged(views):
+            break  # cppanatron itself departs from Catanatron (see test_bridge_tracking._play)
         for seat in syncing:
             tracker = trackers[seat]
             position = tracker.sync(views[seat], game_over=over)

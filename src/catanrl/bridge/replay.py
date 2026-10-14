@@ -68,8 +68,11 @@ PLAYED_CARD = {
     "PLAY_ROAD_BUILDING": "ROAD_BUILDING",
 }
 #: Public points one move can add to its player (a settlement that also
-#: takes Longest Road), kept free of placeholder victory point cards.
+#: takes Longest Road): placeholder victory point cards stay this far from a
+#: win where the unseen cards allow.
 POINT_MARGIN = 3
+#: Moves that can add public points (buildings, Longest Road, Largest Army).
+POINT_MOVES = frozenset({"BUILD_SETTLEMENT", "BUILD_CITY", "BUILD_ROAD", "PLAY_KNIGHT_CARD"})
 
 
 class ReplayError(RuntimeError):
@@ -187,7 +190,7 @@ class Replay:
         mine = player == self.seat
         forced: dict[str, Any] = {}
         extra: dict[str, Any] = {}
-        self._keep_points_room()
+        worlds = self.repairs["worlds"]
         if kind in ("ROLL", "BUY_DEVELOPMENT_CARD"):
             # The record shows the outcome in the action; the move itself has none.
             action = cpp.Action(cpp.Color[color], cpp.ActionType[kind], None)
@@ -239,6 +242,10 @@ class Replay:
             if not mine:
                 self._prepare(player, kind, value)
 
+        if kind in POINT_MOVES:
+            self._guard_points(action, forced)
+            if self.repairs["worlds"] != worlds and not mine:
+                self._prepare(player, kind, value)  # a dealt world replaced the placeholders
         before = Counts.of(self.game)
         try:
             self.game.execute(action, **forced)
@@ -375,6 +382,10 @@ class Replay:
             except ReplayError:
                 continue
             return DEVELOPMENT_CARDS[d]
+        if deck[VICTORY_POINT] > 0:
+            # Every unseen card that can be in the deck is a victory point
+            # card: so was this one, and it wins the game.
+            return DEVELOPMENT_CARDS[VICTORY_POINT]
         raise ReplayError("no placeholder card fits another seat's purchase")
 
     def _ensure_in_deck(self, card: int) -> None:
@@ -411,27 +422,42 @@ class Replay:
         if lower:
             self._redeal_cards(lower=lower, margin=0)
 
-    def _keep_points_room(self) -> None:
-        """Leave every other seat ``POINT_MARGIN`` points of room under its
-        placeholder victory point cards (where the deck and the other hands
-        can take them), so that no public move makes it win the replay."""
-        if not any(self.game.player(s).development_cards[VICTORY_POINT] > self._room(s)
-                   for s in self.others):
+    def _guard_points(self, action: cpp.Action, forced: Mapping[str, Any]) -> None:
+        """No move may make a seat win the replay on placeholder victory
+        point cards: try a move that adds public points (a build, a knight,
+        an award it moves) on a copy, and re-deal first the cards of any
+        seat it would make win (while the replay is in progress, so a world
+        can still be dealt for it), unless no deal avoids it (the move wins
+        the game)."""
+        if not any(self.game.player(s).development_cards[VICTORY_POINT] for s in self.others):
             return
+        trial = self.game.copy()
         try:
-            self._redeal_cards()
+            trial.execute(action, **forced)
+        except (ValueError, RuntimeError):
+            return  # the real move reports it
+        caps = {}
+        for s in self.others:
+            p = trial.player(s)
+            room = victory_point_room(self.rules, p.victory_points)
+            if p.development_cards[VICTORY_POINT] > room:
+                caps[s] = room
+        if not caps or self._card_deal(caps=caps, margin=0) is None:
+            return  # every deal of the unseen cards makes that seat win: so does the game
+        try:
+            self._redeal_cards(caps=caps)
         except ReplayError:
-            winner = self.game.winning_color
-            if winner is not None and self.colors.index(winner.name) != self.seat:
-                raise
+            return  # nor does any world the tracker deals avoid it: the move wins the game
+        self.repairs["points"] += 1
 
-    def _redeal_cards(self, *, lower: Mapping[int, Mapping[int, int]] | None = None,
-                      deck_lower: Mapping[int, int] | None = None, margin: int = POINT_MARGIN) -> None:
-        """Re-deal the unseen development cards (the deck plus the other
-        hands) with every hand size kept: at least ``lower`` per hand and
-        ``deck_lower`` in the deck, and no hand with so many victory point
-        cards that its seat would have won (``margin`` points kept free when
-        possible); few cards move."""
+    def _card_deal(self, *, lower: Mapping[int, Mapping[int, int]] | None = None,
+                   deck_lower: Mapping[int, int] | None = None, margin: int = POINT_MARGIN,
+                   caps: Mapping[int, int] | None = None):
+        """A deal of the unseen development cards (the deck plus the other
+        hands) keeping every hand size, with at least ``lower`` per hand and
+        ``deck_lower`` in the deck, no seat within ``margin`` points of a win
+        on victory point cards and at most ``caps`` of them; None if there
+        is none. Few cards move."""
         current: dict[Any, list[int]] = {s: list(self.game.player(s).development_cards) for s in self.others}
         current["deck"] = self.deck()
         supply = [sum(current[h][d] for h in current) for d in range(5)]
@@ -442,16 +468,27 @@ class Replay:
                 lo[s][d] = max(lo[s][d], int(v))
         for d, v in (deck_lower or {}).items():
             lo["deck"][d] = max(lo["deck"][d], int(v))
+        hi: dict[Any, list[int]] = {h: [demand[h]] * 5 for h in current}
+        for s in self.others:
+            room = min(self._room(s, margin), int((caps or {}).get(s, demand[s])))
+            hi[s][VICTORY_POINT] = max(lo[s][VICTORY_POINT], min(demand[s], room))
+        try:
+            return transport(supply, demand, lower=lo, upper=hi, prefer=current)
+        except ValueError:
+            return None
+
+    def _redeal_cards(self, *, lower: Mapping[int, Mapping[int, int]] | None = None,
+                      deck_lower: Mapping[int, int] | None = None, margin: int = POINT_MARGIN,
+                      caps: Mapping[int, int] | None = None) -> None:
+        """Re-deal the unseen development cards to meet ``lower``,
+        ``deck_lower`` and ``caps`` (see :meth:`_card_deal`; ``margin``
+        points kept free when possible), through the engine's setters or,
+        where they cannot, a world the seat's tracker deals."""
         deal = None
         for m in sorted({margin, 0}, reverse=True):
-            hi: dict[Any, list[int]] = {h: [demand[h]] * 5 for h in current}
-            for s in self.others:
-                hi[s][VICTORY_POINT] = max(lo[s][VICTORY_POINT], min(demand[s], self._room(s, m)))
-            try:
-                deal = transport(supply, demand, lower=lo, upper=hi, prefer=current)
+            deal = self._card_deal(lower=lower, deck_lower=deck_lower, margin=m, caps=caps)
+            if deal is not None:
                 break
-            except ValueError:
-                continue
         try:
             if deal is None:
                 raise ReplayError("no deal of the unseen development cards fits the public moves")
@@ -462,7 +499,8 @@ class Replay:
             self._resample(lambda world: all(
                 world.player(s).development_cards[d] >= v for s, counts in (lower or {}).items()
                 for d, v in counts.items()) and all(
-                self._deck_of(world)[d] >= v for d, v in (deck_lower or {}).items()))
+                self._deck_of(world)[d] >= v for d, v in (deck_lower or {}).items()) and all(
+                world.player(s).development_cards[VICTORY_POINT] <= v for s, v in (caps or {}).items()))
 
     def _deck_of(self, game: cpp.Game) -> list[int]:
         deck = [int(x) for x in self.rules.development_deck]

@@ -122,3 +122,21 @@ def test_tui_decide_fns_play_a_local_game():
         assert summary["decisions"].get("decisions", 0) >= 5
         assert not [k for k in summary["decisions"] if k.startswith("fallback") or k == "inexact"], summary
         assert not summary["tracking"].get("broken"), summary
+
+
+def test_a_seat_the_agent_cannot_play_fairly_is_refused_before_the_game():
+    """A PUBLIC actor reads the other hands, which only a two-player bank
+    pins down: in a three-player room the bot stops at the seat commitments,
+    before revealing its seed (the server then calls the game off)."""
+    from catanrl.bridge.agent import UnfairAgent
+
+    dims = {"max_players": 3, **BASE_DIMS}
+    public = ViewAgent(tiny_agent("POLICY", "public", dims))
+
+    async def scenario(base):
+        return await play_bot(public, base, transcript_dir=None,
+                              new_room={"config": {"num_players": 3}, "seats": [None, "F", "F"]})
+
+    with pytest.raises(UnfairAgent):
+        _run(scenario)
+    assert public.stats["decisions"] == 0
