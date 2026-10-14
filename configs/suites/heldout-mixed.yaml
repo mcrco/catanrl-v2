@@ -1,0 +1,6 @@
+# 2-4 players on random islands; lineups shorter than a game's seats need fill (e.g. fill: F).
+purpose: heldout
+seed: 70
+boards: 500
+scenarios: [{game: base-2p}, {game: base-3p}, {game: random-4p}]
+turn_limit: 500

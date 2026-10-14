@@ -1,0 +1,31 @@
+# The experiment schema (DESIGN 6.2): every key an experiment may set, with
+# its default. An unknown key is an error. configs/train/<train.algo>.yaml
+# completes `train` and configs/models/<model.preset>.yaml completes `model`.
+# Precedence: defaults < train/model files < body < stage < sweep cell < --set.
+kind: train                  # train | eval (eval: only eval.final, swept over params)
+seed: 0
+env:
+  scenarios: []              # [{game, weight, seats, shuffle_seats, turn_limit, maps, value_enemies, name}]
+  num_envs: 1024             # games per VecEnv (rows = num_envs x max_players)
+  dims: auto                 # auto (generator bounds) | pool | {max_players, max_tiles, max_nodes, max_edges}
+  map_pool: {seed: null}     # null: derive_seed(seed, "map_pool")
+  reward: {vp: 0.0}          # win/loss only; vp shaping leaves PufferLib's clamp and is refused
+obs: {level: private, critic_level: null}   # private | public | full; critic null = actor's level
+model: null                  # required: {preset} or {preset, class, args}; no default architecture
+train: {algo: ppo}           # ppo | imitation | alphazero
+init_from: null              # {ckpt: REF or {actor: REF, critic: REF}, parts: [actor, critic], restore: weights}
+eval:
+  select: null               # {suite, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate, fill: null}
+  final: []                  # [{suite, lineup: ["POLICY:ckpt=${run}@best", F], fill: null}]
+                             # suite: a name, or {name, boards} for its first boards
+params: {}                   # kind: eval sweep values, referenced as ${params.NAME}
+meta: {}                     # not hashed: notes, wandb, ...
+runtime:                     # not hashed: how, not what
+  device: auto               # auto | cpu | cuda | cuda:N
+  threads: 8                 # VecEnv and eval threads
+  num_envs: 256              # eval games in flight
+  infer_rows: 256            # strict eval: the one padded inference shape
+  determinism: fast          # training: fast | strict (evals follow their suite)
+  compile: false
+  time_limit_hours: null     # stop (status time_limit) after this long; a relaunch resumes
+  allow_stale_build: false

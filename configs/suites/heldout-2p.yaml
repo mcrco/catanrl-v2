@@ -1,0 +1,5 @@
+purpose: heldout
+seed: 67
+boards: 2500               # each played in every seat rotation
+scenarios: [{game: base-2p}]
+turn_limit: 500

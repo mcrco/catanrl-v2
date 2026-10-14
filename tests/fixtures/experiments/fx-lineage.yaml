@@ -1,0 +1,22 @@
+# Frozen fixture (tests/test_config.py pins its hashes): do not edit.
+name: fx-lineage
+seed: 42
+env: {scenarios: [{game: base-2p}], num_envs: 64}
+obs: {level: full, critic_level: full}
+model: {preset: graph-tiny}
+train: {algo: ppo, total_timesteps: 1_000_000, learning_rate: 3e-4, gamma: 0.99, checkpoint_interval: 50}
+eval:
+  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+stages:
+  dagger: {train!: {algo: imitation, iterations: 4, checkpoint_interval: 2}, eval.select.every: 2}
+  warm: {init_from: {ckpt: "${stages.dagger}@best", parts: [actor, critic]}}
+  g1: {init_from: {ckpt: "${stages.warm}@3000"}, train.gamma: 1.0}
+sweep:
+  axes:
+    model.preset: [graph-tiny, mlp]
+    seed: [42, 43]
+  name: "{model.preset}-s{seed}"
+meta: {notes: fixture}
+runtime: {device: cpu, threads: 2}

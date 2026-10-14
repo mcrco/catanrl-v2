@@ -1,0 +1,5 @@
+purpose: select
+seed: 125
+boards: 200               # each played in every seat rotation
+scenarios: [{game: random-4p}]
+turn_limit: 500

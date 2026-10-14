@@ -1,0 +1,17 @@
+# `catanrl run EXP --smoke`: every variant for a few seconds on CPU, under
+# the experiment name EXP+smoke. Epoch refs (@3000) become @latest, and every
+# eval plays only `eval_boards` boards of its suite.
+eval_boards: 2
+set:
+  env: {num_envs: 8}
+  train:
+    total_timesteps: 512
+    bptt_horizon: 8
+    minibatch_size: 64
+    max_minibatch_size: 64
+    optimizer: adam
+    checkpoint_interval: 1
+    log_interval: 4
+    iterations: 2
+    steps_per_iteration: 16
+  runtime: {device: cpu, threads: 2, num_envs: 8, infer_rows: 16, compile: false, time_limit_hours: null}

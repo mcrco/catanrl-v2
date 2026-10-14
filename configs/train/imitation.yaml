@@ -1,0 +1,16 @@
+# DAgger from F (catanrl.train.imitation): v1's warm-start recipe.
+algo: imitation
+expert: F
+expert_enemies: next           # next | all
+iterations: 24
+steps_per_iteration: 512
+beta0: 1.0
+beta_decay: 0.9
+beta_min: 0.1
+dataset_cap: 200_000
+epochs_per_iteration: 1
+minibatch_size: 512
+learning_rate: 3.0e-4
+vf_coef: 0.5
+max_grad_norm: 0.5
+checkpoint_interval: 8

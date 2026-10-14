@@ -1,0 +1,12 @@
+# Frozen fixture (tests/test_config.py pins its hashes): do not edit.
+name: fx-mcts
+kind: eval
+params: {sims: 64}
+eval:
+  final:
+    - {suite: heldout-2p, lineup: ["MCTS:ckpt=fx-lineage/graph-tiny-s42.g1@best:sims=${params.sims}:${params.world}", F]}
+sweep:
+  axes:
+    params.sims: [16, 64]
+    world: {oracle: {params.world: "oracle=true"}, d4: {params.world: "dets=4"}}
+  name: "s{params.sims}-{world}"

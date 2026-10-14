@@ -1,0 +1,38 @@
+# PPO through PuffeRL (catanrl.train.puffer), written deliberately rather than
+# copied from PufferLib's default.ini: Adam, constant LR, amp and bf16 off
+# (Turing GPUs have no bf16), no prioritized replay. These are exactly the
+# PuffeRL keys minus the runner's (device, seed, data_dir, compile,
+# batch_size, ...: set from `runtime` and the env) plus catanrl's
+# (algo, lr_schedule, kl_target, lr_min, lr_max, log_interval).
+algo: ppo
+total_timesteps: 400_000_000   # agent steps: rows (num_envs x max_players) per VecEnv step
+learning_rate: 3.0e-4
+lr_schedule: constant          # constant | kl_adaptive (needs kl_target, lr_min, lr_max)
+kl_target: null
+lr_min: null
+lr_max: null
+anneal_lr: false
+min_lr_ratio: 0.0
+optimizer: adam                # muon compiles through heavyball even with compile off
+adam_beta1: 0.9
+adam_beta2: 0.999
+adam_eps: 1.0e-8
+gamma: 0.99
+gae_lambda: 0.95
+update_epochs: 1
+clip_coef: 0.2
+vf_coef: 0.5
+vf_clip_coef: 0.2
+max_grad_norm: 0.5
+ent_coef: 0.01
+bptt_horizon: 64
+minibatch_size: 2048
+max_minibatch_size: 2048
+precision: float32
+amp: false                     # PuffeRL reads config.get('amp', True)
+prio_alpha: 0.0                # uniform minibatches
+prio_beta0: 1.0
+vtrace_rho_clip: 1.0
+vtrace_c_clip: 1.0
+checkpoint_interval: 50        # epochs
+log_interval: 32               # VecEnv steps between episode-stat pops
