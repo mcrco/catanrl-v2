@@ -60,3 +60,11 @@ def test_blob_is_connected():
                 seen.add(n)
                 todo.append(n)
     assert len(seen) == 40
+
+
+def test_every_generated_map_has_a_desert_for_the_robber():
+    for land in range(3, 41):
+        assert None in maps.terrain_for(land)
+    for seed in range(20):
+        spec = maps.generate({"type": "blob", "land_tiles": [4, 12]}, seed)
+        assert any(t["type"] == "land" and t["resource"] is None for t in spec["tiles"])

@@ -133,11 +133,17 @@ def _balanced(counts: Mapping[Any, float], total: int) -> list[Any]:
 
 
 def terrain_for(land_tiles: int) -> list[str | None]:
+    """Base-game proportions, with at least one desert: the robber starts there."""
     if land_tiles == 19:
         return [key for key, count in BASE_TERRAIN.items() for _ in range(count)]
     if land_tiles == 30:
         return [key for key, count in EXTENSION_TERRAIN.items() for _ in range(count)]
-    return _balanced(BASE_TERRAIN, land_tiles)
+    terrain = _balanced(BASE_TERRAIN, land_tiles)
+    if None not in terrain:
+        # Replace one tile of the most common resource.
+        most = max(set(terrain), key=lambda r: (terrain.count(r), r))
+        terrain[terrain.index(most)] = None
+    return terrain
 
 
 def numbers_for(numbered_tiles: int) -> list[int]:
