@@ -5,13 +5,14 @@ seat's ``client_view`` and the actions it may play. The bridge turns that into
 what the native agents read, using nothing but that seat's information:
 
 * :mod:`~catanrl.bridge.position`: the view's map, rules and seating as a
-  cppanatron game, the public-state comparison, and the ``apply_setup``
-  snapshot of a turn position;
+  cppanatron game, the public-state comparison, and the view's exact
+  position declared through ``apply_setup`` (at any prompt);
 * :mod:`~catanrl.bridge.replay`: the view's action log replayed on
-  cppanatron, with placeholder hidden cards (repaired when a public move
-  needs them), so every prompt is reproduced exactly;
+  cppanatron, with placeholder hidden cards (re-dealt when a public move
+  needs them);
 * :mod:`~catanrl.bridge.tracking`: the seat's ``HandTracker``, fed the
-  public events of every replayed transition;
+  public events of every replayed transition, re-anchored on the declared
+  position wherever the replay cannot explain a view;
 * :mod:`~catanrl.bridge.agent`: :class:`ViewAgent`, a
   ``decide(view, playable_actions)`` callback for ``GameClient.play`` and
   TUI ``decide_fns``;
