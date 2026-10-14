@@ -250,35 +250,21 @@ def _suggest(key: str, known: Sequence[str]) -> str:
 
 
 def _coerce(value: Any, default: Any, path: str) -> Any:
-    if default is None or value is None:
+    """``value`` as its default's type (bool, int or float): YAML reads ``3e-4`` as a string."""
+    if default is None or value is None or not isinstance(default, (bool, int, float)):
         return value
-    if isinstance(default, bool):
-        if not isinstance(value, bool):
-            raise ConfigError(f"{path}: expected a boolean, got {value!r}")
+    kind = type(default)
+    if isinstance(value, bool) != (kind is bool):
+        raise ConfigError(f"{path}: expected a {kind.__name__}, got {value!r}")
+    if kind is bool:
         return value
-    if isinstance(default, float):
-        if isinstance(value, bool):
-            raise ConfigError(f"{path}: expected a number, got {value!r}")
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            raise ConfigError(f"{path}: expected a number, got {value!r}") from None
-    if isinstance(default, int):
-        if isinstance(value, bool):
-            raise ConfigError(f"{path}: expected an integer, got {value!r}")
-        if isinstance(value, str):
-            try:
-                value = float(value.replace("_", "")) if any(c in value for c in ".eE") else int(value.replace("_", ""))
-            except ValueError:
-                raise ConfigError(f"{path}: expected an integer, got {value!r}") from None
-        if isinstance(value, float) and value.is_integer():
-            value = int(value)
-        if not isinstance(value, int):
-            raise ConfigError(f"{path}: expected an integer, got {value!r}")
-        return value
-    if isinstance(default, str) and isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value  # e.g. env.dims: auto vs a dict; checked downstream
-    return value
+    try:
+        number = float(value.replace("_", "")) if isinstance(value, str) else float(value)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{path}: expected a {kind.__name__}, got {value!r}") from None
+    if kind is int and not number.is_integer():
+        raise ConfigError(f"{path}: expected an int, got {value!r}")
+    return int(number) if kind is int else number
 
 
 def _check(cfg: dict, schema: Mapping[str, Any], prefix: str = "") -> dict:
