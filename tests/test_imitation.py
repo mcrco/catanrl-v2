@@ -86,3 +86,40 @@ def test_labels_are_value_action():
         assert np.all(np.delete(labels, acting) == -1)
         vec.step()
     assert checked >= 300
+
+
+def test_resume_restores_the_dataset_decisions_and_rng(tmp_path, monkeypatch):
+    """A resumed DAgger run continues from the aggregate it stopped with."""
+    from catanrl.train import imitation
+
+    config = {**CONFIG, "train": {**CONFIG["train"], "iterations": 4, "checkpoint_interval": 2}}
+    straight = LocalWriter(tmp_path / "straight")
+    train_imitation(LocalVariant(config), straight)
+
+    stopped = LocalWriter(tmp_path / "run", stop_after_epochs=2)
+    train_imitation(LocalVariant(config), stopped)
+    saved = stopped.load_trainer_state()
+    assert saved["epoch"] == 2 and saved["dataset"]["rows"].shape[0] == straight.metrics[1]["dataset"]
+
+    restored = {}
+    original = imitation._Dataset.restore
+
+    def spy(self, state):
+        original(self, state)
+        restored["size"] = self.size
+
+    def spy_rng(state):
+        set_rng = imitation.__dict__["_set_rng_state_original"]
+        set_rng(state)
+        restored["rng"] = torch.get_rng_state()
+
+    monkeypatch.setattr(imitation._Dataset, "restore", spy)
+    monkeypatch.setitem(imitation.__dict__, "_set_rng_state_original", imitation.set_rng_state)
+    monkeypatch.setattr(imitation, "set_rng_state", spy_rng)
+    resumed = LocalWriter(tmp_path / "run", mode="resume", launch=1)
+    train_imitation(LocalVariant(config), resumed)
+    assert restored["size"] == saved["dataset"]["rows"].shape[0]
+    assert torch.equal(restored["rng"], saved["rng"]["torch"])
+    first = resumed.metrics[0]
+    assert first["epoch"] == 3 and first["decisions"] > saved["decisions"]
+    assert first["dataset"] >= restored["size"] > 0  # the aggregate survives (games in flight restart)

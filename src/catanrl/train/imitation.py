@@ -32,6 +32,7 @@ import torch.nn.functional as F
 
 from catanrl.envs.encoding import encoder_dims, info_level
 from catanrl.envs.puffer import plan_env
+from catanrl.seeding import rng_state, set_rng_state
 from catanrl.train.puffer import (
     _derive_seed,
     _seed_everything,
@@ -88,6 +89,25 @@ class _Dataset:
 
     def arrays(self):
         return tuple(np.concatenate(part) for part in zip(*self.chunks))
+
+    def state(self) -> dict[str, Any]:
+        """The aggregate as tensors (``weights_only``-loadable), chunk by chunk."""
+        if not self.chunks:
+            return {"sizes": []}
+        rows, labels, targets, present = self.arrays()
+        return {"sizes": [len(chunk[0]) for chunk in self.chunks], "rows": torch.from_numpy(rows),
+                "labels": torch.from_numpy(labels), "targets": torch.from_numpy(targets),
+                "present": torch.from_numpy(present)}
+
+    def restore(self, state: Mapping[str, Any]) -> None:
+        self.chunks.clear()
+        self.size = 0
+        start = 0
+        for size in state["sizes"]:
+            part = slice(start, start + int(size))
+            self.chunks.append(tuple(state[key][part].numpy() for key in ("rows", "labels", "targets", "present")))
+            self.size += int(size)
+            start += int(size)
 
 
 class _Collector:
@@ -224,6 +244,7 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
                            seed=_derive_seed(seed, "rollout", launch), level=obs.get("level", "private"),
                            enemies={"next": cpp.ValueEnemies.NEXT, "all": cpp.ValueEnemies.ALL}[train["expert_enemies"]])
     dataset = _Dataset(train["dataset_cap"])
+    torch.manual_seed(_derive_seed(seed, "sample", launch))  # policy samples during collection
     iteration, agent_steps = 0, 0
     beta = float(train["beta0"])
     select = (cfg.get("eval") or {}).get("select")
@@ -239,10 +260,13 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
 
     def save() -> None:
         ref = writer.save_checkpoint(model, epoch=iteration, agent_steps=agent_steps)
+        # The commit point holds the whole algorithm state: the aggregated dataset (float16 rows,
+        # up to dataset_cap of them), the decision count and every RNG.
         writer.save_trainer_state({
             "epoch": iteration, "agent_steps": agent_steps, "beta": beta, "decisions": collector.decisions,
             "model": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
             "optimizer": copy.deepcopy(optimizer.state_dict()), "map_pool": plan.pool["hash"], "best_metric": best[0],
+            "dataset": dataset.state(), "rng": rng_state(),
         })
         if select and iteration % int(select.get("every", 1)) == 0:
             run_select(ref)
@@ -255,6 +279,9 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
         optimizer.load_state_dict(state["optimizer"])
         iteration, agent_steps, beta = int(state["epoch"]), int(state["agent_steps"]), float(state["beta"])
         best[0] = state.get("best_metric")
+        dataset.restore(state["dataset"])
+        collector.decisions = int(state["decisions"])
+        set_rng_state(state["rng"])
     else:
         save()
     for ref in getattr(writer, "pending_selects", list)():
