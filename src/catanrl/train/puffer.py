@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from catanrl.envs.encoding import action_size, critic_level_of, row_layout
+from catanrl.envs.encoding import action_size, critic_level_of, dims_for, row_layout
 from catanrl.envs.puffer import make_vecenv, plan_env
 from catanrl.models import CatanModel, build_model, normalize_levels
 from catanrl.train.puffer_policy import PufferPolicy
@@ -322,6 +322,20 @@ class CatanPuffeRL(pufferl.PuffeRL):
         logs["learning_rate"] = lr
 
 
+def check_bindable(model: CatanModel, plan: Any) -> None:
+    """Refuse a network evals could not bind.
+
+    Evals play at the generators' bounds (``dims_for``); a network that is not
+    dims-agnostic (mlp) trained at other dims (``env.dims: pool`` or explicit)
+    would train fine and then fail every select and heldout eval.
+    """
+    bounds = dims_for([spec.game for spec in plan.specs])
+    if not model.dims_agnostic and dict(model.dims) != bounds:
+        raise ValueError(
+            f"a {model.spec['class']} network is not dims-agnostic: it must train at the generators' "
+            f"bounds {bounds} (env.dims: auto), not {dict(model.dims)}")
+
+
 def build_policy_model(cfg: Mapping[str, Any], dims: Mapping[str, int]) -> CatanModel:
     obs = cfg.get("obs") or {}
     levels = normalize_levels({"level": obs.get("level", "private"), "critic_level": obs.get("critic_level")})
@@ -386,6 +400,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
 
     _seed_everything(_derive_seed(seed, "init"))
     model = build_policy_model(cfg, plan.dims)
+    check_bindable(model, plan)
     if cfg.get("init_from") and getattr(writer, "mode", "new") == "new":
         from catanrl.checkpoint import load_parts
 

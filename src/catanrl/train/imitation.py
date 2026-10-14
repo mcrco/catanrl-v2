@@ -207,6 +207,7 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
     plan = plan_env(env_cfg, pool_seed=pool_seed)
     _seed_everything(_derive_seed(seed, "init"))
     model = build_policy_model(cfg, plan.dims)
+    check_bindable(model, plan)
     if cfg.get("init_from") and getattr(writer, "mode", "new") == "new":
         from catanrl.checkpoint import load_parts
 
