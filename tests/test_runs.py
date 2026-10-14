@@ -199,3 +199,24 @@ def test_finish_and_fork_continue_a_time_limited_parent():
     assert load_experiment("exp/p").status == "finished"
     with pytest.raises(RunError):
         runs.finish("exp/p")
+
+
+def test_missing_selects_rerun_after_a_crash(monkeypatch):
+    from test_results import FakeHarness
+
+    from catanrl.eval import results
+
+    monkeypatch.setattr(results, "play_schedule", FakeHarness())
+    select = {"suite": {"name": "select-2p", "boards": 2}, "lineup": ["POLICY:ckpt=${self}", "R"], "every": 2}
+    v = make_variant(eval={"select": select})
+    with RunWriter.open(v, argv=["t"]) as w:
+        e0 = commit(w, tiny(0), 0)
+        assert w.pending_selects() == [e0]  # crash before its select eval
+        rec = results.evaluate([f"POLICY:ckpt={e0}", "R"], select["suite"])
+        w.set_alias("best", e0, record=rec)
+        e1 = commit(w, tiny(1), 1)  # off the select cadence
+        e2 = commit(w, tiny(2), 2)  # crash before its select eval
+        assert [r.epoch for r in w.pending_selects()] == [2]
+        results.evaluate([f"POLICY:ckpt={e2}", "R"], select["suite"])  # crash before the alias
+        assert [r.epoch for r in w.pending_selects()] == [2]  # the last commit's alias decision is redone
+        assert e1.epoch == 1 and w.resolve("best").epoch == 0
