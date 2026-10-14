@@ -36,14 +36,17 @@ def _native_choice(native, game, seat, seed, tracker):
 
 
 @pytest.mark.parametrize("key", sorted(CASES))
-@pytest.mark.parametrize("name", ["base-2p", "base-3p"])
+@pytest.mark.parametrize("name", ["base-2p", "base-3p", "base-4p-friendly"])
 def test_view_agent_decides_like_the_native_agent(key, name):
     """Every decision of every seat of a random game: the native agent on the
     true game and the seat's true tracker, the ViewAgent on the seat's views
-    only (decide-only, as a TUI callback), with the same decision seeds."""
+    only (decide-only, as a TUI callback), with the same decision seeds.
+    Under the friendly robber the agent is also asked about lone robber
+    moves, as a server asks (the options bound the others' points)."""
     level, params = CASES[key]
     index = sorted(CASES).index(key)
-    ls = lockstep(name, 20 + index)
+    friendly = name.endswith("-friendly")
+    ls = lockstep(name.removesuffix("-friendly"), 20 + index, friendly_robber=friendly or None)
     n = len(ls.colors)
     native = tiny_agent(key, level, ls.dims, **params)
 
@@ -57,6 +60,8 @@ def test_view_agent_decides_like_the_native_agent(key, name):
     while compared < limit and not ls.over:
         seat = ls.current_seat
         playable = ls.playable_json()
+        if len(playable) == 1 and friendly:
+            assert ours.decide(ls.view(seat), playable) is playable[0]
         if len(playable) > 1:
             view = ls.view(seat)
             mine = ours.decide(view, playable)

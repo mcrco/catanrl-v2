@@ -220,6 +220,11 @@ class ViewAgent:
             self._drain()
             if len(playable_actions) == 1:
                 self.stats["forced"] += 1
+                if view["current_prompt"] == "MOVE_ROBBER" and (view.get("game") or {}).get("friendly_robber"):
+                    # Even a lone friendly-robber option bounds the others' points.
+                    tracker = self._tracker(view, playable_actions[0][0])
+                    if tracker.sync(view).method == "replay":
+                        tracker.options([from_catanatron_action(action_from_json(list(playable_actions[0])))])
                 return playable_actions[0]
             tracker = self._tracker(view, playable_actions[0][0])
             self.stats["decisions"] += 1

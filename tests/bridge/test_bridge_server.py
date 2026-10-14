@@ -14,13 +14,13 @@ import pytest
 pytest.importorskip("websockets")
 pytest.importorskip("cryptography")
 
-from bridge_games import tiny_agent  # noqa: E402
-from catanatron.server.app import GameServer, run_server  # noqa: E402
-from catanatron.server.client import create_room  # noqa: E402
-from catanatron.server.verify import verify_transcript  # noqa: E402
+from bridge_games import tiny_agent
+from catanatron.server.app import GameServer, run_server
+from catanatron.server.client import create_room
+from catanatron.server.verify import verify_transcript
 
-from catanrl.bridge.agent import ViewAgent  # noqa: E402
-from catanrl.bridge.server_bot import play_bot, room_url  # noqa: E402
+from catanrl.bridge.agent import ViewAgent
+from catanrl.bridge.server_bot import play_bot, room_url
 
 BASE_DIMS = {"max_tiles": 19, "max_nodes": 54, "max_edges": 72}
 TIMEOUT = 600

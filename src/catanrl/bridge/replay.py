@@ -19,9 +19,13 @@ move needs cards a placeholder hand lacks (a build, a discard, a trade, a
 played card, a monopoly's exact take), the hidden cards of the other seats
 are re-dealt first with the fewest changes: per resource the cards those
 seats hold together (public, from the bank) and every hand size stay as they
-are, and the unseen development cards stay the deck plus their hands. No
-placeholder ever comes from hidden information, and none can make a seat win
-the replay that has not won the game.
+are, and the unseen development cards stay the deck plus their hands. Where
+the engine's setters cannot reach such a deal (a victory point card has to
+move between two hands while the deck is empty: ``set_development_cards``
+keeps victory point counts, ``determinize_development_cards`` trades only
+with the deck), the placeholders become a world the seat's own tracker deals
+(``cpp.sample_world``). No placeholder ever comes from hidden information,
+and none can make a seat win the replay that has not won the game.
 
 Monopoly takes are public (every hand size is visible), but a log entry does
 not carry them: :meth:`Replay.step` takes the hand sizes after the entry when

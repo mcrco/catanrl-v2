@@ -44,7 +44,6 @@ from typing import Any
 import cppanatron as cpp
 
 from catanrl.bridge.position import (
-    RESOURCES,
     Inexpressible,
     Position,
     SeatView,
@@ -77,9 +76,8 @@ def transition_events(tr: Transition, observer: int, *, amounts: Sequence[int] |
         resource = cpp.Resource[tr.stolen] if seen and tr.stolen is not None else None
         return [Event.steal(p, tr.victim, resource)]
     if kind == "PLAY_MONOPOLY":
-        r = RESOURCES.index(tr.resource)
-        if amounts is None:
-            amounts = [0 if s == p else tr.before.resources[s][r] - tr.after.resources[s][r]
+        if amounts is None:  # every other seat lost exactly its take: public hand sizes
+            amounts = [0 if s == p else tr.before.sizes[s] - tr.after.sizes[s]
                        for s in range(len(tr.before.resources))]
         return [Event.play_development_card(p, cpp.DevelopmentCard.MONOPOLY),
                 Event.monopoly(p, cpp.Resource[tr.resource], [int(a) for a in amounts])]
@@ -263,8 +261,7 @@ class SeatTracker:
         if len(unsettled) == 1:
             i = unsettled[0]
             tr, events = pending[i]
-            r = RESOURCES.index(tr.resource)
-            guessed = [0 if s == tr.player else tr.before.resources[s][r] - tr.after.resources[s][r]
+            guessed = [0 if s == tr.player else tr.before.sizes[s] - tr.after.sizes[s]
                        for s in range(len(self.colors))]
             amounts = [0 if s == tr.player else guessed[s] - delta[s] for s in range(len(self.colors))]
             if min(amounts) >= 0:
