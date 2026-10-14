@@ -79,3 +79,17 @@ def test_stepper_and_vecenv_play_the_same_games(bot):
     stepped = play(lineup(), suite, games, fill=agent("F"))
     vectorized = play(lineup(), suite, games, fill=agent("F"), backend="vecenv", num_envs=4, threads=2)
     assert stepped == vectorized
+
+
+def test_policy_of_an_asymmetric_critic_model_plays_from_actor_rows():
+    from catanrl.envs.encoding import action_size, dims_for, row_layout
+    from catanrl.models import build_model
+
+    dims = dims_for(["base-2p"])
+    model = build_model({"preset": "graph-tiny"}, dims=dims, levels={"level": "private", "critic_level": "full"},
+                        num_actions=action_size(dims), layout=row_layout(dims, "private", "full"))
+    suite = Suite(({"game": "base-2p"},), turn_limit=100)
+    rows = play([agent("POLICY", model), agent("R")], suite, schedule(suite, 2, boards=1))
+    assert len(rows) == 2
+    with pytest.raises(NotImplementedError):
+        agent("MCTS", model, sims=4, oracle=True)

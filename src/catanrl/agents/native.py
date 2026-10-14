@@ -66,15 +66,27 @@ class NativeAgent:
         self.mode = mode
         self.heads = heads
         self.level = model.levels["level"]
-        if critic_level_of(self.level, model.levels["critic_level"]) is not None and heads == "both":
-            raise NotImplementedError(
-                "searching with a critic at another level needs an engine encoder that writes the "
-                "critic block (VecEnv's critic_players) for SearchPool leaves")
         self._weights = {k: v.detach().cpu() for k, v in model.state_dict().items()}
         self._spec = model.spec
         self._levels = dict(model.levels)
         self.dims_agnostic = model.dims_agnostic
+        if critic_level_of(self.level, model.levels["critic_level"]) is not None:
+            if heads == "both":
+                raise NotImplementedError(
+                    "searching with a critic at another level needs an engine encoder that writes the "
+                    "critic block (VecEnv's critic_players) for SearchPool leaves")
+            # Decisions read only the actor: drop the critic block (it has the players block's
+            # width, so the same weights load) and play from actor-level rows.
+            self._levels["critic_level"] = self.level
+            model = self._rebuild(dict(model.dims))
         self._set_model(model)
+
+    def _rebuild(self, dims: dict) -> CatanModel:
+        critic = critic_level_of(self._levels["level"], self._levels["critic_level"])
+        model = build_model(self._spec, dims=dims, levels=self._levels, num_actions=action_size(dims),
+                            layout=row_layout(dims, self.level, critic))
+        model.load_state_dict(self._weights)
+        return model
 
     def _set_model(self, model: CatanModel) -> None:
         self.model = model
@@ -92,11 +104,7 @@ class NativeAgent:
         if not self.dims_agnostic:
             raise ValueError(f"{self.key}: this network was trained at dims {self.dims} and is "
                              f"not dims-agnostic; the games need {dims}")
-        critic = critic_level_of(self._levels["level"], self._levels["critic_level"])
-        model = build_model(self._spec, dims=dims, levels=self._levels, num_actions=action_size(dims),
-                            layout=row_layout(dims, self.level, critic))
-        model.load_state_dict(self._weights)
-        self._set_model(model)
+        self._set_model(self._rebuild(dims))
 
     def encode(self, game: cpp.Game, seat: int) -> np.ndarray:
         return self.encoder.encode(game, seat)
