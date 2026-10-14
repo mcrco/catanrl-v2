@@ -1,0 +1,4 @@
+# The larger graph network (v1's graph-m: wider and one more layer).
+preset: graph-m
+class: graph
+args: {hidden: 192, global_hidden: 96, layers: 4, head_hidden: 256, shared: false}

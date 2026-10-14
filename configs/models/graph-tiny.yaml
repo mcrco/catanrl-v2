@@ -1,0 +1,4 @@
+# A tiny graph network for tests and smoke runs.
+preset: graph-tiny
+class: graph
+args: {hidden: 16, global_hidden: 8, layers: 1, head_hidden: 16, shared: false}

@@ -1,0 +1,4 @@
+# Flat residual MLP over the padded row (ablation baseline; not dims-agnostic).
+preset: mlp
+class: mlp
+args: {hidden: 512, blocks: 2, shared: false}

@@ -1,0 +1,5 @@
+# Canopy Nexus-v3 style graph network, v1's graph-s size: about 0.45M actor
+# parameters and 0.37M critic parameters (separate networks).
+preset: graph-s
+class: graph
+args: {hidden: 96, global_hidden: 64, layers: 3, head_hidden: 128, shared: false}
