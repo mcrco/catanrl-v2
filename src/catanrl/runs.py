@@ -353,8 +353,9 @@ def check_runs(pattern: str = "*") -> list[dict]:
     return rows
 
 
-def bind_refs(cfg: Mapping[str, Any]) -> dict:
-    """Refs to other runs, pinned once at creation: ``init_from`` per part and eval lineups."""
+def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
+    """Refs to other runs, pinned once at creation: ``init_from`` per part and eval
+    lineups (refs to ``own``, the run being created, resolve when its evals run)."""
     out: dict[str, Any] = {}
     init = cfg.get("init_from")
     if init:
@@ -364,15 +365,17 @@ def bind_refs(cfg: Mapping[str, Any]) -> dict:
                             for part in parts}
     lineups = []
     for entry in (cfg.get("eval") or {}).get("final") or []:
-        lineups.append([_bind_spec(spec) for spec in entry["lineup"]])
+        lineups.append([_bind_spec(spec, own) for spec in entry["lineup"]])
     if lineups:
         out["lineups"] = lineups
     return out
 
 
-def _bind_spec(spec: str) -> str:
+def _bind_spec(spec: str, own: str | None) -> str:
     """A lineup spec with another run's checkpoint pinned; own-run refs stay for eval time."""
-    if "${" in spec or not any(k in spec for k in ("POLICY", "MCTS", "BELIEF")):
+    if "${" in spec or not spec.startswith(("POLICY", "MCTS", "BELIEF")):
+        return spec
+    if own and re.search(rf"(^|[:=]){re.escape(own)}(@|#|:|$)", spec):
         return spec
     from catanrl.agents import resolve_agent
 
@@ -384,7 +387,7 @@ def _write_manifest(path: Path, variant: Variant, *, source: Mapping[str, Any] |
     canon.write_once_json(path / "config.json", {
         "schema": SCHEMA, "experiment": variant.experiment, "variant": variant.name, "stage": variant.stage,
         "labels": variant.labels, "depends_on": list(variant.depends_on), "config": variant.config,
-        "config_hash": variant.config_hash, "resolved": bind_refs(variant.config), "source": source,
+        "config_hash": variant.config_hash, "resolved": bind_refs(variant.config, variant.ref), "source": source,
     })
 
 

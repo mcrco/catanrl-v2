@@ -204,6 +204,8 @@ def evaluate(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any =
         return _play(agents, fill_agent, suite, key, eval_id, path, allow_mixed=allow_mixed, device=device,
                      num_envs=num_envs, threads=threads, infer_rows=infer_rows)
     finally:
+        if path.exists():
+            path.with_suffix(".lock").unlink(missing_ok=True)  # waiters return the record
         fcntl.flock(lock, fcntl.LOCK_UN)
         os.close(lock)
 

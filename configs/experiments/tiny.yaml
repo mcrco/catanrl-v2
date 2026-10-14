@@ -1,0 +1,31 @@
+# The end-to-end test's experiment (tests/test_e2e_tiny.py): a tiny graph
+# network for 3 PPO epochs on CPU, a select eval at every checkpoint and one
+# final eval, in 2p (vs F) and 4p (vs three R).
+name: tiny
+seed: 7
+env: {scenarios: [{game: base-2p, maps: 4}], num_envs: 4}
+obs: {level: private}
+model: {preset: graph-tiny}
+train:
+  total_timesteps: 768          # 3 epochs of 4 games x 2 seats x 32 steps
+  learning_rate: 1.0e-3
+  bptt_horizon: 32
+  minibatch_size: 128
+  max_minibatch_size: 128
+  checkpoint_interval: 1
+  log_interval: 8
+eval:
+  select: {suite: {name: select-2p, boards: 1}, lineup: ["POLICY:ckpt=${self}", F], every: 1}
+  final:
+    - {suite: {name: heldout-2p, boards: 1}, lineup: ["POLICY:ckpt=${run}@best", F]}
+sweep:
+  axes:
+    players:
+      2p: {}
+      4p:
+        env.scenarios: [{game: base-4p, maps: 4}]
+        train.total_timesteps: 1536
+        eval.select: {suite: {name: select-4p, boards: 1}, lineup: ["POLICY:ckpt=${self}", R, R, R], every: 1}
+        eval.final!: [{suite: {name: heldout-4p, boards: 1}, lineup: ["POLICY:ckpt=${run}@best", R, R, R]}]
+  name: "{players}"
+runtime: {device: cpu, threads: 2, num_envs: 4, infer_rows: 16, determinism: strict}
