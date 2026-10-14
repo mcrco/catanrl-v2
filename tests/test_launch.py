@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 import torch
@@ -135,7 +136,7 @@ def test_yaml_outside_the_repo_is_refused(tmp_path):
     from catanrl.config import ConfigError, load_plan
 
     source = tmp_path / "tiny.yaml"
-    source.write_text(open("configs/experiments/tiny.yaml").read())
+    source.write_text(Path("configs/experiments/tiny.yaml").read_text())
     with pytest.raises(ConfigError, match="outside"):
         runner.run_plan(load_plan(source))
 

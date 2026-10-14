@@ -45,7 +45,7 @@ def _expand(lineup: list[str]) -> list[tuple[Any, list[str]]]:
 
     from catanrl.runs import list_runs
 
-    key, args, named = parse_spec(lineup[0])
+    _, args, named = parse_spec(lineup[0])
     ckpt = named.get("ckpt") or (args[0] if args else "")
     pattern = ckpt.split("@")[0].split("#")[0]
     if "*" not in pattern:
