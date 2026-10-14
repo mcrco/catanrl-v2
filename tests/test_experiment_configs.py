@@ -82,8 +82,8 @@ def test_ppo_4p_is_puffer_graph2_per_decision():
     horizon = config["bptt_horizon"]
     assert config["batch_size"] == 262_144 and num_envs * horizon == 65_536   # decisions per epoch
     assert abs(num_envs / ref_envs - 1) < 0.01                                   # 2p: 66,048
-    assert config["total_timesteps"] // 4 == ref_config["total_timesteps"] // 2 == 250_000_000
-    assert config["total_timesteps"] // config["batch_size"] == 3814           # cosine T_max (2p: 3785)
+    assert abs(config["total_timesteps"] // 4 - ref_config["total_timesteps"] // 2) < 1_000_000  # ~250M decisions
+    assert config["total_timesteps"] == 3800 * config["batch_size"]  # whole epochs, a multiple of the select interval
 
     def steps(c, players):
         micro = c["update_epochs"] * c["batch_size"] // c["max_minibatch_size"]

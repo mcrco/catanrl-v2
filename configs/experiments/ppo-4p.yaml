@@ -11,7 +11,7 @@
 # decisions per optimizer step, as 2p's 16384 rows at half acting, so 16
 # optimizer steps per epoch; each as 8 accumulated 4096-row micro-batches
 # (2p: 4 of 4096 rows) so the run fits the 8 GB card alone; cosine T_max =
-# 1e9 // 262,144 = 3814 epochs. Every decision and its reason is in meta.notes.
+# 996,147,200 / 262,144 = exactly 3800 epochs. Every decision and its reason is in meta.notes.
 name: ppo-4p
 seed: 42
 env:
@@ -21,7 +21,7 @@ obs: {level: private}           # the only fair level in 4p; the shared trunk re
 model: {preset: graph-s, args: {shared: true}}
 train:
   algo: ppo
-  total_timesteps: 1_000_000_000  # agent steps, all four rows: 250M decisions, v1's 500M 2p agent steps (notes 6)
+  total_timesteps: 996_147_200    # agent steps, all four rows: 3800 epochs, ~249M decisions, about v1's 500M 2p agent steps (notes 6)
   optimizer: muon
   learning_rate: 0.005
   lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
@@ -109,8 +109,10 @@ meta:
        int(2 x 264,192 / 4096) = 129 micro-batches and carry the last one's gradient into the
        next epoch's first step; 1024 gives exactly 128 = 16 x 8.
     6. Budget. v1 trained 2p for 500M agent steps = 250M decisions. 1e9 agent steps here are
-       250M decisions; PuffeRL's cosine T_max = 1e9 // 262,144 = 3814 epochs and the run stops
-       after 3815 (1,000,079,360 agent steps, 250,019,840 decisions), against 3785/3786 in 2p.
+       250M decisions, rounded down to a whole multiple of the select interval: 996,147,200 =
+       3800 epochs x 262,144, so PuffeRL's cosine T_max is 3800 and the last checkpoint, at the
+       bottom of the cosine, gets a select eval (puffer-graph2's e3786 does not). 249,036,800
+       decisions, against v1's 250M.
     7. Wall time, estimated (the GPU was busy): about 10 h (9-11.5 h). The VecEnv (CPU, 4
        threads, random legal actions, 1032 games) steps 2p in 4.8 ms and 4p in 6.3 ms; waiting
        rows are written once, so per step only the acting row is encoded. puffer-graph2 spends
