@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from learning_standins import LocalVariant, LocalWriter
+from run_helpers import train
 from train_configs import tiny_ppo
 
 from catanrl.train.puffer import train_ppo
@@ -12,13 +12,12 @@ pytestmark = pytest.mark.train
 
 
 def run(tmp_path, name, seed):
-    writer = LocalWriter(tmp_path / name)
-    train_ppo(LocalVariant(tiny_ppo(seed=seed)), writer)
+    writer = train(train_ppo, tiny_ppo(seed=seed), name)
     assert writer.status == "finished"
-    outcome = {k: v for row in writer.metrics for k, v in row.items()
+    outcome = {k: v for row in writer.rows for k, v in row.items()
                if k.startswith(("losses/", "environment/", "critic/"))}
     per_epoch = [{k: v for k, v in row.items() if k.startswith(("losses/", "environment/", "critic/"))}
-                 for row in writer.metrics]
+                 for row in writer.rows]
     return [(ref.epoch, ref.weights_sha256) for ref in writer.saved], per_epoch, outcome
 
 

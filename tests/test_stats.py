@@ -2,7 +2,12 @@ import math
 
 import pytest
 
-from catanrl.eval.stats import _paired_comparison, binomial_two_sided, mcnemar_exact, wilson_interval
+from catanrl.eval.stats import (
+    _paired_comparison,
+    binomial_two_sided,
+    mcnemar_exact,
+    wilson_interval,
+)
 
 
 def test_wilson_matches_known_values():

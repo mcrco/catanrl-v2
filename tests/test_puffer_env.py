@@ -211,7 +211,7 @@ def test_logged_losses_and_kl_adaptation_use_the_current_epoch(tmp_path, monkeyp
     import sys
 
     sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
-    from learning_standins import LocalVariant, LocalWriter
+    from run_helpers import train as train_run
     from train_configs import tiny_ppo
 
     from catanrl.train import puffer
@@ -227,9 +227,8 @@ def test_logged_losses_and_kl_adaptation_use_the_current_epoch(tmp_path, monkeyp
 
     monkeypatch.setattr(puffer.CatanPuffeRL, "train", train)
     config = tiny_ppo(epochs=4, lr_schedule="kl_adaptive", kl_target=1e-4, lr_min=1e-5, lr_max=1e-1)
-    writer = LocalWriter(tmp_path / "kl")
-    puffer.train_ppo(LocalVariant(config), writer)
-    for row in writer.metrics:
+    writer = train_run(puffer.train_ppo, config, "kl")
+    for row in writer.rows:
         assert row["losses/approx_kl"] == computed[row["epoch"]]
     for epoch in range(1, 4):  # epoch e+1's LR follows epoch e's KL
         kl, lr = computed[epoch], lrs[epoch]

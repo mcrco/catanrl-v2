@@ -6,7 +6,7 @@ from __future__ import annotations
 import cppanatron as cpp
 import numpy as np
 import pytest
-from eval_standins import tiny_model
+from eval_helpers import tiny_model
 
 from catanrl import games
 from catanrl.search import BatchEvaluator, make_pool, run_searches, search_config

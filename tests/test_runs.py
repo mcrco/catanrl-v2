@@ -95,7 +95,7 @@ def test_an_exited_child_is_dead(runs_dir):
         RunWriter.open(Variant("exp", "v", None, {{}}, cfg, config_hash(cfg)), argv=["child"])
         os._exit(3)
     """)
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300, check=False)
     assert result.returncode == 3, result.stderr[-2000:]
     run = load_experiment("exp/v")
     assert run.status == "dead"

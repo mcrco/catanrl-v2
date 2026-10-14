@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from eval_standins import tiny_model
+from eval_helpers import tiny_model
 
 checkpoint = pytest.importorskip("catanrl.checkpoint")
 spec = pytest.importorskip("catanrl.agents.spec")

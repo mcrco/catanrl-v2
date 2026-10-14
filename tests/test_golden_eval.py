@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 import torch
-from eval_standins import Suite, agent, schedule
+from eval_helpers import agent, make_suite, schedule
 
 from catanrl.envs.encoding import action_size, row_layout
 from catanrl.eval.harness import play_schedule
@@ -20,7 +20,7 @@ from catanrl.models import build_model
 
 DATA = Path(__file__).with_name("data")
 GOLDEN = DATA / "golden_eval.json"
-SUITE = Suite(({"game": "base-2p"},), turn_limit=250)
+SUITE = make_suite(({"game": "base-2p"},), turn_limit=250)
 GAMES = schedule(SUITE, 2, boards=16, seed=23)  # 32 games
 CASES = {
     "POLICY": ({}, GAMES),

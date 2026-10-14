@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from learning_standins import LocalVariant, LocalWriter
+from run_helpers import train
 from train_configs import tiny_ppo
 
 from catanrl.train import select as select_module
@@ -39,7 +39,7 @@ SELECT = {"suite": "select-2p", "lineup": ["POLICY:ckpt=${self}", "F"], "every":
 
 
 def best_epoch(writer):
-    return writer.aliases["best"][0].epoch
+    return writer.aliases()["best"]["epoch"]
 
 
 def ppo_config():
@@ -54,14 +54,10 @@ def dagger_config():
 
 @pytest.mark.parametrize("trainer, config", [(train_ppo, ppo_config), (train_imitation, dagger_config)])
 def test_best_survives_a_resume(tmp_path, fake_evals, trainer, config):
-    straight = LocalWriter(tmp_path / "straight")
-    trainer(LocalVariant(config()), straight)
+    straight = train(trainer, config(), "straight")
     assert best_epoch(straight) == 2
 
-    stopped = LocalWriter(tmp_path / "run", stop_after_epochs=2)
-    trainer(LocalVariant(config()), stopped)
+    stopped = train(trainer, config(), "run", stop_after=2)
     assert best_epoch(stopped) == 2  # e2's select ran after its trainer state was written
-    resumed = LocalWriter(tmp_path / "run", mode="resume", launch=1)
-    resumed.aliases = dict(stopped.aliases)
-    trainer(LocalVariant(config()), resumed)
+    resumed = train(trainer, config(), "run")
     assert best_epoch(resumed) == 2  # e3 (0.5) must not take over from e2 (0.9)

@@ -4,12 +4,12 @@ interrupts or reruns, and play exactly the schedule's games."""
 from __future__ import annotations
 
 import pytest
-from eval_standins import Suite, agent, schedule, tiny_model
+from eval_helpers import agent, make_suite, schedule, tiny_model
 from reference_stepper import play_reference
 
 from catanrl.eval.harness import play_schedule
 
-SUITE = Suite(({"game": "base-2p"}, {"game": "base-3p"}), turn_limit=160)
+SUITE = make_suite(({"game": "base-2p"}, {"game": "base-3p"}), turn_limit=160)
 GAMES = schedule(SUITE, 3, boards=4)  # 16 boards: 4 x 2p rotations + 4 x 3p rotations = 20 games
 MODEL = tiny_model(["base-2p", "base-3p"], level="full", seed=11)
 

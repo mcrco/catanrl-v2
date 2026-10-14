@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import cppanatron as cpp
 import numpy as np
-from eval_standins import Suite, agent, schedule
+from eval_helpers import agent, make_suite, schedule
 from reference_stepper import play_reference
 
 from catanrl.envs.puffer import plan_env
@@ -58,7 +58,7 @@ def test_env_does_not_depend_on_num_envs():
 def test_schedule_mode_reproduces_a_scheduled_game():
     """Bots-only games started in schedule mode end exactly like the same ScheduledGames
     stepped in Python (engine F, a bit-exact copy of the engine's R stream)."""
-    suite = Suite(({"game": "base-3p"},), turn_limit=300)
+    suite = make_suite(({"game": "base-3p"},), turn_limit=300)
     games = schedule(suite, 3, boards=2)
     lineup = lambda: [agent("F"), agent("R"), agent("R")]
     found = []

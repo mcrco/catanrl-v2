@@ -7,7 +7,7 @@ import cppanatron as cpp
 import numpy as np
 import pytest
 import torch
-from eval_standins import tiny_model
+from eval_helpers import tiny_model
 
 from catanrl import games
 from catanrl.search import BatchEvaluator

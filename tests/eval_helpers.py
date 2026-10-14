@@ -1,0 +1,41 @@
+"""Helpers for the harness tests: real suites and native agents over
+in-memory networks (no checkpoint), with the real agent param dataclasses."""
+
+from __future__ import annotations
+
+import dataclasses
+
+import torch
+
+from catanrl.agents.native import make_native_agent
+from catanrl.agents.spec import BeliefParams, MctsParams, PolicyParams, ResolvedAgent
+from catanrl.envs.encoding import action_size, dims_for, row_layout
+from catanrl.eval.suites import Suite
+from catanrl.models import build_model
+
+PARAMS = {"POLICY": PolicyParams, "MCTS": MctsParams, "BELIEF": BeliefParams}
+
+
+def make_suite(scenarios, turn_limit: int = 500) -> Suite:
+    return Suite(name="test", purpose="dev", seed=7, boards=1, scenarios=tuple(dict(s) for s in scenarios),
+                 turn_limit=turn_limit)
+
+
+def schedule(suite: Suite, lineup_size: int, boards: int, seed: int = 7):
+    """Every board in every seat rotation; seats past the lineup are the fill slot."""
+    return dataclasses.replace(suite, boards=boards, seed=seed).schedule(lineup_size, fill=True)
+
+
+def tiny_model(games=("base-2p",), level="private", seed=0, preset="graph-tiny"):
+    torch.manual_seed(seed)
+    dims = dims_for(list(games))
+    return build_model({"preset": preset}, dims=dims, levels={"level": level},
+                       num_actions=action_size(dims), layout=row_layout(dims, level))
+
+
+def agent(key: str, model=None, infer_rows: int = 16, device: str = "cpu", **params):
+    if key in PARAMS:
+        params = PARAMS[key](ckpt="<in memory>", **params)
+    resolved = ResolvedAgent(key=key, impl="test", params=params, checkpoint=None, fair=False, label=key,
+                             canonical=key)
+    return make_native_agent(resolved, device=device, infer_rows=infer_rows, model=model)

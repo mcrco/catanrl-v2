@@ -5,7 +5,7 @@ from __future__ import annotations
 import cppanatron as cpp
 import numpy as np
 import pytest
-from eval_standins import Suite, agent, schedule, tiny_model
+from eval_helpers import agent, make_suite, schedule, tiny_model
 from reference_stepper import MT19937_64, below, play_reference
 
 from catanrl.eval.harness import play_schedule
@@ -32,7 +32,7 @@ def play(lineup, suite, games, **kwargs):
 
 
 def test_rows_score_every_slot():
-    suite = Suite(({"game": "base-2p"},), turn_limit=200)
+    suite = make_suite(({"game": "base-2p"},), turn_limit=200)
     games = schedule(suite, 2, boards=3)
     rows = play([agent("POLICY", tiny_model()), agent("R")], suite, games)
     assert [r["game_id"] for r in rows] == sorted(g.game_id for g in games)
@@ -46,7 +46,7 @@ def test_rows_score_every_slot():
 
 
 def test_fill_plays_the_empty_seats():
-    suite = Suite(({"game": "base-4p"},), turn_limit=150)
+    suite = make_suite(({"game": "base-4p"},), turn_limit=150)
     games = schedule(suite, 2, boards=1)
     assert any(2 in g.seats for g in games)
     rows = play([agent("POLICY", tiny_model(["base-4p"])), agent("R")], suite, games, fill=agent("F"))
@@ -54,14 +54,14 @@ def test_fill_plays_the_empty_seats():
 
 
 def test_sampled_policy_reproduces_from_decision_seeds():
-    suite = Suite(({"game": "base-2p"},), turn_limit=120)
+    suite = make_suite(({"game": "base-2p"},), turn_limit=120)
     games = schedule(suite, 2, boards=2)
     lineup = lambda: [agent("POLICY", tiny_model(), sample=True, temperature=1.0), agent("F")]
     assert play(lineup(), suite, games) == play(lineup(), suite, games, num_envs=1)
 
 
 def test_missing_fill_raises():
-    suite = Suite(({"game": "base-4p"},), turn_limit=150)
+    suite = make_suite(({"game": "base-4p"},), turn_limit=150)
     games = schedule(suite, 2, boards=1)
     with pytest.raises(ValueError):
         play([agent("POLICY", tiny_model(["base-4p"])), agent("R")], suite, games)
@@ -81,7 +81,7 @@ def test_vecenv_plays_exactly_the_reference_games(case):
     """play_schedule (VecEnv schedule mode, engine bots, engine trackers) gives exactly the rows of
     the games stepped one action at a time in Python with HandTracker.observe on every transition."""
     (key, params), bot = REFERENCE_CASES[case]
-    suite = Suite(({"game": "base-2p"}, {"game": "base-3p"}), turn_limit=120)
+    suite = make_suite(({"game": "base-2p"}, {"game": "base-3p"}), turn_limit=120)
     games = schedule(suite, 2, boards=2 if key == "MCTS" else 3)
     lineup = lambda: [agent(key, tiny_model(["base-2p", "base-3p"], level="full"), infer_rows=8, **params),
                       agent(bot)]
@@ -96,7 +96,7 @@ def test_policy_of_an_asymmetric_critic_model_plays_from_actor_rows():
     dims = dims_for(["base-2p"])
     model = build_model({"preset": "graph-tiny"}, dims=dims, levels={"level": "private", "critic_level": "full"},
                         num_actions=action_size(dims), layout=row_layout(dims, "private", "full"))
-    suite = Suite(({"game": "base-2p"},), turn_limit=100)
+    suite = make_suite(({"game": "base-2p"},), turn_limit=100)
     rows = play([agent("POLICY", model), agent("R")], suite, schedule(suite, 2, boards=1))
     assert len(rows) == 2
 
@@ -118,7 +118,7 @@ def test_mcts_searches_with_a_critic_at_another_level(params):
     full = make_encoder(dims, "full").encode(game, 0)
     expected = np.concatenate([make_encoder(dims, "private").encode(game, 0), full[offset : offset + 2 * 46]])
     assert np.array_equal(leaf.encode(game, 0), expected)
-    suite = Suite(({"game": "base-2p"},), turn_limit=60)
+    suite = make_suite(({"game": "base-2p"},), turn_limit=60)
     games = schedule(suite, 2, boards=1)
     lineup = lambda: [agent("MCTS", model, sims=6, **params), agent("R")]
     assert play(lineup(), suite, games) == play_reference(lineup(), games, suite=suite)
@@ -182,7 +182,7 @@ def test_mcts_add_failure_leaks_no_search():
 @pytest.mark.parametrize("num_envs, threads", [(0, 1), (-2, 1), (4, 0)])
 def test_non_positive_envs_or_threads_raise(num_envs, threads):
     """The old Python stepper spun forever with num_envs <= 0 while the VecEnv clamped it."""
-    suite = Suite(({"game": "base-2p"},), turn_limit=50)
+    suite = make_suite(({"game": "base-2p"},), turn_limit=50)
     with pytest.raises(ValueError, match="positive"):
         play([agent("R"), agent("F")], suite, schedule(suite, 2, boards=1), num_envs=num_envs, threads=threads)
 
@@ -192,7 +192,7 @@ SMALL = {"name": "small-3p", "num_players": 3, "map": {"type": "blob", "land_til
 
 def test_small_maps_play():
     """Suites whose maps are all smaller than BASE used to crash the VecEnv at construction."""
-    suite = Suite(({"game": SMALL}, {"game": {**SMALL, "name": "small-3p-b", "map": {"type": "hexagon", "radius": 1}}}),
+    suite = make_suite(({"game": SMALL}, {"game": {**SMALL, "name": "small-3p-b", "map": {"type": "hexagon", "radius": 1}}}),
                   turn_limit=120)
     games = [g for g in schedule(suite, 2, boards=2) if g.scenario == 0]
     lineup = lambda: [agent("POLICY", tiny_model([SMALL])), agent("F")]
@@ -225,7 +225,7 @@ def test_unseatable_maps_are_refused_before_any_game():
     """Refused up front (the old Python stepper scored them as stuck 1/N rows; the VecEnv refused
     them in start_games, after other games had played)."""
     crowded = {"name": "crowded-6p", "num_players": 6, "map": {"type": "blob", "land_tiles": 5}}  # seats <= 11
-    suite = Suite(({"game": "base-2p"}, {"game": crowded}), turn_limit=100)
+    suite = make_suite(({"game": "base-2p"}, {"game": crowded}), turn_limit=100)
     games = schedule(suite, 2, boards=1)
     played = []
     with pytest.raises(ValueError, match="cannot seat"):

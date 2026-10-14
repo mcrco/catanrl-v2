@@ -6,7 +6,7 @@ import cppanatron as cpp
 import numpy as np
 import pytest
 import torch
-from learning_standins import LocalVariant, LocalWriter
+from run_helpers import train
 
 from catanrl.envs.puffer import plan_env
 from catanrl.train.imitation import IMITATION_KEYS, _Collector, _Dataset, train_imitation
@@ -50,12 +50,11 @@ def test_dataset_drops_the_oldest_chunks():
 
 
 def test_short_run(tmp_path):
-    writer = LocalWriter(tmp_path / "dagger")
-    train_imitation(LocalVariant(CONFIG), writer)
+    writer = train(train_imitation, CONFIG, "dagger")
     assert writer.status == "finished"
     assert [ref.epoch for ref in writer.saved] == [0, 1, 2]
-    assert writer.metrics[-1]["beta"] == pytest.approx(0.9)
-    assert "imitation/accuracy" in writer.metrics[-1]
+    assert writer.rows[-1]["beta"] == pytest.approx(0.9)
+    assert "imitation/accuracy" in writer.rows[-1]
     state = writer.load_trainer_state()
     assert state["epoch"] == 2 and isinstance(state["model"], dict)
     assert all(isinstance(v, torch.Tensor) for v in state["model"].values())
@@ -64,7 +63,7 @@ def test_short_run(tmp_path):
 def test_unknown_or_missing_keys_raise(tmp_path):
     bad = {**CONFIG, "train": {**CONFIG["train"], "epochs": 3}}
     with pytest.raises(ValueError):
-        train_imitation(LocalVariant(bad), LocalWriter(tmp_path / "bad"))
+        train(train_imitation, bad, "bad")
 
 
 def test_labels_are_value_action():
@@ -93,13 +92,10 @@ def test_resume_restores_the_dataset_decisions_and_rng(tmp_path, monkeypatch):
     from catanrl.train import imitation
 
     config = {**CONFIG, "train": {**CONFIG["train"], "iterations": 4, "checkpoint_interval": 2}}
-    straight = LocalWriter(tmp_path / "straight")
-    train_imitation(LocalVariant(config), straight)
-
-    stopped = LocalWriter(tmp_path / "run", stop_after_epochs=2)
-    train_imitation(LocalVariant(config), stopped)
+    straight = train(train_imitation, config, "straight")
+    stopped = train(train_imitation, config, "run", stop_after=2)
     saved = stopped.load_trainer_state()
-    assert saved["epoch"] == 2 and saved["dataset"]["rows"].shape[0] == straight.metrics[1]["dataset"]
+    assert saved["epoch"] == 2 and saved["dataset"]["rows"].shape[0] == straight.rows[1]["dataset"]
 
     restored = {}
     original = imitation._Dataset.restore
@@ -116,10 +112,9 @@ def test_resume_restores_the_dataset_decisions_and_rng(tmp_path, monkeypatch):
     monkeypatch.setattr(imitation._Dataset, "restore", spy)
     monkeypatch.setitem(imitation.__dict__, "_set_rng_state_original", imitation.set_rng_state)
     monkeypatch.setattr(imitation, "set_rng_state", spy_rng)
-    resumed = LocalWriter(tmp_path / "run", mode="resume", launch=1)
-    train_imitation(LocalVariant(config), resumed)
+    resumed = train(train_imitation, config, "run")
     assert restored["size"] == saved["dataset"]["rows"].shape[0]
     assert torch.equal(restored["rng"], saved["rng"]["torch"])
-    first = resumed.metrics[0]
+    first = resumed.rows[0]
     assert first["epoch"] == 3 and first["decisions"] > saved["decisions"]
     assert first["dataset"] >= restored["size"] > 0  # the aggregate survives (games in flight restart)

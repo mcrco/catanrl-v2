@@ -44,9 +44,8 @@ def test_determinism_restores_flags():
     torch.backends.cudnn.benchmark = before[0]
     assert (torch.backends.cudnn.benchmark, torch.are_deterministic_algorithms_enabled(),
             torch.get_float32_matmul_precision(), torch.backends.cuda.matmul.allow_tf32) == before
-    with pytest.raises(ValueError):
-        with determinism("loose"):
-            pass
+    with pytest.raises(ValueError), determinism("loose"):
+        pass
 
 
 def test_rng_state_round_trips_through_weights_only(tmp_path):

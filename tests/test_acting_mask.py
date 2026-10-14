@@ -6,7 +6,7 @@ from __future__ import annotations
 import pufferlib.pytorch
 import pytest
 import torch
-from learning_standins import LocalVariant, LocalWriter
+from run_helpers import train
 from train_configs import tiny_ppo
 
 from catanrl.train import puffer
@@ -38,8 +38,7 @@ def test_only_acting_steps_count(tmp_path, monkeypatch, prio_alpha):
 
     monkeypatch.setattr(PufferPolicy, "value_loss", spy)
     monkeypatch.setattr(puffer.CatanPuffeRL, "__init__", init)
-    writer = LocalWriter(tmp_path / "mask")
-    puffer.train_ppo(LocalVariant(config(prio_alpha)), writer)
+    writer = train(puffer.train_ppo, config(prio_alpha), "mask")
     trainer = trainers[0]
     policy = trainer.uncompiled_policy
     acting = policy.acting_mask(trainer.observations)
@@ -58,5 +57,5 @@ def test_only_acting_steps_count(tmp_path, monkeypatch, prio_alpha):
             _, _, entropy = pufferlib.pytorch.sample_logits(logits, action=trainer.actions[idx])
             mask = acting[idx].reshape(-1).float()
             expected.append(float((entropy * mask).sum() / mask.sum()))
-    logged = writer.metrics[-1]["losses/entropy"]
+    logged = writer.rows[-1]["losses/entropy"]
     assert logged == pytest.approx(sum(expected) / len(expected), rel=1e-4)

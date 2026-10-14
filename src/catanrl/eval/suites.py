@@ -94,8 +94,6 @@ class Suite:
         out = []
         for s, game in enumerate(self.games()):
             n = game.num_players
-            if lineup_size > n:
-                raise ValueError(f"suite {self.name}: a lineup of {lineup_size} does not fit {n}-player games")
             if lineup_size < n and not fill:
                 raise ValueError(f"suite {self.name}: {n}-player games need {n} agents or a fill agent")
             scenario_hash = self.scenario_hash(s)
@@ -109,6 +107,9 @@ class Suite:
                     out.append(ScheduledGame(game_id=f"s{s}b{i}r{r}", scenario=s, board=i, rotation=r, num_players=n,
                                              map_seed=map_seed, game_seed=game_seed,
                                              bot_seed=derive_seed(board, "bots", r), map_hash=mhash, seats=seats))
+        seated = {slot for g in out for slot in g.seats}
+        if not set(range(lineup_size)) <= seated:
+            raise ValueError(f"suite {self.name}: a lineup of {lineup_size} has slots no game seats")
         return out
 
     def schedule_hash(self, lineup_size: int, *, fill: bool = False) -> str:
