@@ -322,8 +322,7 @@ class CatanrlPlayer(Player):
         row = agent.encode(native_game, seat)[None]
         offset, (size,) = agent.encoder.layout()["action_mask"]
         mask = row[:, offset:offset + size]
-        seed = derive_seed(int(game.seed), "decide", seat, mirror["ply"])
-        mirror["ply"] += 1
+        seed = derive_seed(int(game.seed), "decide", seat, mirror["ply"])  # ply: the seat's actions so far
         index = agent.act(row, mask, np.array([seed], dtype=np.uint64),
                           games=[native_game] if agent.needs_games else None,
                           trackers=[mirror["tracker"]] if agent.needs_trackers else None)[0]
@@ -340,17 +339,18 @@ class CatanrlPlayer(Player):
 
         records = game.state.action_records
         m = self._mirror
-        if m is None or m["id"] != game.id or m["applied"] > len(records):
+        # Rebuild unless the game only grew since the last sync (an undo rewrites the log).
+        if m is None or m["id"] != game.id or records[:len(m["records"])] != m["records"]:
             native = _native_game(game)
             seat = list(game.state.colors).index(self.color)
             tracker = cpp.HandTracker(native, seat) if agent.needs_trackers else None
-            m = self._mirror = {"id": game.id, "game": native, "seat": seat, "tracker": tracker, "applied": 0,
+            m = self._mirror = {"id": game.id, "game": native, "seat": seat, "tracker": tracker, "records": [],
                                 "ply": 0}
         from catanatron.models.enums import Action, ActionType
         from cppanatron.catanatron import from_catanatron_action
 
         parity = CppanatronParityGame(m["game"])
-        for record in records[m["applied"]:]:
+        for record in records[len(m["records"]):]:
             action = record.action
             if action.action_type in (ActionType.ROLL, ActionType.BUY_DEVELOPMENT_CARD):
                 action = Action(action.color, action.action_type, None)  # the record holds the outcome
@@ -359,7 +359,8 @@ class CatanrlPlayer(Player):
             parity.execute(action, outcome)
             if m["tracker"] is not None:
                 m["tracker"].observe(before, from_catanatron_action(action), m["game"])
-        m["applied"] = len(records)
+        m["records"] = list(records)
+        m["ply"] = sum(1 for r in records if r.action.color == self.color)
         return m
 
 

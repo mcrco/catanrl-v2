@@ -128,7 +128,7 @@ def test_whole_catanatron_games_stay_in_sync(ckpts, spec):
     players = [player(spec.format(path=ckpts["private"]), Color.RED), REGISTRY.build("R", Color.BLUE)]
     game = config.catanatron_game(players, map_seed=3, seed=5)
     game.play()
-    assert game.state.num_turns > 10 and players[0]._mirror["applied"] > 50
+    assert game.state.num_turns > 10 and len(players[0]._mirror["records"]) > 50
 
 
 def test_a_path_spec_pins_its_weights(ckpts, tmp_path, monkeypatch):
@@ -140,3 +140,23 @@ def test_a_path_spec_pins_its_weights(ckpts, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     relative = resolve_agent("POLICY:ckpt=public.pt")
     assert relative.checkpoint.path.is_absolute() and relative.checkpoint.run is None
+
+
+def test_the_mirror_follows_an_undo(ckpts):
+    """Undo then another action keeps the log's length; the mirror must still rebuild."""
+    from cppanatron.catanatron import from_catanatron_action
+
+    from catanrl.agents import player
+    from catanrl.games import load_game
+
+    red = player(f"POLICY:ckpt={ckpts['private']}", Color.RED)
+    game = load_game("base-2p").catanatron_game([red, REGISTRY.build("R", Color.BLUE)], map_seed=3, seed=5)
+    while len(game.state.action_records) < 30 or len(game.playable_actions) < 2:
+        game.play_tick()
+    snapshot = game.copy()
+    game.execute(game.playable_actions[0])
+    red._sync(game, red._agent())
+    snapshot.execute(snapshot.playable_actions[-1])  # the undo, then a different action
+    mirror = red._sync(snapshot, red._agent())
+    native = {tuple(a) for a in mirror["game"].playable_actions}
+    assert native == {tuple(from_catanatron_action(a)) for a in snapshot.playable_actions}
