@@ -173,3 +173,10 @@ def test_critic_level_rows_match_the_model():
     with torch.no_grad():
         _logits, values = policy.forward_eval(torch.from_numpy(obs.copy()))
     assert values.shape == (8,) and torch.all((values > 0) & (values < 1))
+
+
+@pytest.mark.parametrize("maps", [0, -3, 2.5, True, "16"])
+def test_map_pools_must_hold_maps(maps):
+    """An empty pool would silently train on BASE boards instead of the game's generator."""
+    with pytest.raises(ValueError, match="maps"):
+        scenario_specs([{"game": "random-4p", "maps": maps}])

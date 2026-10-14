@@ -84,6 +84,10 @@ def scenario_specs(entries: Sequence[Mapping[str, Any] | str]) -> list[ScenarioS
             raise ValueError(f"{game.name}: {len(seats)} seats for {game.num_players} players")
         if seats and "learner" not in seats:
             raise ValueError(f"{game.name}: a training scenario needs a learner seat")
+        pool = entry.get("maps", DEFAULT_POOL)
+        if isinstance(pool, bool) or not isinstance(pool, int) or pool < 1:
+            # An empty pool would make the engine draw fresh BASE boards, whatever the generator.
+            raise ValueError(f"{game.name}: maps (the map pool size) must be a positive integer, not {pool!r}")
         name = str(entry.get("name") or game.name)
         names[name] = names.get(name, 0) + 1
         if names[name] > 1:
@@ -96,7 +100,7 @@ def scenario_specs(entries: Sequence[Mapping[str, Any] | str]) -> list[ScenarioS
                 seats=seats,
                 shuffle_seats=bool(entry.get("shuffle_seats", True)),
                 turn_limit=int(entry.get("turn_limit", DEFAULT_TURN_LIMIT)),
-                maps=int(entry.get("maps", DEFAULT_POOL)),
+                maps=pool,
                 value_enemies=str(entry.get("value_enemies", "next")),
             )
         )
