@@ -66,14 +66,106 @@ def test_a_partial_record_plays_only_missing_games(monkeypatch):
     assert [s["segment"] for s in record.data["segments"]] == [0, 1] and not record.data["mixed"]
 
 
-def test_mixed_execution_needs_allow_mixed(monkeypatch):
+def test_mixed_execution_needs_allow_mixed_or_a_restart(monkeypatch):
+    machine = {"device_class": "A"}
+    monkeypatch.setattr(results, "_execution", lambda device, infer_rows: dict(machine))
     use(monkeypatch, FakeHarness(fail_after=2))
     with pytest.raises(KeyboardInterrupt):
-        evaluate(["R", "F"], SUITE, infer_rows=8)
+        evaluate(["R", "F"], SUITE)
+    machine["device_class"] = "B"
     use(monkeypatch, FakeHarness())
     with pytest.raises(ExecutionMismatch):
-        evaluate(["R", "F"], SUITE, infer_rows=16)
-    assert evaluate(["R", "F"], SUITE, infer_rows=16, allow_mixed=True).data["mixed"]
+        evaluate(["R", "F"], SUITE)
+    assert evaluate(["R", "F"], SUITE, allow_mixed=True).data["mixed"]
+    use(monkeypatch, FakeHarness(fail_after=2))
+    with pytest.raises(KeyboardInterrupt):
+        evaluate(["R", "R"], SUITE)
+    machine["device_class"] = "C"
+    restarted = use(monkeypatch, FakeHarness())
+    record = evaluate(["R", "R"], SUITE, restart_partial=True)  # select/final evals: nothing cites a partial
+    assert len(restarted.played) == 8 and not record.data["mixed"]
+
+
+def test_cpu_execution_ignores_infer_rows():
+    assert results._execution("cpu", 8) == results._execution("cpu", 256)
+    assert "cpu_capability" in results._execution("cpu", 8)
+
+
+def test_games_are_played_under_strict_flags(monkeypatch):
+    import torch
+
+    seen = []
+
+    def harness(*args, **kwargs):
+        seen.append(torch.are_deterministic_algorithms_enabled())
+        FakeHarness()(*args, **kwargs)
+
+    use(monkeypatch, harness)
+    evaluate(["R", "F"], SUITE)
+    assert seen == [True] and not torch.are_deterministic_algorithms_enabled()
+
+
+def test_win_share_is_tested_on_decided_games():
+    rows = [{"game_id": str(i), "seats": [0, 1], "winner": i % 2, "truncated": False} for i in range(1000)]
+    rows += [{"game_id": f"t{i}", "seats": [0, 1], "winner": None, "truncated": True} for i in range(100)]
+    slot = summarize(rows, ["a", "b"])["slots"][0]
+    assert slot["decided"] == 1000 and slot["win_share_p"] == pytest.approx(1.0)
+
+
+def test_verify_rebuilds_the_keyed_suite_and_refuses_changed_inputs(monkeypatch, tmp_path):
+    import shutil
+
+    import torch
+
+    from catanrl.checkpoint import save
+    from catanrl.envs.encoding import action_size, dims_for, row_layout
+    from catanrl.models import build_model
+
+    def model(seed):
+        torch.manual_seed(seed)
+        dims = dims_for(["base-2p"])
+        return build_model({"preset": "graph-tiny"}, dims=dims, levels="private", num_actions=action_size(dims),
+                           layout=row_layout(dims, "private"))
+
+    pt = tmp_path / "e000000.pt"
+    save(pt, model(0), run=None, epoch=0, agent_steps=0, config={}, code={})
+    use(monkeypatch, FakeHarness())
+    inline = {"purpose": "heldout", "seed": 3, "boards": 2, "scenarios": [{"game": "base-2p"}], "turn_limit": 50}
+    record = evaluate([f"POLICY:ckpt={pt}", "F"], inline)
+    assert results.verify(record, games=None)["identical"] == 4  # an inline suite replays from its key
+    shutil.move(pt, tmp_path / "old.pt")
+    save(pt, model(1), run=None, epoch=0, agent_steps=0, config={}, code={})
+    with pytest.raises(Exception, match="not #|inputs changed"):
+        results.verify(record)
+
+
+def test_fairness_is_judged_on_the_suite_games(monkeypatch, tmp_path):
+    import torch
+
+    from catanrl.agents import resolve_agent
+    from catanrl.checkpoint import save
+    from catanrl.envs.encoding import action_size, dims_for, row_layout
+    from catanrl.models import build_model
+
+    torch.manual_seed(0)
+    dims = dims_for(["base-2p"])
+    net = build_model({"preset": "graph-tiny"}, dims=dims, levels="public", num_actions=action_size(dims),
+                      layout=row_layout(dims, "public"))
+    pt = save(tmp_path / "pub.pt", net, run=None, epoch=0, agent_steps=0, config={}, code={}).path
+    agent = resolve_agent(f"POLICY:ckpt={pt}")
+    assert agent.fair  # judged without games: 2p dims
+    use(monkeypatch, FakeHarness())
+    suite = {**SUITE, "scenarios": [{"game": "base-4p"}], "boards": 1}
+    record = evaluate([agent, "R", "R", "R"], suite)
+    assert record.data["fair"][0] is False
+
+
+def test_paired_needs_the_same_slot_and_code(monkeypatch):
+    use(monkeypatch, FakeHarness())
+    a = evaluate(["R", "F"], SUITE)
+    b = evaluate(["F", "R"], SUITE)
+    with pytest.raises(ValueError, match="same slot"):
+        paired(a, b, slot_a=0, slot_b=1)
 
 
 def test_forfeits_invalidate_and_truncations_rescore(monkeypatch):

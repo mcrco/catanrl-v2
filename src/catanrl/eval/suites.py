@@ -75,6 +75,14 @@ class Suite:
         if self.boards < 1 or not self.scenarios:
             raise ValueError(f"suite {self.name} needs boards and scenarios")
 
+    @classmethod
+    def from_key(cls, name: str, key: Mapping[str, Any]) -> Suite:
+        """The suite an eval key describes (its games as keyed, not as their YAML now reads)."""
+        scenarios = tuple({"game": {**s["game"], "name": f"{name}-{i}"}, "turn_limit": s["turn_limit"]}
+                          for i, s in enumerate(key["scenarios"]))
+        return cls(name=name, purpose=key["purpose"], seed=key["seed"], boards=key["boards"], scenarios=scenarios,
+                   turn_limit=key["turn_limit"], determinism=key["determinism"])
+
     def games(self) -> list[Any]:
         return [load_game(s["game"]) for s in self.scenarios]
 

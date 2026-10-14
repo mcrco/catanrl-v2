@@ -32,7 +32,8 @@ def select_eval(select: Mapping[str, Any], ref: Any, eval_runtime: Mapping[str, 
 
     devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
     with torch.autocast("cuda", enabled=False), torch.random.fork_rng(devices=devices), determinism("strict"):
-        record = evaluate(lineup_for(select, ref), select["suite"], fill=select.get("fill"), **eval_runtime)
+        record = evaluate(lineup_for(select, ref), select["suite"], fill=select.get("fill"), restart_partial=True,
+                          **eval_runtime)
     return record, metric_of(select, record)
 
 

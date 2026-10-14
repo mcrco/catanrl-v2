@@ -9,15 +9,19 @@
 
 ``evaluate(lineup, suite)`` returns the record if it exists. Otherwise it
 locks the id, plays only the games missing from ``<eval_id>.games.jsonl``
-(one appended row per finished game, so a crash resumes exactly) and writes
-the record once. Each start appends its execution (device class, torch,
-``infer_rows``); resuming under another one needs ``allow_mixed``, which
-marks the record. A forfeit makes the record ``valid: false``.
+(one appended row per finished game, so a crash resumes exactly) under the
+suite's determinism flags, and writes the record once. Each start appends a
+segment: its execution (device class, CPU capability, torch, numpy, and
+``infer_rows`` on GPUs) and a provenance capture with patches. Resuming
+under another execution needs ``allow_mixed`` (the record is marked) or
+``restart_partial`` (the partial games are set aside). A forfeit makes the
+record ``valid: false``.
 """
 
 from __future__ import annotations
 
 import fcntl
+import fnmatch
 import os
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -67,19 +71,24 @@ class EvalRecord:
     def valid(self) -> bool:
         return bool(self.data.get("valid", True))
 
+    def suite(self) -> Suite:
+        """The suite exactly as keyed (not as its YAML now reads)."""
+        return Suite.from_key(self.data["suite"], self.key["suite"])
+
 
 # ---------------------------------------------------------------- keys and places
 
 
 def _resolve(lineup: Sequence[Any], suite: Suite, fill: Any, harness: str):
+    """Resolved agents for this suite's games (a resolved agent is re-resolved from its
+    canonical spec, so its fairness is judged on these games)."""
     from catanrl.agents import ResolvedAgent, resolve_agent
 
-    games = suite.games()
-    agents = [a if isinstance(a, ResolvedAgent) else resolve_agent(a, harness=harness, games=games) for a in lineup]
-    fill_agent = None
-    if fill is not None:
-        fill_agent = fill if isinstance(fill, ResolvedAgent) else resolve_agent(fill, harness=harness, games=games)
-    return agents, fill_agent
+    def one(spec: Any):
+        spec = spec.canonical if isinstance(spec, ResolvedAgent) else spec
+        return resolve_agent(spec, harness=harness, games=suite.games())
+
+    return [one(a) for a in lineup], (one(fill) if fill is not None else None)
 
 
 def eval_key(lineup: Sequence[Any], suite: Suite, *, harness: str, fill: Any = None) -> dict:
@@ -96,8 +105,7 @@ def _record_path(lineup: Sequence[Any], suite: Suite, eval_id: str) -> Path:
 
     first = lineup[0].checkpoint
     if first is not None and first.run:
-        experiment, variant = first.run.split("/")
-        root = runs_root() / experiment / variant / "evals"
+        root = runs_root() / first.run / "evals"
     else:
         root = runs_root() / "_evals"
     return root / suite.name / f"{eval_id}.json"
@@ -112,14 +120,22 @@ def find(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any = Non
     return EvalRecord.load(path) if path.exists() else None
 
 
+def all_records(pattern: str = "*") -> list[Path]:
+    """Record files of runs matching ``pattern``, plus those under ``_evals``."""
+    from catanrl.runs import runs_root
+
+    root = runs_root()
+    pattern = pattern if "/" in pattern else f"{pattern}/*"
+    paths = [p for p in sorted(root.glob("*/*/evals/*/*.json"))
+             if fnmatch.fnmatchcase(f"{p.parents[3].name}/{p.parents[2].name}", pattern)]
+    return paths + sorted(root.glob("_evals/*/*.json"))
+
+
 # ---------------------------------------------------------------- scoring
 
 
 def _latest_rows(path: Path) -> dict[str, dict]:
-    rows: dict[str, dict] = {}
-    for row in canon.read_jsonl(path):
-        rows[row["game_id"]] = row
-    return rows
+    return {row["game_id"]: row for row in canon.read_jsonl(path)}
 
 
 def scores(row: Mapping[str, Any], num_slots: int) -> list[float]:
@@ -135,51 +151,79 @@ def scores(row: Mapping[str, Any], num_slots: int) -> list[float]:
 
 
 def summarize(rows: Sequence[Mapping[str, Any]], labels: Sequence[str]) -> dict:
-    """Score rates with Wilson intervals, per-seat rates and win shares vs 1/N."""
+    """Score rates with Wilson intervals, per-seat rates, and win shares vs 1/N
+    tested on the decided games (a truncation is nobody's loss)."""
     num_slots = len(labels)
     slots = []
     for slot, label in enumerate(labels):
         mine = [r for r in rows if slot in r["seats"]]
         score = sum(scores(r, num_slots + 1)[slot] for r in mine)
-        wins = sum(1 for r in mine if r.get("winner") == slot)
-        per_seat = {}
+        per_seat: dict[int, list] = {}
         for r in mine:
             for seat, s in enumerate(r["seats"]):
                 if s == slot:
                     entry = per_seat.setdefault(seat, [0.0, 0])
                     entry[0] += scores(r, num_slots + 1)[slot] / r["seats"].count(slot)
                     entry[1] += 1
-        sizes = {len(r["seats"]) for r in mine}
+        decided = [r for r in mine if r.get("winner") is not None]
+        wins = sum(1 for r in decided if r["winner"] == slot)
         n = len(mine)
         info = {"label": label, "games": n, "score_rate": score / n if n else float("nan"),
-                "wilson": list(wilson_interval(score, n)), "wins": wins,
+                "wilson": list(wilson_interval(score, n)), "wins": wins, "decided": len(decided),
                 "per_seat": {str(seat): s / c for seat, (s, c) in sorted(per_seat.items())}}
-        if len(sizes) == 1 and n:
+        sizes = {len(r["seats"]) for r in mine}
+        if len(sizes) == 1 and decided:
             players = sizes.pop()
             info["expected"] = 1.0 / players
-            info["win_share_p"] = binomial_two_sided(wins, n, 1.0 / players)
+            info["win_share_p"] = binomial_two_sided(wins, len(decided), 1.0 / players)
         slots.append(info)
-    forfeits = sum(sum(r.get("forfeits") or []) for r in rows)
     return {"games": len(rows), "score_rate": slots[0]["score_rate"], "wilson": slots[0]["wilson"],
-            "truncated": sum(1 for r in rows if r.get("truncated")), "forfeits": forfeits, "slots": slots}
+            "truncated": sum(1 for r in rows if r.get("truncated")),
+            "forfeits": sum(sum(r.get("forfeits") or []) for r in rows), "slots": slots}
 
 
 def _execution(device: str, infer_rows: int) -> dict:
+    """What may move a row's bits: the device class (and on CPU the kernel ISA), torch,
+    numpy (sampled moves), and on GPUs the padded inference shape."""
+    import numpy as np
     import torch
 
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    cls = torch.cuda.get_device_name(torch.device(device)) if device.startswith("cuda") else "cpu"
-    return {"device_class": cls, "torch": torch.__version__, "infer_rows": int(infer_rows)}
+    if device.startswith("cuda"):
+        return {"device_class": torch.cuda.get_device_name(torch.device(device)), "torch": torch.__version__,
+                "numpy": np.__version__, "infer_rows": int(infer_rows)}
+    # Strict CPU evaluation runs one row at a time, so infer_rows does not matter there.
+    return {"device_class": "cpu", "cpu_capability": torch.backends.cpu.get_cpu_capability(),
+            "torch": torch.__version__, "numpy": np.__version__}
+
+
+def _strict(suite: Suite):
+    """The suite's determinism flags, with autocast off (PuffeRL leaks bf16 autocast)."""
+    import contextlib
+
+    import torch
+
+    from catanrl.seeding import determinism
+
+    stack = contextlib.ExitStack()
+    stack.enter_context(torch.autocast("cuda", enabled=False))
+    stack.enter_context(torch.autocast("cpu", enabled=False))
+    stack.enter_context(determinism(suite.determinism))
+    return stack
 
 
 # ---------------------------------------------------------------- evaluate
 
 
 def evaluate(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any = None, harness: str = "native",
-             recompute: bool = False, allow_mixed: bool = False, device: str | None = None,
-             num_envs: int | None = None, threads: int | None = None, infer_rows: int | None = None) -> EvalRecord:
-    """The record of ``lineup`` on ``suite``: cached, or played (resuming a partial one)."""
+             recompute: bool = False, allow_mixed: bool = False, restart_partial: bool = False,
+             device: str | None = None, num_envs: int | None = None, threads: int | None = None,
+             infer_rows: int | None = None) -> EvalRecord:
+    """The record of ``lineup`` on ``suite``: cached, or played (resuming a partial one).
+
+    ``recompute`` replays every game of an existing record and raises if any differs.
+    """
     if harness != "native":
         raise NotImplementedError("only the native harness evaluates; Catanatron players are for play and parity")
     suite = load_suite(suite)
@@ -194,15 +238,15 @@ def evaluate(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any =
     lock = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if path.exists() and not recompute:
+        if path.exists():
+            if recompute:
+                result = verify(EvalRecord.load(path), games=None, device=device, num_envs=num_envs, threads=threads)
+                if result["differing"]:
+                    raise RuntimeError(f"{eval_id}: {len(result['differing'])} games differ on replay")
             return EvalRecord.load(path)
-        if recompute and path.exists():
-            result = verify(EvalRecord.load(path), games=None, device=device, num_envs=num_envs, threads=threads)
-            if result["differing"]:
-                raise RuntimeError(f"{eval_id}: {len(result['differing'])} games differ on replay")
-            return EvalRecord.load(path)
-        return _play(agents, fill_agent, suite, key, eval_id, path, allow_mixed=allow_mixed, device=device,
-                     num_envs=num_envs, threads=threads, infer_rows=infer_rows)
+        return _play(agents, fill_agent, suite, key, eval_id, path, allow_mixed=allow_mixed,
+                     restart_partial=restart_partial, device=device, num_envs=num_envs, threads=threads,
+                     infer_rows=infer_rows)
     finally:
         if path.exists():
             path.with_suffix(".lock").unlink(missing_ok=True)  # waiters return the record
@@ -210,21 +254,41 @@ def evaluate(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any =
         os.close(lock)
 
 
-def _play(agents, fill_agent, suite, key, eval_id, path, *, allow_mixed, device, num_envs, threads,
-          infer_rows) -> EvalRecord:
+def _segment(path: Path, eval_id: str, segment: int, execution: dict) -> dict:
+    """Record this start: provenance (with patches and keep refs) in its own file, a small row."""
     from catanrl import provenance
 
-    games_path = path.with_suffix(".games.jsonl")
-    segments_path = path.with_suffix(".segments.jsonl")
+    prov = provenance.capture(kind="eval")
+    provenance.check_launch(prov, {})
+    folder = path.parent / "provenance"
+    name = f"{eval_id}.start{len(list(folder.glob(f'{eval_id}.start*.json')))}"  # unique across restarts
+    prov["run"]["launch_name"] = name
+    provenance.save_patches(prov, folder)
+    provenance.keep_commits(prov)
+    canon.write_once_json(folder / f"{name}.json", prov)
+    row = {"segment": segment, "execution": execution, "time": time.time(), "dirty": provenance.any_dirty(prov),
+           "git": prov["git"]["repos"]["catanrl-v2"]["head"], "provenance": f"provenance/{name}.json"}
+    canon.append_jsonl(path.with_suffix(".segments.jsonl"), row)
+    return row
+
+
+def _play(agents, fill_agent, suite, key, eval_id, path, *, allow_mixed, restart_partial, device, num_envs,
+          threads, infer_rows) -> EvalRecord:
+    games_path, segments_path = path.with_suffix(".games.jsonl"), path.with_suffix(".segments.jsonl")
     execution = _execution(device, infer_rows)
     segments = canon.read_jsonl(segments_path)
-    mixed = any(s["execution"] != execution for s in segments)
-    if mixed and not allow_mixed:
-        raise ExecutionMismatch(f"{eval_id} was started under {segments[0]['execution']}, now {execution}; "
-                                "pass allow_mixed to finish it here (the record is marked mixed)")
+    if any(s["execution"] != execution for s in segments):
+        if restart_partial:  # nothing cites a partial record: set its games aside and start over
+            stamp = int(time.time())
+            for p in (games_path, segments_path):
+                if p.exists():
+                    p.rename(p.with_name(f"{p.name}.discarded-{stamp}"))
+            segments = []
+        elif not allow_mixed:
+            raise ExecutionMismatch(f"{eval_id} was started under {segments[0]['execution']}, now {execution}; "
+                                    "pass allow_mixed to finish it here (the record is marked mixed)")
     segment = len(segments)
-    canon.append_jsonl(segments_path, {"segment": segment, "execution": execution, "time": time.time(),
-                                       "provenance": provenance.capture(kind="eval")})
+    _segment(path, eval_id, segment, execution)
     schedule = suite.schedule(len(agents), fill=fill_agent is not None)
     done = _latest_rows(games_path)
     missing = [g for g in schedule if g.game_id not in done]
@@ -232,27 +296,26 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, allow_mixed, device,
         natives = [a.native(device=device, infer_rows=infer_rows, mode=suite.determinism) for a in agents]
         fill_native = fill_agent.native(device=device, infer_rows=infer_rows, mode=suite.determinism) \
             if fill_agent is not None else None
-
-        def on_game(row: dict) -> None:
-            canon.append_jsonl(games_path, {**row, "segment": segment})
-
-        play_schedule(natives, missing, fill=fill_native, device=device, num_envs=int(num_envs or 256),
-                      threads=int(threads or 8), infer_rows=infer_rows, on_game=on_game, suite=suite)
+        with _strict(suite):
+            play_schedule(natives, missing, fill=fill_native, device=device, num_envs=int(num_envs or 256),
+                          threads=int(threads or 8), infer_rows=infer_rows, suite=suite,
+                          on_game=lambda row: canon.append_jsonl(games_path, {**row, "segment": segment}))
     rows = _latest_rows(games_path)
     if set(rows) != {g.game_id for g in schedule}:
         raise RuntimeError(f"{eval_id}: the harness did not play every scheduled game")
     labels = [a.label for a in agents]
     ordered = [rows[g.game_id] for g in schedule]
     summary = summarize(ordered, labels)
+    segments = canon.read_jsonl(segments_path)
     record = {
         "eval_id": eval_id, "key": key, "summary": summary, "suite": suite.name,
         "specs": [a.canonical for a in agents], "fill": fill_agent.canonical if fill_agent else None,
         "refs": [str(a.checkpoint) if a.checkpoint else None for a in agents],
         "fair": [a.fair for a in agents], "labels": labels,
         "allow_drift": any(bool(getattr(a.params, "allow_drift", False)) for a in agents),
-        "valid": summary["forfeits"] == 0, "mixed": mixed,
+        "valid": summary["forfeits"] == 0, "mixed": len({canon.digest(s["execution"]) for s in segments}) > 1,
         "games_sha256": canon.digest([_strip(r) for r in ordered], 64),
-        "segments": canon.read_jsonl(segments_path), "created": time.time(),
+        "segments": segments, "created": time.time(),
     }
     canon.write_once_json(path, record)
     return EvalRecord.load(path)
@@ -262,13 +325,18 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, allow_mixed, device,
 
 
 def paired(a: EvalRecord, b: EvalRecord, *, slot_a: int = 0, slot_b: int = 0) -> dict:
-    """Delta and exact McNemar of two records on the same games and opponents."""
+    """Delta and exact McNemar of two records that differ only in one slot's agent."""
+    if slot_a != slot_b:
+        raise ValueError("paired records compare the same slot (same seat order against the same opponents)")
     if a.key["suite"]["schedule_hash"] != b.key["suite"]["schedule_hash"]:
         raise ValueError("paired records must play the same schedule (schedule hashes differ)")
+    for part in ("code", "determinism", "harness"):
+        if a.key[part] != b.key[part]:
+            raise ValueError(f"paired records differ in {part}")
     others_a = [d for i, d in enumerate(a.key["lineup"]) if i != slot_a] + [a.key["fill"]]
     others_b = [d for i, d in enumerate(b.key["lineup"]) if i != slot_b] + [b.key["fill"]]
-    if others_a != others_b:
-        raise ValueError("paired records must face the same opponents")
+    if others_a != others_b or len(a.key["lineup"]) != len(b.key["lineup"]):
+        raise ValueError("paired records must face the same opponents in the same seats")
     rows_a, rows_b = {r["game_id"]: r for r in a.games()}, {r["game_id"]: r for r in b.games()}
     if set(rows_a) != set(rows_b):
         raise ValueError(f"paired game ids differ: {sorted(set(rows_a) ^ set(rows_b))[:5]}")
@@ -280,29 +348,34 @@ def paired(a: EvalRecord, b: EvalRecord, *, slot_a: int = 0, slot_b: int = 0) ->
 
 def verify(record: EvalRecord | str | Path, *, games: int | None = 16, device: str | None = None,
            num_envs: int | None = None, threads: int | None = None) -> dict:
-    """Replay the first ``games`` games with this code and machine; count identical rows."""
+    """Replay the first ``games`` games with this code and machine; count identical rows.
+
+    The suite and agents are rebuilt from the record's key; inputs that no
+    longer resolve to that key (other weights at a path, an edited game) raise.
+    """
     if not isinstance(record, EvalRecord):
         record = EvalRecord.load(record)
-    data = record.data
-    suite = load_suite(data["suite"])
-    suite = Suite(**{**suite.__dict__, "boards": record.key["suite"]["boards"]})
+    data, suite = record.data, record.suite()
     agents, fill_agent = _resolve(data["specs"], suite, data.get("fill"), record.key["harness"])
+    rebuilt = eval_key(agents, suite, harness=record.key["harness"], fill=fill_agent)
+    changed = [k for k in record.key if k != "code" and rebuilt.get(k) != record.key[k]]
+    if changed:
+        raise RuntimeError(f"{record.eval_id}: its inputs changed ({', '.join(changed)}); this is not a replay")
     stored = {r["game_id"]: r for r in record.games()}
     schedule = suite.schedule(len(agents), fill=fill_agent is not None)
     chosen = schedule if games is None else schedule[: int(games)]
-    infer_rows = int(data["segments"][0]["execution"]["infer_rows"]) if data.get("segments") else 256
+    first = (data.get("segments") or [{}])[0].get("execution") or {}
+    infer_rows = int(first.get("infer_rows", 256))
     natives = [a.native(device=device or "auto", infer_rows=infer_rows, mode=suite.determinism) for a in agents]
     fill_native = fill_agent.native(device=device or "auto", infer_rows=infer_rows, mode=suite.determinism) \
         if fill_agent else None
     found: dict[str, dict] = {}
-    play_schedule(natives, chosen, fill=fill_native, device=device or "auto", num_envs=int(num_envs or 256),
-                  threads=int(threads or 8), infer_rows=infer_rows, on_game=lambda r: found.__setitem__(r["game_id"], r),
-                  suite=suite)
-
-    def same(x: dict, y: dict) -> bool:
-        return canon.canonical_json(_strip(x)) == canon.canonical_json(_strip(y))
-
-    differing = [g.game_id for g in chosen if not same(found[g.game_id], stored[g.game_id])]
+    with _strict(suite):
+        play_schedule(natives, chosen, fill=fill_native, device=device or "auto", num_envs=int(num_envs or 256),
+                      threads=int(threads or 8), infer_rows=infer_rows, suite=suite,
+                      on_game=lambda r: found.__setitem__(r["game_id"], r))
+    differing = [g.game_id for g in chosen
+                 if canon.canonical_json(_strip(found[g.game_id])) != canon.canonical_json(_strip(stored[g.game_id]))]
     return {"identical": len(chosen) - len(differing), "of": len(chosen), "differing": differing}
 
 
@@ -312,18 +385,7 @@ def _strip(row: Mapping[str, Any]) -> dict:
 
 def stale(pattern: str = "*") -> list[EvalRecord]:
     """Records whose outcome code differs from this checkout's."""
-    import fnmatch
-
     from catanrl.provenance import code_id
-    from catanrl.runs import runs_root
 
-    root = runs_root()
-    pattern = pattern if "/" in pattern else f"{pattern}/*"
-    paths = [p for p in sorted(root.glob("*/*/evals/*/*.json"))
-             if fnmatch.fnmatchcase(f"{p.parents[3].name}/{p.parents[2].name}", pattern)]
-    out = []
-    for path in paths + sorted(root.glob("_evals/*/*.json")):
-        record = EvalRecord.load(path)
-        if record.key["code"] != code_id("eval", record.key["harness"]):
-            out.append(record)
-    return out
+    records = [EvalRecord.load(p) for p in all_records(pattern)]
+    return [r for r in records if r.key["code"] != code_id("eval", r.key["harness"])]
