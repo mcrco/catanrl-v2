@@ -1,4 +1,4 @@
-"""The native evaluation harness: rows, bots, agents and backends."""
+"""The native evaluation harness: rows, bots, trackers and agents."""
 
 from __future__ import annotations
 
@@ -6,10 +6,9 @@ import cppanatron as cpp
 import numpy as np
 import pytest
 from eval_standins import Suite, agent, schedule, tiny_model
+from reference_stepper import MT19937_64, below, play_reference
 
-from catanrl.eval.harness import MT19937_64, below, play_schedule
-
-HAS_SCHEDULE_MODE = hasattr(cpp.VecEnv, "start_games")
+from catanrl.eval.harness import play_schedule
 
 
 def test_mt19937_64_matches_the_standard():
@@ -28,7 +27,7 @@ def test_below_is_uniform_and_in_range():
 
 def play(lineup, suite, games, **kwargs):
     rows = []
-    play_schedule(lineup, games, suite=suite, on_game=rows.append, **{"backend": "stepper", **kwargs})
+    play_schedule(lineup, games, suite=suite, on_game=rows.append, **kwargs)
     return sorted(rows, key=lambda r: r["game_id"])
 
 
@@ -61,25 +60,33 @@ def test_sampled_policy_reproduces_from_decision_seeds():
     assert play(lineup(), suite, games) == play(lineup(), suite, games, num_envs=1)
 
 
-def test_unknown_backend_and_missing_fill_raise():
+def test_missing_fill_raises():
     suite = Suite(({"game": "base-4p"},), turn_limit=150)
     games = schedule(suite, 2, boards=1)
     with pytest.raises(ValueError):
         play([agent("POLICY", tiny_model(["base-4p"])), agent("R")], suite, games)
-    with pytest.raises(ValueError):
-        play([agent("R"), agent("R")], Suite(({"game": "base-2p"},)), schedule(Suite(({"game": "base-2p"},)), 2, 1),
-             backend="mystery")
 
 
-@pytest.mark.skipif(not HAS_SCHEDULE_MODE, reason="needs VecEnv schedule mode (engine E1)")
-@pytest.mark.parametrize("bot", ["F", "R"])
-def test_stepper_and_vecenv_play_the_same_games(bot):
-    suite = Suite(({"game": "base-2p"}, {"game": "base-3p"}), turn_limit=200)
-    games = schedule(suite, 2, boards=3)
-    lineup = lambda: [agent("POLICY", tiny_model(["base-2p", "base-3p"])), agent(bot)]
-    stepped = play(lineup(), suite, games, fill=agent("F"))
-    vectorized = play(lineup(), suite, games, fill=agent("F"), backend="vecenv", num_envs=4, threads=2)
-    assert stepped == vectorized
+# Agents whose decisions read games and VecEnv's hand trackers (E6), and bots.
+REFERENCE_CASES = {
+    "policy-F": (("POLICY", {}), "F"),
+    "policy-R": (("POLICY", {}), "R"),
+    "mcts-dets": (("MCTS", {"sims": 6, "dets": 2}), "R"),
+    "belief": (("BELIEF", {"worlds": 3}), "F"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REFERENCE_CASES))
+def test_vecenv_plays_exactly_the_reference_games(case):
+    """play_schedule (VecEnv schedule mode, engine bots, engine trackers) gives exactly the rows of
+    the games stepped one action at a time in Python with HandTracker.observe on every transition."""
+    (key, params), bot = REFERENCE_CASES[case]
+    suite = Suite(({"game": "base-2p"}, {"game": "base-3p"}), turn_limit=120)
+    games = schedule(suite, 2, boards=2 if key == "MCTS" else 3)
+    lineup = lambda: [agent(key, tiny_model(["base-2p", "base-3p"], level="full"), infer_rows=8, **params),
+                      agent(bot)]
+    reference = play_reference(lineup(), games, suite=suite, fill=agent("F"))
+    assert play(lineup(), suite, games, fill=agent("F"), num_envs=4, threads=2) == reference
 
 
 def test_policy_of_an_asymmetric_critic_model_plays_from_actor_rows():
@@ -151,28 +158,26 @@ def test_mcts_add_failure_leaks_no_search():
     assert len(mcts.pool) == 0
 
 
-@pytest.mark.parametrize("backend", ["stepper", "vecenv"])
 @pytest.mark.parametrize("num_envs, threads", [(0, 1), (-2, 1), (4, 0)])
-def test_non_positive_envs_or_threads_raise(backend, num_envs, threads):
-    """The stepper used to spin forever with num_envs <= 0 while the VecEnv clamped it."""
+def test_non_positive_envs_or_threads_raise(num_envs, threads):
+    """The old Python stepper spun forever with num_envs <= 0 while the VecEnv clamped it."""
     suite = Suite(({"game": "base-2p"},), turn_limit=50)
     with pytest.raises(ValueError, match="positive"):
-        play([agent("R"), agent("F")], suite, schedule(suite, 2, boards=1), backend=backend,
-             num_envs=num_envs, threads=threads)
+        play([agent("R"), agent("F")], suite, schedule(suite, 2, boards=1), num_envs=num_envs, threads=threads)
 
 
 SMALL = {"name": "small-3p", "num_players": 3, "map": {"type": "blob", "land_tiles": [10, 14]}}
 
 
-@pytest.mark.parametrize("backend", ["stepper", "vecenv"])
-def test_small_maps_play_on_both_backends(backend):
-    """Suites whose maps are all smaller than BASE used to crash the VecEnv backend at construction."""
+def test_small_maps_play():
+    """Suites whose maps are all smaller than BASE used to crash the VecEnv at construction."""
     suite = Suite(({"game": SMALL}, {"game": {**SMALL, "name": "small-3p-b", "map": {"type": "hexagon", "radius": 1}}}),
                   turn_limit=120)
     games = [g for g in schedule(suite, 2, boards=2) if g.scenario == 0]
-    rows = play([agent("POLICY", tiny_model([SMALL])), agent("F")], suite, games, fill=agent("R"),
-                backend=backend, num_envs=3)
+    lineup = lambda: [agent("POLICY", tiny_model([SMALL])), agent("F")]
+    rows = play(lineup(), suite, games, fill=agent("R"), num_envs=3)
     assert len(rows) == len(games)
+    assert rows == play_reference(lineup(), games, suite=suite, fill=agent("R"))
 
 
 def test_settlement_capacity_matches_the_engine():
@@ -195,14 +200,13 @@ def test_settlement_capacity_matches_the_engine():
             assert accepted == (settlement_capacity(catan_map) >= 2 * players), (tiles, players)
 
 
-@pytest.mark.parametrize("backend", ["stepper", "vecenv"])
-def test_unseatable_maps_are_refused_before_any_game(backend):
-    """The stepper used to score such games as stuck 1/N rows while the VecEnv refused them."""
+def test_unseatable_maps_are_refused_before_any_game():
+    """Refused up front (the old Python stepper scored them as stuck 1/N rows; the VecEnv refused
+    them in start_games, after other games had played)."""
     crowded = {"name": "crowded-6p", "num_players": 6, "map": {"type": "blob", "land_tiles": 5}}  # seats <= 11
     suite = Suite(({"game": "base-2p"}, {"game": crowded}), turn_limit=100)
     games = schedule(suite, 2, boards=1)
     played = []
     with pytest.raises(ValueError, match="cannot seat"):
-        play_schedule([agent("R"), agent("F")], games, fill=agent("R"), suite=suite, on_game=played.append,
-                      backend=backend)
+        play_schedule([agent("R"), agent("F")], games, fill=agent("R"), suite=suite, on_game=played.append)
     assert played == []

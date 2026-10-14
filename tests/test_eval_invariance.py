@@ -3,13 +3,11 @@ interrupts or reruns, and play exactly the schedule's games."""
 
 from __future__ import annotations
 
-import cppanatron as cpp
 import pytest
 from eval_standins import Suite, agent, schedule, tiny_model
+from reference_stepper import play_reference
 
 from catanrl.eval.harness import play_schedule
-
-pytestmark = pytest.mark.skipif(not hasattr(cpp.VecEnv, "start_games"), reason="needs engine E1/E2")
 
 SUITE = Suite(({"game": "base-2p"}, {"game": "base-3p"}), turn_limit=160)
 GAMES = schedule(SUITE, 3, boards=4)  # 16 boards: 4 x 2p rotations + 4 x 3p rotations = 20 games
@@ -56,7 +54,6 @@ def test_rows_are_invariant(case):
     assert play(lineup(key, **params), list(reversed(games)), num_envs=4) == reference
 
 
-def test_policy_agrees_across_backends():
-    vectorized = play(lineup("POLICY"), backend="vecenv", num_envs=6, threads=4)
-    stepped = play(lineup("POLICY"), backend="stepper", num_envs=6)
-    assert vectorized == stepped
+def test_policy_agrees_with_the_reference_stepper():
+    reference = {row["game_id"]: row for row in play_reference(lineup("POLICY"), GAMES, suite=SUITE)}
+    assert play(lineup("POLICY"), num_envs=6, threads=4) == reference

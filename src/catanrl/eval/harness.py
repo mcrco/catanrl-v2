@@ -13,23 +13,17 @@ on ``num_envs``, ``threads`` or the order games finish in:
 * the dims (and so every network's shapes) come from the scenarios'
   generator bounds, not from the games being played.
 
-Two backends play the games:
-
-* ``vecenv``: cppanatron's VecEnv in schedule mode (engine E1); bots and
-  forced moves run inside the engine on its threads. Used unless an agent
-  needs hand trackers.
-* ``stepper``: the games stepped one action at a time in Python, so every
-  transition can feed the hand trackers of MCTS (``dets``) and BELIEF agents.
-  It plays F with the engine's ``value_action`` and R with the engine's bot
-  stream (mt19937_64 seeded by the bot seed, Lemire's bounded draw), so both
-  backends play the same games.
+Games run on cppanatron's VecEnv in schedule mode (engine E1): bots and
+forced moves play inside the engine on its threads, each game's random bots
+draw from its own stream (E2), and with an MCTS (``dets``) or BELIEF agent in
+the lineup the VecEnv keeps a hand tracker per learner seat, fed every
+transition (E6), which the agents read through ``tracker(env, seat)``.
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import cppanatron as cpp
@@ -39,8 +33,6 @@ from catanrl import games as game_configs
 from catanrl.agents.native import BotAgent, NativeAgent, make_native_agent
 from catanrl.envs.encoding import dims_for, encoder_dims, info_level
 
-MASK64 = (1 << 64) - 1
-
 
 def _derive_seed(root: int, *labels) -> int:
     try:
@@ -48,54 +40,6 @@ def _derive_seed(root: int, *labels) -> int:
     except ImportError:
         from catanrl.envs.puffer import _derive_seed as derive_seed
     return derive_seed(root, *labels)
-
-
-# ---------------------------------------------------------------- engine bot stream
-
-
-class MT19937_64:
-    """std::mt19937_64, bit for bit."""
-
-    def __init__(self, seed: int) -> None:
-        mt = [0] * 312
-        mt[0] = seed & MASK64
-        for i in range(1, 312):
-            mt[i] = (6364136223846793005 * (mt[i - 1] ^ (mt[i - 1] >> 62)) + i) & MASK64
-        self.mt = mt
-        self.index = 312
-
-    def _twist(self) -> None:
-        mt = self.mt
-        for i in range(312):
-            x = (mt[i] & 0xFFFFFFFF80000000) | (mt[(i + 1) % 312] & 0x7FFFFFFF)
-            shifted = x >> 1
-            if x & 1:
-                shifted ^= 0xB5026F5AA96619E9
-            mt[i] = mt[(i + 156) % 312] ^ shifted
-        self.index = 0
-
-    def __call__(self) -> int:
-        if self.index >= 312:
-            self._twist()
-        y = self.mt[self.index]
-        self.index += 1
-        y ^= (y >> 29) & 0x5555555555555555
-        y ^= (y << 17) & 0x71D67FFFEDA60000
-        y ^= (y << 37) & 0xFFF7EEE000000000
-        y ^= y >> 43
-        return y & MASK64
-
-
-def below(rng: MT19937_64, bound: int) -> int:
-    """cppanatron's ``random::below``: Lemire's unbiased draw in [0, bound)."""
-    product = rng() * bound
-    low = product & MASK64
-    if low < bound:
-        threshold = ((1 << 64) - bound) % bound
-        while low < threshold:
-            product = rng() * bound
-            low = product & MASK64
-    return product >> 64
 
 
 # ---------------------------------------------------------------- schedule inputs
@@ -183,7 +127,7 @@ def settlement_capacity(catan_map: cpp.CatanMap) -> int:
 
 
 def _check_games(games, scenarios: list[_Scenario], maps: _Maps, dims: Mapping[str, int]) -> None:
-    """Refuse, before playing anything, a game the backends could not play alike."""
+    """Refuse, before playing anything, a game the VecEnv would refuse mid-eval."""
     encoder = encoder_dims(dims)
     for scheduled in games:
         scenario = scenarios[scheduled.scenario]
@@ -210,113 +154,10 @@ class _Maps:
         return self.cache[key]
 
 
-# ---------------------------------------------------------------- the stepper
-
-
-@dataclass
-class _Table:
-    scheduled: Any
-    scenario: _Scenario
-    game: cpp.Game
-    agents: list[Any]                 # per seat
-    rng: MT19937_64
-    trackers: dict[int, cpp.HandTracker] = field(default_factory=dict)
-    decisions: list[int] = field(default_factory=list)
-    stuck: bool = False
-
-    def execute(self, action: cpp.Action) -> None:
-        if self.trackers:
-            before = self.game.copy()
-            self.game.execute(action)
-            for tracker in self.trackers.values():
-                tracker.observe(before, action, self.game)
-        else:
-            self.game.execute(action)
-
-    def advance(self) -> bool:
-        """Play bots and forced moves; False once the game is over."""
-        game = self.game
-        while True:
-            if game.winning_color is not None or game.num_turns >= self.scenario.turn_limit:
-                return False
-            actions = game.playable_actions
-            if not actions:
-                self.stuck = True
-                return False
-            agent = self.agents[game.current_player_index]
-            if isinstance(agent, BotAgent):
-                if agent.key == "R":
-                    self.execute(actions[below(self.rng, len(actions))])
-                else:
-                    self.execute(cpp.value_action(game, enemies=agent.value_enemies))
-            elif len(actions) == 1:
-                self.execute(actions[0])
-            else:
-                return True
-
-
-def _play_stepper(agents, games, scenarios, maps, *, num_envs, on_game) -> None:
-    num_slots = len(agents)
-    queue = list(games)
-    queue.reverse()
-    active: list[_Table] = []
-
-    def start(scheduled) -> None:
-        scenario = scenarios[scheduled.scenario]
-        game = cpp.Game(scenario.game.num_players, map=maps.get(scheduled.scenario, scheduled.map_seed),
-                        rules=scenario.game.cppanatron_rules(), seed=int(scheduled.game_seed))
-        seat_agents = [agents[int(slot)] for slot in scheduled.seats]
-        table = _Table(scheduled, scenario, game, seat_agents, MT19937_64(int(scheduled.bot_seed)),
-                       decisions=[0] * len(seat_agents))
-        for seat, agent in enumerate(seat_agents):
-            if agent.needs_trackers:
-                table.trackers[seat] = cpp.HandTracker(game, seat)
-        if table.advance():
-            active.append(table)
-        else:
-            finish(table)
-
-    def finish(table: _Table) -> None:
-        game = table.game
-        winner = game.winning_player_index if game.winning_color is not None else None
-        on_game(_row(table.scheduled, num_slots=num_slots, winner_seat=winner, turns=game.num_turns,
-                     truncated=winner is None, stuck=table.stuck, decisions=table.decisions))
-
-    while queue or active:
-        while queue and len(active) < num_envs:
-            start(queue.pop())
-        by_agent: dict[int, list[_Table]] = defaultdict(list)
-        for table in active:
-            agent = table.agents[table.game.current_player_index]
-            by_agent[id(agent)].append(table)
-        still: list[_Table] = []
-        for tables in by_agent.values():
-            agent = tables[0].agents[tables[0].game.current_player_index]
-            seats = [t.game.current_player_index for t in tables]
-            rows = np.stack([agent.encode(t.game, s) for t, s in zip(tables, seats)])
-            masks = rows[:, -agent.action_space.size:]
-            seeds = np.array([
-                _derive_seed(int(t.scheduled.game_seed), "decide", int(t.scheduled.rotation), s, t.decisions[s])
-                for t, s in zip(tables, seats)], dtype=np.uint64)
-            games_arg = [t.game for t in tables] if agent.needs_games else None
-            trackers = [t.trackers[s] for t, s in zip(tables, seats)] if agent.needs_trackers else None
-            choices = agent.act(rows, masks, seeds, games=games_arg, trackers=trackers)
-            for table, seat, index in zip(tables, seats, choices):
-                table.decisions[seat] += 1
-                table.execute(agent.action_space.decode(table.game, int(index)))
-                if table.advance():
-                    still.append(table)
-                else:
-                    finish(table)
-        active = still
-
-
 # ---------------------------------------------------------------- VecEnv schedule mode
 
 
 def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_game) -> None:
-    if not hasattr(cpp.VecEnv, "start_games"):
-        raise RuntimeError("this cppanatron has no VecEnv schedule mode (E1); rebuild the engine")
     networks = [a for a in agents if isinstance(a, NativeAgent)]
     level = networks[0].level if networks else "private"
     enemies = {a.value_enemies for a in agents if isinstance(a, BotAgent) and a.key == "F"}
@@ -335,8 +176,9 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
         for i, s in enumerate(scenarios)
     ]
     num_envs = min(int(num_envs), max(1, len(games)))
+    trackers = any(agent.needs_trackers for agent in agents)
     vec = cpp.VecEnv(cpp_scenarios, num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
-                     seed=0, num_threads=int(threads), auto_reset=False)
+                     seed=0, num_threads=int(threads), auto_reset=False, trackers=trackers)
     buffers = vec.allocate()
     vec.reset()
     size = int(vec.action_size)
@@ -399,8 +241,10 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
                 seeds.append(_derive_seed(int(scheduled.game_seed), "decide", int(scheduled.rotation), int(s),
                                           decisions[int(s)]))
                 decisions[int(s)] += 1
+            seat_trackers = ([vec.tracker(int(e), int(s)) for e, s in zip(envs, seats)]
+                             if agent.needs_trackers else None)
             choices = agent.act(rows, rows[:, -size:], np.array(seeds, dtype=np.uint64),
-                                games=games_list if agent.needs_games else None)
+                                games=games_list if agent.needs_games else None, trackers=seat_trackers)
             buffers["actions"][rows_idx] = np.asarray(choices, dtype=np.int32)
         vec.step()
         collect()
@@ -422,7 +266,6 @@ def play_schedule(
     suite: Any = None,
     scenarios: Sequence[Any] | None = None,
     turn_limit: int | None = None,
-    backend: str = "auto",
 ) -> None:
     """Play ``games`` (ScheduledGame) with ``lineup`` (resolved agents, slot order).
 
@@ -446,16 +289,6 @@ def play_schedule(
     for scheduled in games:
         if max(scheduled.seats) >= len(agents):
             raise ValueError(f"{scheduled.game_id}: a seat's slot has no agent (fill missing?)")
-    if backend == "auto":
-        backend = "stepper" if any(a.needs_trackers for a in agents) else "vecenv"
     maps = _Maps(table)
     _check_games(games, table, maps, dims)
-    if backend == "stepper":
-        _play_stepper(agents, list(games), table, maps, num_envs=int(num_envs), on_game=on_game)
-    elif backend == "vecenv":
-        if any(a.needs_trackers for a in agents):
-            raise ValueError("hand trackers need the stepper backend")
-        _play_vecenv(agents, list(games), table, maps, dims, num_envs=num_envs, threads=threads,
-                     on_game=on_game)
-    else:
-        raise ValueError(f"backend must be auto, vecenv or stepper, not {backend!r}")
+    _play_vecenv(agents, list(games), table, maps, dims, num_envs=num_envs, threads=threads, on_game=on_game)

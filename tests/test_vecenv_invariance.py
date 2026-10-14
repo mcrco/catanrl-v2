@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import cppanatron as cpp
 import numpy as np
-import pytest
 from eval_standins import Suite, agent, schedule
+from reference_stepper import play_reference
 
 from catanrl.envs.puffer import plan_env
 from catanrl.eval.harness import play_schedule
@@ -55,17 +55,14 @@ def test_env_does_not_depend_on_num_envs():
         assert np.array_equal(a["num_players"], b["num_players"][:8])
 
 
-@pytest.mark.skipif(not hasattr(cpp.VecEnv, "start_games"), reason="needs engine E1")
 def test_schedule_mode_reproduces_a_scheduled_game():
-    """A bots-only game started in schedule mode ends exactly like the same
-    ScheduledGame stepped in Python (engine F, engine R stream)."""
+    """Bots-only games started in schedule mode end exactly like the same ScheduledGames
+    stepped in Python (engine F, a bit-exact copy of the engine's R stream)."""
     suite = Suite(({"game": "base-3p"},), turn_limit=300)
     games = schedule(suite, 3, boards=2)
-    lineup = [agent("F"), agent("R"), agent("R")]
-    rows = {}
-    for backend in ("vecenv", "stepper"):
-        found = []
-        play_schedule(lineup, games, suite=suite, on_game=found.append, backend=backend, num_envs=3, threads=2)
-        rows[backend] = sorted(found, key=lambda r: r["game_id"])
-    assert rows["vecenv"] == rows["stepper"]
-    assert any(not r["truncated"] for r in rows["stepper"])
+    lineup = lambda: [agent("F"), agent("R"), agent("R")]
+    found = []
+    play_schedule(lineup(), games, suite=suite, on_game=found.append, num_envs=3, threads=2)
+    reference = play_reference(lineup(), games, suite=suite)
+    assert sorted(found, key=lambda r: r["game_id"]) == reference
+    assert any(not r["truncated"] for r in reference)
