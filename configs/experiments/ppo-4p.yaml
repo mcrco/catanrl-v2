@@ -1,0 +1,150 @@
+# Four-player PPO on BASE with the recipe that replicated v1's graph2 in 2p
+# (puffer-graph2): graph-s with one shared trunk, Muon with a cosine LR,
+# prioritized segments, pure self-play (all four seats learn), at the fair
+# `private` level. The 2p run is matched per DECISION, not per agent step: in
+# 4p one row in four acts, so an epoch keeps 2p's decisions and the budget is
+# v1's 500M two-row agent steps in decisions (250M), i.e. 1B four-row agent
+# steps over the same ~3800-epoch cosine.
+#
+# Batch shape: 1024 games x 4 rows = 4096 rows x 64 steps = 262,144 agent steps
+# = 65,536 decisions per epoch (2p: 66,048); 32768-row minibatches = 8192
+# decisions per optimizer step, as 2p's 16384 rows at half acting, so 16
+# optimizer steps per epoch; each as 8 accumulated 4096-row micro-batches
+# (2p: 4 of 4096 rows) so the run fits the 8 GB card alone; cosine T_max =
+# 1e9 // 262,144 = 3814 epochs. Every decision and its reason is in meta.notes.
+name: ppo-4p
+seed: 42
+env:
+  scenarios: [{game: base-4p, turn_limit: 1000, maps: 4096}]
+  num_envs: 1024
+obs: {level: private}           # the only fair level in 4p; the shared trunk reads it too (notes 3)
+model: {preset: graph-s, args: {shared: true}}
+train:
+  algo: ppo
+  total_timesteps: 1_000_000_000  # agent steps, all four rows: 250M decisions, v1's 500M 2p agent steps (notes 6)
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 0.999                  # per decision (notes 8)
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0                  # puffer-graph2's acting-row balance; the per-seat loss is a mean over seats (notes 4)
+  vf_clip_coef: 0.2             # not read: the per-seat value loss replaces the clipped MSE
+  ent_coef: 0.005
+  max_grad_norm: 4.0            # 8 accumulated micro-batches sum to 2x puffer-graph2's gradient (notes 5)
+  bptt_horizon: 64
+  minibatch_size: 32768         # rows: 8192 decisions per optimizer step, as puffer-graph2
+  max_minibatch_size: 4096      # rows: about 1210 acting; about 5 GiB peak, 8192 would be about 6.8 (notes 5)
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+eval:
+  # slot 0's score share against three F (a win 1, a truncation 1/4 per seat): 0.25 is parity
+  select: {suite: select-4p, lineup: ["POLICY:ckpt=${self}", F, F, F], every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", F, F, F]}
+    # two copies against two F, adjacent in seat order (the team's score is slot 0 + slot 1)
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${run}@best", F, F]}
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", R, R, R]}
+meta:
+  recipe: puffer-graph2
+  v1_budget: {agent_steps_2p: 500_000_000, decisions: 250_000_000}
+  notes: |
+    Decisions, and why:
+    1. Recipe. Everything not listed below is puffer-graph2's, for its reasons (its meta.notes):
+       graph-s with one shared trunk (541,540 parameters, as in 2p: the graph network is
+       dims-agnostic), Muon at 5e-3 with a cosine to 0.1x, momentum 0.95, gamma 0.999, GAE 0.95,
+       2 update epochs, PPO clip 0.2, entropy 0.005, bptt 64, segment priorities 0.8 with beta
+       from 0.2, V-trace clips 1.0, fp32, 4096 pre-generated BASE boards, seed 42. Pure self-play:
+       no `seats`, so all four seats are learners and every game step is one learner decision.
+    2. Game and turn limit. base-4p: BASE under the standard rules (10 VP, discard limit 7).
+       base-4p sets no turn limit and the scenario default is 500; training uses 1000, as
+       puffer-graph2. Random legal play in 4p (measured, 256 games, a long window): 335 turns and
+       464 decisions per game on average, 10% truncated at 500 turns, none at 1000. A truncation
+       pays every seat 0, so it only wastes early games. The suites keep their 500.
+    3. Information level: private, actor and critic (critic_level null; one shared trunk reads
+       one level). In 4p `public` is an oracle (steals between two other seats are hidden, so
+       exact hands are not public knowledge) and there is no fair public level; `full` is an
+       oracle too. A private POLICY is fair as is, so no BELIEF rows are needed.
+    4. vf_coef 2.0. In 2p, v1's means counted waiting rows (half of all rows, no policy
+       gradient), which halved its policy and entropy terms; puffer-graph2's vf_coef 2.0 over
+       acting rows restores v1's balance. Counting the same way in 4p (three waiting rows in
+       four) would give 4.0, but that dilution was an artifact of v1's bookkeeping, not a choice,
+       and it would change with the player count. v2's losses are over acting rows: the policy
+       and entropy terms are means over decisions, and the value term is the mean BCE over every
+       (acting row, seat slot) pair, 4 slots here and 2 in 2p, so its scale does not grow with
+       the seat count (per-slot BCE floors: H(0.25) = 0.56 nats at 4p parity, H(0.5) = 0.69 in
+       2p). So 2.0 keeps puffer-graph2's per-decision value/policy balance, the one that matched
+       v1's curve. Nothing found argues for 4.0.
+    5. Micro-batches, memory and max_grad_norm 4.0. The optimizer step is puffer-graph2's in
+       decisions: 32768 rows x 1/4 acting = 8192 decisions (2p: 16384 x 1/2), 16 steps per epoch.
+       Memory (8 GB RTX 2070 Super, alone):
+       - rollout: rows x horizon x (obs + 8) x 4 B; the base-4p private row is 3202 floats
+         (2p: 2564), so 4096 x 64 x 3210 x 4 = 3.14 GiB (2p: 2064 x 64 x 2572 x 4 = 1.27 GiB);
+       - training: puffer-graph2's peak was 4.42 GiB allocated at epoch 1040 (it creeps: 3.63 at
+         epoch 1), i.e. 3.15 GiB above its rollout, for 4096-row micro-batches of about 2250
+         acting rows (about 2490 in an epoch's largest, under prioritized sampling). Autograd
+         saves 1.21 MiB per acting row in 2p and 1.24 MiB in 4p (graph-s, counted on CPU).
+         A 4096-row 4p micro-batch holds about 1210 acting rows (1410 in an epoch's largest),
+         so training needs about 1.8 GiB: about 5.0 GiB allocated, about 6 GB on the card.
+       - 8192-row micro-batches (4 per step: exactly puffer-graph2's arithmetic, max_grad_norm
+         2.0) hold about 2420 acting rows (2700 at the max): about 3.5 GiB of training, 6.6-6.9
+         GiB allocated plus about 0.5 GiB of CUDA context. Too close to 8 GB for a 10-hour
+         unattended run, and max_minibatch_size is hashed, so an OOM could not resume.
+       PuffeRL does not divide the loss by the accumulation count, so 8 summed micro-batch
+       means are twice puffer-graph2's 4: max_grad_norm 4.0 clips at the same per-decision
+       gradient as its 2.0 (and v1's 1.0). Muon orthogonalizes matrix updates (536,288
+       parameters), which ignore the scale; only biases and LayerNorms (5,252) step twice as far
+       as in puffer-graph2. num_envs 1024 rather than 1032: with 1032, PuffeRL would run
+       int(2 x 264,192 / 4096) = 129 micro-batches and carry the last one's gradient into the
+       next epoch's first step; 1024 gives exactly 128 = 16 x 8.
+    6. Budget. v1 trained 2p for 500M agent steps = 250M decisions. 1e9 agent steps here are
+       250M decisions; PuffeRL's cosine T_max = 1e9 // 262,144 = 3814 epochs and the run stops
+       after 3815 (1,000,079,360 agent steps, 250,019,840 decisions), against 3785/3786 in 2p.
+    7. Wall time, estimated (the GPU was busy): about 10 h (9-11.5 h). The VecEnv (CPU, 4
+       threads, random legal actions, 1032 games) steps 2p in 4.8 ms and 4p in 6.3 ms; waiting
+       rows are written once, so per step only the acting row is encoded. puffer-graph2 spends
+       1.53 s collecting and 5.9 s training per epoch. Here collecting moves 2.5x the
+       observation bytes to the GPU per step (52 MB): about 2 s. Training sees the same
+       decisions (about 8% more acting rows under prioritized sampling; a 4p row costs a 2p
+       row's forward and backward on CPU) in twice as many micro-batches: about 7 s. Select
+       evals (800 games; native F is cheap: 100 four-F games took under 4 s on 4 CPU threads,
+       start-up included) add well under 0.5 s per epoch. About 9.5 s per epoch: 6.9k
+       decisions/s, 27k agent steps/s. The full budget fits well inside 16 h.
+    8. gamma 0.999 per decision (every seat's row discounts at every game step), kept. How much
+       a game is discounted depends on its decisions: random play gives about the same in 4p
+       (464 per game, 10 VP) as in 2p (480, 15 VP), and trained 2p games take about 186
+       (puffer-graph2 at epoch 1040: 0.999^186 = 0.83). environment/decisions shows 4p's; if
+       trained 4p games run much longer (0.999^300 = 0.74), gamma 0.9995 would restore 2p's
+       horizon. That would be a separate experiment.
+    9. Critic calibration. Every epoch metrics.jsonl logs critic/value_sum_4p (mean over rollout
+       decisions of the four seats' predicted win probabilities, summed), critic/target_sum_4p
+       (the same sum of the lambda-return targets trained on) and critic/sum_gap_4p (predicted
+       minus target sum on the same decisions; 0 when calibrated). The four sigmoids are
+       independent, so their sum is a real check; with gamma < 1 and truncations paying nobody
+       the targets sum below 1, so a calibrated critic sits at target_sum_4p, not exactly 1.
+       puffer-graph2 at epoch 1040: 0.979 / 0.981 / +0.0007.
+    10. Evals. Select: select-4p (seed 124, 200 boards x 4 seat rotations = 800 games, turn
+        limit 500, strict) every 50 epochs against three native F; the metric is slot 0's score
+        share (score_rate: a win 1, a truncation 1/4 to each seat), 0.25 at parity, Wilson
+        about +-3 points. Finals on heldout-4p (seed 68, 1000 boards x 4 rotations = 4000
+        games): POLICY vs F,F,F (the headline); two copies vs two F, adjacent in seat order
+        (the team's score is slot 0 + slot 1; alternating P,F,P,F would play each seating
+        twice, as rotations 0/2 and 1/3 coincide); POLICY vs R,R,R (a sanity floor, near 1).
+        eval.final is not hashed for a train run, so search rows can be added later, against
+        the raw policy as with puffer-graph2, e.g. {suite: {name: heldout-4p, boards: 125},
+        lineup: ["MCTS:ckpt=${run}@best:sims=1024:dets=1", "POLICY:ckpt=${run}@best",
+        "POLICY:ckpt=${run}@best", "POLICY:ckpt=${run}@best"]}.
+    Launch alone, after puffer-graph2 has finished, with
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (as puffer-graph2).
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

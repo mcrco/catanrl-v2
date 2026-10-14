@@ -50,3 +50,58 @@ def test_puffer_graph2_keeps_v1_shape():
         assert (config["vf_coef"], config["max_grad_norm"]) == (2.0, 2.0)
         model = build_policy_model(cfg, dims_for([load_game("base-2p")]))
         assert sum(p.numel() for p in model.parameters()) == 541_540
+
+
+def test_ppo_4p_is_puffer_graph2_per_decision():
+    """ppo-4p is puffer-graph2's recipe at four rows per game, matched per decision (one row in
+    four acts): about 66k decisions per epoch, 8192 decisions per optimizer step and 16 steps
+    per epoch with no micro-batch left over, v1's 250M decisions over the same ~3800-epoch
+    cosine, a clip scaled with the accumulated micro-batches, a private shared trunk, pure
+    self-play, and a rollout buffer that leaves the 8 GB card room to train."""
+    from catanrl.envs.encoding import dims_for, row_layout, row_size
+    from catanrl.games import load_game
+    from catanrl.train.puffer import build_policy_model, puffer_config, rollout_bytes
+
+    ref = load_plan("puffer-graph2").variant("full").config
+    plan = load_plan("ppo-4p")
+    assert [v.name for v in plan.variants] == ["main"]
+    cfg = plan.variants[0].config
+    (scenario,) = cfg["env"]["scenarios"]
+    assert scenario["game"]["name"] == "base-4p" and not scenario.get("seats")  # every seat learns
+    assert scenario["turn_limit"] == 1000 and scenario["maps"] == 4096
+    assert cfg["obs"] == {"level": "private", "critic_level": None} and cfg["model"]["args"]["shared"]
+
+    same = ("optimizer", "learning_rate", "lr_schedule", "anneal_lr", "min_lr_ratio", "adam_beta1", "gamma",
+            "gae_lambda", "update_epochs", "clip_coef", "vf_coef", "ent_coef", "bptt_horizon", "prio_alpha",
+            "prio_beta0", "vtrace_rho_clip", "vtrace_c_clip", "precision", "amp", "checkpoint_interval")
+    assert {k: cfg["train"][k] for k in same} == {k: ref["train"][k] for k in same}
+
+    num_envs, ref_envs = cfg["env"]["num_envs"], ref["env"]["num_envs"]
+    config = puffer_config(cfg["train"], cfg["runtime"], rows=4 * num_envs, seed=0, data_dir=".")
+    ref_config = puffer_config(ref["train"], ref["runtime"], rows=2 * ref_envs, seed=0, data_dir=".")
+    horizon = config["bptt_horizon"]
+    assert config["batch_size"] == 262_144 and num_envs * horizon == 65_536   # decisions per epoch
+    assert abs(num_envs / ref_envs - 1) < 0.01                                   # 2p: 66,048
+    assert config["total_timesteps"] // 4 == ref_config["total_timesteps"] // 2 == 250_000_000
+    assert config["total_timesteps"] // config["batch_size"] == 3814           # cosine T_max (2p: 3785)
+
+    def steps(c, players):
+        micro = c["update_epochs"] * c["batch_size"] // c["max_minibatch_size"]
+        accumulate = c["minibatch_size"] // c["max_minibatch_size"]
+        return micro, accumulate, c["minibatch_size"] // players                # decisions per step
+
+    micro, accumulate, decisions = steps(config, 4)
+    ref_micro, ref_accumulate, ref_decisions = steps(ref_config, 2)
+    assert config["update_epochs"] * config["batch_size"] % config["max_minibatch_size"] == 0
+    assert micro % accumulate == 0 and micro // accumulate == ref_micro // ref_accumulate == 16
+    assert decisions == ref_decisions == 8192
+    # PuffeRL sums the micro-batch means: twice the micro-batches, twice the clip
+    assert config["max_grad_norm"] / accumulate == ref_config["max_grad_norm"] / ref_accumulate
+
+    dims = dims_for([load_game("base-4p")])
+    assert sum(p.numel() for p in build_policy_model(cfg, dims).parameters()) == 541_540
+    obs = row_size(row_layout(dims, "private"))
+    assert obs == 3202 and rollout_bytes(4 * num_envs, horizon, obs) < 3.2 * 2**30
+
+    assert cfg["eval"]["select"] == {"suite": "select-4p", "lineup": ["POLICY:ckpt=${self}", "F", "F", "F"],
+                                     "every": 50, "metric": "score_rate"}
