@@ -1,10 +1,10 @@
 """Our agents as catanatron-server seats and TUI players.
 
-:func:`run_bot` takes a seat in a catanatron-server room (protocol 3) with a
+:func:`run_bot` takes a seat in a catanatron-server room (protocol 4) with a
 :class:`~catanrl.bridge.agent.ViewAgent` and plays it to the end, through
 ``catanatron.server.client.GameClient``, which does the protocol's fairness
-work: it commits to and reveals its seed (signing the commitments' digest,
-through restart rounds), signs every move bound to those commitments, checks
+work: it commits to and reveals its seed (signing the commitments' digest),
+signs every move bound to those commitments, checks
 every message's signature and hash chain and the server's receipts, saves
 the transcript and verifies it. Every server message also feeds the
 agent (:meth:`ViewAgent.observe`), so the room's supply and every step's hand
