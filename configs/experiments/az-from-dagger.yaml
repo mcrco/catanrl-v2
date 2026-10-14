@@ -1,21 +1,22 @@
 # AlphaZero from an imitation warm start: DAgger from F, then self-play with
 # determinized search (dets: 1, a world sampled from each seat's hand
 # tracker, so the network never searches hidden cards it could not know).
+# The az stage keeps AlphaZero's default evals (config.alphazero_evals, DESIGN
+# 6.2): head to head against the DAgger network it starts from, ${init}.
 name: az-from-dagger
 seed: 42
 env: {scenarios: [{game: base-2p}], num_envs: 128}
 obs: {level: private}
 model: {preset: graph-s}
 train: {algo: imitation, iterations: 24, steps_per_iteration: 256, dataset_cap: 300_000, checkpoint_interval: 8}
-eval:
-  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 8}
-  final:
-    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
 stages:
-  dagger: {}
+  dagger:
+    eval:
+      select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 8}
+      final:
+        - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
   az:
     init_from: {ckpt: "${stages.dagger}@best", parts: [actor, critic]}
     env.num_envs: 512
     train!: {algo: alphazero, iterations: 300, dets: 1, learning_rate: 5.0e-5}
-    eval.select.every: 10
 runtime: {device: cuda, threads: 12, time_limit_hours: 8}

@@ -14,7 +14,13 @@ string), and ``${...}`` interpolates:
 * ``${params.NAME}``: a ``params`` value (every ``params`` key must be used);
 * ``${run}``: this variant's ref; ``${stages.NAME}``: an earlier stage's ref
   in the same sweep cell; ``${experiment}``;
-* ``${self}``: the checkpoint under select (only inside ``eval.select``).
+* ``${self}``: the checkpoint under select (only inside ``eval.select``);
+* ``${init}``: the checkpoint ``init_from`` loads the actor from, as bound
+  when the run is created (only inside ``eval``; an error without one).
+
+An AlphaZero variant that starts from a network (``init_from`` with the
+actor) gets :func:`alphazero_evals` as a layer between the defaults and the
+body: head to head against that network.
 
 ``config_hash`` covers everything but ``meta``, ``runtime`` and, for
 ``kind: train``, ``eval.final``. Refs are hashed as written; they are bound
@@ -366,6 +372,59 @@ def _resolve_scenario(entry: Any) -> dict:
     return entry
 
 
+def init_parts(init: Mapping[str, Any] | None) -> list[str]:
+    """The parts ``init_from`` loads (none without it)."""
+    if not init:
+        return []
+    ckpt = init.get("ckpt")
+    return list(init.get("parts") or (ckpt.keys() if isinstance(ckpt, Mapping) else PARTS))
+
+
+def alphazero_evals(level: str) -> dict:
+    """AlphaZero's default ``eval`` for a variant that starts from a network: head to
+    head against that network, ``${init}``. Self-play drifts (v1's runs beat their
+    previous iteration while flat or worse against F), and against F a strong policy
+    is near its ceiling.
+
+    Every network plays as its fair raw policy: POLICY at a ``private`` actor or a
+    ``public`` one (fair in these 2p suites), else BELIEF. Select scores each
+    checkpoint by slot 0's score rate against the start on select-2p. e0 is the
+    start's weights, so it scores exactly 50% as POLICY (mirrored games; as BELIEF,
+    50% up to world sampling) and is ``best`` first; ``best`` then moves only to a
+    checkpoint above every earlier one, so above 50%. The finals, on heldout-2p:
+    the run's raw policy against the start's; its search (the training search's
+    budget and root, fair with ``dets=1``) against the start's raw policy; the
+    start's own search there (paired with the previous: what training added to
+    search); and the raw policy against F, kept as a secondary number.
+    """
+    def raw(ckpt: str) -> str:
+        return f"POLICY:ckpt={ckpt}" if level in ("private", "public") else f"BELIEF:ckpt={ckpt}:worlds=16"
+
+    search = "sims=${train.sims}:dets=1:root=${train.root}:c_puct=${train.c_puct}:gumbel_m=${train.gumbel_m}"
+    searched = {"name": "heldout-2p", "boards": 500}
+    return {
+        "select": {"suite": "select-2p", "lineup": [raw("${self}"), raw("${init}")], "every": 1,
+                   "metric": "score_rate"},
+        "final": [
+            {"suite": "heldout-2p", "lineup": [raw("${run}@best"), raw("${init}")]},
+            {"suite": searched, "lineup": [f"MCTS:ckpt=${{run}}@best:{search}", raw("${init}")]},
+            {"suite": searched, "lineup": [f"MCTS:ckpt=${{init}}:{search}", raw("${init}")]},
+            {"suite": "heldout-2p", "lineup": [raw("${run}@best"), "F"]},
+        ],
+    }
+
+
+def _algo_layer(merged: Mapping[str, Any]) -> dict:
+    """What the variant's algo adds between the defaults and the body (DESIGN 6.2):
+    :func:`alphazero_evals` for AlphaZero from a network; nothing otherwise."""
+    train = merged.get("train") or {}
+    if merged.get("kind", "train") != "train" or train.get("algo") != "alphazero":
+        return {}
+    if "actor" not in init_parts(merged.get("init_from")):
+        return {}  # from scratch: there is no start to play
+    return {"eval": alphazero_evals((merged.get("obs") or {}).get("level") or "private")}
+
+
 def migrate(cfg: dict, *, from_schema: int) -> dict:
     """A stored config of ``from_schema`` with every later key at its legacy value."""
     cfg = copy.deepcopy(cfg)
@@ -406,6 +465,13 @@ def _interpolate(value: Any, scope: Mapping[str, Any], path: str, used: set[str]
             if not path.startswith("eval.select"):
                 raise ConfigError(f"{path}: ${{self}} is only allowed in eval.select")
             return "${self}"
+        if name == "init":  # bound when the run is created, like init_from (runs.bind_refs)
+            if not path.startswith(("eval.select", "eval.final")):
+                raise ConfigError(f"{path}: ${{init}} is only allowed in eval.select and eval.final")
+            if "actor" not in init_parts(scope["__config__"].get("init_from")):
+                raise ConfigError(f"{path}: ${{init}} is the checkpoint init_from loads the actor from, "
+                                  "and this variant has none")
+            return "${init}"
         if name.startswith("params."):
             used.add(name[len("params."):])
         if name.startswith("stages."):
@@ -563,7 +629,7 @@ def config_diff(a: Mapping[str, Any], b: Mapping[str, Any]) -> list[str]:
 def resolve(raw: Mapping[str, Any], *, experiment: str, variant: str,
             stages: Mapping[str, str] | None = None) -> dict:
     """One variant's config from its merged layers: checked, coerced, completed, interpolated."""
-    merged = merge(defaults(), raw)
+    merged = merge(defaults(), _algo_layer(merge(defaults(), raw)), raw)
     merged.pop("name", None)
     cfg = _check(merged, defaults())
     cfg["train"] = _check_train(cfg["train"])

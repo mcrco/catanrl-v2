@@ -56,7 +56,7 @@ def test_tiny_end_to_end(name, monkeypatch):
         catanrl.evaluate(["POLICY:tiny/2p@e1", "F"], {"name": "heldout-2p", "boards": 1})
         from catanrl.runner import summarize
 
-        assert "| players=2p | 0:POLICY | heldout-2p |" in summarize("tiny").read_text()
+        assert "| players=2p | 0:POLICY vs F | heldout-2p |" in summarize("tiny").read_text()
         assert summarize("tiny").read_text().rstrip().endswith("| 1 |")
 
     monkeypatch.setattr(results, "play_schedule", no_play)

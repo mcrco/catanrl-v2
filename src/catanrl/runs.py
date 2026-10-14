@@ -46,6 +46,7 @@ from catanrl.config import (
     Variant,
     config_diff,
     config_hash,
+    init_parts,
     merge,
     migrate,
     parse_overrides,
@@ -229,6 +230,11 @@ class Run:
 
         return [EvalRecord.load(p) for p in sorted((self.path / "evals").glob(f"{suite or '*'}/*.json"))]
 
+    @property
+    def init_ref(self) -> str | None:
+        """The checkpoint ``init_from`` loaded the actor from, as pinned at creation: ``${init}``."""
+        return ((self.manifest.get("resolved") or {}).get("init_from") or {}).get("actor")
+
     def bindings(self) -> dict[str, str]:
         """Specs naming other runs, as pinned (at creation, or when a later final eval first ran)."""
         out = dict((self.manifest.get("resolved") or {}).get("specs") or {})
@@ -360,7 +366,7 @@ def fork(ref: str, *, as_: str, overrides: Sequence[str] = ()) -> Variant:
     The parent's trainer state is copied into the fork now, under the parent's
     lock, so a later relaunch of the parent cannot invalidate the fork. Refs to
     the parent in the parent's config (``${run}`` in eval.final) become refs to
-    the fork."""
+    the fork; ``${init}`` stays the parent's start (pinned), not the fork's."""
     run_ref, which, _ = parse_ref(ref)
     parent = load_experiment(run_ref)
     experiment, _, name = as_.rpartition("/")
@@ -380,6 +386,7 @@ def fork(ref: str, *, as_: str, overrides: Sequence[str] = ()) -> Variant:
                            f"{'nothing' if state is None else 'e' + str(state['epoch'])}, not e{target.epoch}: "
                            "a fork continues the latest commit")
         raw = merge(_rebase(parent.config, parent.ref, f"{experiment}/{name}"), parse_overrides(overrides))
+        raw["eval"] = expand_init(raw["eval"], parent.init_ref)  # a continuation plays the parent's start
         raw["init_from"] = {"ckpt": str(target), "parts": ["actor", "critic"], "restore": "weights+optimizer"}
         cfg = resolve(raw, experiment=experiment, variant=name)
         variant = Variant(experiment=experiment, name=name, stage=None, labels={"fork": parent.ref}, config=cfg,
@@ -421,8 +428,9 @@ def _missing_selects(run: Run) -> list[CheckpointRef]:
     from catanrl.eval.results import find
 
     every = int(select.get("every", 1))
+    lineup = expand_init(select["lineup"], run.init_ref)
     return [ref for ref in run.checkpoints() if ref.epoch % every == 0
-            and find([str(s).replace("${self}", str(ref)) for s in select["lineup"]], select["suite"],
+            and find([str(s).replace("${self}", str(ref)) for s in lineup], select["suite"],
                      fill=select.get("fill")) is None]
 
 
@@ -445,6 +453,20 @@ def check_runs(pattern: str = "*") -> list[dict]:
 # ---------------------------------------------------------------- binding refs
 
 
+def expand_init(value: Any, init: str | None) -> Any:
+    """``value`` (a spec, a lineup, an eval section) with ``${init}`` as ``init``, the pinned
+    checkpoint a run's actor started from (:attr:`Run.init_ref`)."""
+    if isinstance(value, Mapping):
+        return {k: expand_init(v, init) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand_init(v, init) for v in value]
+    if not isinstance(value, str) or "${init}" not in value:
+        return value
+    if init is None:
+        raise RunError(f"{value}: ${{init}} is the checkpoint init_from loads the actor from, and there is none")
+    return value.replace("${init}", init)
+
+
 def bind_spec(spec: str, own: str | None) -> str | None:
     """The canonical form of a lineup spec naming another run's checkpoint, or None
     when it names no run (a bot, ``${...}``) or the run ``own`` (bound at eval time)."""
@@ -458,15 +480,16 @@ def bind_spec(spec: str, own: str | None) -> str | None:
 
 
 def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
-    """Refs to other runs, pinned once at creation: ``init_from`` per part and eval.final specs."""
+    """Refs to other runs, pinned once at creation: ``init_from`` per part and eval.final
+    specs (``${init}`` as the actor's ``init_from``, keyed as written)."""
     out: dict[str, Any] = {}
     init = cfg.get("init_from")
     if init:
         ckpt = init["ckpt"]
-        parts = list(init.get("parts") or (ckpt.keys() if isinstance(ckpt, Mapping) else ("actor", "critic")))
         out["init_from"] = {part: str(load_checkpoint(ckpt[part] if isinstance(ckpt, Mapping) else ckpt).ref)
-                            for part in parts}
-    specs = {spec: bind_spec(spec, own) for entry in (cfg.get("eval") or {}).get("final") or []
+                            for part in init_parts(init)}
+    start = (out.get("init_from") or {}).get("actor")
+    specs = {spec: bind_spec(expand_init(spec, start), own) for entry in (cfg.get("eval") or {}).get("final") or []
              for spec in entry["lineup"]}
     out["specs"] = {spec: bound for spec, bound in specs.items() if bound is not None}
     return out
@@ -478,11 +501,11 @@ def bound_lineup(run: Run, lineup: Sequence[str]) -> list[str]:
     out = []
     for spec in lineup:
         if spec not in known:
-            bound = bind_spec(spec, run.ref)
+            bound = bind_spec(expand_init(spec, run.init_ref), run.ref)
             if bound is not None:
                 canon.append_jsonl(run.path / "bindings.jsonl", {"spec": spec, "bound": bound, "time": time.time()})
                 known[spec] = bound
-        out.append(known.get(spec, spec))
+        out.append(known.get(spec) or expand_init(spec, run.init_ref))
     return out
 
 
@@ -636,7 +659,7 @@ class RunWriter(Run):
 
     @property
     def variant_for_training(self) -> Variant:
-        """The variant with ``init_from`` refs as bound at creation."""
+        """The variant with ``init_from`` refs as bound at creation (and ``${init}`` as the actor's)."""
         return self.bound_variant
 
     def record_runtime(self, info: Mapping[str, Any]) -> None:
@@ -749,4 +772,5 @@ def _bound_variant(variant: Variant, resolved: Mapping[str, Any]) -> Variant:
         return variant
     cfg = dict(variant.config)
     cfg["init_from"] = {**init, "ckpt": dict(resolved["init_from"]), "parts": list(resolved["init_from"])}
+    cfg["eval"] = expand_init(cfg["eval"], resolved["init_from"].get("actor"))  # the trainer's select lineup
     return dataclasses.replace(variant, config=cfg)

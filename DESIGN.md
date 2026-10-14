@@ -350,6 +350,33 @@ counts takes `fill: F` for the empty seats.
   target.
 * `${self}` and `${run}@best` resolve when the eval runs, and are pinned in
   its record.
+* `${init}` is the checkpoint `init_from` loads the actor from, pinned when
+  the variant is created like `init_from` itself. It is allowed only in eval
+  lineups, and a variant without one is an error. (`${run}@init` is this
+  run's e0: the same actor weights, but recorded under this run.)
+
+**AlphaZero evals.** Self-play drifts: v1's AlphaZero runs beat their
+previous iteration (56–60%) while flat or worse against F, and against F a
+strong policy is near its ceiling. So an AlphaZero variant that starts from a
+network (`init_from` with the actor) is measured against that network by
+default: `config.alphazero_evals`, a layer between the defaults and the body,
+so an experiment's own `eval` keys override it. Each network plays as its fair
+raw policy, `RAW`: `POLICY` at a `private` or `public` actor (these suites are
+2p), else `BELIEF:…:worlds=16`.
+
+| Eval | Lineup | Suite |
+|---|---|---|
+| select, every checkpoint, slot 0's score rate | `RAW ${self}` vs `RAW ${init}` | `select-2p` |
+| final | `RAW ${run}@best` vs `RAW ${init}` | `heldout-2p` |
+| final | `MCTS:ckpt=${run}@best:sims=${train.sims}:dets=1:root=${train.root}:c_puct=…:gumbel_m=…` vs `RAW ${init}` | `heldout-2p`, 500 boards |
+| final | the same search on `${init}` vs `RAW ${init}`, paired with the row above | `heldout-2p`, 500 boards |
+| final | `RAW ${run}@best` vs F, a secondary number | `heldout-2p` |
+
+`best` needs no rule of its own. e0 holds the start's weights, so it scores
+exactly 50% as `POLICY` (the two rotations of a board are mirror games; as
+`BELIEF`, 50% up to world sampling) and is `best` first. `best` then moves
+only to a checkpoint above every earlier one, so above 50%. A run from
+scratch has no start and keeps the global defaults.
 
 ### 6.3 Checkpoints
 
@@ -411,7 +438,7 @@ resumes it, and `catanrl finish REF` ends it.
 **Budgets never grow in place.** `catanrl fork REF --as V+more --set …` makes
 a new variant with `init_from: {ckpt: REF@latest, restore:
 weights+optimizer}`. With the constant-LR default this is a true
-continuation.
+continuation, and `${init}` stays the parent's start.
 
 **Warm starts** take `init_from: {ckpt: REF, parts: [actor, critic]}`, or
 one ref per part (v1's hybrid). Each part loads strictly through the checks

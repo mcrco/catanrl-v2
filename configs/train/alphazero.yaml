@@ -1,6 +1,8 @@
 # AlphaZero / expert iteration (catanrl.train.alphazero): self-play with
 # batched SearchPool searches, a replay buffer and Adam(W) on policy
 # cross-entropy plus per-seat value BCE. Exactly catanrl's ALPHAZERO_KEYS.
+# Evals: a variant that starts from a network (init_from) is evaluated head to
+# head against it, ${init}, unless it sets its own (catanrl.config.alphazero_evals).
 algo: alphazero
 iterations: 100                # self-play + learning cycles (an epoch each; checkpoints count them)
 steps_per_iteration: 32        # VecEnv steps of self-play per iteration (one search per env per step)

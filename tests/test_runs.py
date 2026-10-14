@@ -239,6 +239,44 @@ def test_a_fork_evaluates_itself_not_its_parent():
     assert load_experiment("exp/p+more").manifest["resolved"]["specs"] == {}  # its own: bound at eval time
 
 
+def test_init_is_pinned_at_creation_and_kept_by_forks(monkeypatch):
+    from test_results import FakeHarness
+
+    from catanrl.eval import results
+    from catanrl.runner import final_evals
+
+    monkeypatch.setattr(results, "play_schedule", FakeHarness())
+    with RunWriter.open(make_variant("p"), argv=["t"]) as w:
+        commit(w, tiny(0), 0)
+        w.finish("time_limit")
+    start = str(load_experiment("exp/p").resolve("latest"))
+    suite = {"name": "heldout-2p", "boards": 1}
+    ev = {"select": {"suite": "select-2p", "lineup": ["POLICY:ckpt=${self}", "POLICY:ckpt=${init}"]},
+          "final": [{"suite": suite, "lineup": ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${init}"]}]}
+    child = make_variant("c", init_from={"ckpt": "exp/p@latest"}, eval=ev, runtime={"device": "cpu"})
+    with RunWriter.open(child, argv=["t"]) as w:
+        assert w.init_ref == start
+        assert w.variant_for_training.config["eval"]["select"]["lineup"] == [
+            "POLICY:ckpt=${self}", f"POLICY:ckpt={start}"]  # what the trainer's select plays
+        assert w.bindings()["POLICY:ckpt=${init}"].startswith(f"POLICY:ckpt={start}:")  # keyed as written
+        e0 = commit(w, tiny(1), 0)
+        assert w.pending_selects() == [e0]
+        w.set_alias("best", e0, record=record())
+        w.finish("time_limit")
+    with RunWriter.open(load_experiment("exp/p").variant(), argv=["t"]) as w:  # the start's run moves on
+        w.load_trainer_state()
+        commit(w, tiny(2), 1)
+        w.finish("time_limit")
+    assert str(load_experiment("exp/p").resolve("latest")) != start
+    played = final_evals(load_experiment("exp/c"), child)
+    assert played[0].data["refs"] == [str(e0), start]
+    more = runs.fork("exp/c", as_="c+more")  # a continuation still plays the parent's start
+    assert more.config["eval"]["select"]["lineup"][1] == f"POLICY:ckpt={start}"
+    assert more.config["eval"]["final"][0]["lineup"] == ["POLICY:ckpt=exp/c+more@best", f"POLICY:ckpt={start}"]
+    with pytest.raises(RunError, match="there is none"):
+        runs.expand_init("POLICY:ckpt=${init}", load_experiment("exp/p").init_ref)
+
+
 def test_a_kill_between_provenance_and_run_json_keeps_the_run_openable(monkeypatch):
     v = make_variant()
     real = canon.atomic_write_json

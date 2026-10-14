@@ -27,6 +27,7 @@ from catanrl.runs import (
     bind_spec,
     bound_lineup,
     check_stored,
+    expand_init,
     list_runs,
     load_experiment,
     runs_root,
@@ -95,7 +96,8 @@ def _missing_finals(run: Any, v: Variant) -> bool:
     known = run.bindings()
     for entry in v.config["eval"]["final"]:
         try:
-            lineup = [known.get(s) or bind_spec(s, run.ref) or s for s in entry["lineup"]]
+            specs = [(s, expand_init(s, run.init_ref)) for s in entry["lineup"]]
+            lineup = [known.get(s) or bind_spec(spec, run.ref) or spec for s, spec in specs]
             if find(lineup, entry["suite"], fill=entry.get("fill")) is None:
                 return True
         except (RuntimeError, ValueError):  # unresolvable now: the child run reports why
@@ -216,11 +218,12 @@ def summarize(experiment: str) -> Path:
         finals = []
         for i, entry in enumerate(run.config["eval"]["final"]):
             try:
-                record = find([known.get(s, s) for s in entry["lineup"]], entry["suite"], fill=entry.get("fill"))
+                record = find([known.get(s) or expand_init(s, run.init_ref) for s in entry["lineup"]], entry["suite"],
+                              fill=entry.get("fill"))
             except (RuntimeError, ValueError):
                 record = None
             if record is not None:
-                finals.append((i, entry["lineup"][0].split(":")[0], record))
+                finals.append((i, _lineup_label(entry["lineup"]), record))
         final = "; ".join(f"{key} {r.data['suite']} {r.summary['score_rate']:.3f}" for _, key, r in finals)
         best_text = f"e{best['epoch']} {best['metric'] or 0:.3f}" if best else "-"
         lines.append(f"| {run.manifest['variant']} | {run.status} | {ckpts[-1].epoch if ckpts else '-'} | "
@@ -238,3 +241,8 @@ def summarize(experiment: str) -> Path:
     path = runs_root() / experiment / "summary.md"
     canon.atomic_write_bytes(path, ("\n".join(lines) + "\n").encode())
     return path
+
+
+def _lineup_label(lineup: list[str]) -> str:
+    """``MCTS vs POLICY(init)``: each slot's key, marking the run's start."""
+    return " vs ".join(str(s).split(":")[0] + ("(init)" if "${init}" in str(s) else "") for s in lineup)

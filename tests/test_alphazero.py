@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -34,10 +36,10 @@ TRAIN = {**ALPHAZERO_KEYS, "iterations": 2, "steps_per_iteration": 24, "sims": 4
 ENV = {"scenarios": [{"game": "base-2p", "maps": 4, "turn_limit": 8}], "num_envs": 4}  # short games
 
 
-def variant(name="t", seed=3, eval=None, **train) -> Variant:
+def variant(name="t", seed=3, eval=None, init_from=None, **train) -> Variant:
     raw = {"seed": seed, "env": ENV, "obs": {"level": "private"}, "model": {"preset": "graph-tiny"},
            "train": {**TRAIN, **train}, "runtime": {"device": "cpu", "threads": 2, "determinism": "strict"},
-           **({"eval": eval} if eval else {})}
+           **({"eval": eval} if eval else {}), **({"init_from": init_from} if init_from else {})}
     cfg = resolve(raw, experiment="az", variant=name)
     return Variant("az", name, None, {}, cfg, config_hash(cfg))
 
@@ -176,6 +178,49 @@ def test_resume_restores_the_replay_buffer_and_counters(monkeypatch):
         assert torch.equal(restored["replay"][key], saved["replay"][key])
     final = torch.load(path / "trainer_state.pt", weights_only=False)
     assert final["epoch"] == 2 and final["decisions"] > saved["decisions"] and final["replay"]["added"] > saved["replay"]["added"]
+
+
+def test_a_warm_start_selects_against_its_start(monkeypatch):
+    """From a network, AlphaZero's default select plays each checkpoint against that network
+    (pinned when the run is created); e0, the start's weights, is best first, and best moves
+    only above every earlier checkpoint."""
+    from catanrl.train import select as select_module
+
+    run(variant("start"))
+    start = load_experiment("az/start").resolve("latest")
+    rates = {0: 0.5, 1: 0.45, 2: 0.55, 3: 0.52}
+    played = []
+
+    def fake_select_eval(select, ref, eval_runtime):
+        played.append(select_module.lineup_for(select, ref))
+        return SimpleNamespace(eval_id=f"x{ref.epoch}", summary={"score_rate": rates[ref.epoch]}), rates[ref.epoch]
+
+    monkeypatch.setattr(select_module, "select_eval", fake_select_eval)
+    warm = variant("warm", init_from={"ckpt": "az/start@latest"}, iterations=3)
+    assert warm.config["eval"]["select"]["lineup"] == ["POLICY:ckpt=${self}", "POLICY:ckpt=${init}"]
+    run(warm)
+    warm_run = load_experiment("az/warm")
+    ckpts = warm_run.checkpoints()
+    assert ckpts[0].weights_sha256 == start.weights_sha256
+    assert {tuple(lineup) for lineup in played} == {(f"POLICY:ckpt={c}", f"POLICY:ckpt={start}") for c in ckpts}
+    best = [row for row in canon.read_jsonl(warm_run.path / "aliases.jsonl") if row["name"] == "best"]
+    assert [(row["epoch"], row["metric"]) for row in best] == [(0, 0.5), (2, 0.55)]
+
+
+@pytest.mark.train
+def test_the_start_scores_half_against_itself():
+    """The real select eval: e0 against the start is a mirror (exactly 50%), and best is e0 or above 50%."""
+    run(variant("start"))
+    start = str(load_experiment("az/start").resolve("latest"))
+    run(variant("warm", init_from={"ckpt": "az/start@latest"},
+                eval={"select": {"suite": {"name": "select-2p", "boards": 2}}}))
+    warm_run = load_experiment("az/warm")
+    records = {r.data["refs"][0]: r for r in warm_run.evals("select-2p")}
+    assert sorted(records) == sorted(str(c) for c in warm_run.checkpoints())
+    assert all(r.data["refs"][1] == start and all(r.data["fair"]) for r in records.values())
+    assert records[str(warm_run.resolve(0))].summary["score_rate"] == 0.5
+    best = warm_run.aliases()["best"]
+    assert best["epoch"] == 0 or best["metric"] > 0.5
 
 
 @pytest.mark.train

@@ -83,7 +83,8 @@ v1's research maps onto config axes: architecture (`model.preset`),
 information levels (`obs.level`, `obs.critic_level`), belief averaging
 (`BELIEF:`), determinized search (`MCTS:…:dets=K:sims=N`), reward and γ
 (`train.*`), DAgger warm starts (`stages` + `init_from`), AlphaZero
-(`train.algo: alphazero`), and player-count and map generalization
+(`train.algo: alphazero`; from a network, its evals default to head to head
+against that network, `${init}`), and player-count and map generalization
 (`env.scenarios` mixtures with held-out maps). See `DESIGN.md` §3 and §6.
 
 ## Status
@@ -101,7 +102,9 @@ information levels (`obs.level`, `obs.critic_level`), belief averaging
 - **AlphaZero:** the loop is built, deterministic and checked end to end; a
   first run from a PPO network with 64/16-simulation Gumbel targets degraded
   the policy (no bug found: shallow-search targets cannot improve a strong
-  policy). Next attempt: targets from ≥ 1024 simulations.
+  policy). Next attempt: targets from ≥ 1024 simulations. A run from a
+  network is now judged head to head against that network, raw policy and
+  search, with vs F as a secondary number (DESIGN 6.2).
 - **Server:** protocol 4 with commit–reveal seeds, signed and hash-chained
   messages, signed moves, receipts and an independent verifier; hardening
   continues (see the threat model in the server README).

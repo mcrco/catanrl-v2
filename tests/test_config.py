@@ -116,6 +116,49 @@ def test_interpolation_self_and_params(tmp_path):
     assert cfg["meta"]["note"] == "seed ${seed}"  # meta is not interpolated
 
 
+def test_interpolation_init_needs_the_actor_from_init_from(tmp_path):
+    ev = {"select": {"suite": "select-2p", "lineup": ["POLICY:ckpt=${self}", "POLICY:ckpt=${init}"]},
+          "final": [{"suite": "heldout-2p", "lineup": ["MCTS:ckpt=${init}:sims=8", "F"]}]}
+    start = {"ckpt": "other/run@best"}
+    cfg = load_plan(write(tmp_path, eval=ev, init_from=start)).variants[0].config
+    assert cfg["eval"]["select"]["lineup"][1] == "POLICY:ckpt=${init}"  # bound when the run is created
+    assert cfg["eval"]["final"][0]["lineup"][0] == "MCTS:ckpt=${init}:sims=8"
+    hybrid = {"ckpt": {"actor": "other/run@best", "critic": "third/run@best"}}
+    assert load_plan(write(tmp_path, eval=ev, init_from=hybrid)).variants[0].config["eval"] == cfg["eval"]
+    with pytest.raises(ConfigError, match="has none"):
+        load_plan(write(tmp_path, eval=ev))
+    with pytest.raises(ConfigError, match="has none"):
+        load_plan(write(tmp_path, eval=ev, init_from={**start, "parts": ["critic"]}))
+    with pytest.raises(ConfigError, match="only allowed in eval.select and eval.final"):
+        load_plan(write(tmp_path, init_from={"ckpt": "${init}"}))
+
+
+def test_alphazero_from_a_network_evaluates_head_to_head_against_it(tmp_path):
+    az = {"train": {"algo": "alphazero"}, "init_from": {"ckpt": "other/run@best"}}
+    cfg = load_plan(write(tmp_path, **az)).variants[0].config
+    assert cfg["eval"]["select"] == {"suite": "select-2p", "lineup": ["POLICY:ckpt=${self}", "POLICY:ckpt=${init}"],
+                                     "every": 1, "metric": "score_rate"}
+    search = "sims=64:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16"  # the training search, made fair
+    assert [(e["suite"], e["lineup"]) for e in cfg["eval"]["final"]] == [
+        ("heldout-2p", ["POLICY:ckpt=exp/main@best", "POLICY:ckpt=${init}"]),
+        ({"name": "heldout-2p", "boards": 500}, [f"MCTS:ckpt=exp/main@best:{search}", "POLICY:ckpt=${init}"]),
+        ({"name": "heldout-2p", "boards": 500}, [f"MCTS:ckpt=${{init}}:{search}", "POLICY:ckpt=${init}"]),
+        ("heldout-2p", ["POLICY:ckpt=exp/main@best", "F"]),
+    ]
+    assert config.validate_plan(write(tmp_path, **az)) == []
+    # A full-information actor plays as BELIEF; the experiment's own keys sit above the defaults.
+    full = load_plan(write(tmp_path, obs={"level": "full"}, eval={"select": {"every": 5}}, **az)).variants[0].config
+    assert full["eval"]["select"]["lineup"] == ["BELIEF:ckpt=${self}:worlds=16", "BELIEF:ckpt=${init}:worlds=16"]
+    assert full["eval"]["select"]["every"] == 5 and full["eval"]["final"][3]["lineup"][0].startswith("BELIEF:")
+    stages = {"first": {}, "az": {"train!": az["train"], "init_from": {"ckpt": "${stages.first}@best"}}}
+    first, second = load_plan(write(tmp_path, stages=stages)).variants
+    assert first.config["eval"] == {"select": None, "final": []}
+    assert second.config["eval"]["select"]["lineup"][1] == "POLICY:ckpt=${init}"
+    # From scratch there is no start to play: the global defaults.
+    scratch = load_plan(write(tmp_path, train=az["train"])).variants[0].config
+    assert scratch["eval"] == {"select": None, "final": []}
+
+
 def test_hash_ignores_meta_runtime_and_train_final(tmp_path):
     first = load_plan(write(tmp_path)).variants[0]
     other = load_plan(write(tmp_path, meta={"notes": "x"}, runtime={"device": "cpu", "threads": 3},

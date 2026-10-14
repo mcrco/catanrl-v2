@@ -2,6 +2,12 @@
 # NN-MCTS loop"): graph-s trains by self-play PPO on 2p BASE, then its best
 # checkpoint (actor and critic) seeds AlphaZero, whose search uses the same
 # network for priors and per-seat values.
+#
+# The az stage keeps AlphaZero's default evals (config.alphazero_evals, DESIGN
+# 6.2): head to head against the PPO network it starts from, ${init}. Select:
+# POLICY ${self} vs POLICY ${init} on select-2p at every checkpoint. Final, on
+# heldout-2p: best's POLICY, best's MCTS and the start's MCTS (both at the
+# training search, dets=1) against POLICY ${init}, and best's POLICY vs F.
 name: az-from-ppo
 seed: 42
 env: {scenarios: [{game: base-2p}], num_envs: 1024}
@@ -21,12 +27,12 @@ train:
   minibatch_size: 8192
   max_minibatch_size: 2048
   checkpoint_interval: 50
-eval:
-  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50}
-  final:
-    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
 stages:
-  ppo: {}
+  ppo:
+    eval:
+      select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50}
+      final:
+        - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
   az:
     init_from: {ckpt: "${stages.ppo}@best", parts: [actor, critic]}
     env.num_envs: 512
@@ -39,8 +45,4 @@ stages:
       full_search_prob: 0.25
       learning_rate: 5.0e-5
       checkpoint_interval: 10
-    eval.select.every: 10
-    eval.final!:
-      - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
-      - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=64:dets=1", F]}
 runtime: {device: cuda, threads: 12, compile: true, time_limit_hours: 8}
