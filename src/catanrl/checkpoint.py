@@ -78,8 +78,9 @@ class CheckpointRef:
     weights_sha256: str
 
     def __str__(self) -> str:
+        """``run@eN#sha``, or for a checkpoint loaded by path ``/abs/path.pt#sha``."""
         if self.run is None:
-            return str(self.path)
+            return f"{self.path}#{self.weights_sha256[:12]}"
         return f"{self.run}@e{self.epoch}#{self.weights_sha256[:12]}"
 
 
@@ -356,9 +357,9 @@ class Checkpoint:
         if ref is not None and ref.weights_sha256 != payload["weights_sha256"]:
             raise WeightsCorrupt(f"{path}: weights {payload['weights_sha256'][:12]} differ from the pinned "
                                  f"{ref.weights_sha256[:12]}")
-        if ref is None:
-            ref = CheckpointRef(run=payload["run"], which=f"e{payload['epoch']}", epoch=payload["epoch"],
-                                agent_steps=payload["agent_steps"], path=path,
+        if ref is None:  # loaded by path: its identity is the file, whatever run its header names
+            ref = CheckpointRef(run=None, which=f"e{payload['epoch']}", epoch=payload["epoch"],
+                                agent_steps=payload["agent_steps"], path=path.resolve(),
                                 weights_sha256=payload["weights_sha256"])
         return cls(ref=ref, header=payload, state_dict=state)
 

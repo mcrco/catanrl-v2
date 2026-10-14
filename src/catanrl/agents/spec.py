@@ -161,7 +161,7 @@ def _ckpt_syntax(ckpt: str) -> None:
 
     if any(c in ckpt for c in ",:"):
         raise SpecError(f"ckpt {ckpt!r} contains ',' or ':'")
-    if ckpt.endswith(".pt"):
+    if ckpt.partition("#")[0].endswith(".pt"):
         return
     try:
         parse_ref(ckpt)
@@ -214,7 +214,7 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
         ckpt = _tested_checkpoint(str(ref.path), ref.weights_sha256, part, params.allow_drift)
     except (RuntimeError, ValueError) as error:  # CheckpointError: drift, corruption, schema
         raise SpecError(f"{key}: {ref}: {error}") from None
-    pinned = str(ref.path) if params.ckpt.endswith(".pt") else f"{ref.run}@e{ref.epoch}#{ref.weights_sha256[:12]}"
+    pinned = str(ref)  # run@eN#sha, or /abs/path.pt#sha
     params = dataclasses.replace(params, ckpt=pinned)
     levels, dims = ckpt.levels, ckpt.dims
     configs = [g if hasattr(g, "num_players") else load_game(g) for g in games]

@@ -59,7 +59,9 @@ def test_canonical_is_a_fixed_point_and_pins_best(ckpts):
     assert "device" not in mcts.canonical and "threads" not in mcts.canonical
     assert mcts.params.threads == 3  # still used to execute
     path = resolve_agent(f"BELIEF:ckpt={ckpts['full']}")
-    assert path.canonical.startswith(f"BELIEF:ckpt={ckpts['full']}:worlds=16")
+    sha = path.checkpoint.weights_sha256[:12]
+    assert path.canonical.startswith(f"BELIEF:ckpt={ckpts['full'].resolve()}#{sha}:worlds=16")
+    assert resolve_agent(path.canonical).canonical == path.canonical
 
 
 def test_bad_specs_raise(ckpts):
@@ -127,3 +129,14 @@ def test_whole_catanatron_games_stay_in_sync(ckpts, spec):
     game = config.catanatron_game(players, map_seed=3, seed=5)
     game.play()
     assert game.state.num_turns > 10 and players[0]._mirror["applied"] > 50
+
+
+def test_a_path_spec_pins_its_weights(ckpts, tmp_path, monkeypatch):
+    agent = resolve_agent(f"POLICY:ckpt={ckpts['private']}")
+    ckpts["private"].unlink()  # other weights at the same path
+    save(ckpts["private"], tiny(seed=1), run=None, epoch=0, agent_steps=0, config={}, code={})
+    with pytest.raises(SpecError, match="not #"):
+        resolve_agent(agent.canonical)
+    monkeypatch.chdir(tmp_path)
+    relative = resolve_agent("POLICY:ckpt=public.pt")
+    assert relative.checkpoint.path.is_absolute() and relative.checkpoint.run is None

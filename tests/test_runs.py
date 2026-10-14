@@ -170,7 +170,7 @@ def test_selectors_pins_and_portable_checkpoints(tmp_path):
     copy = tmp_path / "portable.pt"
     shutil.copy(e2.path, copy)
     shutil.rmtree(run.path)
-    assert Checkpoint.load(copy).model().catanrl_ref == str(e2)  # identity, not location
+    assert Checkpoint.load(copy).model().catanrl_ref == f"{copy.resolve()}#{e2.weights_sha256[:12]}"
 
 
 def test_best_needs_a_select_record():
@@ -367,3 +367,18 @@ def test_a_brief_status_probe_does_not_refuse_a_writer():
     threading.Timer(0.3, lambda: (fcntl.flock(fd, fcntl.LOCK_UN), os.close(fd))).start()
     with RunWriter.open(v, argv=["t"]) as w:
         assert w.mode == "resume"
+
+
+def test_a_copied_pt_is_its_own_identity(tmp_path):
+    with RunWriter.open(make_variant(), argv=["t"]) as w:
+        e0 = commit(w, tiny(), 0)
+        w.finish("finished")
+    copy = tmp_path / "copy.pt"
+    shutil.copy(e0.path, copy)
+    warm = make_variant("warm", init_from={"ckpt": str(copy)})
+    with RunWriter.open(warm, argv=["t"]) as w:
+        bound = w.variant_for_training.config["init_from"]["ckpt"]["actor"]
+        w.finish("finished")
+    assert bound == f"{copy.resolve()}#{e0.weights_sha256[:12]}"
+    shutil.rmtree(load_experiment("exp/v").path)  # the header's run is gone; the copy still serves
+    assert [r.run for r in load_experiment("exp/warm").lineage()] == [None]
