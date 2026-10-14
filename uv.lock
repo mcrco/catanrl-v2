@@ -147,9 +147,10 @@ requires-dist = [
     { name = "pytest-watch", marker = "extra == 'dev'" },
     { name = "rich" },
     { name = "sqlalchemy", marker = "extra == 'web'" },
+    { name = "textual", marker = "extra == 'tui'", specifier = ">=1.0" },
     { name = "websockets", marker = "extra == 'server'", specifier = ">=13" },
 ]
-provides-extras = ["gym", "web", "server", "dev"]
+provides-extras = ["gym", "web", "server", "tui", "dev"]
 
 [[package]]
 name = "catanrl"
