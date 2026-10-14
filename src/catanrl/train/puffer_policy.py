@@ -9,7 +9,7 @@ segment ``s`` holds row ``s``). In each env only the seat to move acts:
   ``k`` places after the actor), which becomes the value of seat
   ``(actor + k) mod n``'s row. Waiting rows get the no-op only. So GAE along
   each seat's row is exact at one network evaluation per game step.
-* **Training** (``forward`` and ``value_loss``, PufferLib's patched hook):
+* **Training** (``forward``, ``value_loss`` and ``acting_mask``, PufferLib's patched hooks):
   only acting rows run the network. Slot ``k`` of an acting row at step ``t``
   is trained (binary cross-entropy) on the return of seat ``(actor + k) mod
   n``'s row at ``t``; the predictions are written back into those rows'
@@ -118,6 +118,15 @@ class PufferPolicy(nn.Module):
         return out
 
     # ------------------------------------------------------------ training
+
+    def acting_mask(self, observations: torch.Tensor) -> torch.Tensor:
+        """PuffeRL's hook: bool [segments, horizon], the stored steps whose row acted.
+
+        Only those weigh in the advantage normalization, the prioritized
+        sampling and the means of the policy loss, entropy, KL and clip
+        fraction (waiting, bot and padded rows have one legal no-op).
+        """
+        return observations[..., self.model.mask_offset + self.model.noop] == 0
 
     def forward(self, observations: torch.Tensor, state=None):
         rows = observations.shape[0]
