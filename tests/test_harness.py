@@ -159,3 +159,17 @@ def test_non_positive_envs_or_threads_raise(backend, num_envs, threads):
     with pytest.raises(ValueError, match="positive"):
         play([agent("R"), agent("F")], suite, schedule(suite, 2, boards=1), backend=backend,
              num_envs=num_envs, threads=threads)
+
+
+SMALL = {"name": "small-3p", "num_players": 3, "map": {"type": "blob", "land_tiles": [10, 14]}}
+
+
+@pytest.mark.parametrize("backend", ["stepper", "vecenv"])
+def test_small_maps_play_on_both_backends(backend):
+    """Suites whose maps are all smaller than BASE used to crash the VecEnv backend at construction."""
+    suite = Suite(({"game": SMALL}, {"game": {**SMALL, "name": "small-3p-b", "map": {"type": "hexagon", "radius": 1}}}),
+                  turn_limit=120)
+    games = [g for g in schedule(suite, 2, boards=2) if g.scenario == 0]
+    rows = play([agent("POLICY", tiny_model([SMALL])), agent("F")], suite, games, fill=agent("R"),
+                backend=backend, num_envs=3)
+    assert len(rows) == len(games)

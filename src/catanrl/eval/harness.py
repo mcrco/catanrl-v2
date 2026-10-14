@@ -286,10 +286,16 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
     if len(enemies) > 1:
         raise ValueError("every F of a lineup must count the same enemies")
     value_enemies = enemies.pop() if enemies else cpp.ValueEnemies.NEXT
+    # Schedule mode passes every game's map; a scenario's own map only has to fit the dims
+    # (without one the engine checks a BASE board, which small-map suites do not cover).
+    first_seed = {}
+    for scheduled in games:
+        first_seed.setdefault(int(scheduled.scenario), int(scheduled.map_seed))
     cpp_scenarios = [
         cpp.Scenario(num_players=s.game.num_players, rules=s.game.cppanatron_rules(),
-                     turn_limit=s.turn_limit, value_enemies=value_enemies)
-        for s in scenarios
+                     maps=[maps.get(i, first_seed.get(i, 0))], turn_limit=s.turn_limit,
+                     value_enemies=value_enemies)
+        for i, s in enumerate(scenarios)
     ]
     num_envs = min(int(num_envs), max(1, len(games)))
     vec = cpp.VecEnv(cpp_scenarios, num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
