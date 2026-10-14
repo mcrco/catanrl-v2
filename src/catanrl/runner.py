@@ -80,7 +80,7 @@ def final_evals(run: Any) -> list:
 
 
 def _child_argv(plan: Plan, v: Variant, overrides: Sequence[str], allow_code_change: bool) -> list[str]:
-    argv = [sys.executable, "-m", "catanrl.cli", "run", str(plan.source), "--variant", v.name, "--inline"]
+    argv = [sys.executable, "-P", "-m", "catanrl.cli", "run", str(plan.source), "--variant", v.name, "--inline"]
     for item in overrides:
         argv += ["--set", item]
     if plan.smoke:
