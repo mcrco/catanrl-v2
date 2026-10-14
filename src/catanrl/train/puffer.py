@@ -21,48 +21,23 @@ docs/experiments-implementation.md are handled here:
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import math
 import time
 from collections.abc import Mapping
 from typing import Any
 
-import numpy as np
 import torch
 
+from catanrl._puffer import import_pufferl
 from catanrl.envs.encoding import action_size, critic_level_of, dims_for, row_layout
 from catanrl.envs.puffer import make_vecenv, plan_env
 from catanrl.models import CatanModel, build_model, normalize_levels
+from catanrl.seeding import derive_seed as _derive_seed
+from catanrl.seeding import determinism, rng_state, set_rng_state
+from catanrl.seeding import seed_everything as _seed_everything
 from catanrl.train.puffer_policy import PufferPolicy
 from catanrl.train.select import Selector
-
-
-def import_pufferl():
-    """``pufferlib.pufferl`` without its import side effects."""
-    try:
-        from catanrl._puffer import import_pufferl as imported
-    except ImportError:  # until catanrl._puffer lands
-        imported = _import_pufferl_locally
-    return imported()
-
-
-def _import_pufferl_locally():
-    import signal
-    import sys
-    import warnings
-
-    if "pufferlib.pufferl" in sys.modules:
-        return sys.modules["pufferlib.pufferl"]
-    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
-    hook = sys.excepthook
-    with warnings.catch_warnings():
-        from pufferlib import pufferl
-    for sig, handler in handlers.items():
-        signal.signal(sig, handler)
-    sys.excepthook = hook
-    return pufferl
-
 
 pufferl = import_pufferl()
 
@@ -82,14 +57,6 @@ RUNNER_KEYS = frozenset({
 })
 #: Keys of the ``train`` section that catanrl reads and PuffeRL does not.
 CATANRL_TRAIN_KEYS = frozenset({"algo", "lr_schedule", "kl_target", "lr_min", "lr_max", "log_interval"})
-
-
-def _derive_seed(root: int, *labels) -> int:
-    try:
-        from catanrl.seeding import derive_seed
-    except ImportError:
-        from catanrl.envs.puffer import _derive_seed as derive_seed
-    return derive_seed(root, *labels)
 
 
 def resolve_device(device: str) -> str:
@@ -186,14 +153,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
     # ------------------------------------------------------------ state
 
     def state(self) -> dict[str, Any]:
-        rng = None
-        try:
-            from catanrl.seeding import rng_state
-
-            rng = rng_state()
-        except ImportError:
-            rng = {"torch": torch.get_rng_state(),
-                   "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
+        rng = rng_state()
         return {
             "epoch": self.epoch,
             "global_step": self.global_step,
@@ -218,14 +178,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.decisions = int(state["decisions"])
         rng = state.get("rng")
         if rng is not None:
-            try:
-                from catanrl.seeding import set_rng_state
-
-                set_rng_state(rng)
-            except ImportError:
-                torch.set_rng_state(rng["torch"])
-                if rng.get("cuda"):
-                    torch.cuda.set_rng_state_all(rng["cuda"])
+            set_rng_state(rng)
 
     # ------------------------------------------------------------ checkpoints
 
@@ -333,19 +286,6 @@ def build_policy_model(cfg: Mapping[str, Any], dims: Mapping[str, int]) -> Catan
                        layout=row_layout(dims, levels["level"], critic))
 
 
-def _seed_everything(seed: int) -> None:
-    try:
-        from catanrl.seeding import seed_everything
-    except ImportError:
-        import random
-
-        random.seed(seed)
-        np.random.seed(seed % 2**32)
-        torch.manual_seed(seed)
-        return
-    seed_everything(seed)
-
-
 def _lr_schedule(train: Mapping[str, Any]) -> dict[str, Any]:
     kind = train.get("lr_schedule", "constant")
     if kind == "constant":
@@ -372,12 +312,7 @@ def train_ppo(variant: Any, writer: Any) -> None:
     if vp_reward:
         raise ValueError("env.reward.vp shaping can push a step outside PufferLib's reward clamp [-1, 1]")
     strict = runtime.get("determinism", "fast") == "strict"
-    try:
-        from catanrl.seeding import determinism
-        guard = determinism("strict" if strict else "fast")
-    except ImportError:
-        guard = contextlib.nullcontext()
-    with guard:
+    with determinism("strict" if strict else "fast"):
         _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, strict)
 
 

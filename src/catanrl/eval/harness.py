@@ -32,15 +32,7 @@ import numpy as np
 from catanrl import games as game_configs
 from catanrl.agents.native import BotAgent, NativeAgent, make_native_agent
 from catanrl.envs.encoding import dims_for, encoder_dims, info_level
-
-
-def _derive_seed(root: int, *labels) -> int:
-    try:
-        from catanrl.seeding import derive_seed
-    except ImportError:
-        from catanrl.envs.puffer import _derive_seed as derive_seed
-    return derive_seed(root, *labels)
-
+from catanrl.seeding import derive_seed as _derive_seed
 
 # ---------------------------------------------------------------- schedule inputs
 

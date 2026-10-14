@@ -35,6 +35,7 @@ from catanrl.envs.encoding import (
     info_level,
     row_layout,
 )
+from catanrl.seeding import derive_seed as _derive_seed
 
 SCENARIO_KEYS = {"game", "weight", "seats", "shuffle_seats", "turn_limit", "maps", "value_enemies", "name"}
 DEFAULT_POOL = 1024
@@ -57,15 +58,6 @@ class ScenarioSpec:
     value_enemies: str = "next"
     map_seeds: list[int] = field(default_factory=list)
     map_hashes: list[str] = field(default_factory=list)
-
-
-def _derive_seed(root: int, *labels) -> int:
-    try:
-        from catanrl.seeding import derive_seed
-    except ImportError:  # until catanrl.seeding lands: the v1 formula
-        payload = "|".join([str(root), *(str(label) for label in labels)])
-        return int.from_bytes(hashlib.sha256(payload.encode()).digest()[:8], "big") % (2**63 - 1)
-    return derive_seed(root, *labels)
 
 
 def scenario_specs(entries: Sequence[Mapping[str, Any] | str]) -> list[ScenarioSpec]:

@@ -18,7 +18,6 @@ the outcomes, so the critic is fitted alongside.
 
 from __future__ import annotations
 
-import contextlib
 import copy
 import time
 from collections import deque
@@ -32,7 +31,7 @@ import torch.nn.functional as F
 
 from catanrl.envs.encoding import encoder_dims, info_level
 from catanrl.envs.puffer import plan_env
-from catanrl.seeding import rng_state, set_rng_state
+from catanrl.seeding import determinism, rng_state, set_rng_state
 from catanrl.train.puffer import (
     _derive_seed,
     _seed_everything,
@@ -214,12 +213,7 @@ def train_imitation(variant: Any, writer: Any) -> None:
     launch = int(getattr(writer, "launch", 0))
     env_cfg = cfg["env"]
     strict = runtime.get("determinism", "fast") == "strict"
-    try:
-        from catanrl.seeding import determinism
-        guard = determinism("strict" if strict else "fast")
-    except ImportError:
-        guard = contextlib.nullcontext()
-    with guard:
+    with determinism("strict" if strict else "fast"):
         _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg)
 
 

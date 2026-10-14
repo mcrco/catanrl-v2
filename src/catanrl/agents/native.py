@@ -35,14 +35,7 @@ from catanrl.envs.encoding import action_size, check_dims, critic_level_of, make
 from catanrl.models import CatanModel, build_model
 from catanrl.search.evaluator import BatchEvaluator
 from catanrl.search.pool import make_pool, run_searches, search_config
-
-
-def _derive_seed(root: int, *labels) -> int:
-    try:
-        from catanrl.seeding import derive_seed
-    except ImportError:  # until catanrl.seeding lands: v1's formula
-        from catanrl.envs.puffer import _derive_seed as derive_seed
-    return derive_seed(root, *labels)
+from catanrl.seeding import derive_seed as _derive_seed
 
 
 def _param(params: Any, key: str, default: Any = None) -> Any:
