@@ -1,0 +1,417 @@
+"""PPO through PufferLib: ``CatanPuffeRL`` and ``train_ppo``.
+
+``train_ppo(variant, writer)`` trains one experiment variant: it builds the
+map pools and the VecEnv (one ``Serial`` :class:`~catanrl.envs.puffer.CatanPufferEnv`),
+the network, and a :class:`CatanPuffeRL`, then loops ``evaluate`` / ``train``
+until the budget, a stop request or the time limit. The PufferLib pitfalls of
+docs/experiments-implementation.md are handled here:
+
+* ``pufferl`` is imported only through ``catanrl._puffer.import_pufferl``;
+* logging is not throttled (``last_log_time`` is reset before every
+  ``train``) and SPS is measured here;
+* PufferLib's flags are overridden after ``PuffeRL.__init__``; the select
+  eval runs with autocast off, a forked RNG and strict determinism;
+* seeds: ``init`` before the model is built, ``sample`` after
+  ``PuffeRL.__init__``, ``rollout`` for the VecEnv;
+* checkpoints go through the run writer (PufferLib's ``save_checkpoint`` and
+  its data_dir copy are replaced);
+* rewards are win/loss in [0, 1], inside PufferLib's clamp; VP shaping, which
+  can leave it, is refused.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import math
+import time
+from collections.abc import Mapping
+from typing import Any
+
+import numpy as np
+import torch
+
+from catanrl.envs.encoding import action_size, critic_level_of, row_layout
+from catanrl.envs.puffer import make_vecenv, plan_env
+from catanrl.models import CatanModel, build_model, normalize_levels
+from catanrl.train.puffer_policy import PufferPolicy
+
+
+def import_pufferl():
+    """``pufferlib.pufferl`` without its import side effects."""
+    try:
+        from catanrl._puffer import import_pufferl as imported
+    except ImportError:  # until catanrl._puffer lands
+        imported = _import_pufferl_locally
+    return imported()
+
+
+def _import_pufferl_locally():
+    import signal
+    import sys
+    import warnings
+
+    if "pufferlib.pufferl" in sys.modules:
+        return sys.modules["pufferlib.pufferl"]
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    hook = sys.excepthook
+    with warnings.catch_warnings():
+        from pufferlib import pufferl
+    for sig, handler in handlers.items():
+        signal.signal(sig, handler)
+    sys.excepthook = hook
+    return pufferl
+
+
+pufferl = import_pufferl()
+
+#: Every key PuffeRL reads from its config (tests/test_ppo_keys.py checks it by AST).
+PUFFERL_KEYS = frozenset({
+    "adam_beta1", "adam_beta2", "adam_eps", "amp", "anneal_lr", "batch_size", "bptt_horizon",
+    "checkpoint_interval", "clip_coef", "compile", "compile_mode", "cpu_offload", "data_dir", "device",
+    "ent_coef", "env", "gae_lambda", "gamma", "learning_rate", "max_grad_norm", "max_minibatch_size",
+    "min_lr_ratio", "minibatch_size", "optimizer", "precision", "prio_alpha", "prio_beta0", "seed",
+    "torch_deterministic", "total_timesteps", "update_epochs", "use_rnn", "vf_clip_coef", "vf_coef",
+    "vtrace_c_clip", "vtrace_rho_clip",
+})
+#: Keys train_ppo sets itself (from runtime, the env and the run), not from ``train``.
+RUNNER_KEYS = frozenset({
+    "batch_size", "compile", "compile_mode", "cpu_offload", "data_dir", "device", "env", "seed",
+    "torch_deterministic", "use_rnn",
+})
+#: Keys of the ``train`` section that catanrl reads and PuffeRL does not.
+CATANRL_TRAIN_KEYS = frozenset({"algo", "lr_schedule", "kl_target", "lr_min", "lr_max", "log_interval"})
+
+
+def _derive_seed(root: int, *labels) -> int:
+    try:
+        from catanrl.seeding import derive_seed
+    except ImportError:
+        from catanrl.envs.puffer import _derive_seed as derive_seed
+    return derive_seed(root, *labels)
+
+
+def resolve_device(device: str) -> str:
+    if device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return device
+
+
+def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows: int, seed: int,
+                  data_dir: str, strict: bool = False) -> dict[str, Any]:
+    """PuffeRL's config: the ``train`` section minus catanrl's keys, plus the runner's."""
+    config = {key: value for key, value in train.items() if key not in CATANRL_TRAIN_KEYS}
+    clash = RUNNER_KEYS & set(config)
+    if clash:
+        raise ValueError(f"train sets runner-owned keys {sorted(clash)} (they belong in runtime)")
+    config.update(
+        device=resolve_device(runtime.get("device", "auto")),
+        seed=int(seed),
+        env="catan",
+        data_dir=str(data_dir),
+        use_rnn=False,
+        torch_deterministic=bool(strict),
+        cpu_offload=False,
+        compile=bool(runtime.get("compile", False)),
+        compile_mode=str(runtime.get("compile_mode", "default")),
+        batch_size=int(rows) * int(config["bptt_horizon"]),
+    )
+    missing = PUFFERL_KEYS - set(config)
+    unknown = set(config) - PUFFERL_KEYS
+    if missing or unknown:
+        raise ValueError(f"PuffeRL config: missing {sorted(missing)}, unknown {sorted(unknown)}")
+    if config["update_epochs"] * config["batch_size"] < config["minibatch_size"]:
+        raise ValueError("minibatch_size exceeds the batch")
+    return config
+
+
+class _CaptureLogger:
+    """PuffeRL's logger: keeps the last logs for train_ppo to complete and write."""
+
+    run_id = "catanrl"
+
+    def __init__(self) -> None:
+        self.logs: dict[str, Any] | None = None
+
+    def log(self, logs, step):
+        self.logs = dict(logs)
+
+    def close(self, model_path=None, early_stop=None):
+        pass
+
+
+class CatanPuffeRL(pufferl.PuffeRL):
+    """PuffeRL with catanrl's checkpoints, state, select evals and quiet output."""
+
+    def __init__(self, config: dict, vecenv: Any, policy: PufferPolicy, *, writer: Any,
+                 select: Mapping[str, Any] | None = None, eval_runtime: Mapping[str, Any] | None = None,
+                 lr_schedule: Mapping[str, Any] | None = None) -> None:
+        self.writer = writer
+        self.select = dict(select) if select else None
+        self.eval_runtime = dict(eval_runtime or {})
+        self.lr_schedule = dict(lr_schedule or {"kind": "constant"})
+        self.best_metric: float | None = None
+        self.decisions = 0
+        self.saved_epoch: int | None = None
+        #: Recorded in every trainer state and compared on resume.
+        self.extra_state: dict[str, Any] = {}
+        self.capture = _CaptureLogger()
+        self.msg = ""
+        super().__init__(config, vecenv, policy, logger=self.capture)
+        # PuffeRL.__init__ set matmul precision, cudnn.benchmark and cudnn.deterministic.
+        strict = bool(config["torch_deterministic"])
+        torch.backends.cudnn.benchmark = not strict
+        torch.backends.cudnn.deterministic = strict
+        if strict:
+            torch.backends.cuda.matmul.allow_tf32 = False
+            torch.backends.cudnn.allow_tf32 = False
+            torch.set_float32_matmul_precision("highest")
+
+    @property
+    def model(self) -> CatanModel:
+        return self.uncompiled_policy.model
+
+    def print_dashboard(self, clear=False, idx=None, **kwargs):
+        pass
+
+    # ------------------------------------------------------------ state
+
+    def state(self) -> dict[str, Any]:
+        rng = None
+        try:
+            from catanrl.seeding import rng_state
+
+            rng = rng_state()
+        except ImportError:
+            rng = {"torch": torch.get_rng_state(),
+                   "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []}
+        return {
+            "epoch": self.epoch,
+            "global_step": self.global_step,
+            "decisions": self.decisions,
+            "model": {k: v.detach().cpu() for k, v in self.model.state_dict().items()},
+            "optimizer": self.optimizer.state_dict(),
+            "scheduler": self.scheduler.state_dict(),
+            "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
+            "best_metric": self.best_metric,
+            "rng": rng,
+            **self.extra_state,
+        }
+
+    def restore(self, state: Mapping[str, Any]) -> None:
+        self.model.load_state_dict(state["model"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        self.scheduler.load_state_dict(state["scheduler"])
+        for group in self.optimizer.param_groups:
+            group["lr"] = state["learning_rate"]
+        self.epoch = int(state["epoch"])
+        self.global_step = int(state["global_step"])
+        self.decisions = int(state["decisions"])
+        self.best_metric = state.get("best_metric")
+        rng = state.get("rng")
+        if rng is not None:
+            try:
+                from catanrl.seeding import set_rng_state
+
+                set_rng_state(rng)
+            except ImportError:
+                torch.set_rng_state(rng["torch"])
+                if rng.get("cuda"):
+                    torch.cuda.set_rng_state_all(rng["cuda"])
+
+    # ------------------------------------------------------------ checkpoints
+
+    def save_checkpoint(self) -> str:
+        """Weights (the .pt), then trainer state (the commit), then the select eval."""
+        ref = self.writer.save_checkpoint(self.model, epoch=self.epoch, agent_steps=self.global_step)
+        self.writer.save_trainer_state(self.state())
+        self.saved_epoch = self.epoch
+        if self.select and self.epoch % int(self.select.get("every", 1)) == 0:
+            self.run_select(ref)
+        return str(getattr(ref, "path", ref))
+
+    def run_select(self, ref: Any) -> None:
+        """The select eval of a checkpoint, isolated from training state; moves ``best``."""
+        from catanrl.eval.results import evaluate
+
+        try:
+            from catanrl.seeding import determinism
+        except ImportError:
+            determinism = None
+        lineup = [str(spec).replace("${self}", str(ref)) for spec in self.select["lineup"]]
+        devices = [torch.cuda.current_device()] if torch.cuda.is_available() else []
+        guard = determinism("strict") if determinism else contextlib.nullcontext()
+        was_training = self.model.training
+        self.model.eval()
+        with torch.autocast("cuda", enabled=False), torch.random.fork_rng(devices=devices), guard:
+            record = evaluate(lineup, self.select["suite"], fill=self.select.get("fill"), **self.eval_runtime)
+        self.model.train(was_training)
+        metric = float(record.summary[self.select.get("metric", "score_rate")])
+        if self.best_metric is None or metric > self.best_metric:
+            self.best_metric = metric
+            self.writer.set_alias("best", ref, record=record)
+
+    def close(self) -> None:
+        self.vecenv.close()
+        self.utilization.stop()
+
+    # ------------------------------------------------------------ one epoch
+
+    def step_epoch(self) -> dict[str, Any] | None:
+        """Collect and train one epoch; returns the epoch's complete logs."""
+        start = time.time()
+        steps, env = self.global_step, self.vecenv.envs[0]
+        decisions = env.decisions
+        self.evaluate()
+        collected = time.time()
+        self.decisions += env.decisions - decisions
+        self.last_log_time = 0.0  # PuffeRL logs at most every 0.25 s otherwise
+        self.capture.logs = None
+        self.train()
+        logs = self.capture.logs
+        if logs is None:
+            return None
+        elapsed = time.time() - start
+        rows = self.global_step - steps
+        logs = {key: value for key, value in logs.items() if key not in ("SPS", "uptime")}
+        logs.update({
+            "decisions": self.decisions,
+            "throughput/agent_steps_per_s": rows / elapsed,
+            "throughput/decisions_per_s": (env.decisions - decisions) / elapsed,
+            "throughput/collect_s": collected - start,
+            "throughput/train_s": time.time() - collected,
+        })
+        logs.update({f"critic/{k}": v for k, v in self.uncompiled_policy.pop_calibration().items()})
+        self._adapt_lr(logs)
+        return logs
+
+    def _adapt_lr(self, logs: dict[str, Any]) -> None:
+        """rl_games' KL-adaptive step size (v1's ``kl-adaptive``), when configured."""
+        if self.lr_schedule.get("kind", "constant") != "kl_adaptive":
+            return
+        kl = logs.get("losses/approx_kl")
+        if kl is None or not math.isfinite(kl):
+            return
+        target = float(self.lr_schedule["kl_target"])
+        lr = float(self.optimizer.param_groups[0]["lr"])
+        if kl > 2.0 * target:
+            lr /= 1.5
+        elif kl < 0.5 * target:
+            lr *= 1.5
+        lr = min(max(lr, float(self.lr_schedule["lr_min"])), float(self.lr_schedule["lr_max"]))
+        for group in self.optimizer.param_groups:
+            group["lr"] = lr
+        logs["learning_rate"] = lr
+
+
+def build_policy_model(cfg: Mapping[str, Any], dims: Mapping[str, int]) -> CatanModel:
+    obs = cfg.get("obs") or {}
+    levels = normalize_levels({"level": obs.get("level", "private"), "critic_level": obs.get("critic_level")})
+    critic = critic_level_of(levels["level"], levels["critic_level"])
+    return build_model(cfg["model"], dims=dims, levels=levels, num_actions=action_size(dims),
+                       layout=row_layout(dims, levels["level"], critic))
+
+
+def _seed_everything(seed: int) -> None:
+    try:
+        from catanrl.seeding import seed_everything
+    except ImportError:
+        import random
+
+        random.seed(seed)
+        np.random.seed(seed % 2**32)
+        torch.manual_seed(seed)
+        return
+    seed_everything(seed)
+
+
+def _lr_schedule(train: Mapping[str, Any]) -> dict[str, Any]:
+    kind = train.get("lr_schedule", "constant")
+    if kind == "constant":
+        return {"kind": "constant"}
+    if kind != "kl_adaptive":
+        raise ValueError(f"train.lr_schedule must be constant or kl_adaptive, not {kind!r}")
+    if train.get("anneal_lr"):
+        raise ValueError("kl_adaptive needs anneal_lr: false")
+    return {"kind": kind, "kl_target": train.get("kl_target", 0.01),
+            "lr_min": train.get("lr_min", 1e-5), "lr_max": train.get("lr_max", 3e-4)}
+
+
+def train_ppo(variant: Any, writer: Any) -> None:
+    """Train ``variant`` (a :class:`catanrl.config.Variant`) into ``writer``'s run."""
+    cfg = variant.config
+    seed = int(cfg["seed"])
+    launch = int(getattr(writer, "launch", 0))
+    env_cfg, train, runtime = cfg["env"], dict(cfg["train"]), dict(cfg.get("runtime") or {})
+    reward = env_cfg.get("reward") or {}
+    vp_reward = float(reward.get("vp", 0.0))
+    if vp_reward:
+        raise ValueError("env.reward.vp shaping can push a step outside PufferLib's reward clamp [-1, 1]")
+    strict = runtime.get("determinism", "fast") == "strict"
+    try:
+        from catanrl.seeding import determinism
+        guard = determinism("strict" if strict else "fast")
+    except ImportError:
+        guard = contextlib.nullcontext()
+    with guard:
+        _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, strict)
+
+
+def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, strict) -> None:
+    pool_cfg = env_cfg.get("map_pool") or {}
+    pool_seed = pool_cfg.get("seed")
+    pool_seed = _derive_seed(seed, "map_pool") if pool_seed is None else int(pool_seed)
+    plan = plan_env(env_cfg, pool_seed=pool_seed)
+
+    _seed_everything(_derive_seed(seed, "init"))
+    model = build_policy_model(cfg, plan.dims)
+    if cfg.get("init_from") and getattr(writer, "mode", "new") == "new":
+        from catanrl.checkpoint import load_parts
+
+        load_parts(model, cfg["init_from"])
+    device = resolve_device(runtime.get("device", "auto"))
+    model.to(device)
+
+    obs = cfg.get("obs") or {}
+    level = obs.get("level", "private")
+    rollout_seed = _derive_seed(seed, "rollout", launch)
+    vecenv = make_vecenv(
+        plan, num_envs=int(env_cfg["num_envs"]), level=level, critic_level=obs.get("critic_level"),
+        threads=int(runtime.get("threads", 1)), seed=rollout_seed,
+        log_interval=int(train.get("log_interval", 32)),
+    )
+    policy = PufferPolicy(model, num_rows=vecenv.num_agents)
+    config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
+                           data_dir=str(getattr(writer, "path", ".")), strict=strict)
+    select = (cfg.get("eval") or {}).get("select")
+    eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
+    trainer = CatanPuffeRL(config, vecenv, policy, writer=writer, select=select, eval_runtime=eval_runtime,
+                           lr_schedule=_lr_schedule(train))
+    trainer.extra_state["map_pool"] = plan.pool["hash"]
+    torch.manual_seed(_derive_seed(seed, "sample", launch))
+
+    state = writer.load_trainer_state() if getattr(writer, "mode", "new") == "resume" else None
+    if state is not None:
+        if state.get("map_pool") not in (None, plan.pool["hash"]):
+            raise RuntimeError("the map pool changed since the run started; refusing to resume")
+        trainer.restore(state)
+    else:
+        trainer.save_checkpoint()  # e000000
+    for ref in getattr(writer, "pending_selects", list)():
+        if select:
+            trainer.run_select(ref)
+
+    status = "finished"
+    try:
+        while trainer.global_step < config["total_timesteps"]:
+            if writer.should_stop():
+                status = getattr(writer, "stop_reason", None) or "interrupted"
+                break
+            logs = trainer.step_epoch()
+            if logs is not None:
+                logs["map_pool"] = plan.pool["hash"]
+                writer.log(logs, trainer.global_step)
+        if trainer.saved_epoch != trainer.epoch:
+            trainer.save_checkpoint()  # the off-interval checkpoint
+    finally:
+        trainer.close()
+    writer.finish(status)
