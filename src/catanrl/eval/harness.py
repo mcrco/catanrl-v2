@@ -160,6 +160,43 @@ def _row(scheduled: Any, *, num_slots: int, winner_seat: int | None, turns: int,
     }
 
 
+def settlement_capacity(catan_map: cpp.CatanMap) -> int:
+    """Settlements the distance rule lets a map hold: the engine's greedy count
+    (place on the open node with the fewest open neighbours), which VecEnv uses
+    to refuse maps that cannot seat every player's two initial settlements."""
+    nodes = sorted(catan_map.land_nodes)
+    open_nodes = set(nodes)
+    neighbors = {node: list(catan_map.neighbors(node)) for node in nodes}
+    placed = 0
+    while True:
+        best, fewest = None, 0
+        for node in nodes:
+            if node in open_nodes:
+                count = sum(n in open_nodes for n in neighbors[node])
+                if best is None or count < fewest:
+                    best, fewest = node, count
+        if best is None:
+            return placed
+        placed += 1
+        open_nodes.discard(best)
+        open_nodes.difference_update(neighbors[best])
+
+
+def _check_games(games, scenarios: list[_Scenario], maps: _Maps, dims: Mapping[str, int]) -> None:
+    """Refuse, before playing anything, a game the backends could not play alike."""
+    encoder = encoder_dims(dims)
+    for scheduled in games:
+        scenario = scenarios[scheduled.scenario]
+        n = scenario.game.num_players
+        if len(scheduled.seats) != n:
+            raise ValueError(f"{scheduled.game_id}: seats do not match its scenario's players")
+        catan_map = maps.get(scheduled.scenario, scheduled.map_seed)
+        if not encoder.fits(catan_map, n):
+            raise ValueError(f"{scheduled.game_id}: its map does not fit the suite's dims {dict(dims)}")
+        if settlement_capacity(catan_map) < 2 * n:
+            raise ValueError(f"{scheduled.game_id}: its map cannot seat {n} players' initial settlements")
+
+
 class _Maps:
     def __init__(self, scenarios: list[_Scenario]) -> None:
         self.scenarios = scenarios
@@ -407,13 +444,12 @@ def play_schedule(
     for agent in agents:
         agent.bind(dims)
     for scheduled in games:
-        if len(scheduled.seats) != table[scheduled.scenario].game.num_players:
-            raise ValueError(f"{scheduled.game_id}: seats do not match its scenario's players")
         if max(scheduled.seats) >= len(agents):
             raise ValueError(f"{scheduled.game_id}: a seat's slot has no agent (fill missing?)")
     if backend == "auto":
         backend = "stepper" if any(a.needs_trackers for a in agents) else "vecenv"
     maps = _Maps(table)
+    _check_games(games, table, maps, dims)
     if backend == "stepper":
         _play_stepper(agents, list(games), table, maps, num_envs=int(num_envs), on_game=on_game)
     elif backend == "vecenv":

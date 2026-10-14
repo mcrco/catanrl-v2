@@ -173,3 +173,36 @@ def test_small_maps_play_on_both_backends(backend):
     rows = play([agent("POLICY", tiny_model([SMALL])), agent("F")], suite, games, fill=agent("R"),
                 backend=backend, num_envs=3)
     assert len(rows) == len(games)
+
+
+def test_settlement_capacity_matches_the_engine():
+    """The VecEnv refuses exactly the maps settlement_capacity says cannot seat 2n settlements."""
+    from catanrl.eval.harness import settlement_capacity
+
+    for tiles in range(1, 9):
+        spec = {"name": "tiny", "num_players": 2, "map": {"type": "blob", "land_tiles": tiles}}
+        config = __import__("catanrl.games", fromlist=["load_game"]).load_game(spec)
+        catan_map = cpp.CatanMap.from_spec(cpp.MapSpec.from_dict(config.map_spec(0)))
+        for players in range(2, 7):
+            scenario = cpp.Scenario(num_players=players, maps=[catan_map])
+            dims = cpp.EncoderDims(max_players=6, max_tiles=40, max_nodes=200, max_edges=200)
+            try:
+                cpp.VecEnv([scenario], num_envs=1, dims=dims)
+                accepted = True
+            except ValueError as error:
+                assert "seat" in str(error)
+                accepted = False
+            assert accepted == (settlement_capacity(catan_map) >= 2 * players), (tiles, players)
+
+
+@pytest.mark.parametrize("backend", ["stepper", "vecenv"])
+def test_unseatable_maps_are_refused_before_any_game(backend):
+    """The stepper used to score such games as stuck 1/N rows while the VecEnv refused them."""
+    crowded = {"name": "crowded-6p", "num_players": 6, "map": {"type": "blob", "land_tiles": 5}}  # seats <= 11
+    suite = Suite(({"game": "base-2p"}, {"game": crowded}), turn_limit=100)
+    games = schedule(suite, 2, boards=1)
+    played = []
+    with pytest.raises(ValueError, match="cannot seat"):
+        play_schedule([agent("R"), agent("F")], games, fill=agent("R"), suite=suite, on_game=played.append,
+                      backend=backend)
+    assert played == []
