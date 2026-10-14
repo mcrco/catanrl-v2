@@ -36,6 +36,7 @@ from catanrl.train.puffer import (
     _derive_seed,
     _seed_everything,
     build_policy_model,
+    check_bindable,
     resolve_device,
     select_eval,
 )
