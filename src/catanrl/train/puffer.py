@@ -142,6 +142,10 @@ class CatanPuffeRL(pufferl.PuffeRL):
             torch.backends.cuda.matmul.allow_tf32 = False
             torch.backends.cudnn.allow_tf32 = False
             torch.set_float32_matmul_precision("highest")
+        from catanrl.provenance import torch_runtime
+
+        writer.record_runtime({"torch": torch_runtime(), "advantage_cuda": bool(pufferl.ADVANTAGE_CUDA),
+                               "amp": config.get("amp"), "precision": config["precision"]})
 
     @property
     def model(self) -> CatanModel:

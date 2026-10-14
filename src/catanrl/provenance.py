@@ -30,10 +30,27 @@ from catanrl.canon import ast_digest, digest, sha256_file
 
 PACKAGE = Path(__file__).resolve().parent
 #: catanrl's outcome code: what an eval's result depends on.
-OUTCOME = ("models", "agents", "search", "envs", "eval/harness.py", "maps.py", "games.py")
+OUTCOME = ("models", "agents", "search", "envs", "eval/harness.py", "maps.py", "games.py", "seeding.py")
+#: PufferLib files a training process runs (besides _C).
+PUFFERLIB = ("__init__.py", "pufferl.py", "pytorch.py", "vector.py", "emulation.py", "spaces.py")
 ENV_VARS = ("CUDA_VISIBLE_DEVICES", "CUBLAS_WORKSPACE_CONFIG", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-            "PYTHONHASHSEED", "CATANRL_RUNS_DIR", "ADVANTAGE_CUDA")
-_PROCESS_START = time.time()
+            "PYTHONHASHSEED", "CATANRL_RUNS_DIR", "CATANRL_ALLOW_STALE_BUILD")
+
+
+def _process_start() -> float:
+    """When this process started (Linux /proc), so edits made after any import count as late."""
+    try:
+        ticks = int(Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19])
+        with open("/proc/stat") as f:
+            boot = float(next(line.split()[1] for line in f if line.startswith("btime")))
+        return boot + ticks / os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError, StopIteration):
+        import catanrl
+
+        return catanrl.IMPORT_TIME
+
+
+_PROCESS_START = _process_start()
 
 
 class ProvenanceError(RuntimeError):
@@ -73,7 +90,7 @@ def _components(kind: str, harness: str) -> dict[str, dict[str, list]]:
 
         puffer = Path(pufferlib.__file__).parent
         parts["train"] = {"py": _py_files(PACKAGE / "train", "train"), "bin": []}
-        parts["pufferlib"] = {"py": [(n, puffer / n) for n in ("pufferl.py", "pytorch.py")],
+        parts["pufferlib"] = {"py": [(n, puffer / n) for n in PUFFERLIB if (puffer / n).exists()],
                               "bin": sorted(puffer.glob("_C*.so"))}
     return parts
 
@@ -91,8 +108,9 @@ _SNAPSHOTS: dict[tuple[str, str], tuple[dict[str, str], dict[str, dict[str, list
 def code_id(kind: Literal["eval", "train"] = "eval", harness: Literal["native", "catanatron"] = "native") -> dict:
     """``{component: digest}`` of the outcome code, frozen at the first call.
 
-    The first call also refuses files modified after this process started:
-    the process may be running older code than the disk holds.
+    The first call also refuses files (Python or binaries) modified after this
+    process started that it has loaded: it may be running older code than the
+    disk holds. Later calls compare the disk with the snapshot.
     """
     if kind not in ("eval", "train") or harness not in ("native", "catanatron", "server"):
         raise ValueError(f"code_id({kind!r}, {harness!r})")
@@ -100,16 +118,19 @@ def code_id(kind: Literal["eval", "train"] = "eval", harness: Literal["native", 
     key = (kind, harness)
     if key not in _SNAPSHOTS:
         components = _components(kind, harness)
-        late = [str(p) for files in components.values() for _, p in files["py"]
-                if p.stat().st_mtime > _PROCESS_START + 1.0]
-        if late and any(_imported(p) for p in late):
+        paths = [p for files in components.values() for p in [*(p for _, p in files["py"]), *files["bin"]]]
+        late = [p for p in paths if Path(p).stat().st_mtime > _PROCESS_START + 1.0 and _loaded(p)]
+        if late:
             raise StaleProcess(f"{late[0]} changed after this process started; restart it")
+        assert_code_current()
         _SNAPSHOTS[key] = ({name: _digest_component(files) for name, files in components.items()}, components)
     return dict(_SNAPSHOTS[key][0])
 
 
-def _imported(path: str) -> bool:
-    return any(getattr(m, "__file__", None) == path for m in list(sys.modules.values()))
+def _loaded(path: str | Path) -> bool:
+    target = os.path.realpath(path)
+    return any(os.path.realpath(f) == target for m in list(sys.modules.values())
+               if (f := getattr(m, "__file__", None)))
 
 
 def assert_code_current() -> None:
@@ -254,6 +275,24 @@ def capture(*, argv: Sequence[str] | None = None, kind: Literal["eval", "train"]
                 "pid": os.getpid(), "platform": platform.platform(),
                 "env": {k: os.environ[k] for k in ENV_VARS if k in os.environ}},
     }
+
+
+def any_dirty(prov: dict) -> bool:
+    """Whether the code of a capture cannot be checked out from commits: any repo
+    dirty, a submodule off its recorded commit, or an engine build of another tree."""
+    return any(r["dirty"] for r in prov["git"]["repos"].values()) or bool(check(prov))
+
+
+def check_launch(prov: dict, runtime: dict) -> list[str]:
+    """Print a capture's warnings; refuse a stale engine build unless
+    ``runtime.allow_stale_build`` or ``CATANRL_ALLOW_STALE_BUILD=1``."""
+    warnings = check(prov)
+    stale = [w for w in warnings if w.startswith("the cppanatron build")]
+    if stale and not (runtime.get("allow_stale_build") or os.environ.get("CATANRL_ALLOW_STALE_BUILD") == "1"):
+        raise ProvenanceError(f"{stale[0]}; or set runtime.allow_stale_build (CATANRL_ALLOW_STALE_BUILD=1)")
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr, flush=True)
+    return warnings
 
 
 def check(prov: dict, *, strict: bool = False) -> list[str]:

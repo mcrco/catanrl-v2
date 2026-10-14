@@ -91,3 +91,38 @@ def test_resume_diff():
     now = {"code": {"train": "b", "engine": "e"}, "python": {"uv_lock_sha256": "l2"}}
     assert provenance.resume_diff(first, now) == ["code train: a -> b", "uv.lock: l1 -> l2"]
     assert provenance.resume_diff(first, first) == []
+
+
+def test_edits_after_process_start_are_caught_at_the_first_code_id(tmp_path, monkeypatch):
+    """A module imported, then edited, then hashed: the process runs old code."""
+    import sys
+    import types
+
+    original = provenance._components
+    source, binary = tmp_path / "mod.py", tmp_path / "_core.so"
+    source.write_text("x = 1\n")
+    binary.write_bytes(b"\0")
+    for path, files in ((source, {"py": [("mod.py", source)], "bin": []}),
+                        (binary, {"py": [], "bin": [binary]})):
+        module = types.ModuleType("fake_loaded")
+        module.__file__ = str(path)
+        monkeypatch.setitem(sys.modules, "fake_loaded", module)
+        monkeypatch.setattr(provenance, "_components", lambda kind, harness, f=files: {"x": f})
+        monkeypatch.setattr(provenance, "_SNAPSHOTS", {})
+        monkeypatch.setattr(provenance, "_PROCESS_START", path.stat().st_mtime - 10)
+        with pytest.raises(StaleProcess):
+            provenance.code_id("eval")
+    assert any(label == "seeding.py" for label, _ in original("eval", "native")["catanrl"]["py"])
+
+
+def test_stale_engine_builds_are_refused_unless_allowed(monkeypatch):
+    prov = {"git": {"submodules": {}, "repos": {"catanrl-v2": {"head": "a", "dirty": False},
+                                                 "engine/cppanatron": {"head": "b" * 40, "dirty": False}}},
+            "engine": {"build": {"git_sha": "c" * 40, "git_dirty": False}}}
+    monkeypatch.delenv("CATANRL_ALLOW_STALE_BUILD", raising=False)
+    with pytest.raises(ProvenanceError, match="rebuild"):
+        provenance.check_launch(prov, {})
+    assert provenance.check_launch(prov, {"allow_stale_build": True})
+    monkeypatch.setenv("CATANRL_ALLOW_STALE_BUILD", "1")
+    assert provenance.check_launch(prov, {})
+    assert provenance.any_dirty(prov)  # a build of another tree cannot be rebuilt from the commits

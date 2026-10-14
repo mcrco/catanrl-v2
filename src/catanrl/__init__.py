@@ -10,8 +10,11 @@ it before any CUDA use). The everyday entry points are re-exported lazily::
 """
 
 import os
+import time
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+#: When catanrl was first imported (the stale-code guard's fallback for the process start).
+IMPORT_TIME = time.time()
 
 _EXPORTS = {
     "load_experiment": "catanrl.runs",
