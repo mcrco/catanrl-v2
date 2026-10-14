@@ -1,0 +1,135 @@
+# v1's PufferLib graph2 run (catanrl-puffer experiments/puffer_catan_graph2:
+# config/catan_graph.ini over PufferLib's default.ini) as faithfully as v2
+# allows: graph-s with one shared trunk, Muon with a cosine LR, prioritized
+# segments, pure self-play on 2p BASE for v1's 500M agent steps. Two uses:
+# (a) v2's PPO stack is sound if `full` tracks v1's curve vs F (v1 watcher,
+#     400 games: 56% at 13.2M agent steps, 70.5% at 26.4M, 78% at 39.6M,
+#     87% at 132M, 95% at 500M; v1 numbers are never paired with v2's);
+# (b) its `best` seeds the shared-trunk MARL -> MCTS pipeline (an az stage as
+#     in az-from-ppo: init_from {ckpt: puffer-graph2/<variant>@best, parts:
+#     [actor, critic]} carries backbone., policy_head. and value_head.).
+#
+# The batch shape is v1's exactly: 1032 games x 2 rows = 2064 rows x 64 steps
+# = 132,096 agent steps per epoch; 16384-row minibatches as 4 accumulated
+# 4096-row ones, so 64 minibatches and 16 optimizer steps per epoch; cosine
+# T_max = 500M // 132,096 = 3785 epochs to 5e-4, as v1's logged LR. Every
+# deviation from v1 is in meta.notes.
+name: puffer-graph2
+seed: 42                        # v1's vec seed (v1 left torch unseeded)
+env:
+  scenarios: [{game: base-2p, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+model: {preset: graph-s, args: {shared: true}}
+train:
+  algo: ppo
+  total_timesteps: 500_000_000  # agent steps, both seats' rows (as v1 counted)
+  optimizer: muon               # heavyball 2.2.1 ForeachMuon(heavyball_momentum=True), as v1
+  learning_rate: 0.005
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95              # Muon's momentum (PufferLib default.ini; ppo.yaml has 0.9)
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 0.999                  # per decision (forced moves are played inside the env), as v1
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 1.0
+  vf_clip_coef: 0.2             # not read: the per-seat value loss replaces the clipped MSE, as v1's WDL hook did
+  ent_coef: 0.005
+  max_grad_norm: 1.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 4096      # as v1: 4.5 GB on the 8 GB card alone; two runs at once need 2048 (notes)
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false                    # v1's autocast was float32, a no-op
+  checkpoint_interval: 50
+eval:
+  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
+sweep:
+  axes:
+    obs:
+      full:                     # graph2's own setting, apples to apples with v1 (an oracle: it sees F's dev cards)
+        obs.level: full
+        eval.final:
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: heldout-2p, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["POLICY:ckpt=${run}@best", F]}   # pairs with the MCTS rows
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=64:oracle=true", F]}
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=256:oracle=true", F]}
+      private:                  # the fair one: private actor and (shared trunk) private critic
+        obs.level: private
+        eval.final:
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["POLICY:ckpt=${run}@best", F]}   # pairs with the MCTS rows
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=64:dets=1", F]}
+          - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=256:dets=1", F]}
+  name: "{obs}"
+meta:
+  v1: {run: puffer_catan_graph2, repo: catanrl-puffer, epochs: 3786, agent_steps: 500_115_456, hours: 9.5,
+       vs_F_400_games: {e100: 0.56, e200: 0.705, e300: 0.7825, e1000: 0.8675, e3786: 0.9525}}
+  notes: |
+    Deviations from v1's graph2, and why:
+    1. Value head. v1: a WDL softmax per row (its own seat), target ((1+q)/2, 0, (1-q)/2) for the
+       return q in [-1, 1], cross-entropy over every row, V = P(W) - P(L). v2: per-seat sigmoids from
+       the acting row (slot 0 = itself, slot 1 = the opponent), BCE on each seat's lambda-return in
+       [0, 1]. In 2p the draw class is never targeted, and once its probability has gone to about 0
+       the soft-target W-vs-L cross-entropy is BCE on sigmoid(z_W - z_L): the same loss, and P(W)
+       is v2's slot-0 win probability. Left as is because MCTS backs up per-seat
+       values (any N). Residual differences: the two seats' outputs are not tied to sum to 1
+       (logged as critic/value_sum_2p); rewards are 0/1, not +-1 (per-minibatch advantage
+       normalization removes the factor 2); with gamma < 1 v1 shrank targets toward 0.5 and v2
+       toward 0, so v2 is indifferent to how late it loses (gamma^T is 0.84-0.91 over 90-180
+       decisions); a turn-limit game targets W = L = 0.5 in v1 and 0 for both seats in v2 (about
+       1% of games early on, about 0 after 50M steps).
+    2. Waiting rows. v1's policy loss, entropy, advantage normalization and segment priorities
+       counted waiting rows (half the rows, no gradient), so its policy and entropy terms weighed
+       about half against the value loss, and its logged entropy, clipfrac and KL are diluted about
+       2x. v2 (PufferLib fork dfa6fe8) counts acting rows only. Entropy keeps v1's ratio to the
+       policy loss; the value loss weighs half of v1's relative to it. --set train.vf_coef=2.0
+       restores v1's ratio, at twice the loss scale (Muon's orthogonalized matrix updates ignore
+       the scale; biases, LayerNorms and the 1.0 gradient clip do not).
+    3. Network. v2's graph-s preset (hidden 96, global 64, 3 layers, head 128) adds an edge stream
+       v1 lacked; shared, it has 541,540 parameters against graph2's 537,830 at hidden 128. Matched
+       capacity rather than width (hidden 128 would be 799,588: --set model.args.hidden=128). v1's
+       normalize_inputs and semantic_inputs have no switch: v2's C++ encoder scales its features
+       to about [0, 1] itself.
+    4. Maps. v1 drew a fresh BASE board per game (resources and ports shuffled, official number
+       spiral); v2 trains on a pre-generated, hashed pool kept disjoint from the select and heldout
+       boards. 4096 boards rather than the default 1024: by v1's 40M-step mark (about 90k games)
+       each is played about 22 times. Each map costs about 1.3 ms at every launch and validate.
+    5. Vectorization. v1: 6 worker processes, two halves of the rows alternating, so rollout
+       overlapped inference; v2: one Serial VecEnv on C++ threads, in lockstep. Same batch shape;
+       only throughput differs.
+    6. Seeds. v1 left torch, numpy and random unseeded; v2 derives init, sample and rollout seeds
+       from 42. GPU training is statistical either way.
+    7. Evals. v1's watcher played 400 argmax games vs F on seed 67 every 100 epochs, out of
+       process. v2's select plays select-2p (seed 123, 200 boards x 2 seats = 400 games, turn limit
+       500, strict) every 50 epochs, synchronously; finals use heldout-2p (seed 67, but catanrl's
+       boards, not v1's). v1's evals had no truncations. The full variant's POLICY rows are oracle
+       rows, as v1's were; BELIEF is its fair number.
+    8. Compile. v1 compiled its shared network (torch.compile, dynamic); v2's runtime.compile
+       compiles model.heads (dynamic). Muon compiles through heavyball either way: compile_mode
+       "default" is a literal in the fork's pufferl.py, which code_id hashes, and heavyball's
+       version is in each launch's provenance.
+    Same as v1: agent steps count both seats' rows; TF32 matmuls and cudnn.benchmark (fast mode);
+    fp32; reward clamp; temperature-1 sampling; the 0.2 PPO clip; V-trace clips 1.0; segment
+    priorities (|adv| sum)^0.8 with beta annealed from 0.2; values written back per minibatch;
+    the last step of each 64-step segment gets no value target.
+    LR schedule and continuation. Resume restores the cosine exactly. catanrl fork copies the
+    trainer state, scheduler included: its T_max stays 3785 and CosineAnnealingLR is periodic, so
+    past epoch 3785 the LR climbs back toward 5e-3, while the prio beta anneal follows the fork's
+    own budget. To continue past 500M at the floor: catanrl fork ... --set train.anneal_lr=false
+    (the restored LR is then held).
+    Launch one variant at a time (catanrl run puffer-graph2 runs full, then private). Measured on
+    the RTX 2070 Super, 5-epoch runs: about 17k agent steps/s alone (collect 1.5 s, train 6.2 s per
+    epoch; 8.2 h of training per variant), 4.5 GB of GPU memory with
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (6.3 GB without). Two at once run out of
+    memory at max_minibatch_size 4096; at 2048 they fit (6.5 GB together) but share the GPU for
+    about 16k agent steps/s combined, so concurrency gains nothing and changes v1's minibatching.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
