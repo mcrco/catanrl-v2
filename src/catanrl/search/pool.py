@@ -16,7 +16,7 @@ from typing import Any
 import cppanatron as cpp
 import numpy as np
 
-from catanrl.envs.encoding import make_encoder
+from catanrl.envs.encoding import critic_level_of, encoder_dims, info_level, make_encoder
 from catanrl.search.evaluator import BatchEvaluator
 
 #: Dirichlet noise at PUCT roots when an agent asks for noise.
@@ -58,8 +58,18 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
     )
 
 
-def make_pool(dims: Mapping[str, int], level: str, config: cpp.SearchConfig) -> cpp.SearchPool:
-    encoder = make_encoder(dims, level)
+def make_pool(dims: Mapping[str, int], level: str, config: cpp.SearchConfig,
+              critic_level: str | None = None) -> cpp.SearchPool:
+    """A pool whose leaf rows are the network's training rows.
+
+    With a critic at another level the leaves carry the critic block too
+    (``ActorCriticEncoder``, engine E8); with determinizations a leaf is a
+    sampled world, whose sampled hidden cards a full-information critic sees.
+    """
+    if critic_level_of(level, critic_level) is not None:
+        encoder = cpp.ActorCriticEncoder(encoder_dims(dims), info_level(level), info_level(critic_level))
+    else:
+        encoder = make_encoder(dims, level)
     return cpp.SearchPool(encoder.action_space, encoder, config)
 
 

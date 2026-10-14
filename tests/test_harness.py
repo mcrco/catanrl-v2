@@ -99,8 +99,29 @@ def test_policy_of_an_asymmetric_critic_model_plays_from_actor_rows():
     suite = Suite(({"game": "base-2p"},), turn_limit=100)
     rows = play([agent("POLICY", model), agent("R")], suite, schedule(suite, 2, boards=1))
     assert len(rows) == 2
-    with pytest.raises(NotImplementedError):
-        agent("MCTS", model, sims=4, oracle=True)
+
+
+@pytest.mark.parametrize("params", [{"dets": 2}, {"oracle": True}])
+def test_mcts_searches_with_a_critic_at_another_level(params):
+    """Leaves carry the critic block (ActorCriticEncoder, engine E8), as in training rows."""
+    from catanrl.envs.encoding import action_size, dims_for, make_encoder, row_layout
+    from catanrl.models import build_model
+
+    dims = dims_for(["base-2p"])
+    model = build_model({"preset": "graph-tiny"}, dims=dims, levels={"level": "private", "critic_level": "full"},
+                        num_actions=action_size(dims), layout=row_layout(dims, "private", "full"))
+    mcts = agent("MCTS", model, sims=6, **params)
+    assert mcts.pool.observation_size == model.obs_size
+    game = _decisions(1)[0]
+    leaf = cpp.ActorCriticEncoder(cpp.EncoderDims(**dims), cpp.InfoLevel.PRIVATE, cpp.InfoLevel.FULL)
+    offset = row_layout(dims, "private", "full")["players"][0]
+    full = make_encoder(dims, "full").encode(game, 0)
+    expected = np.concatenate([make_encoder(dims, "private").encode(game, 0), full[offset : offset + 2 * 46]])
+    assert np.array_equal(leaf.encode(game, 0), expected)
+    suite = Suite(({"game": "base-2p"},), turn_limit=60)
+    games = schedule(suite, 2, boards=1)
+    lineup = lambda: [agent("MCTS", model, sims=6, **params), agent("R")]
+    assert play(lineup(), suite, games) == play_reference(lineup(), games, suite=suite)
 
 
 class _FailingEvaluator:

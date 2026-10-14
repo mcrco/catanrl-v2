@@ -70,13 +70,10 @@ class NativeAgent:
         self._spec = model.spec
         self._levels = dict(model.levels)
         self.dims_agnostic = model.dims_agnostic
-        if critic_level_of(self.level, model.levels["critic_level"]) is not None:
-            if heads == "both":
-                raise NotImplementedError(
-                    "searching with a critic at another level needs an engine encoder that writes the "
-                    "critic block (VecEnv's critic_players) for SearchPool leaves")
+        if critic_level_of(self.level, model.levels["critic_level"]) is not None and heads == "policy":
             # Decisions read only the actor: drop the critic block (it has the players block's
-            # width, so the same weights load) and play from actor-level rows.
+            # width, so the same weights load) and play from actor-level rows. Searches keep it:
+            # their leaves come from an ActorCriticEncoder.
             self._levels["critic_level"] = self.level
             model = self._rebuild(dict(model.dims))
         self._set_model(model)
@@ -196,7 +193,7 @@ class MctsAgent(NativeAgent):
 
     def _make_pool(self) -> None:
         self.config.max_players = int(self.dims["max_players"])
-        self.pool = make_pool(self.dims, self.level, self.config)
+        self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"])
 
     def act(self, rows, masks, decision_seeds, *, games=None, trackers=None):
         if games is None:
