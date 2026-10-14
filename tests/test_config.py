@@ -142,7 +142,7 @@ def test_alphazero_from_a_network_evaluates_head_to_head_against_it(tmp_path):
     assert [(e["suite"], e["lineup"]) for e in cfg["eval"]["final"]] == [
         ("heldout-2p", ["POLICY:ckpt=exp/main@best", "POLICY:ckpt=${init}"]),
         ({"name": "heldout-2p", "boards": 500}, [f"MCTS:ckpt=exp/main@best:{search}", "POLICY:ckpt=${init}"]),
-        ({"name": "heldout-2p", "boards": 500}, [f"MCTS:ckpt=${{init}}:{search}", "POLICY:ckpt=${init}"]),
+        ({"name": "heldout-2p", "boards": 500}, [f"MCTS:ckpt=exp/main@init:{search}", "POLICY:ckpt=${init}"]),
         ("heldout-2p", ["POLICY:ckpt=exp/main@best", "F"]),
     ]
     assert config.validate_plan(write(tmp_path, **az)) == []
@@ -157,6 +157,29 @@ def test_alphazero_from_a_network_evaluates_head_to_head_against_it(tmp_path):
     # From scratch there is no start to play: the global defaults.
     scratch = load_plan(write(tmp_path, train=az["train"])).variants[0].config
     assert scratch["eval"] == {"select": None, "final": []}
+
+
+def test_alphazero_head_to_head_follows_the_player_count(tmp_path):
+    az = {"train": {"algo": "alphazero"}, "init_from": {"ckpt": "other/run@best"}}
+    four = load_plan(write(tmp_path, env={"scenarios": [{"game": "base-4p"}]}, **az)).variants[0].config
+    start = ["POLICY:ckpt=${init}"] * 3
+    assert four["eval"]["select"]["suite"] == "select-4p"
+    assert four["eval"]["select"]["lineup"] == ["POLICY:ckpt=${self}", *start]
+    assert [e["suite"] for e in four["eval"]["final"]] == ["heldout-4p", {"name": "heldout-4p", "boards": 500},
+                                                           {"name": "heldout-4p", "boards": 500}, "heldout-4p"]
+    assert four["eval"]["final"][3]["lineup"][1:] == ["F", "F", "F"]
+    # 'public' is only fair with two players: four players play it as BELIEF.
+    public = load_plan(write(tmp_path, env={"scenarios": [{"game": "base-4p"}]}, obs={"level": "public"},
+                             **az)).variants[0].config
+    assert public["eval"]["select"]["lineup"][0] == "BELIEF:ckpt=${self}:worlds=16"
+    island = load_plan(write(tmp_path, env={"scenarios": [{"game": "random-4p"}]}, **az)).variants[0].config
+    assert island["eval"]["select"]["suite"] == "select-random-4p"
+    # A mixture has no default suites: the experiment must choose its own head to head.
+    mixed = {"scenarios": [{"game": "base-2p"}, {"game": "base-4p"}]}
+    with pytest.raises(ConfigError, match="no default head-to-head suites"):
+        load_plan(write(tmp_path, env=mixed, **az))
+    own = {"select": {"suite": "select-2p", "lineup": ["POLICY:ckpt=${self}", "POLICY:ckpt=${init}"]}}
+    assert load_plan(write(tmp_path, env=mixed, eval=own, **az)).variants[0].config["eval"]["select"]["suite"] == "select-2p"
 
 
 def test_hash_ignores_meta_runtime_and_train_final(tmp_path):

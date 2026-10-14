@@ -380,38 +380,58 @@ def init_parts(init: Mapping[str, Any] | None) -> list[str]:
     return list(init.get("parts") or (ckpt.keys() if isinstance(ckpt, Mapping) else PARTS))
 
 
-def alphazero_evals(level: str) -> dict:
+def alphazero_evals(level: str, players: int, suites: str) -> dict:
     """AlphaZero's default ``eval`` for a variant that starts from a network: head to
     head against that network, ``${init}``. Self-play drifts (v1's runs beat their
     previous iteration while flat or worse against F), and against F a strong policy
     is near its ceiling.
 
-    Every network plays as its fair raw policy: POLICY at a ``private`` actor or a
-    ``public`` one (fair in these 2p suites), else BELIEF. Select scores each
-    checkpoint by slot 0's score rate against the start on select-2p. e0 is the
-    start's weights, so it scores exactly 50% as POLICY (mirrored games; as BELIEF,
-    50% up to world sampling) and is ``best`` first; ``best`` then moves only to a
-    checkpoint above every earlier one, so above 50%. The finals, on heldout-2p:
-    the run's raw policy against the start's; its search (the training search's
-    budget and root, fair with ``dets=1``) against the start's raw policy; the
-    start's own search there (paired with the previous: what training added to
-    search); and the raw policy against F, kept as a secondary number.
+    Every network plays as its fair raw policy: POLICY at a ``private`` actor, or a
+    ``public`` one in two-player games (where every resource movement is seen by both
+    seats), else BELIEF. The run's network takes slot 0 and the start fills the other
+    ``players - 1`` seats. Select scores each checkpoint by slot 0's score rate against
+    the start on ``select-<suites>``. e0 is the start's weights, so it scores exactly
+    1/players as POLICY (mirrored games; as BELIEF, up to world sampling) and is
+    ``best`` first; ``best`` then moves only to a checkpoint above every earlier one.
+    The finals, on ``heldout-<suites>``: the run's raw policy against the start's; its
+    search (the training search's budget and root, fair with ``dets=1``) against the
+    start's raw policy; the run's own e0 searching the same way there (paired with the
+    previous: what training added to search, with exactly the critic the run started
+    from); and the raw policy against F, kept as a secondary number.
     """
     def raw(ckpt: str) -> str:
-        return f"POLICY:ckpt={ckpt}" if level in ("private", "public") else f"BELIEF:ckpt={ckpt}:worlds=16"
+        fair = level == "private" or (level == "public" and players == 2)
+        return f"POLICY:ckpt={ckpt}" if fair else f"BELIEF:ckpt={ckpt}:worlds=16"
 
     search = "sims=${train.sims}:dets=1:root=${train.root}:c_puct=${train.c_puct}:gumbel_m=${train.gumbel_m}"
-    searched = {"name": "heldout-2p", "boards": 500}
+    start = [raw("${init}")] * (players - 1)
+    heldout = f"heldout-{suites}"
+    searched = {"name": heldout, "boards": 500}
     return {
-        "select": {"suite": "select-2p", "lineup": [raw("${self}"), raw("${init}")], "every": 1,
+        "select": {"suite": f"select-{suites}", "lineup": [raw("${self}"), *start], "every": 1,
                    "metric": "score_rate"},
         "final": [
-            {"suite": "heldout-2p", "lineup": [raw("${run}@best"), raw("${init}")]},
-            {"suite": searched, "lineup": [f"MCTS:ckpt=${{run}}@best:{search}", raw("${init}")]},
-            {"suite": searched, "lineup": [f"MCTS:ckpt=${{init}}:{search}", raw("${init}")]},
-            {"suite": "heldout-2p", "lineup": [raw("${run}@best"), "F"]},
+            {"suite": heldout, "lineup": [raw("${run}@best"), *start]},
+            {"suite": searched, "lineup": [f"MCTS:ckpt=${{run}}@best:{search}", *start]},
+            {"suite": searched, "lineup": [f"MCTS:ckpt=${{run}}@init:{search}", *start]},
+            {"suite": heldout, "lineup": [raw("${run}@best"), *["F"] * (players - 1)]},
         ],
     }
+
+
+def _default_suites(scenarios: Sequence[Any]) -> tuple[int, str] | None:
+    """(players, suite suffix) when every scenario plays one game that has select and
+    heldout suites (``base-4p`` -> ``select-4p``, ``random-4p`` -> ``select-random-4p``)."""
+    from catanrl.games import load_game
+
+    names = {e.get("game") if isinstance(e, Mapping) else e for e in scenarios}
+    if len(names) != 1 or not isinstance(next(iter(names)), str):
+        return None
+    name = next(iter(names))
+    suffix = name.removeprefix("base-")
+    if not all((CONFIG_DIR / "suites" / f"{kind}-{suffix}.yaml").exists() for kind in ("select", "heldout")):
+        return None
+    return load_game(name).num_players, suffix
 
 
 def _algo_layer(merged: Mapping[str, Any]) -> dict:
@@ -422,7 +442,16 @@ def _algo_layer(merged: Mapping[str, Any]) -> dict:
         return {}
     if "actor" not in init_parts(merged.get("init_from")):
         return {}  # from scratch: there is no start to play
-    return {"eval": alphazero_evals((merged.get("obs") or {}).get("level") or "private")}
+    found = _default_suites((merged.get("env") or {}).get("scenarios") or [])
+    if found is None:
+        if (merged.get("eval") or {}).get("select") is not None:
+            return {}  # the experiment chose its own evals
+        games = sorted({str(e.get("game") if isinstance(e, Mapping) else e)
+                        for e in (merged.get("env") or {}).get("scenarios") or []})
+        raise ConfigError(f"AlphaZero from a network on {games} has no default head-to-head suites; "
+                          "set eval.select and eval.final against ${init}")
+    players, suites = found
+    return {"eval": alphazero_evals((merged.get("obs") or {}).get("level") or "private", players, suites)}
 
 
 def migrate(cfg: dict, *, from_schema: int) -> dict:
