@@ -149,7 +149,7 @@ self-play games through `SearchPool` with a network (fresh, or a PPO
 checkpoint) → replay buffer of (observation, visit-count policy, per-seat
 outcome) → train → new network. Because the PPO network and the search
 network are the same class with the same observation, the PufferLib-trained
-GNN plugs straight into search (`mcts:ckpt=…,sims=…`).
+GNN plugs straight into search (`MCTS:ckpt=…:sims=…`).
 
 ## 2. Networks
 
@@ -166,30 +166,30 @@ on, and refuses an env whose spec differs.
 
 ## 3. Agents, evaluation, experiments
 
-Agent specs (strings, as in Catanatron's registry):
-`policy:ckpt=…[,sample]`, `mcts:ckpt=…,sims=256,dets=1`, `belief:ckpt=…,worlds=16`,
-`F`, `R`, and any Catanatron registry bot (`catanatron:AB:2`). The same spec
-plays natively (fast evaluation on cppanatron), as a Catanatron `Player`, or
-as a server client.
+Agent specs use Catanatron's registry syntax (grammar in 6.5):
+`POLICY:ckpt=…[:sample=true]`, `MCTS:ckpt=…:sims=256:dets=4`,
+`MCTS:ckpt=…:oracle=true`, `BELIEF:ckpt=…:worlds=16`, `F`, `R`, and any
+Catanatron registry bot (`AB:2`). The same spec plays natively (fast
+evaluation on cppanatron), as a Catanatron `Player`, or as a server client.
 
 Evaluation: paired seats (every board played from every seat rotation),
 fixed seeds, Wilson intervals, exact McNemar for paired comparisons,
 head-to-head and N-player "win share vs expected 1/N".
 
 Experiments are YAML files under `configs/experiments/` composed from
-`configs/games`, `configs/maps` and `configs/models`, with an optional
-`sweep:` grid. `catanrl run EXPERIMENT.yaml` writes `runs/<experiment>/<variant>/`
-(resolved config, metrics jsonl, checkpoints, eval results) and a
-`summary.md`. v1's research maps onto config axes:
+`configs/games`, `configs/models`, `configs/train` and `configs/suites`, with
+optional `stages:` and a `sweep:` grid. `catanrl run EXPERIMENT.yaml` writes
+`runs/<experiment>/<variant>/` (section 6). v1's research maps onto config
+axes:
 
 | v1 experiment | v2 axis |
 |---|---|
 | architecture ablation (xdim/MLP/graph-s/graph-m) | `model.preset` sweep |
 | information levels for actor/critic | `obs.level` (`private`/`public`/`full`), `obs.critic_level` |
-| belief averaging of a full-info policy | agent `belief:…` |
-| determinized MCTS / ISMCTS, dets × sims | agent `mcts:…,dets=K,sims=N` sweep |
+| belief averaging of a full-info policy | agent `BELIEF:…` |
+| determinized MCTS / ISMCTS, dets × sims | agent `MCTS:…:dets=K:sims=N`, a `kind: eval` sweep over `params` |
 | shaped vs win/loss reward, γ=0.99 vs 1 | `reward.*`, `train.gamma` |
-| DAgger warm start from F | `train.algo: imitation` then `init_from:` |
+| DAgger warm start from F | `stages:` with `train.algo: imitation`, then `init_from:` |
 | expert iteration / AlphaZero | `train.algo: alphazero` |
 | N-player and map generalization | `env.scenarios` mixture + held-out eval maps |
 
@@ -221,7 +221,7 @@ dealing (future work, noted in the server README).
 
 Clients: a terminal UI (`catanrl play` / `catan-tui`, mainly for debugging
 against our bots), a minimal browser client served by the server, and bot
-clients (`catanrl bot --spec mcts:… ws://…`).
+clients (`catanrl bot --spec MCTS:… ws://…`).
 
 ## 5. Build and layout
 
@@ -236,3 +236,443 @@ runs/                   gitignored outputs
 ```
 
 `uv sync` builds everything; `uv run pytest` and `ctest` (engine) test it.
+
+## 6. Experiments: reproducibility and testability
+
+v1's experiment store had the right habits: one name per run,
+`load_experiment(name).build_policy("best")`, selectors, pins, lineage,
+derived seeds and paired seats. Where it failed was at the edges: the runs
+root depended on the cwd, metadata was rewritten on resume, there were six
+spec grammars and a load shim per script, models were selected on the
+report's own seed, and checkpoints silently changed meaning when the model
+code changed (b1b053a and 5717ab8, retracted in bcea78e). v2 keeps the habits
+and enforces these rules in code:
+
+* **Records are write-once.**
+* **Names are resolved once** and stored as `run@eN#sha`.
+* **A cache key holds exactly what decides the outcome**, code included.
+* **A checkpoint self-tests on every load.**
+* **Nothing falls back silently**: no random move for a failed bot, no
+  default architecture, no `best`→`latest`, no unknown config key.
+
+### 6.1 Runs directory
+
+```
+$CATANRL_RUNS_DIR      default <main worktree>/runs (via git-common-dir): one root for all worktrees
+  <experiment>/
+    summary.md         `catanrl summarize`: tables per sweep axis, mean ± sd over seeds
+    <variant>/         graph-s-s42.g1 = sweep cell + "." + stage
+      config.json      write-once: resolved config, config_hash, resolved refs
+      run.json         trainer-owned, atomic: status, launches, checkpoint index
+      aliases.jsonl    append-only: best (trainer, cites its select eval), pins (CLI)
+      metrics.jsonl    one row per epoch
+      provenance/      <launch>.json, plus <launch>.<repo>.patch per dirty repo
+      checkpoints/     e000600.pt …; orphaned/launch<n>/ after a crash
+      trainer_state.pt resume state: the commit point
+      evals/<suite>/   <eval_id>.json + <eval_id>.games.jsonl
+  _evals/              records whose lineup slot 0 is not a run (F vs AB)
+```
+
+* **Names** match `^[a-z0-9][a-z0-9._+-]*$`, so they are safe inside agent
+  specs.
+* **Writes** go through tmp + fsync + `os.replace`. JSONL readers drop a torn
+  last line. A live trainer holds a flock.
+* **At a checkpoint** the trainer writes the `.pt`, then `trainer_state.pt`
+  (the commit), then `run.json`. It then runs the select eval and moves
+  `best`.
+* **On resume**, any `.pt` newer than `trainer_state` moves to `orphaned/`,
+  so it is never `latest` and never an epoch ref. The select evals that
+  committed checkpoints lack run first.
+
+### 6.2 Experiment YAML
+
+`configs/defaults.yaml` is the schema: it lists every key with its default.
+`configs/train/<algo>.yaml` and `configs/models/<preset>.yaml` are complete.
+`ppo.yaml` is written deliberately (Adam, constant LR, `amp` set explicitly)
+rather than copied from PufferLib's `default.ini`. Execution keys (`device`,
+`seed`, `data_dir`, `compile`, …) live in `runtime`, and putting them under
+`train` is an error.
+
+```yaml
+# configs/experiments/arch-lineage.yaml: v1's lineage launch script, swept
+name: arch-lineage                       # = file stem
+seed: 42
+env: {scenarios: [{game: base-2p}], num_envs: 2048}
+obs: {level: full, critic_level: full}
+model: {preset: graph-s}
+train: {algo: ppo, total_timesteps: 400_000_000, learning_rate: 3.0e-4, gamma: 0.99, checkpoint_interval: 50}
+eval:
+  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+    - {suite: heldout-2p, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
+stages:                                  # one variant each, run in order per sweep cell
+  dagger: {train!: {algo: imitation, expert: F, iterations: 24, checkpoint_interval: 8}, eval.select.every: 8}
+  warm:   {init_from: {ckpt: "${stages.dagger}@best", parts: [actor, critic]}}
+  g1:     {init_from: {ckpt: "${stages.warm}@3000"}, train.gamma: 1.0, train.total_timesteps: 200_000_000}
+sweep:
+  axes:
+    model.preset: [graph-s, graph-m, mlp]   # list axis; a mapping is a tied axis:
+    seed: [42, 43]                          #   obs: {pf: {obs.level: private, obs.critic_level: full}, …}
+  name: "{model.preset}-s{seed}"            # graph-m-s43.g1; 3 × 2 × 3 stages = 18 variants
+meta: {notes: "replaces launch-xdim-warm-lineage-20261009.sh", wandb: {project: catanrl-v2}}   # not hashed
+runtime: {device: cuda, threads: 16, time_limit_hours: 12}                                       # not hashed
+```
+
+**Eval-only experiments.** A `kind: eval` experiment has only `eval.final`
+and sweeps `params` into its specs. Example:
+`MCTS:ckpt=…@ref:sims=${params.sims}:dets=${params.dets}`, swept over
+`params.sims: [64, 256, 1024]` and a tied `world` axis (oracle, d4, d16).
+
+**Suites.** A suite (`configs/suites/*.yaml`: `purpose: select | heldout |
+dev`, `seed`, `scenarios`, `boards`, `turn_limit`) holds boards, not lineups.
+So one suite serves vs-F, vs-R and head-to-head. A suite that mixes player
+counts takes `fill: F` for the empty seats.
+
+| Suite | Seed | Boards |
+|---|---|---|
+| `heldout-2p` | 67 | 2500, each played in both seat rotations |
+| `select-2p` | 123 | 200 |
+
+**Resolution.** `config.load_plan` is pure: it reads no argv and no cwd.
+
+* Precedence: defaults < referenced files < body < stage < sweep cell <
+  `--set`. A `key!:` replaces the section instead of merging.
+* Errors: an unknown key (with a did-you-mean), a stage and an axis setting
+  the same key, a `params` key nothing references, two cells with the same
+  name.
+* Values take the default's type, because PyYAML reads `3e-4` as a string.
+* `dims: auto` uses the generators' seed-independent bounds.
+* `config_hash` covers everything except `meta`, `runtime` and (for
+  `kind: train`) `eval.final`. Refs are hashed as written.
+* Refs to other runs are resolved once, when the variant is created, and
+  stored in `config.json`. If one later moves, the variant warns and keeps its
+  target.
+* `${self}` and `${run}@best` resolve when the eval runs, and are pinned in
+  its record.
+
+### 6.3 Checkpoints
+
+A checkpoint is a plain dict that `torch.load(path, weights_only=True)` reads,
+and it is usable without its run directory:
+
+```python
+{"format": "catanrl.ckpt", "schema": 1, "run": "arch-lineage/graph-s-s42.g1", "epoch": 600, "agent_steps": 157286400,
+ "weights_sha256": "41f2a9…",       # over sorted (key, dtype, shape, bytes): unchanged by re-saving
+ "config": {...}, "config_hash": "c41d…", "model": {"preset": "graph-s", "class": "graph", "args": {...}},
+ "parts": {"actor": ["backbone.", "policy_head.", "value_head."], "critic": ["critic."]},
+ "obs": {"level": "full", "critic_level": "full", "dims": {...}, "layout_hash": {...}}, "action": {"layout_hash": "…"},
+ "code": {"id": {...}, "git": "a1b2c3d", "dirty": False},
+ "self_test": {"positions": "<8 apply_setup positions, JSON>", "obs": T, "mask": T, "logits": T, "value": T},
+ "state_dict": {...}}
+```
+
+`Checkpoint.model()` runs these checks in order:
+
+1. The weights hash matches.
+2. `layout_hash` matches, else `SchemaMismatch`.
+3. Dims match, unless the class is dims-agnostic (graph is, mlp is not).
+4. Re-encoding the stored positions gives the stored obs, else
+   `EncoderDrift`.
+5. The rebuilt model on CPU gives the stored logits and values, else
+   `ModelDrift`.
+
+The positions are `Game.apply_setup` payloads, not action logs, so neither
+the toolchain's RNG nor unrelated rules changes can move them.
+`allow_drift=true` skips checks 4 and 5. It is recorded, and the report
+refuses results made with it. Check 5 is the one that would have caught v1's
+reshape bugs, whose encoder bytes never changed.
+
+### 6.4 Resume, warm starts, lineage
+
+| Relaunch finds | Action |
+|---|---|
+| no directory | create it; launch 0 |
+| same hash, `finished` | run only the missing `eval.final` |
+| same hash, lock held | refuse |
+| same hash, otherwise | resume as launch n+1 if the training `code_id` (6.7) and `uv.lock` match launch 0; otherwise refuse, or record `mixed_code` with `--allow-code-change` |
+| different hash | `ConfigConflict` with `config_diff`; use `--variant` or `fork` |
+
+**Migrations.** Stored configs and checkpoint headers pass through
+`config.MIGRATIONS` (key, legacy value) before they are compared or loaded.
+So adding a key breaks neither resume nor old checkpoints. A test fails when
+a new key has no migration.
+
+**Resume** restores the weights (sha verified), optimizer, scheduler, epoch,
+step, RNG and algorithm state (DAgger β, AlphaZero champion). Games in flight
+restart, recorded as `resume_exact: false`. SIGINT, SIGTERM and the time limit
+write an off-interval checkpoint. PufferLib's SIGINT handler, which calls
+`os._exit(0)`, is replaced.
+
+**Time-limited runs** follow v1's habit (budget 1e9, stop after 7 h). A
+`time_limit` run can feed later stages, which pin its epoch. A relaunch
+resumes it, and `catanrl finish REF` ends it.
+
+**Budgets never grow in place.** `catanrl fork REF --as V+more --set …` makes
+a new variant with `init_from: {ckpt: REF@latest, restore:
+weights+optimizer}`. With the constant-LR default this is a true
+continuation.
+
+**Warm starts** take `init_from: {ckpt: REF, parts: [actor, critic]}`, or
+one ref per part (v1's hybrid). Each part loads strictly through the checks
+in 6.3. `e000000.pt` is always saved, and `catanrl ls` flags a `best` that is
+still the parent's weights.
+
+**Lineage.** `run.lineage()` follows the resolved `init_from` back to the
+root. W&B tags are derived from it and never read back.
+
+### 6.5 Agent specs: one string, three backends
+
+Specs use Catanatron's registry syntax. It splits values on `:` and lineups
+on `,`, so neither character appears in a value. This replaces §3's
+`mcts:ckpt=…,sims=256` form and its `catanatron:` prefix.
+
+```
+spec := KEY (":" param)*         param := value | name "=" value   (a positional value is ckpt)
+KEY  := POLICY | MCTS | BELIEF | F | R | any Catanatron registry key
+ckpt := run ["@" which] ["#" sha] | path ending in ".pt"
+run  := experiment ["/" variant]  which := best | latest | init | <alias> | N | eN   (epoch; default best)
+```
+
+Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
+`MCTS:ckpt=…@best:sims=256:dets=4`, `MCTS:ckpt=…:oracle=true`,
+`BELIEF:ckpt=…@1500:worlds=16`, `AB:2`.
+
+* **Params** are frozen dataclasses on the registered players. Unknown or
+  mistyped params raise.
+* **MCTS** takes engine units: `c_puct` 0.75 equals v1's 1.5. `dets ≥ 1`
+  counts sampled worlds, and `oracle=true` searches the true state. There is
+  no magic 0.
+
+`resolve_agent(spec)` does four things:
+
+1. Pins the checkpoint and self-tests it, once, in the parent process.
+2. Checks that each game fits (dims, value head width).
+3. Derives `fair`:
+
+   | Agent | Fair when |
+   |---|---|
+   | POLICY | its actor is `private`, or `public` in 2p |
+   | MCTS | not `oracle` |
+   | BELIEF | always |
+   | built-in bots | never |
+
+4. Writes a canonical spec that is a fixed point of resolution:
+   `MCTS:ckpt=arch-lineage/graph-s-s42.g1@e600#41f2a9c07d11:sims=256:dets=4:oracle=false:root=puct:c_puct=0.75:…`.
+
+Its `key_dict()` drops execution params (device, threads). It adds the model
+args and, for MCTS, the full engine `SearchConfig` read back from the
+binding.
+
+| Backend | Entry point |
+|---|---|
+| native, batched on cppanatron (`SearchPool` for MCTS) | `resolved.native(device=…, infer_rows=…)` |
+| Catanatron `Player` | `catanrl.player(spec, color)`, i.e. `REGISTRY.build` once `catanrl.agents` is imported. It converts via `Game.apply_setup` and runs the native agent at batch 1 |
+| server bot | `catanrl bot --spec SPEC ws://…`. Views feed the `HandTracker`. A `public`/`full` POLICY is refused (use BELIEF) |
+
+The v1 shims stay, over the same path:
+
+```python
+run = catanrl.load_experiment("arch-lineage/graph-s-s42.g1")
+net = run.build_policy("best", device="cuda")      # net.catanrl_ref == "…g1@e600#41f2a9c07d11"
+bot = run.agent("MCTS", which="ref", sims=256).player(Color.RED)
+net = catanrl.load_checkpoint("/anywhere/e000600.pt").model()
+```
+
+### 6.6 Eval records and the report
+
+`Suite.schedule(n)` is pure:
+
+* Board `i` gets `derive_seed(seed, purpose, scenario_hash, i)`. The hash
+  ignores the game's name.
+* That seed's `map` and `game` children are shared by all rotations.
+* Rotation `r` puts `lineup[(seat + r) % n]` in each seat.
+* The quota is exact and does not depend on `num_envs`, threads or finishing
+  order.
+* `select` and `heldout` boards are disjoint by construction.
+
+```python
+key = {"schema": 1, "harness": "native", "determinism": "strict", "code": code_id("eval"),
+       "suite": {seed, purpose, scenarios minus names, boards, turn_limit, schedule_hash},  # incl. map hashes
+       "lineup": [a.key_dict() for a in resolved], "fill": …}
+eval_id = digest(key)  # runs/<slot-0 run or _evals>/evals/<suite>/<eval_id>.{json,games.jsonl}
+```
+
+**`evaluate(lineup, suite)`** returns the existing record if there is one.
+Otherwise it:
+
+1. Locks the id.
+2. Plays only the `game_id`s missing from `.games.jsonl`. Each finished game
+   appends one row, so a crash resumes exactly.
+3. Writes the record once.
+
+Each start or restart appends its execution (device class, torch,
+`infer_rows`). Resuming under different execution needs `--allow-mixed`,
+which marks the record. Any bot forfeit (a `StdioPlayer` random fallback)
+makes the record `valid: false`.
+
+**The record** holds canonical specs, pinned refs, `fair` per slot,
+`games_sha256`, execution, provenance and a summary. The summary gives the
+score rate (a truncation counts 1/N), Wilson 95%, rates per seat, and for N
+players the win share against 1/N with an exact binomial test. Rows can be
+re-scored without replaying.
+
+**`paired(a, b)`** joins on `game_id` and requires equal `schedule_hash` and
+opponents. It returns the delta and the exact McNemar test, computed in log
+space, because `stats.binomial_two_sided` overflows above about 1,030 trials.
+
+The report cites queries, never typed numbers:
+
+```yaml
+# report/results.yaml
+supersedes: [b1b053a]    # refuse checkpoints whose training lineage predates these commits
+cite:
+  g1-vs-F:     {lineup: ["POLICY:ckpt=arch-lineage/graph-s-s42.g1@ref", F], suite: heldout-2p, oracle_ok: true}
+  mcts-vs-F:   {lineup: ["MCTS:ckpt=arch-lineage/graph-s-s42.g1@ref:sims=256:dets=4", F], suite: heldout-2p}
+  mcts-vs-raw: {paired: [mcts-vs-F, g1-vs-F]}
+  arch:        {lineup: ["POLICY:ckpt=arch-lineage/*.g1@best", F], suite: heldout-2p, group_by: model.preset}
+```
+
+**`catanrl report-data`** writes `report/data/results.json` (rate, interval,
+n, p, `eval_id`, canonical specs, `run@eN#sha`, flags), which Typst reads with
+`json()`.
+
+* **Lockfile.** The same file pins refs. A ref or wildcard that now resolves
+  differently shows as a diff and needs `--update`. Wildcards match finished
+  runs only.
+* **Refused:**
+  * suites that are not `heldout`;
+  * unfair slots under test, unless the entry has `oracle_ok`;
+  * invalid or drift-allowed records;
+  * checkpoints with any launch, in the run or an `init_from` ancestor, that
+    does not descend from a `supersedes` commit.
+* **Marked †:** dirty, mixed or `fast` rows. `--final` refuses them instead,
+  and re-plays 16 games of each cited record.
+* **Missing records** fail with the exact `catanrl eval …` line to run, or
+  are computed with `--run-missing`.
+
+### 6.7 Provenance and code identity
+
+`code_id()` hashes these files when catanrl is imported:
+
+* cppanatron's `.so` and Python files;
+* catanrl's outcome code: `models`, `agents`, `search`, `envs`,
+  `eval/harness`, `maps`, `games`;
+* Catanatron, when that harness is used;
+* for training, also `catanrl/train` and PufferLib's `pufferl.py`,
+  `pytorch.py` and `_C`.
+
+Python is hashed by AST, so comments and formatting change nothing. No key
+holds a git SHA, so unrelated commits keep every cache valid.
+
+`capture()` runs at each launch and each eval, always as
+`git -C <package repo>`:
+
+| Part | Recorded |
+|---|---|
+| git | HEAD, branch, dirty, diff sha, untracked files, submodules recorded vs checked out. A patch per dirty repo (≤ 20 MB). A ref `refs/catanrl/keep/<sha>` in each repo, since these commits are on no remote |
+| code | `code_id()`. A launch or eval is refused when the disk no longer matches what was imported (a stale notebook, a rebuild under a long runner) |
+| engine | `.so` sha; after E3, `build_info()` (git sha, dirty, compiler, build type) |
+| python | version, every installed distribution (list + digest), `uv.lock` sha |
+| torch | versions, CUDA, cuDNN, GPUs, driver, threads. Flags read after `PuffeRL.__init__`: TF32, cudnn, autocast, heavyball compile, `ADVANTAGE_CUDA` |
+| run | argv, cwd, host, pid, selected env vars, source YAML sha, map pool hash |
+
+What is allowed, warned about or refused:
+
+* **Allowed:** a dirty tree, because the patch is saved.
+* **Warned:** a submodule mismatch (`--strict` refuses it). A stale engine
+  build warns until E3 lands, then is refused unless
+  `runtime.allow_stale_build`.
+* **Refused outright:** a map pool that changed on resume, and a YAML from
+  outside the package's repo.
+
+### 6.8 Seeds and determinism
+
+Every seed is `derive_seed(root, *labels)`, bit-identical to v1:
+
+| Seed | Labels | Feeds |
+|---|---|---|
+| init | `seed, "init"` | Python, numpy and torch before the model is built (PufferLib's seeding is commented out) |
+| sample | `seed, "sample", launch` | torch after `PuffeRL.__init__` |
+| rollout | `seed, "rollout", launch` | the VecEnv (one Serial PufferEnv) |
+| map pool | `map_pool.seed` or `seed, "map_pool"`; then `scenario, j` | training maps |
+| collection | `seed, "dagger"/"selfplay", epoch, game` | DAgger, AlphaZero |
+| board | `suite.seed, purpose, scenario_hash, i` | eval maps and games |
+| bots | `board, "bots", rotation` | R (native F has no RNG) |
+| decision | `game_seed, "decide", rotation, seat, ply` | sampling, belief worlds, MCTS roots; never torch's global RNG |
+
+Evals run strict, unless a `dev` suite asks for `fast` (the mode is part of
+the key). Strict means:
+
+* no cudnn benchmark, deterministic algorithms, no TF32;
+* `CUBLAS_WORKSPACE_CONFIG` set in `catanrl/__init__`;
+* autocast off, asserted, because PuffeRL leaks bf16 autocast;
+* one padded inference shape, `infer_rows`, for policy forwards and
+  SearchPool leaf chunks.
+
+Training is `fast` by default.
+
+| Guaranteed | Not guaranteed |
+|---|---|
+| maps, schedules: bitwise everywhere | GPU training: statistical only; ≥ 2 seeds per headline variant, spread in `summary.md` |
+| native eval rows: bitwise across `num_envs`, threads, workers, interrupts and reruns, for one device class and `infer_rows` (needs E1, E2) | another device class or `infer_rows`: rare argmax ties may flip; `verify` reports agreement |
+| SearchPool visits: bitwise across pool size, batch size, threads | another compiler or stdlib: until E4; detected, since the `.so` sha is in every key |
+| strict CPU training, small config: bitwise on one machine | games in flight at a resume: restarted (`resume_exact: false`) |
+| resume: weights, optimizer, scheduler, epoch, step, RNG, algorithm state | Catanatron-harness bots: they draw from the game's RNG, so only its seed applies |
+
+### 6.9 Tests
+
+| Tier | Guards |
+|---|---|
+| fast (default) | hashes and `derive_seed` pinned to v1; resolution, migrations, hashes of frozen fixture YAMLs; `validate_plan` on every experiment; `ppo.yaml` matches the keys PuffeRL reads; the runs store under a foreign cwd, with a crash injected between each write; specs; schedules golden, disjoint and exact; eval resume, forfeits, pairing, report gates; provenance; PufferLib import side effects; McNemar at n = 5000 |
+| end to end (default, < 30 s CPU) | a tiny graph net trains 3 epochs; `best` cites a select eval; `build_policy`, `load_checkpoint` and `POLICY:` give identical logits; a repeated `evaluate()` hits the cache; stop and resume keeps the LR and optimizer step; repeated with `[POLICY, R, R, R]` |
+| engine (default) | golden maps; drift detection (byte, layout, encoder, model); eval and SearchPool invariance; spec defaults equal `SearchConfig`'s; native vs Catanatron `Player` parity per position; Catanatron action order across processes; sampled worlds give the true private row; golden outcomes of a committed 100 KB checkpoint |
+| slow (`-m train`) | seeded CPU training is bitwise; straight and resumed runs match; `--smoke` on every experiment |
+| opt-in | `-m gpu`: strict GPU invariance. `-m runs`: `catanrl check-runs` loads, verifies and self-tests every alias of every run |
+
+### 6.10 Out of scope
+
+* No database, MLflow, DVC, Hydra or sacred. W&B mirrors and never decides.
+* No DAG engine or Slurm. Stages, `init_from` and `catanrl run --next` cover
+  it: each terminal claims a free variant, and each variant runs in its own
+  process.
+* No in-place budget extension, bitwise GPU training, VecEnv snapshots, or
+  checkpoint dedup or GC.
+* Grid sweeps only for now; Protein can come later.
+* Lineup order is not normalized: A vs B and B vs A are separate records.
+* Records do not survive changes to outcome code. `catanrl results --stale`
+  lists the old ones.
+* From PufferLib only `PuffeRL` is used, subclassed. The fork keeps its two
+  patches.
+* Phase 2: `catanrl rerun --at-recorded-commit` (everything it needs is
+  recorded from day 1), `import-v1`, and a stdio bridge for v1 policies.
+
+### 6.11 From v1
+
+v1 weights do not load: the encoder, actions, value heads and trainer all
+differ. Conventions carry over, and recipes become YAML (`v1-anchor`,
+`arch-lineage`, `info-levels`, `mcts-dets-sims`).
+
+* **`v1-anchor`** is `base-2p` as is (official spiral, as the report says),
+  trained with PuffeRL. PPO_Central_Critic's settings (separate LRs, target
+  KL) do not carry over. So the anchor shows whether v2 reaches v1's level;
+  it is not the same measurement.
+* **v1 numbers** stay in a history table tagged `bcea78e` and are never
+  paired with v2's.
+  * Its PPO `@best` rows are selection-biased: v1 selected on seed 67, which
+    is also the report's seed.
+  * Its Catanatron-path `dets=1` rows mean `oracle=true`.
+
+Needed outside `src/catanrl`:
+
+* **cppanatron:**
+  * E1: a schedule mode, `start_game(env, scenario, map_spec, game_seed,
+    seats, bot_seed)`;
+  * E2: per-game bot streams;
+  * E3: `_core.build_info()`;
+  * E4: portable replacements for every `std::` distribution (dice, steals,
+    shuffles, discrete, gamma, uniform_real).
+* **Catanatron fork:**
+  * canonical action order in `models/actions.py`;
+  * `build_all` for 2–6 players;
+  * a per-seat forfeit counter in `StdioPlayer`.
