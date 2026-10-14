@@ -10,7 +10,7 @@ completion; :func:`search_config` maps agent parameters onto the engine's
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import cppanatron as cpp
@@ -75,21 +75,43 @@ def make_pool(dims: Mapping[str, int], level: str, config: cpp.SearchConfig,
 
 def run_searches(pool: cpp.SearchPool, evaluator: BatchEvaluator, *, batch_rows: int) -> int:
     """Collect, evaluate and apply until every search in the pool is done; returns leaf rows."""
-    if pool.observation_size != evaluator.obs_size:
-        raise ValueError("the pool's rows and the network's differ (level or dims)")
-    if pool.action_size != evaluator.num_actions or pool.max_players != evaluator.num_players:
-        raise ValueError("the pool's action space or value width differs from the network's")
-    observations = np.empty((max(1, batch_rows), pool.observation_size), dtype=np.float32)
-    ids = np.empty(max(1, batch_rows), dtype=np.int64)
+    return run_pools([pool], evaluator, batch_rows=[batch_rows])
+
+
+def run_pools(pools: Sequence[cpp.SearchPool], evaluator: BatchEvaluator, *, batch_rows: Sequence[int]) -> int:
+    """Run several pools in lockstep, their leaves evaluated in one batch per round
+    (e.g. full- and fast-budget searches of playout cap randomization); returns leaf rows.
+
+    A row's outputs do not depend on its batch (strict evaluator), so the
+    searches are the same as run pool by pool.
+    """
+    for pool in pools:
+        if pool.observation_size != evaluator.obs_size:
+            raise ValueError("the pool's rows and the network's differ (level or dims)")
+        if pool.action_size != evaluator.num_actions or pool.max_players != evaluator.num_players:
+            raise ValueError("the pool's action space or value width differs from the network's")
+    buffers = [(np.empty((max(1, rows), pool.observation_size), dtype=np.float32), np.empty(max(1, rows), dtype=np.int64))
+               for pool, rows in zip(pools, batch_rows)]
     total = 0
-    while n := pool.collect(observations, ids):
+    while True:
+        counts = []
         try:
-            logits, values = evaluator(observations[:n])
-            pool.apply(logits, values)
+            for pool, (observations, ids) in zip(pools, buffers):
+                counts.append(pool.collect(observations, ids))
+            n = sum(counts)
+            if not n:
+                return total
+            rows = [observations[:k] for (observations, _), k in zip(buffers, counts)]
+            logits, values = evaluator(rows[0] if len(rows) == 1 else np.concatenate(rows))
+            start = 0
+            for pool, k in zip(pools, counts):
+                if k:
+                    pool.apply(logits[start : start + k], values[start : start + k])
+                start += k
         except BaseException:
-            # Withdraw the collected leaves, so the pool stays usable and the error is the real one.
-            if pool.pending:
-                pool.cancel()
+            # Withdraw collected leaves, so the pools stay usable and the error is the real one.
+            for pool in pools:
+                if pool.pending:
+                    pool.cancel()
             raise
         total += n
-    return total

@@ -74,3 +74,22 @@ def test_strict_rows_do_not_depend_on_their_batch():
     for i in range(len(rows)):
         alone = evaluator(rows[i : i + 1])
         assert np.array_equal(alone[0][0], together[0][i]) and np.array_equal(alone[1][0], together[1][i])
+
+
+def test_pools_in_lockstep_search_like_pools_alone():
+    """run_pools batches several pools' leaves together; each search is unchanged."""
+    from catanrl.search import run_pools
+
+    evaluator = BatchEvaluator(MODEL, device="cpu", infer_rows=8, mode="strict")
+    budgets = (16, 4)
+    alone, together = [], []
+    for sims in budgets:
+        pool = make_pool(DIMS, "full", search_config({"sims": sims, "oracle": True}, max_players=3))
+        ids = [pool.add(game, seed=50 + i) for i, (game, _) in enumerate(POSITIONS)]
+        run_searches(pool, evaluator, batch_rows=len(ids))
+        alone.append([pool.visits(i).tolist() for i in ids])
+    pools = [make_pool(DIMS, "full", search_config({"sims": sims, "oracle": True}, max_players=3)) for sims in budgets]
+    ids = [[pool.add(game, seed=50 + i) for i, (game, _) in enumerate(POSITIONS)] for pool in pools]
+    run_pools(pools, evaluator, batch_rows=[len(i) for i in ids])
+    together = [[pool.visits(i).tolist() for i in pool_ids] for pool, pool_ids in zip(pools, ids)]
+    assert together == alone
