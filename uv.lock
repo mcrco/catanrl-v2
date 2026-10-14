@@ -130,6 +130,7 @@ requires-dist = [
     { name = "click" },
     { name = "coverage", marker = "extra == 'dev'" },
     { name = "coveralls", marker = "extra == 'dev'" },
+    { name = "cryptography", marker = "extra == 'server'", specifier = ">=42" },
     { name = "fastparquet", marker = "extra == 'gym'" },
     { name = "flask", marker = "extra == 'web'" },
     { name = "flask-cors", marker = "extra == 'web'" },
@@ -146,8 +147,9 @@ requires-dist = [
     { name = "pytest-watch", marker = "extra == 'dev'" },
     { name = "rich" },
     { name = "sqlalchemy", marker = "extra == 'web'" },
+    { name = "websockets", marker = "extra == 'server'", specifier = ">=13" },
 ]
-provides-extras = ["gym", "web", "dev"]
+provides-extras = ["gym", "web", "server", "dev"]
 
 [[package]]
 name = "catanrl"
