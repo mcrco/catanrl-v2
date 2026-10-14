@@ -268,6 +268,7 @@ def _edited(ls, seat):
 
 
 def _until(ls, prompt):
+    """Play on until ``prompt`` is a decision of the seat to move."""
     while not ls.over:
         view = ls.view(ls.current_seat)
         if (view["current_prompt"] == prompt and not view["is_road_building"]
@@ -277,29 +278,18 @@ def _until(ls, prompt):
     raise AssertionError(f"no {prompt} decision")
 
 
-def test_an_edited_turn_position_reanchors_on_the_snapshot():
-    """A view the log does not explain: at a turn position the seat's replay
-    restarts from the apply_setup snapshot of the view."""
-    ls = _decision_point("base-3p", 9)
-    seat = _until(ls, "PLAY_TURN")
+@pytest.mark.parametrize("prompt", ["PLAY_TURN", "MOVE_ROBBER", "DISCARD"])
+def test_an_edited_view_reanchors_on_its_exact_snapshot(prompt):
+    """A view the log does not explain (a TUI edit): at any prompt the seat's
+    replay restarts from the view's exact apply_setup snapshot, and the agent
+    decides on it (strict: nothing inexact, no fallback)."""
+    ls = _decision_point("base-4p", 3)
+    seat = _until(ls, prompt)
     agent = ViewAgent(tiny_agent("POLICY", "private", ls.dims), strict=True)
     playable = ls.playable_json()
     choice = agent.decide(_edited(ls, seat), playable)
     assert any(choice is offered for offered in playable)
     tracker = next(iter(agent.seats.values()))
     assert tracker.stats["reanchored"] == 1 and tracker.position.exact
-
-
-def test_an_edited_robber_position_is_refused_or_counted():
-    """Elsewhere no snapshot can express the view: strict refuses; lenient
-    decides on the replay as it is, or (if the replay broke on it) plays the
-    default move, and counts either."""
-    ls = _decision_point("base-4p", 3)
-    seat = _until(ls, "MOVE_ROBBER")
-    edited, playable = _edited(ls, seat), ls.playable_json()
-    with pytest.raises(BridgeError):
-        ViewAgent(tiny_agent("POLICY", "private", ls.dims), strict=True).decide(edited, playable)
-    lenient = ViewAgent(tiny_agent("POLICY", "private", ls.dims))
-    choice = lenient.decide(edited, playable)
-    assert any(choice is offered for offered in playable)
-    assert lenient.stats["inexact"] + lenient.stats["fallback:no_position"] == 1
+    assert tracker.game.player(seat).resources == tuple(
+        n + (k == 0) for k, n in enumerate(ls.native.player(seat).resources))

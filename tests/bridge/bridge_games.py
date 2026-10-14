@@ -83,16 +83,6 @@ class Lockstep:
     def dims(self) -> dict:
         return covering_dims([self.native.board.map], len(self.colors))
 
-    def native_diverged(self, views: list | dict | None = None) -> list[str]:
-        """Where the native game's public state differs from Catanatron's
-        (an engine parity bug: then the bridge, which follows the views, and
-        the native game cannot be compared any more)."""
-        view = (views or {0: self.view(0)})
-        seat = next(iter(view)) if isinstance(view, dict) else 0
-        from catanrl.bridge.position import public_mismatches
-
-        return public_mismatches(self.native, view[seat], seat)
-
     def playable_json(self) -> list:
         return [action_to_json(a) for a in self.truth.playable_actions]
 

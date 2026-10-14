@@ -1,11 +1,13 @@
-"""A seat's view as a cppanatron game: rules, maps, the apply_setup snapshot,
-and the key equivalence: the bridged game of a seat encodes, at PRIVATE
-level, exactly as the native game does for that seat, at every step of
-random 2-6 player games."""
+"""A seat's view as a cppanatron game: rules, maps, the apply_setup snapshot
+(exact at every prompt, and a replay anchored on it plays on exactly), and
+the key equivalence: the bridged game of a seat encodes, at PRIVATE level,
+exactly as the native game does for that seat, at every step of random 2-6
+player games."""
 
 from __future__ import annotations
 
 import os
+from collections import Counter
 
 import numpy as np
 import pytest
@@ -22,6 +24,7 @@ from catanrl.bridge.position import (
     snapshot,
     transport,
 )
+from catanrl.bridge.replay import Replay
 from catanrl.bridge.tracking import SeatTracker
 from catanrl.envs.encoding import make_encoder
 
@@ -91,35 +94,75 @@ def test_seat_view_reads_one_seat():
 # ---------------------------------------------------------------- the snapshot
 
 
-def test_snapshot_expresses_turn_positions_and_refuses_the_rest():
-    assert "DISCARD" in PROMPT_COVERAGE and PROMPT_COVERAGE["DISCARD"][0] == "replay"
-    exact = refused = 0
-    for index in range(3):
-        ls = lockstep("base-3p", index)
+@pytest.mark.parametrize("name", GAMES)
+def test_snapshot_is_exact_at_every_prompt(name):
+    """apply_setup declares every view exactly: each seat's view at every step
+    of a random game encodes like the native game, at every prompt."""
+    prompts = Counter()
+    for index in range(GAMES_PER_CONFIG):
+        ls = lockstep(name, 40 + index)
         encoder = make_encoder(ls.dims, "private")
         for _ in range(MAX_STEPS):
             if ls.over:
                 break
             ls.step(ls.choose())
-            seat = ls.current_seat
-            view = ls.view(seat)
-            try:
+            if ls.over:
+                break
+            for seat, view in enumerate(ls.views()):
                 position = snapshot(view)
-            except Inexpressible:
-                assert (view["current_prompt"] != "PLAY_TURN" or view["is_road_building"]
-                        or view["is_initial_build_phase"])
-                refused += 1
-                continue
-            assert position.method == "snapshot" and position.seat == seat
-            assert position.mismatches == tuple(public_mismatches(position.game, view, seat))
-            if position.exact:
-                exact += 1
+                assert position.method == "snapshot" and position.seat == seat
+                assert position.exact, position.mismatches
                 assert np.array_equal(encoder.encode(position.game, seat), encoder.encode(ls.native, seat))
-            else:  # only what PROMPT_COVERAGE says apply_setup cannot express
-                for mismatch in position.mismatches:
-                    assert any(what in mismatch for what in ("road length", "longest road", "awards",
-                                                            "playable cards", "points")), mismatch
-    assert exact > 100 and refused > 20
+                native = ls.native.player(seat)
+                for other in range(len(ls.colors)):  # what the log tells of every seat, too
+                    ours, theirs = position.game.player(other), ls.native.player(other)
+                    assert ours.turns_since_last_knight == theirs.turns_since_last_knight
+                    assert (ours.turns_since_last_development_card_bought
+                            == theirs.turns_since_last_development_card_bought)
+                assert position.game.player(seat).development_card_owned_at_start == (
+                    native.development_card_owned_at_start)
+            view = ls.view(ls.current_seat)
+            prompts["free roads" if view["is_road_building"] else view["current_prompt"]] += 1
+    for prompt in ("BUILD_INITIAL_SETTLEMENT", "BUILD_INITIAL_ROAD", "PLAY_TURN", "MOVE_ROBBER"):
+        assert prompts[prompt], prompts
+
+
+def test_snapshot_refuses_only_trade_negotiations():
+    view = lockstep("base-3p", 0).view(0)
+    view = {**view, "current_prompt": "DECIDE_TRADE", "is_resolving_trade": True}
+    with pytest.raises(Inexpressible):
+        snapshot(view)
+    assert "Inexpressible" in PROMPT_COVERAGE["DECIDE_TRADE / DECIDE_ACCEPTEES"]
+
+
+@pytest.mark.parametrize("name", ("base-3p", "extension-6p"))
+def test_a_replay_anchored_on_a_snapshot_plays_on_exactly(name):
+    """A replay started from a mid-game snapshot (how a seat re-anchors)
+    follows the rest of the game exactly: the declaration carries everything
+    later moves depend on (road networks and cached lengths included)."""
+    for index in range(GAMES_PER_CONFIG):
+        ls = lockstep(name, 60 + index)
+        encoder = make_encoder(ls.dims, "private")
+        anchored: list[tuple[int, Replay]] = []
+        for step in range(MAX_STEPS):
+            if ls.over:
+                break
+            ls.step(ls.choose())
+            if ls.over:
+                break
+            views = ls.views()
+            for seat, replay in anchored:
+                # Every step, with the hand sizes after it (as the server shows them).
+                replay.step(views[seat]["action_records"][-1],
+                            sizes_after=SeatView(views[seat], seat).hand_sizes())
+                assert not public_mismatches(replay.game, views[seat], seat)
+                assert np.array_equal(encoder.encode(replay.game, seat), encoder.encode(ls.native, seat))
+            if step % 97 == 13:
+                seat = step % len(ls.colors)
+                position = snapshot(views[seat])
+                anchored.append((seat, Replay(views[seat], seat, ls.native.rules, shared_map(views[seat]["map"]),
+                                              game=position.game, entries=views[seat]["action_records"])))
+        assert len(anchored) >= 3
 
 
 def test_two_player_placeholders_are_the_truth():
@@ -162,15 +205,10 @@ def _equivalence(name: str, index: int, every: int) -> int:
         over = ls.truth.winning_color() is not None
         syncing = [seat for seat in range(n) if not step % every or over or ls.current_seat == seat]
         views = ls.views() if len(syncing) > 1 else {seat: ls.view(seat) for seat in syncing}
-        if ls.native_diverged(views):
-            break  # cppanatron itself departs from Catanatron (see test_bridge_tracking._play)
         for seat in syncing:
             tracker = trackers[seat]
             position = tracker.sync(views[seat], game_over=over)
-            if position.mismatches:
-                # Only a decide-only stream can lose a monopoly's takes (tracking module doc).
-                assert every > 1 and tracker.stats["broken"] + tracker.stats["mismatched_syncs"], position
-                continue
+            assert position.exact, position.mismatches  # re-anchored on the snapshot if it had to
             assert np.array_equal(encoder.encode(position.game, seat), encoder.encode(ls.native, seat)), (
                 name, index, step, seat)
             compared += 1

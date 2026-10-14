@@ -15,16 +15,14 @@ This module holds what both constructions of a position share:
   ``cpp.CatanMap`` per map document, shared by every game on it);
 * :func:`public_mismatches`, the check that a cppanatron game shows exactly
   what the view shows (everything a PRIVATE row reads, and more);
-* :func:`snapshot`: the position through ``Game.apply_setup``, with the other
-  seats' hidden cards filled by a deterministic placeholder deal built from
-  public counts only (the hand tracker's sampler replaces them).
+* :func:`snapshot`: the position from one view through ``Game.apply_setup``,
+  exact at every prompt Catanatron offers (:data:`PROMPT_COVERAGE`), with
+  the other seats' hidden cards filled by a deterministic placeholder deal
+  built from public counts only (the hand tracker's sampler replaces them).
 
-``apply_setup`` expresses positions at a seat's turn, before or after the
-roll, with every held card playable (:data:`PROMPT_COVERAGE`). Everything
-else (initial placement, discards, robber moves, free roads, cards bought
-this turn, Catanatron's in-play road lengths) comes from
-:mod:`catanrl.bridge.replay`, which replays the view's log instead; the
-snapshot is its fallback for turn positions.
+:mod:`catanrl.bridge.replay` replays the view's log instead, which also
+feeds the seat's hand tracker; the snapshot is where it (re-)anchors when it
+cannot explain a view (a TUI edit, a log it cannot follow).
 
 Nothing here reads hidden information: placeholders depend only on the hand
 sizes, the bank, the unseen pool and public victory points.
@@ -47,24 +45,18 @@ VICTORY_POINT = DEVELOPMENT_CARDS.index("VICTORY_POINT")
 #: Supplies by the names catanatron-server room configs use.
 SUPPLY_NAMES = ("base", "extension")
 
-#: How each prompt a seat can be asked about becomes a position. "snapshot"
-#: is ``apply_setup`` alone; "replay" is :class:`catanrl.bridge.replay.Replay`.
+#: Which view fields each prompt's ``apply_setup`` declaration carries; every
+#: one is exact (``snapshot`` reproduces the view's public state and the
+#: seat's cards) except a trade negotiation, which Catanatron never offers.
 PROMPT_COVERAGE = {
-    "BUILD_INITIAL_SETTLEMENT": ("replay", "apply_setup needs a finished initial phase"),
-    "BUILD_INITIAL_ROAD": ("replay", "apply_setup needs a finished initial phase"),
-    "PLAY_TURN (before the roll)": ("snapshot", "exact unless a road length differs (below)"),
-    "PLAY_TURN (after the roll)": ("snapshot",
-                                   ("exact unless the seat bought a card this turn (apply_setup makes "
-                                    "every held card playable) or a road length differs (below)")),
-    "PLAY_TURN (free roads of Road Building)": ("replay", "apply_setup has no free-road state"),
-    "DISCARD": ("replay", "apply_setup has no discard state (who discards, how many are left)"),
-    "MOVE_ROBBER (after a 7 or a knight)": ("replay", "apply_setup has no robber prompt"),
-    "DECIDE_TRADE / DECIDE_ACCEPTEES": ("replay",
-                                        "never offered: Catanatron generates no domestic trades"),
-    "road lengths": ("replay",
-                     ("apply_setup recomputes them; Catanatron counts a road's last edge into an "
-                      "opponent's building only if the road was there first, so a snapshot's "
-                      "length (and Longest Road) can differ")),
+    "BUILD_INITIAL_SETTLEMENT / BUILD_INITIAL_ROAD": "prompt; placement read from the pieces (newest last)",
+    "PLAY_TURN before / after the roll": "has_rolled, has_played_development_card, owned-at-start flags",
+    "PLAY_TURN with free roads (Road Building)": "free_roads",
+    "DISCARD": "acting_player (the discarding seat), discards left per seat",
+    "MOVE_ROBBER (after a 7 or a knight)": "prompt, has_rolled, has_played_development_card",
+    "every prompt": ("road networks, cached and published road lengths, the length Longest Road was won "
+                     "with, award holders, robber, turns of each seat's last knight and purchase"),
+    "DECIDE_TRADE / DECIDE_ACCEPTEES": "not expressible (Inexpressible); never offered by Catanatron",
 }
 
 
@@ -533,49 +525,78 @@ class Position:
         return not self.mismatches
 
 
+def card_turns(records: Sequence[Any], colors: Sequence[str]) -> list[tuple[int, int]]:
+    """Per seat, the completed turns (END_TURNs before) of its last knight
+    and of its last purchase in a log; -1 for never. Both are public."""
+    last = [[-1, -1] for _ in colors]
+    completed = 0
+    for (color, kind, _value), _result in records:
+        if kind == "END_TURN":
+            completed += 1
+        elif kind == "PLAY_KNIGHT_CARD":
+            last[colors.index(color)][0] = completed
+        elif kind == "BUY_DEVELOPMENT_CARD":
+            last[colors.index(color)][1] = completed
+    return [(knight, bought) for knight, bought in last]
+
+
 def snapshot(view: Mapping[str, Any], *, color: Any = None, rules: cpp.GameRules | None = None,
              catan_map: cpp.CatanMap | None = None, supply: Any = None, seed: int = 0) -> Position:
-    """The view's position through ``Game.apply_setup``.
+    """The view's position through ``Game.apply_setup``, at any prompt but a
+    domestic trade's negotiation (:class:`Inexpressible`; Catanatron offers
+    none).
 
-    Only turn positions (``PLAY_TURN``, before or after the roll, no free
-    roads pending) can be expressed; others raise :class:`Inexpressible`.
-    Hidden hands are :func:`placeholder_hands`. The result's ``mismatches``
-    say where it differs from the view (a card bought this turn shown as
-    playable, a road length; see :data:`PROMPT_COVERAGE`).
+    Everything the view shows goes into the declaration: the pieces (each
+    seat's settlements in building order), the prompt with the seat to act,
+    cards left to discard, free roads, the seat's own cards and which of
+    them it held when its turn began, Catanatron's road networks and cached
+    and published road lengths, awards, and from the log the turns of every
+    seat's last knight and purchase. Hidden hands are
+    :func:`placeholder_hands`. ``mismatches`` is empty when the game shows
+    exactly what the view shows.
     """
     sv = SeatView.of(view, color)
-    prompt = view["current_prompt"]
-    if view["is_initial_build_phase"] or prompt != "PLAY_TURN" or view["is_road_building"] or view.get(
-            "is_resolving_trade"):
-        what = "free roads" if view["is_road_building"] else prompt
-        raise Inexpressible(f"apply_setup cannot express a {what} position")
+    if view.get("is_resolving_trade") or view["current_prompt"] in ("DECIDE_TRADE", "DECIDE_ACCEPTEES"):
+        raise Inexpressible("apply_setup cannot express a trade negotiation")
     rules = rules if rules is not None else game_rules(view, supply)
     catan_map = catan_map if catan_map is not None else shared_map(view["map"])
     resources, cards = placeholder_hands(sv, rules)
+    board = view["board"]
+    turns = card_turns(view.get("action_records", ()), sv.colors)
+    discarding = bool(view["is_discarding"])
     players = []
-    for i in range(sv.num_players):
+    for i, name in enumerate(sv.colors):
         built = sv.buildings(i)
+        cached = board["road_lengths"].get(name)
+        components = board["connected_components"].get(name)
         players.append(cpp.PlayerSetup(
             settlements=[int(x) for x in built.get("SETTLEMENT", [])],
             cities=[int(x) for x in built.get("CITY", [])],
             roads=[tuple(sorted(int(x) for x in edge)) for edge in built.get("ROAD", [])],
             resources=tuple(resources[i]), development_cards=tuple(cards[i]),
-            played_development_cards=sv.played(i)))
-    current = int(view["current_player_index"])
-    kwargs = {
-        "robber": tuple(int(x) for x in view["board"]["robber_coordinate"]),
-        "current_player": current,
-        "has_rolled": bool(sv.value(current, "HAS_ROLLED")),
-        "has_played_development_card": bool(sv.value(current, "HAS_PLAYED_DEVELOPMENT_CARD_IN_TURN")),
-        "completed_turns": int(view["num_turns"]) - 2 * (sv.num_players - 1),
-    }
+            played_development_cards=sv.played(i),
+            development_card_owned_at_start=sv.owned_at_start(i) if sv.visible(i) else None,
+            discards=int(view["discard_counts"][i]) if discarding else 0,
+            longest_road_length=int(sv.value(i, "LONGEST_ROAD_LENGTH")),
+            cached_road_length=None if cached is None else int(cached),
+            road_components=None if components is None else [[int(n) for n in c] for c in components],
+            last_knight_completed_turn=turns[i][0],
+            last_development_card_bought_completed_turn=turns[i][1]))
+    turn = int(view["current_turn_index"])
+    acting = int(view["current_player_index"])
     game = fresh_game(view, rules, catan_map, seed)
-    try:
-        game.apply_setup(players, longest_road=sv.award_holder("HAS_ROAD"),
-                         largest_army=sv.award_holder("HAS_ARMY"), **kwargs)
-    except ValueError:
-        # Recomputed road lengths can disagree with Catanatron's (PROMPT_COVERAGE):
-        # let apply_setup name the holders, and report the difference.
-        game = fresh_game(view, rules, catan_map, seed)
-        game.apply_setup(players, **kwargs)
+    game.apply_setup(
+        players,
+        robber=tuple(int(x) for x in board["robber_coordinate"]),
+        current_player=turn,
+        acting_player=acting if acting != turn else None,
+        has_rolled=bool(sv.value(turn, "HAS_ROLLED")),
+        has_played_development_card=bool(sv.value(turn, "HAS_PLAYED_DEVELOPMENT_CARD_IN_TURN")),
+        completed_turns=max(0, int(view["num_turns"]) - 2 * (sv.num_players - 1)),
+        longest_road=sv.award_holder("HAS_ROAD"),
+        largest_army=sv.award_holder("HAS_ARMY"),
+        prompt=cpp.ActionPrompt[view["current_prompt"]],
+        free_roads=int(view["free_roads_available"]) if view["is_road_building"] else 0,
+        longest_road_length=int(board["road_length"]) if board.get("road_color") else None,
+    )
     return Position(game, sv.seat, "snapshot", tuple(public_mismatches(game, view, sv.seat)))

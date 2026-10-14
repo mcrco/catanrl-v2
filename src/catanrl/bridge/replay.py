@@ -4,11 +4,11 @@ A view's ``action_records`` is the game's whole log, redacted for the seat:
 every action with its dice, the cards the seat bought and the steals it was
 party to; other seats' purchases and the steals between them show no card.
 :class:`Replay` executes the log on a fresh cppanatron game seated and mapped
-like the view, forcing every outcome the log shows. Both engines follow the
-same rules (cppanatron's differential tests), so the replay reaches exactly
-the view's public state at every prompt (initial placement, discards, robber
-moves, free roads, cards bought this turn) with Catanatron's in-play road
-lengths, which ``apply_setup`` cannot express (``position.PROMPT_COVERAGE``).
+like the view (or from an ``apply_setup`` snapshot of an earlier view),
+forcing every outcome the log shows. Both engines follow the same rules
+(cppanatron's differential tests), so the replay reaches exactly the view's
+public state at every prompt, and every transition it passes through is
+what the seat's hand tracker learns from (:mod:`catanrl.bridge.tracking`).
 
 The other seats' hidden cards are placeholders. They start as the fresh
 game's (empty hands) and change only by public moves and by placeholder
@@ -16,16 +16,13 @@ outcomes the seat cannot see: a hidden steal takes a card the victim's
 placeholder hand holds, a hidden purchase draws a card the placeholder deck
 holds (not a victory point card while another kind is left). When a public
 move needs cards a placeholder hand lacks (a build, a discard, a trade, a
-played card, a monopoly's exact take), the hidden cards of the other seats
-are re-dealt first with the fewest changes: per resource the cards those
-seats hold together (public, from the bank) and every hand size stay as they
-are, and the unseen development cards stay the deck plus their hands. Where
-the engine's setters cannot reach such a deal (a victory point card has to
-move between two hands while the deck is empty: ``set_development_cards``
-keeps victory point counts, ``determinize_development_cards`` trades only
-with the deck), the placeholders become a world the seat's own tracker deals
-(``cpp.sample_world``). No placeholder ever comes from hidden information,
-and none can make a seat win the replay that has not won the game.
+played card, a monopoly's exact take, a friendly-robber target), the hidden
+cards of the other seats are re-dealt first (``Game.redeal_hidden_cards``)
+with the fewest changes: per resource the cards those seats hold together
+(public, from the bank) and every hand size stay as they are, and the unseen
+development cards stay the deck plus their hands. No placeholder ever comes
+from hidden information, and none can make a seat win the replay that has
+not won the game.
 
 Monopoly takes are public (every hand size is visible), but a log entry does
 not carry them: :meth:`Replay.step` takes the hand sizes after the entry when
@@ -38,7 +35,7 @@ to the sizes a later view shows.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -162,10 +159,6 @@ class Replay:
         self.entries: list[Any] = list(entries)
         #: Placeholder repairs by kind.
         self.repairs: Counter[str] = Counter()
-        #: The seat's hand tracker when it has seen every replayed entry
-        #: (set by :class:`catanrl.bridge.tracking.SeatTracker`), else None:
-        #: repairs the engine's setters cannot make draw from its worlds.
-        self.tracker_source: Callable[[], cpp.HandTracker | None] = lambda: None
 
     @property
     def applied(self) -> int:
@@ -190,7 +183,6 @@ class Replay:
         mine = player == self.seat
         forced: dict[str, Any] = {}
         extra: dict[str, Any] = {}
-        worlds = self.repairs["worlds"]
         if kind in ("ROLL", "BUY_DEVELOPMENT_CARD"):
             # The record shows the outcome in the action; the move itself has none.
             action = cpp.Action(cpp.Color[color], cpp.ActionType[kind], None)
@@ -244,8 +236,6 @@ class Replay:
 
         if kind in POINT_MOVES:
             self._guard_points(action, forced)
-            if self.repairs["worlds"] != worlds and not mine:
-                self._prepare(player, kind, value)  # a dealt world replaced the placeholders
         before = Counts.of(self.game)
         try:
             self.game.execute(action, **forced)
@@ -334,10 +324,15 @@ class Replay:
             deal = transport(supply, demand, lower=lo, upper=hi, prefer=current)
         except ValueError as error:
             raise ReplayError(f"no deal of the other seats' resources fits: {error}") from None
-        for s in self.others:
-            if deal[s] != current[s]:
-                self.game.set_resources(s, tuple(deal[s]))
-                self.repairs["resources"] += 1
+        changed = {s: deal[s] for s in self.others if deal[s] != current[s]}
+        if not changed:
+            return
+        if sizes is None:
+            self._redeal(resources=changed)
+        else:  # new hand sizes: set them (the bank stays, as the totals do)
+            for s, hand in changed.items():
+                self.game.set_resources(s, tuple(hand))
+        self.repairs["resources"] += 1
 
     def resize(self, sizes: Sequence[int]) -> None:
         """Move placeholder cards between the other seats so their hands
@@ -346,6 +341,30 @@ class Replay:
         if int(sizes[self.seat]) != sum(self.game.player(self.seat).resources):
             raise ReplayError("the seat's own hand size differs from the view")
         self._redeal_resources(sizes={s: int(sizes[s]) for s in self.others})
+
+    def _redeal(self, *, resources: Mapping[int, Sequence[int]] | None = None,
+                cards: Mapping[int, Sequence[int]] | None = None,
+                playable: Mapping[int, int] | None = None) -> None:
+        """Give the other seats these resources and development cards
+        (``Game.redeal_hidden_cards``; the rest of the unseen cards becomes
+        the deck). A hand whose cards change counts every kind it now holds
+        as held since its turn began, and ``playable`` (seat -> kind) marks
+        one more such kind."""
+        hands = []
+        for seat in range(len(self.colors)):
+            p = self.game.player(seat)
+            held = list((cards or {}).get(seat, p.development_cards))
+            owned = list(p.development_card_owned_at_start)
+            if held != list(p.development_cards):
+                owned = [held[d] > 0 for d in range(4)]
+            if seat in (playable or {}):
+                owned[playable[seat]] = True
+            hands.append(cpp.HiddenHand(resources=tuple((resources or {}).get(seat, p.resources)),
+                                        development_cards=tuple(held), development_card_owned_at_start=owned))
+        try:
+            self.game.redeal_hidden_cards(hands, seed=len(self.entries))
+        except ValueError as error:
+            raise ReplayError(f"the placeholders cannot be re-dealt: {error}") from None
 
     def _placeholder_steal(self, victim: int) -> str:
         held = self.game.player(victim).resources
@@ -357,7 +376,11 @@ class Replay:
 
     def deck(self) -> list[int]:
         """The replay's deck by kind: the rules' deck minus every hand and played card."""
-        return self._deck_of(self.game)
+        deck = [int(x) for x in self.rules.development_deck]
+        for p in self.game.players:
+            for d in range(5):
+                deck[d] -= p.development_cards[d] + p.played_development_cards[d]
+        return deck
 
     def _room(self, seat: int, margin: int = POINT_MARGIN) -> int:
         return victory_point_room(self.rules, self.game.player(seat).victory_points, margin)
@@ -401,7 +424,7 @@ class Replay:
             p = self.game.player(seat)
         if not p.development_card_owned_at_start[card]:
             # A placeholder bought this turn: the seat held one before.
-            self.game.set_development_cards(seat, tuple(p.development_cards))
+            self._redeal(playable={seat: card})
             self.repairs["playable"] += 1
 
     def _allow_robber(self, player: int, action: cpp.Action) -> None:
@@ -426,9 +449,8 @@ class Replay:
         """No move may make a seat win the replay on placeholder victory
         point cards: try a move that adds public points (a build, a knight,
         an award it moves) on a copy, and re-deal first the cards of any
-        seat it would make win (while the replay is in progress, so a world
-        can still be dealt for it), unless no deal avoids it (the move wins
-        the game)."""
+        seat it would make win, unless no deal avoids it (then the move
+        wins the game)."""
         if not any(self.game.player(s).development_cards[VICTORY_POINT] for s in self.others):
             return
         trial = self.game.copy()
@@ -444,10 +466,7 @@ class Replay:
                 caps[s] = room
         if not caps or self._card_deal(caps=caps, margin=0) is None:
             return  # every deal of the unseen cards makes that seat win: so does the game
-        try:
-            self._redeal_cards(caps=caps)
-        except ReplayError:
-            return  # nor does any world the tracker deals avoid it: the move wins the game
+        self._redeal_cards(caps=caps)
         self.repairs["points"] += 1
 
     def _card_deal(self, *, lower: Mapping[int, Mapping[int, int]] | None = None,
@@ -482,112 +501,22 @@ class Replay:
                       caps: Mapping[int, int] | None = None) -> None:
         """Re-deal the unseen development cards to meet ``lower``,
         ``deck_lower`` and ``caps`` (see :meth:`_card_deal`; ``margin``
-        points kept free when possible), through the engine's setters or,
-        where they cannot, a world the seat's tracker deals."""
-        deal = None
+        points kept free when possible)."""
         for m in sorted({margin, 0}, reverse=True):
             deal = self._card_deal(lower=lower, deck_lower=deck_lower, margin=m, caps=caps)
             if deal is not None:
                 break
-        try:
-            if deal is None:
-                raise ReplayError("no deal of the unseen development cards fits the public moves")
-            self._realize_cards({s: deal[s] for s in self.others})
-        except ReplayError:
-            # The setters cannot move a victory point card between two hands
-            # (only through the deck): deal a world from the tracker instead.
-            self._resample(lambda world: all(
-                world.player(s).development_cards[d] >= v for s, counts in (lower or {}).items()
-                for d, v in counts.items()) and all(
-                self._deck_of(world)[d] >= v for d, v in (deck_lower or {}).items()) and all(
-                world.player(s).development_cards[VICTORY_POINT] <= v for s, v in (caps or {}).items()))
+        else:
+            raise ReplayError("no deal of the unseen development cards fits the public moves")
+        self._redeal(cards={s: deal[s] for s in self.others})
+        self.repairs["cards"] += 1
 
-    def _deck_of(self, game: cpp.Game) -> list[int]:
-        deck = [int(x) for x in self.rules.development_deck]
-        for p in game.players:
-            for d in range(5):
-                deck[d] -= p.development_cards[d] + p.played_development_cards[d]
-        return deck
-
-    def _resample(self, accept: Callable[[cpp.Game], bool], attempts: int = 512) -> None:
-        """Replace every placeholder by a world the seat's tracker deals
-        (``cpp.sample_world``: known cards, the unknown pool, victory point
-        caps), the first of ``attempts`` seeded deals ``accept`` takes."""
-        tracker = self.tracker_source()
-        if tracker is None:
-            raise ReplayError("no placeholder deal fits, and the tracker is not in step to deal one")
-        if self.game.winning_color is not None:
-            raise ReplayError("no placeholder deal fits, and a finished game deals no worlds")
-        for attempt in range(attempts):
-            world = cpp.sample_world(self.game, tracker, seed=len(self.entries) * attempts + attempt)
-            if accept(world):
-                self.game = world
-                self.repairs["worlds"] += 1
-                return
-        raise ReplayError(f"none of {attempts} worlds dealt by the tracker fits the public moves")
-
-    def _realize_cards(self, target: Mapping[int, Sequence[int]]) -> None:
-        """Bring the other hands to ``target`` with the engine's two tools:
-        ``determinize_development_cards`` (a hand trades with the deck) and
-        ``set_development_cards`` (two hands swap cards other than victory
-        points)."""
-        game = self.game
-        for _ in range(64):
-            hands = {s: list(game.player(s).development_cards) for s in self.others}
-            pending = [s for s in self.others if hands[s] != list(target[s])]
-            if not pending:
-                return
-            deck = self.deck()
-            for s in pending:  # a hand whose missing cards are all in the deck
-                if all(max(0, target[s][d] - hands[s][d]) <= deck[d] for d in range(5)):
-                    game.determinize_development_cards(s, tuple(int(x) for x in target[s]),
-                                                       seed=len(self.entries))
-                    self.repairs["cards"] += 1
-                    break
-            else:
-                if not self._swap_hands(pending, hands, target) and not self._via_deck(pending, hands, target,
-                                                                                     deck):
-                    raise ReplayError("cannot move the placeholder development cards into place")
-        raise ReplayError("placeholder development cards did not settle")
-
-    def _swap_hands(self, pending, hands, target) -> bool:
-        for s in pending:
-            for t in pending:
-                if s == t:
-                    continue
-                for a in range(5):  # s needs a, t has a to spare
-                    if a == VICTORY_POINT or hands[s][a] >= target[s][a] or hands[t][a] <= target[t][a]:
-                        continue
-                    for b in range(5):  # s has b to spare
-                        if b == VICTORY_POINT or b == a or hands[s][b] <= target[s][b]:
-                            continue
-                        new_s, new_t = list(hands[s]), list(hands[t])
-                        new_s[a] += 1
-                        new_s[b] -= 1
-                        new_t[a] -= 1
-                        new_t[b] += 1
-                        self.game.set_development_cards(s, tuple(new_s))
-                        self.game.set_development_cards(t, tuple(new_t))
-                        self.repairs["cards"] += 1
-                        return True
-        return False
-
-    def _via_deck(self, pending, hands, target, deck) -> bool:
-        """Put a spare card some other hand needs into the deck."""
-        for t in pending:
-            for e in range(5):
-                if hands[t][e] <= target[t][e]:
-                    continue
-                if not any(hands[s][e] < target[s][e] for s in pending if s != t):
-                    continue
-                for z in range(5):
-                    if z != e and deck[z] > 0:
-                        new_t = list(hands[t])
-                        new_t[e] -= 1
-                        new_t[z] += 1
-                        if new_t[VICTORY_POINT] > max(target[t][VICTORY_POINT], hands[t][VICTORY_POINT]):
-                            continue
-                        self.game.determinize_development_cards(t, tuple(new_t), seed=len(self.entries))
-                        self.repairs["cards"] += 1
-                        return True
-        return False
+    def match_points(self, floors: Mapping[int, int], caps: Mapping[int, int]) -> None:
+        """Give the other seats between ``floors`` and ``caps`` victory point
+        cards (what the seat's tracker knows), so the replay protects the
+        tiles the friendly robber protects."""
+        held = {s: self.game.player(s).development_cards[VICTORY_POINT] for s in self.others}
+        if all(floors.get(s, 0) <= held[s] <= caps.get(s, held[s]) for s in self.others):
+            return
+        self._redeal_cards(lower={s: {VICTORY_POINT: int(v)} for s, v in floors.items() if v},
+                           caps=caps, margin=0)

@@ -32,6 +32,10 @@ decisions (TUI ``decide_fns``) one monopoly between two decisions is solved
 from the hand sizes at the next view; for two, the tracker restarts from the
 replay (sound: it forgets the others' cards, nothing more), counted in
 ``stats["tracker_resets"]``.
+
+A view the replay does not explain (a TUI edit, a log the replay cannot
+follow) re-anchors it on the view's own position, which ``apply_setup``
+declares exactly at every prompt (:func:`catanrl.bridge.position.snapshot`).
 """
 
 from __future__ import annotations
@@ -125,12 +129,10 @@ class SeatTracker:
     ``tracker`` its ``cpp.HandTracker``. Feed ``record(index, state)`` with
     every server ``step`` (or any later view) to make monopolies exact.
     A log that no longer extends the replayed one (a TUI undo, another game)
-    restarts the replay. A log the replay cannot follow (a TUI edit, or the
-    rare monopoly whose takes a decide-only stream cannot recover before a
-    discard depends on them) marks it ``broken`` until the seat's next turn
-    position, where it re-anchors on the ``apply_setup`` snapshot (the
-    agent decides on snapshots or plays the default move meanwhile, see
-    :mod:`catanrl.bridge.agent`).
+    restarts the replay. A log the replay cannot follow, or a view it does
+    not explain (a TUI edit, or the rare monopoly whose takes a decide-only
+    stream cannot recover before a discard depends on them), re-anchors the
+    replay on the view's exact ``apply_setup`` snapshot.
     """
 
     def __init__(self, view: Mapping[str, Any], color: Any = None, *, supply: Any = None,
@@ -150,14 +152,9 @@ class SeatTracker:
 
     def _start(self, view: Mapping[str, Any]) -> None:
         self.replay = Replay(view, self.seat, self.rules, self.catan_map)
-        self.replay.tracker_source = self._synced_tracker
         self.tracker = cpp.HandTracker(self.replay.game, self.seat)
-        self._in_sync = True
         self.broken = None
         self.mismatches = ()
-
-    def _synced_tracker(self) -> cpp.HandTracker | None:
-        return self.tracker if self._in_sync else None
 
     @property
     def game(self) -> cpp.Game:
@@ -181,8 +178,8 @@ class SeatTracker:
 
         ``game_over``: the view's last entry ended the game (no public
         victory points follow it, as in ``HandTracker.events``). A replay
-        that breaks re-anchors on the ``apply_setup`` snapshot at the seat's
-        next turn position (``stats["reanchored"]``; its tracker starts
+        that breaks or differs from the view re-anchors on the view's exact
+        ``apply_setup`` snapshot (``stats["reanchored"]``; the tracker starts
         afresh there, which is sound).
         """
         records = view["action_records"]
@@ -203,21 +200,20 @@ class SeatTracker:
                     self.stats["mismatched_syncs"] += 1
         if self.broken is not None or self.mismatches:
             self._reanchor(view, records)
-        if self.broken is not None:
-            self.mismatches = (f"replay broken: {self.broken}",)
         return self.position
 
     def _reanchor(self, view: Mapping[str, Any], records: Sequence[Any]) -> None:
         try:
             anchor = snapshot(view, color=self.color, rules=self.rules, catan_map=self.catan_map)
-        except (Inexpressible, ViewError, ValueError):
+        except (Inexpressible, ViewError, ValueError) as error:
+            self.mismatches = (f"no snapshot: {error}",) + self.mismatches
             return
-        if self.broken is None and len(anchor.mismatches) >= len(self.mismatches):
-            return
+        if anchor.mismatches:
+            self.stats["inexact_snapshots"] += 1
+            if self.broken is None:
+                return  # keep the replay; its own mismatches stand
         self.replay = Replay(view, self.seat, self.rules, self.catan_map, game=anchor.game, entries=records)
-        self.replay.tracker_source = self._synced_tracker
         self.tracker = cpp.HandTracker(anchor.game, self.seat)
-        self._in_sync = True
         self.broken = None
         self.mismatches = anchor.mismatches
         self.stats["reanchored"] += 1
@@ -239,7 +235,6 @@ class SeatTracker:
                 unsettled.append(0 if pending is None else len(pending))
                 if pending is None:
                     pending = []
-                    self._in_sync = False
             if pending is None:
                 for event in events:
                     self.tracker.apply(event)
@@ -277,12 +272,10 @@ class SeatTracker:
                     pass
                 else:
                     self.tracker = trial
-                    self._in_sync = True
                     self.stats["monopolies_from_sizes"] += 1
                     self.stats["transitions"] += len(pending)
                     return
         self.tracker = cpp.HandTracker(self.replay.game, self.seat)
-        self._in_sync = True
         self.stats["tracker_resets"] += 1
 
     def options(self, legal: Sequence[cpp.Action]) -> None:
@@ -290,17 +283,21 @@ class SeatTracker:
 
         Under the friendly robber they bound the others' victory point cards
         (``observe_options``), and the replay must offer the same robber
-        moves: its placeholders are then redealt from the tracker until it
-        does (``cpp.sample_world`` respects those bounds).
+        moves: its placeholders then get victory point cards within the
+        tracker's bounds.
         """
         if self.broken is not None:
             return
         legal = list(legal)
         self.tracker.observe_options(self.replay.game, legal)
         wanted = sorted(map(repr, legal))
-        if self.rules.friendly_robber and sorted(map(repr, self.replay.game.playable_actions)) != wanted:
-            try:
-                self.replay._resample(lambda world: sorted(map(repr, world.playable_actions)) == wanted)
-                self.stats["robber_options_redealt"] += 1
-            except ReplayError:
-                self.stats["robber_options_differ"] += 1
+        if not self.rules.friendly_robber or sorted(map(repr, self.replay.game.playable_actions)) == wanted:
+            return
+        others = [s for s in range(len(self.colors)) if s != self.seat]
+        try:
+            self.replay.match_points({s: self.tracker.victory_point_card_floor(s) for s in others},
+                                     {s: self.tracker.victory_point_card_cap(s) for s in others})
+        except ReplayError:
+            pass
+        matched = sorted(map(repr, self.replay.game.playable_actions)) == wanted
+        self.stats["robber_options_redealt" if matched else "robber_options_differ"] += 1

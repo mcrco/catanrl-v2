@@ -22,13 +22,9 @@ MAX_STEPS = int(os.environ.get("CATANRL_BRIDGE_STEPS", "600"))
 
 def _play(name: str, index: int, *, every: int = 1, friendly_robber: bool | None = None) -> Counter:
     """A random game with a SeatTracker and a native HandTracker per seat;
-    the trackers are compared at every sync. Returns the trackers' stats.
-    The comparison stops where cppanatron itself departs from Catanatron
-    (``native_diverged``: an engine parity bug the bridge, which follows the
-    views, does not share)."""
+    the trackers are compared at every sync. Returns the trackers' stats."""
     ls = lockstep(name, index, friendly_robber=friendly_robber)
     n = len(ls.colors)
-    stats_native_diverged: list = []
     bridged = [SeatTracker(view) for view in ls.views()]
     native = [cpp.HandTracker(ls.native, seat) for seat in range(n)]
     for step in range(MAX_STEPS):
@@ -42,18 +38,13 @@ def _play(name: str, index: int, *, every: int = 1, friendly_robber: bool | None
         over = ls.truth.winning_color() is not None
         syncing = [seat for seat in range(n) if not step % every or over or ls.current_seat == seat]
         views = ls.views() if len(syncing) > 1 else {seat: ls.view(seat) for seat in syncing}
-        if ls.native_diverged(views):
-            stats_native_diverged.append((name, index, step))
-            break
         for seat in syncing:
             tracker = bridged[seat]
             tracker.sync(views[seat], game_over=over)
             if not over and ls.current_seat == seat:
                 # What the seat is offered (natively applied at every transition to it).
                 tracker.options([from_catanatron_action(a) for a in ls.truth.playable_actions])
-            if tracker.mismatches:
-                assert every > 1, tracker.mismatches
-                continue
+            assert not tracker.mismatches, tracker.mismatches  # re-anchored if it had to
             tracker.tracker.check_public(tracker.game)
             if tracker.stats["tracker_resets"] or tracker.stats["reanchored"]:
                 # Restarted mid-game (a decide-only stream): it knows less, but it is sound.
@@ -61,7 +52,7 @@ def _play(name: str, index: int, *, every: int = 1, friendly_robber: bool | None
                     assert tracker.tracker.consistent_with(ls.native), (name, index, step, seat)
             else:
                 assert tracker.tracker == native[seat], (name, index, step, seat)
-    stats: Counter = Counter({"native_diverged": len(stats_native_diverged)})
+    stats: Counter = Counter()
     for tracker in bridged:
         stats.update(tracker.stats)
         stats.update({f"repair:{k}": v for k, v in tracker.replay.repairs.items()})
@@ -75,6 +66,7 @@ def test_tracker_equals_the_native_tracker(name):
         stats += _play(name, 10 + index)
     assert stats["transitions"] > 300
     assert not stats["broken"] and not stats["tracker_resets"] and not stats["mismatched_syncs"]
+    assert not stats["reanchored"]
 
 
 def test_tracker_equals_the_native_tracker_with_the_friendly_robber():

@@ -31,13 +31,13 @@ pure function of the view, so a transcript fixes every decision's seed. (The
 native harness counts the seat's own decisions instead, which a view cannot
 reproduce after a reconnect or a TUI undo.) ``seed_fn`` overrides it.
 
-Nothing falls back silently. A seat whose replay is broken (until it
-re-anchors at its next turn) decides on the ``apply_setup`` snapshot when
-the prompt allows, and otherwise plays the server's default move; a position
-that differs from the view is used but counted; a chosen action that was not
-offered is never mapped to another one. All of it is counted in
-:attr:`ViewAgent.stats`, and ``strict=True`` (the tests) raises
-:class:`BridgeError` instead.
+Nothing falls back silently. The seat's replay re-anchors on the view's exact
+``apply_setup`` snapshot whenever it cannot explain the view (a TUI edit, a
+mid-game join whose log it cannot follow); what is left (no position at all,
+a position that still differs from the view, a chosen action that was not
+offered, which is never mapped to another one, an error) plays the
+server's default move or is counted in :attr:`ViewAgent.stats`, and
+``strict=True`` (the tests) raises :class:`BridgeError` instead.
 """
 
 from __future__ import annotations
@@ -55,12 +55,10 @@ from catanatron.serialization import action_from_json, action_to_json
 from cppanatron.catanatron import from_catanatron_action, to_catanatron_action
 
 from catanrl.bridge.position import (
-    Inexpressible,
     Position,
     SeatView,
     ViewError,
     color_name,
-    snapshot,
 )
 from catanrl.bridge.tracking import SeatTracker
 from catanrl.seeding import derive_seed
@@ -230,8 +228,8 @@ class ViewAgent:
                 if view["current_prompt"] == "MOVE_ROBBER" and (view.get("game") or {}).get("friendly_robber"):
                     # Even a lone friendly-robber option bounds the others' points.
                     tracker = self._tracker(view, playable_actions[0][0])
-                    if tracker.sync(view).method == "replay":
-                        tracker.options([from_catanatron_action(action_from_json(list(playable_actions[0])))])
+                    tracker.sync(view)
+                    tracker.options([from_catanatron_action(action_from_json(list(playable_actions[0])))])
                 return playable_actions[0]
             tracker = self._tracker(view, playable_actions[0][0])
             self.stats["decisions"] += 1
@@ -273,16 +271,8 @@ class ViewAgent:
     def _choose(self, view: Mapping[str, Any], playable_actions: Sequence[Any], tracker: SeatTracker,
                 position: Position) -> Any:
         seat = tracker.seat
-        hand_tracker: cpp.HandTracker = tracker.tracker
-        if position.method == "broken":
-            if self.strict:
-                raise BridgeError(f"the replay is broken: {tracker.broken}")
-            try:
-                position = snapshot(view, color=tracker.color, rules=tracker.rules, catan_map=tracker.catan_map)
-            except (Inexpressible, ViewError, ValueError) as error:
-                return self._fallback("no_position", playable_actions, f"{tracker.broken}; {error}")
-            self.stats["snapshot"] += 1
-            hand_tracker = cpp.HandTracker(position.game, seat)
+        if position.method == "broken":  # nor could the view be declared (a trade negotiation)
+            return self._fallback("no_position", playable_actions, "; ".join(position.mismatches))
         if not position.exact:
             self.stats["inexact"] += 1
             if self.strict:
@@ -303,11 +293,8 @@ class ViewAgent:
                 self.stats["unindexed_offers"] += 1
         if not mask.any():
             return self._fallback("no_indexable_offer", playable_actions)
-        if position.method == "replay":
-            tracker.options(offered)
-            game = tracker.game  # the friendly robber may have redealt its placeholders
-        else:
-            hand_tracker.observe_options(game, offered)
+        tracker.options(offered)
+        game = tracker.game  # the friendly robber may have redealt its placeholders
 
         row = self.native.encode(game, seat)
         if not np.array_equal(row[-mask.size:], mask):
@@ -320,7 +307,7 @@ class ViewAgent:
         index = int(self.native.act(
             row[None], mask[None], np.array([seed], dtype=np.uint64),
             games=[game] if getattr(self.native, "needs_games", False) else None,
-            trackers=[hand_tracker] if getattr(self.native, "needs_trackers", False) else None)[0])
+            trackers=[tracker.tracker] if getattr(self.native, "needs_trackers", False) else None)[0])
         chosen = space.decode(game, index)
         key = action_key(action_to_json(to_catanatron_action(chosen)))
         for action in playable_actions:
