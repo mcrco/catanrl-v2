@@ -35,10 +35,10 @@ train:
   gae_lambda: 0.95
   update_epochs: 2
   clip_coef: 0.2
-  vf_coef: 1.0
+  vf_coef: 2.0                  # v1's effective value/policy balance (meta.notes 2)
   vf_clip_coef: 0.2             # not read: the per-seat value loss replaces the clipped MSE, as v1's WDL hook did
   ent_coef: 0.005
-  max_grad_norm: 1.0
+  max_grad_norm: 2.0            # the loss is 2x v1's, so this clips where v1's 1.0 did
   bptt_horizon: 64
   minibatch_size: 16384
   max_minibatch_size: 4096      # as v1: 4.5 GB on the 8 GB card alone; two runs at once need 2048 (notes)
@@ -62,8 +62,8 @@ sweep:
           - {suite: {name: heldout-2p, boards: 250}, lineup: ["POLICY:ckpt=${run}@best", F]}   # pairs with the MCTS rows
           - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=64:oracle=true", F]}
           - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=256:oracle=true", F]}
-      private:                  # the fair one: private actor and (shared trunk) private critic
-        obs.level: private
+      public:                   # the fair one in 2p: every resource movement is seen by both seats, so the
+        obs.level: public       # opponent's exact hand is public (a perfect card counter's knowledge)
         eval.final:
           - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
           - {suite: {name: heldout-2p, boards: 250}, lineup: ["POLICY:ckpt=${run}@best", F]}   # pairs with the MCTS rows
@@ -90,10 +90,11 @@ meta:
     2. Waiting rows. v1's policy loss, entropy, advantage normalization and segment priorities
        counted waiting rows (half the rows, no gradient), so its policy and entropy terms weighed
        about half against the value loss, and its logged entropy, clipfrac and KL are diluted about
-       2x. v2 (PufferLib fork dfa6fe8) counts acting rows only. Entropy keeps v1's ratio to the
-       policy loss; the value loss weighs half of v1's relative to it. --set train.vf_coef=2.0
-       restores v1's ratio, at twice the loss scale (Muon's orthogonalized matrix updates ignore
-       the scale; biases, LayerNorms and the 1.0 gradient clip do not).
+       2x. v2 (PufferLib fork dfa6fe8) counts acting rows only, so v1's loss was in effect
+       0.5 x (policy + 2 value - 0.005 entropy) over acting rows. vf_coef 2.0 with max_grad_norm
+       2.0 restores it at twice the scale: the clip binds exactly where v1's did, Muon's
+       orthogonalized matrix updates (536,288 of 541,540 parameters) equal v1's, and only biases
+       and LayerNorms (5,252 parameters) step twice as far.
     3. Network. v2's graph-s preset (hidden 96, global 64, 3 layers, head 128) adds an edge stream
        v1 lacked; shared, it has 541,540 parameters against graph2's 537,830 at hidden 128. Matched
        capacity rather than width (hidden 128 would be 799,588: --set model.args.hidden=128). v1's
@@ -126,7 +127,7 @@ meta:
     past epoch 3785 the LR climbs back toward 5e-3, while the prio beta anneal follows the fork's
     own budget. To continue past 500M at the floor: catanrl fork ... --set train.anneal_lr=false
     (the restored LR is then held).
-    Launch one variant at a time (catanrl run puffer-graph2 runs full, then private). Measured on
+    Launch one variant at a time (catanrl run puffer-graph2 runs full, then public). Measured on
     the RTX 2070 Super, 5-epoch runs: about 17k agent steps/s alone (collect 1.5 s, train 6.2 s per
     epoch; 8.2 h of training per variant), 4.5 GB of GPU memory with
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (6.3 GB without). Two at once run out of
