@@ -101,6 +101,7 @@ def test_waiting_rows_take_the_acting_rows_prediction_for_their_seat():
     calibration = policy.pop_calibration()
     assert calibration["value_sum_2p"] == pytest.approx(0.3)
     assert calibration["value_sum_4p"] == pytest.approx(1.0)
+    assert "value_sum_abs_err_2p" not in calibration
 
 
 def test_seat_rows_wrap_around_the_table():
@@ -122,6 +123,7 @@ def test_value_loss_targets_partner_rows_and_writes_back_values():
     policy = PufferPolicy.__new__(PufferPolicy)
     torch.nn.Module.__init__(policy)
     policy.max_players, policy.num_rows = players, rows
+    policy._rollout_sums = policy._trained_sums = None
     idx = torch.tensor([3, 0])          # segments (= rows) in the minibatch
     # Minibatch row f = local_segment * horizon + t. Row 3 (env 1, seat 1) acts at t = 1;
     # row 0 (env 0, seat 0) acts at t = 2 and t = 4 (the last step: no target).
@@ -141,6 +143,28 @@ def test_value_loss_targets_partner_rows_and_writes_back_values():
     assert torch.all(grad[2] == 0)
     stored = newvalue.view(2, horizon)
     assert stored[0, 1].item() == pytest.approx(0.5) and stored[1, 2].item() == pytest.approx(0.5)
+    # Calibration compares the predicted seat-sum with the targets' sum on the trained steps.
+    target_sums = [returns[3, 1] + returns[2, 1], returns[0, 2] + returns[1, 2]]
+    calibration = policy.pop_calibration()
+    assert calibration["target_sum_2p"] == pytest.approx(float(sum(target_sums)) / 2, abs=1e-5)
+    assert calibration["sum_gap_2p"] == pytest.approx(1.0 - float(sum(target_sums)) / 2, abs=1e-5)
+
+
+def test_a_critic_calibrated_on_truncations_shows_no_gap():
+    """Truncated games pay nobody: a critic predicting the targets has gap 0, though its sum is below 1."""
+    players, horizon = 2, 4
+    policy = PufferPolicy.__new__(PufferPolicy)
+    torch.nn.Module.__init__(policy)
+    policy.max_players, policy.num_rows = players, players
+    policy._rollout_sums = policy._trained_sums = None
+    values = torch.full((players, horizon), 0.3)
+    advantages = torch.zeros(players, horizon)        # returns = values: 0.3 + 0.3 per step
+    logits = torch.logit(torch.full((1, players), 0.3)).requires_grad_()
+    outputs = ValueBatch(torch.tensor([1]), logits, torch.ones(1, players), rows=horizon)
+    policy.value_loss(outputs, values.flatten(), idx=torch.tensor([0]), values=values, advantages=advantages)
+    calibration = policy.pop_calibration()
+    assert calibration["target_sum_2p"] == pytest.approx(0.6)
+    assert calibration["sum_gap_2p"] == pytest.approx(0.0, abs=1e-6)
 
 
 def test_policy_trains_only_on_acting_rows():

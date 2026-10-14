@@ -17,8 +17,9 @@ segment ``s`` holds row ``s``). In each env only the seat to move acts:
   have one legal action (log-prob 0, no gradient) and add nothing to the
   value loss.
 
-The adapter also tracks the critic's calibration: the sum over seats of the
-acting rows' predicted win probabilities, by player count.
+The adapter also tracks the critic's calibration by player count: the sum
+over seats of the predicted win probabilities, against the sum of the
+targets it is trained on (see :meth:`PufferPolicy.pop_calibration`).
 """
 
 from __future__ import annotations
@@ -70,7 +71,9 @@ class PufferPolicy(nn.Module):
         if self.num_rows % self.max_players:
             raise ValueError("rows must be whole envs of max_players rows")
         self.hidden_size = 0
-        self._calibration: torch.Tensor | None = None  # [P + 1, 3]: count, sum, |sum - 1|
+        # By player count: [count, predicted sum] over rollouts, [count, predicted, target] over training.
+        self._rollout_sums: torch.Tensor | None = None
+        self._trained_sums: torch.Tensor | None = None
 
     # ------------------------------------------------------------ rollout
 
@@ -96,25 +99,34 @@ class PufferPolicy(nn.Module):
 
     def _track(self, probs: torch.Tensor, present: torch.Tensor) -> None:
         probs, present = probs.detach(), present.detach()
-        n = present.sum(1).round().long()
-        total = probs.sum(1)
-        one_hot = F.one_hot(n, self.max_players + 1).float()  # [M, P+1]
-        stats = torch.stack((torch.ones_like(total), total, (total - 1.0).abs()), dim=1)
-        update = one_hot.T @ stats
-        self._calibration = update if self._calibration is None else self._calibration + update
+        stats = torch.stack((torch.ones_like(probs[:, 0]), probs.sum(1)), dim=1)
+        self._rollout_sums = self._add(self._rollout_sums, present.sum(1), stats)
+
+    def _add(self, total: torch.Tensor | None, players: torch.Tensor, stats: torch.Tensor) -> torch.Tensor:
+        """Sum ``stats`` rows by player count (a one-hot matmul: deterministic on CUDA)."""
+        update = F.one_hot(players.round().long(), self.max_players + 1).float().T @ stats.float()
+        return update if total is None else total + update
 
     def pop_calibration(self) -> dict[str, float]:
-        """Mean over acting rows of the per-seat win probabilities' sum, by player count."""
-        if self._calibration is None:
-            return {}
-        stats = self._calibration.cpu()
-        self._calibration = None
+        """The critic's calibration since the last pop, by player count n.
+
+        ``value_sum_<n>p``: mean over rollout decisions of the per-seat win
+        probabilities' sum. ``target_sum_<n>p``: mean over trained decisions of
+        the sum of their slots' targets (the seats' lambda-returns, which pay
+        nobody for truncations and discount by gamma, so a calibrated critic's
+        sum sits below 1 there). ``sum_gap_<n>p``: the mean predicted minus
+        target sum on the same trained decisions; 0 when calibrated.
+        """
         out: dict[str, float] = {}
+        rollout, trained = self._rollout_sums, self._trained_sums
+        self._rollout_sums = self._trained_sums = None
         for n in range(2, self.max_players + 1):
-            count = float(stats[n, 0])
-            if count:
-                out[f"value_sum_{n}p"] = float(stats[n, 1]) / count
-                out[f"value_sum_abs_err_{n}p"] = float(stats[n, 2]) / count
+            if rollout is not None and float(rollout[n, 0]):
+                out[f"value_sum_{n}p"] = float(rollout[n, 1] / rollout[n, 0])
+            if trained is not None and float(trained[n, 0]):
+                count = float(trained[n, 0])
+                out[f"target_sum_{n}p"] = float(trained[n, 2]) / count
+                out[f"sum_gap_{n}p"] = float(trained[n, 1] - trained[n, 2]) / count
         return out
 
     # ------------------------------------------------------------ training
@@ -160,4 +172,10 @@ class PufferPolicy(nn.Module):
             probs = torch.sigmoid(outputs.logits)
             values[target_rows[valid], steps[valid]] = probs[valid]
             newvalue = values[idx].reshape(-1)
+            trained = t < horizon - 1
+            if trained.any():
+                mask = valid[trained].float()
+                stats = torch.stack((torch.ones_like(mask[:, 0]), (probs[trained] * mask).sum(1),
+                                     (targets[trained] * mask).sum(1)), dim=1)
+                self._trained_sums = self._add(self._trained_sums, mask.sum(1), stats)
         return newvalue, loss
