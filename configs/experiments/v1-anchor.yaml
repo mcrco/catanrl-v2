@@ -1,0 +1,20 @@
+# v1's reference recipe as v2's anchor (DESIGN 6.11): base-2p as is (official
+# spiral), full-information actor and critic, PPO through PuffeRL. It shows
+# whether v2 reaches v1's level; it is not the same measurement (v1 numbers
+# stay in a history table tagged bcea78e and are never paired with these).
+name: v1-anchor
+seed: 42
+env: {scenarios: [{game: base-2p}], num_envs: 1024}
+obs: {level: full, critic_level: full}
+model: {preset: graph-s}
+train: {algo: ppo, total_timesteps: 1_000_000_000, gamma: 0.99}
+eval:
+  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+    - {suite: heldout-2p, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
+sweep:
+  axes: {seed: [42, 43]}
+  name: "s{seed}"
+meta: {notes: "v1's habit: a 1e9 budget stopped after 7 h; relaunch to resume, catanrl finish to end"}
+runtime: {device: cuda, threads: 16, time_limit_hours: 7}

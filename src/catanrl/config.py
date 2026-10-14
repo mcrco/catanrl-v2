@@ -710,7 +710,8 @@ def _heldout_overlap(cfg: Mapping[str, Any], suite: Any, boards: int = 64) -> li
         if digest(game.map_spec(0)) == digest(game.map_spec(1)):
             continue  # a fixed board: every game is on it
         pool = {digest(game.map_spec(derive_seed(pool_seed, i, j))) for j in range(int(entry.get("maps", 1024)))}
-        held = {g.map_hash for g in suite.schedule(1, fill=True)[: boards * game.num_players]}
+        first = type(suite)(**{**suite.__dict__, "boards": min(suite.boards, boards)})
+        held = {g.map_hash for g in first.schedule(1, fill=True)}
         if pool & held:
             problems.append(f"{len(pool & held)} heldout maps of {suite.name} are in the training pool of "
                             f"scenario {i}")

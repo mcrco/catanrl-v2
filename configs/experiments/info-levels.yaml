@@ -1,0 +1,23 @@
+# What the actor and the critic may see (v1's information-level study): a
+# tied axis over (actor, critic) levels. Full-information actors are scored
+# through BELIEF, which samples worlds from the hand tracker.
+name: info-levels
+seed: 42
+env: {scenarios: [{game: base-2p}], num_envs: 1024}
+model: {preset: graph-s}
+train: {algo: ppo, total_timesteps: 400_000_000}
+eval:
+  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+    - {suite: heldout-2p, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
+sweep:
+  axes:
+    info:
+      pp: {obs.level: private, obs.critic_level: private}
+      pf: {obs.level: private, obs.critic_level: full}
+      uf: {obs.level: public, obs.critic_level: full}
+      ff: {obs.level: full, obs.critic_level: full}
+    seed: [42, 43]
+  name: "{info}-s{seed}"
+runtime: {device: cuda, threads: 16}

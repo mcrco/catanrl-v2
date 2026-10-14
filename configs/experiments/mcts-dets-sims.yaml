@@ -1,0 +1,15 @@
+# Search budget vs world sampling for one network (v1's dets x sims grid), an
+# eval-only experiment. Pin the network first:
+#   catanrl pin arch-lineage/graph-s-s42.g1@best ref
+name: mcts-dets-sims
+kind: eval
+params: {sims: 256, world: "dets=1"}
+eval:
+  final:
+    - {suite: heldout-2p, lineup: ["MCTS:ckpt=arch-lineage/graph-s-s42.g1@ref:sims=${params.sims}:${params.world}", F]}
+sweep:
+  axes:
+    params.sims: [64, 256, 1024]
+    world: {oracle: {params.world: "oracle=true"}, d4: {params.world: "dets=4"}, d16: {params.world: "dets=16"}}
+  name: "s{params.sims}-{world}"
+runtime: {device: cuda, threads: 16, num_envs: 512}
