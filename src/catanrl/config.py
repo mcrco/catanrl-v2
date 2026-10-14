@@ -610,17 +610,20 @@ def load_plan(path: str | Path, *, overrides: Sequence[str] = (), only: str | No
 
     variants: list[Variant] = []
     seen: dict[str, tuple] = {}
+    cli_clashes: dict[str, str] = {}
     for labels, cell_layer, cell_paths in _cells(sweep):
         base_cfg = merge(defaults(), raw, cell_layer)
         cell = _cell_name(sweep.get("name"), labels, base_cfg)
         stage_refs: dict[str, str] = {}
         for stage, stage_layer in (stages.items() if stages else [(None, {})]):
             stage_layer = dict(stage_layer or {})
-            for what, layer in ((f"stage {stage}", stage_layer), ("--set", cli)):
-                clash = [p for p in _set_paths(layer) for q in cell_paths if _overlaps(p, q)]
-                if clash:
-                    raise ConfigError(f"{what} and a sweep axis both set {clash[0]!r}")
+            clash = [p for p in _set_paths(stage_layer) for q in cell_paths if _overlaps(p, q)]
+            if clash:
+                raise ConfigError(f"stage {stage} and a sweep axis both set {clash[0]!r}")
             name = cell if stage is None else f"{cell}.{stage}"
+            clash = [p for p in _set_paths(cli) for q in cell_paths if _overlaps(p, q)]
+            if clash:  # refused below, if this variant is kept
+                cli_clashes[name] = clash[0]
             if not NAME_RE.match(name):
                 raise ConfigError(f"variant name {name!r} must match {NAME_RE.pattern}")
             if name in seen:
@@ -659,6 +662,9 @@ def load_plan(path: str | Path, *, overrides: Sequence[str] = (), only: str | No
         variants = [v for v in variants if fnmatch.fnmatchcase(v.name, only)]
         if not variants:
             raise ConfigError(f"--only {only!r} matches no variant of {experiment}")
+    for v in variants:
+        if v.name in cli_clashes:
+            raise ConfigError(f"--set and a sweep axis both set {cli_clashes[v.name]!r} (in {v.name})")
     return Plan(experiment=experiment, source=path.resolve(), source_sha256=hashlib.sha256(source).hexdigest(),
                 variants=variants, smoke=smoke)
 

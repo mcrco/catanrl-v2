@@ -52,7 +52,8 @@ def test_round_trip_gives_identical_outputs(tmp_path, preset, critic):
     with torch.no_grad():
         for a, b in zip(model(obs), loaded(obs)):
             assert torch.equal(a, b)
-    assert loaded.catanrl_ref == str(ref.path) and loaded.catanrl_allow_drift is False
+    assert loaded.catanrl_ref == str(ref) == f"{ref.path.resolve()}#{ref.weights_sha256[:12]}"
+    assert loaded.catanrl_allow_drift is False
     assert saved(tmp_path, model).weights_sha256 == ref.weights_sha256  # same epoch and weights: no-op
     with torch.no_grad():
         next(model.parameters()).add_(1.0)
