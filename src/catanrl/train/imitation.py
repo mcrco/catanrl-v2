@@ -99,10 +99,10 @@ class _Collector:
                               level=info_level(level), seed=seed, num_threads=threads)
         self.buffers = self.vec.allocate()
         self.vec.reset(seed)
-        self.space = self.vec.encoder.action_space
         self.players = int(self.vec.max_players)
         self.enemies = enemies
         self.pending: list[list[tuple[np.ndarray, int, int, int]]] = [[] for _ in range(num_envs)]
+        self.labels = np.empty(int(self.vec.num_rows), dtype=np.int32)
         self.decisions = 0
 
     def collect(self, model: torch.nn.Module, device: str, steps: int, beta: float,
@@ -116,10 +116,11 @@ class _Collector:
             with torch.no_grad():
                 logits = model.policy_logits(torch.from_numpy(obs).to(device)).float()
                 sampled = torch.distributions.Categorical(logits=logits).sample().cpu().numpy()
+            # F's choice for every acting row, computed on the env threads (engine E7).
+            labels = self.vec.expert_actions(self.labels, enemies=self.enemies)[acting]
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
-                game = self.vec.game(env)
-                label = int(self.space.index(game, cpp.value_action(game, enemies=self.enemies)))
+                label = int(labels[i])
                 use_expert = rng.random() < beta
                 action = label if use_expert else int(sampled[i])
                 executed_expert += use_expert

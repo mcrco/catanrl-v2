@@ -65,3 +65,24 @@ def test_unknown_or_missing_keys_raise(tmp_path):
     bad = {**CONFIG, "train": {**CONFIG["train"], "epochs": 3}}
     with pytest.raises(ValueError):
         train_imitation(LocalVariant(bad), LocalWriter(tmp_path / "bad"))
+
+
+def test_labels_are_value_action():
+    """The engine's expert labels (E7) are F's value_action at every acting row."""
+    plan = plan_env(CONFIG["env"], pool_seed=2)
+    collector = _Collector(plan, CONFIG["train"], num_envs=6, threads=2, seed=4, level="private",
+                           enemies=cpp.ValueEnemies.NEXT)
+    vec, space = collector.vec, collector.vec.encoder.action_space
+    buffers = collector.buffers
+    checked = 0
+    for _ in range(60):
+        acting = np.flatnonzero(buffers["acting"])
+        labels = vec.expert_actions(enemies=cpp.ValueEnemies.NEXT)
+        for row in acting:
+            game = vec.game(int(buffers["env_index"][row]))
+            assert labels[row] == space.index(game, cpp.value_action(game, enemies=cpp.ValueEnemies.NEXT))
+            buffers["actions"][row] = labels[row]
+            checked += 1
+        assert np.all(np.delete(labels, acting) == -1)
+        vec.step()
+    assert checked >= 300
