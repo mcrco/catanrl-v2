@@ -26,12 +26,7 @@ def fake_evals(monkeypatch):
         records[str(ref)] = Record(METRICS[ref.epoch])
         return records[str(ref)], METRICS[ref.epoch]
 
-    def fake_recorded(select, ref):
-        record = records.get(str(ref))
-        return None if record is None else record.summary["score_rate"]
-
     monkeypatch.setattr(select_module, "select_eval", fake_select_eval)
-    monkeypatch.setattr(select_module, "recorded_metric", fake_recorded)
     return records
 
 
@@ -61,3 +56,26 @@ def test_best_survives_a_resume(tmp_path, fake_evals, trainer, config):
     assert best_epoch(stopped) == 2  # e2's select ran after its trainer state was written
     resumed = train(trainer, config(), "run")
     assert best_epoch(resumed) == 2  # e3 (0.5) must not take over from e2 (0.9)
+
+
+def test_best_moves_after_a_crash_between_record_and_alias(tmp_path, fake_evals, monkeypatch):
+    """e2's select record exists but its alias was never written: the resume moves best to e2."""
+    from catanrl.runs import RunWriter
+
+    real = RunWriter.set_alias
+
+    def crash_at_e2(self, name, ref, **kwargs):
+        if ref.epoch == 2:
+            raise KeyboardInterrupt  # killed between the select record and the alias
+        real(self, name, ref, **kwargs)
+
+    from catanrl.eval import results
+
+    # Records are found like real cached ones: e2's exists although its alias does not.
+    monkeypatch.setattr(results, "find", lambda lineup, suite, **kw: fake_evals.get(lineup[0].split("ckpt=")[1]))
+    monkeypatch.setattr(RunWriter, "set_alias", crash_at_e2)
+    with pytest.raises(KeyboardInterrupt):
+        train(train_ppo, ppo_config(), "run")
+    monkeypatch.setattr(RunWriter, "set_alias", real)
+    resumed = train(train_ppo, ppo_config(), "run")
+    assert best_epoch(resumed) == 2

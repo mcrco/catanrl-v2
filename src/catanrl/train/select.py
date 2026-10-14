@@ -3,9 +3,10 @@
 DESIGN 6.1 orders a checkpoint as: the ``.pt``, then the trainer state (the
 commit), then the select eval, which may move ``best``. The trainer state
 therefore never knows the newest checkpoint's select result, so the best
-metric is not kept there: on resume, :meth:`Selector.restore` rebuilds it
-from the select records of every committed checkpoint (cached records, read
-with ``catanrl.eval.results.find``; nothing is replayed).
+metric is not kept there: on resume, :meth:`Selector.restore` reads it from
+the run's ``best`` alias (the last decision written), and the writer's
+pending selects (the last commit's included) replay their cached records
+through :meth:`Selector.run`, redoing a decision a crash cut off.
 """
 
 from __future__ import annotations
@@ -37,14 +38,6 @@ def select_eval(select: Mapping[str, Any], ref: Any, eval_runtime: Mapping[str, 
     return record, metric_of(select, record)
 
 
-def recorded_metric(select: Mapping[str, Any], ref: Any) -> float | None:
-    """The metric of a checkpoint's existing select record, or None."""
-    from catanrl.eval.results import find
-
-    record = find(lineup_for(select, ref), select["suite"], fill=select.get("fill"))
-    return None if record is None else metric_of(select, record)
-
-
 def metric_of(select: Mapping[str, Any], record: Any) -> float:
     return float(record.summary[select.get("metric", "score_rate")])
 
@@ -72,15 +65,12 @@ class Selector:
             self.writer.set_alias("best", ref, record=record)
 
     def restore(self) -> None:
-        """The best metric over the committed checkpoints' select records."""
+        """The metric of the run's current ``best`` (not of a select record whose alias
+        was never written, so rerunning that select moves ``best`` to it)."""
         self.best = None
-        if not self.select:
-            return
-        for ref in self.writer.checkpoints():
-            if self.due(ref.epoch):
-                metric = recorded_metric(self.select, ref)
-                if metric is not None and (self.best is None or metric > self.best):
-                    self.best = metric
+        row = self.writer.aliases().get("best") if self.select else None
+        if row is not None and row.get("metric") is not None:
+            self.best = float(row["metric"])
 
 
 @contextlib.contextmanager
