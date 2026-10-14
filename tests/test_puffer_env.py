@@ -156,3 +156,20 @@ def test_policy_trains_only_on_acting_rows():
     waiting = torch.from_numpy(vec.envs[0].acting == 0)
     probs = torch.softmax(logits[waiting], dim=1)
     assert torch.all(probs[:, -1] == 1)
+
+
+def test_critic_level_rows_match_the_model():
+    """obs.critic_level above obs.level: VecEnv appends critic_players and the model reads it."""
+    plan = small_plan({"game": "base-2p"})
+    vec = make_vecenv(plan, num_envs=4, level="private", critic_level="full", threads=1, seed=4)
+    layout = row_layout(plan.dims, "private", "full")
+    assert vec.single_observation_space.shape[0] == layout["critic_players"][0] + 2 * 46
+    model = build_model({"preset": "graph-tiny"}, dims=plan.dims,
+                        levels={"level": "private", "critic_level": "full"},
+                        num_actions=action_size(plan.dims), layout=layout)
+    policy = PufferPolicy(model, num_rows=vec.num_agents)
+    vec.async_reset(4)
+    obs, *_ = vec.recv()
+    with torch.no_grad():
+        _logits, values = policy.forward_eval(torch.from_numpy(obs.copy()))
+    assert values.shape == (8,) and torch.all((values > 0) & (values < 1))

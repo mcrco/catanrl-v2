@@ -42,14 +42,14 @@ class ResidualMLP(nn.Module):
 
 
 class FlatNetwork(nn.Module):
-    def __init__(self, layout: Mapping[str, Any], prefix: str, outputs: int, args: Mapping[str, Any],
+    def __init__(self, layout: Mapping[str, Any], players: str, outputs: int, args: Mapping[str, Any],
                  *, out_gain: float) -> None:
         super().__init__()
         self.layout = dict(layout)
-        self.prefix = prefix
-        self.encoder = ResidualMLP(flat_feature_size(layout, prefix), args["hidden"], args["blocks"])
+        self.players = players
+        self.encoder = ResidualMLP(flat_feature_size(layout, players), args["hidden"], args["blocks"])
         self.output = nn.Linear(args["hidden"], outputs)
         orthogonal_(self.output, out_gain)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.output(self.encoder(flat_features(obs, self.layout, self.prefix)))
+        return self.output(self.encoder(flat_features(obs, self.layout, self.players)))

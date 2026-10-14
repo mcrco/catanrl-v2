@@ -160,3 +160,23 @@ def test_graph_forward_is_deterministic_on_cuda():
         torch.use_deterministic_algorithms(previous)
     assert torch.equal(first[0], second[0]) and torch.equal(first[1], second[1])
     assert torch.allclose(first[0][3], one[0][0], atol=1e-5)
+
+
+def test_critic_reads_the_critic_players_block():
+    """With obs.critic_level above obs.level, the critic reads E5's critic_players block."""
+    layout = row_layout(BASE_2P, "private", "full")
+    assert layout["critic_players"] == (make_encoder(BASE_2P, "private").size, (2, 46))
+    torch.manual_seed(0)
+    model = build_model({"preset": "graph-tiny"}, dims=BASE_2P, levels={"level": "private", "critic_level": "full"},
+                        num_actions=action_size(BASE_2P), layout=layout).eval()
+    played = played_games(count=4, plies=200)
+    private, full = encode(played, BASE_2P, "private"), encode(played, BASE_2P, "full")
+    players_offset, _ = layout["players"]
+    width = 2 * 46
+    rows = torch.cat((private, full[:, players_offset : players_offset + width]), dim=1)
+    logits, values = model(rows)
+    other = rows.clone()
+    other[:, -width:] = private[:, players_offset : players_offset + width]
+    logits2, values2 = model(other)
+    assert torch.equal(logits, logits2)
+    assert not torch.equal(values, values2)

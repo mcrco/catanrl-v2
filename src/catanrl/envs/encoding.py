@@ -35,6 +35,8 @@ LEVELS = {
 MAX_PLAYERS = 6
 #: Blocks of a row that hold per-slot features.
 FEATURE_BLOCKS = ("global", "players", "tiles", "nodes", "edges")
+#: The critic block VecEnv appends when the critic reads another level.
+CRITIC_PLAYERS = "critic_players"
 
 
 def info_level(level: str | cpp.InfoLevel) -> cpp.InfoLevel:
@@ -93,9 +95,10 @@ def row_layout(dims: Mapping[str, Any], level: str, critic_level: str | None = N
 
     The blocks are the encoder's (``global``, ``players``, ``tiles``,
     ``nodes``, ``edges``, ``edge_nodes``, ``tile_nodes``, ``action_mask``).
-    When the critic reads another information level, the row also carries the
-    critic's feature blocks under ``critic/<block>`` (the engine's critic
-    block, which VecEnv appends after the actor's row).
+    When the critic reads another information level, VecEnv appends the
+    critic block (engine E5): ``critic_players``, the players block at the
+    critic's level (the only block that differs between levels), right after
+    the actor's row; its feature names are the players block's.
     """
     encoder = make_encoder(dims, level)
     layout: dict[str, Any] = {
@@ -103,28 +106,8 @@ def row_layout(dims: Mapping[str, Any], level: str, critic_level: str | None = N
         for name, (offset, shape) in encoder.layout().items()
     }
     if critic_level_of(level, critic_level) is not None:
-        critic = critic_block_layout(dims, critic_level, offset=int(encoder.size))
-        layout.update({f"critic/{name}": span for name, span in critic.items()})
+        layout[CRITIC_PLAYERS] = (int(encoder.size), tuple(layout["players"][1]))
     return layout
-
-
-def critic_block_layout(dims: Mapping[str, Any], critic_level: str, *, offset: int) -> dict[str, Any]:
-    """The layout of the critic block VecEnv appends for ``critic_level``.
-
-    Needs the engine's critic block (E5). Until VecEnv exposes it, asymmetric
-    levels raise rather than guess its layout.
-    """
-    vec_env = cpp.VecEnv
-    if not hasattr(vec_env, "critic_layout"):
-        raise NotImplementedError(
-            "obs.critic_level differs from obs.level, but this cppanatron has no critic "
-            "block (E5): rebuild the engine with VecEnv critic_level support"
-        )
-    layout = vec_env.critic_layout(encoder_dims(dims), info_level(critic_level))
-    return {
-        name: (int(start) + offset, tuple(int(s) for s in shape))
-        for name, (start, shape) in layout.items()
-    }
 
 
 def row_size(layout: Mapping[str, Any]) -> int:

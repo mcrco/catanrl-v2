@@ -30,6 +30,7 @@ import yaml
 from torch import nn
 
 from catanrl.envs.encoding import (
+    CRITIC_PLAYERS,
     check_dims,
     critic_level_of,
     level_name,
@@ -121,7 +122,8 @@ class CatanModel(nn.Module):
         self.obs_size = row_size(layout)
         self.mask_offset, (self.num_actions,) = layout["action_mask"]
         self.noop = self.num_actions - 1
-        self.has_critic_block = any(name.startswith("critic/") for name in layout)
+        self.has_critic_block = CRITIC_PLAYERS in layout
+        self.critic_players = CRITIC_PLAYERS if self.has_critic_block else "players"
 
     # Subclasses implement these three; the rest derives from them.
     def policy_logits(self, obs: torch.Tensor) -> torch.Tensor:
@@ -172,8 +174,7 @@ class GraphModel(CatanModel):
             self.parts = {"actor": ["backbone.", "policy_head."], "critic": ["value_head."]}
         else:
             critic_names = feature_names(dims, levels["critic_level"])
-            prefix = "critic/" if self.has_critic_block else ""
-            critic_reader = RowReader(layout, critic_names, prefix=prefix, canonical=canonical)
+            critic_reader = RowReader(layout, critic_names, players=self.critic_players, canonical=canonical)
             self.actor = GraphNetwork(actor_reader, action_layout, args=args, num_players=self.num_players,
                                       policy=True, value=False)
             self.critic = GraphNetwork(critic_reader, action_layout, args=args, num_players=self.num_players,
@@ -216,15 +217,14 @@ class MlpModel(CatanModel):
         names = feature_names(dims, levels["level"])
         self.present_index = names["players"].index("present")
         self.players_offset, (_, self.player_width) = layout["players"][0], layout["players"][1]
-        critic_prefix = "critic/" if self.has_critic_block else ""
         if args["shared"]:
             if self.has_critic_block:
                 raise ValueError("a shared trunk cannot read a separate critic level")
-            self.backbone = FlatNetwork(layout, "", self.num_actions + self.num_players, args, out_gain=0.01)
+            self.backbone = FlatNetwork(layout, "players", self.num_actions + self.num_players, args, out_gain=0.01)
             self.parts = {"actor": ["backbone."], "critic": []}
         else:
-            self.actor = FlatNetwork(layout, "", self.num_actions, args, out_gain=0.01)
-            self.critic = FlatNetwork(layout, critic_prefix, self.num_players, args, out_gain=0.01)
+            self.actor = FlatNetwork(layout, "players", self.num_actions, args, out_gain=0.01)
+            self.critic = FlatNetwork(layout, self.critic_players, self.num_players, args, out_gain=0.01)
             self.parts = {"actor": ["actor."], "critic": ["critic."]}
         self.shared = bool(args["shared"])
 

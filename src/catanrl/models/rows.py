@@ -1,9 +1,9 @@
 """Reading environment rows by their layout.
 
 A row is ``[global | players | tiles | nodes | edges | edge_nodes | tile_nodes
-| action_mask]`` (plus the critic's feature blocks under ``critic/<block>``
-when the critic reads another information level); :class:`RowReader` slices
-it by the encoder's ``layout()``, never by hard-coded offsets.
+| action_mask]`` (plus ``critic_players``, the players block at the critic's
+level, when the critic reads another information level); :class:`RowReader`
+slices it by the encoder's ``layout()``, never by hard-coded offsets.
 
 Per-seat features (``settlement_<k>``, ``road_<k>``, ``players_<n>``, ...)
 are remapped onto the canonical six-seat feature order of an encoder with
@@ -59,9 +59,9 @@ class Rows:
 class RowReader(nn.Module):
     """Slices rows into :class:`Rows` and remaps features to canonical order.
 
-    ``prefix`` selects the feature blocks (``""`` for the actor's,
-    ``"critic/"`` for the critic block); topology and the mask always come
-    from the actor's row.
+    ``players`` names the block the players are read from: ``"players"``,
+    or ``"critic_players"`` for a critic at another level; every other block
+    is shared.
     """
 
     def __init__(
@@ -69,15 +69,14 @@ class RowReader(nn.Module):
         layout: Mapping[str, Any],
         names: Mapping[str, Sequence[str]],
         *,
-        prefix: str = "",
+        players: str = "players",
         canonical: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         super().__init__()
         canonical = canonical or canonical_feature_names()
-        self.prefix = prefix
         self.spans: dict[str, tuple[int, tuple[int, ...]]] = {}
-        for block in (*FEATURE_BLOCKS,):
-            offset, shape = layout[prefix + block]
+        for block in FEATURE_BLOCKS:
+            offset, shape = layout[players if block == "players" else block]
             self.spans[block] = (int(offset), tuple(int(s) for s in shape))
         for block in ("edge_nodes", "tile_nodes", "action_mask"):
             offset, shape = layout[block]
@@ -136,11 +135,11 @@ class RowReader(nn.Module):
         )
 
 
-def flat_features(obs: torch.Tensor, layout: Mapping[str, Any], prefix: str = "") -> torch.Tensor:
+def flat_features(obs: torch.Tensor, layout: Mapping[str, Any], players: str = "players") -> torch.Tensor:
     """The feature blocks of a row, concatenated in their actual (padded) order."""
     parts = []
     for block in FEATURE_BLOCKS:
-        offset, shape = layout[prefix + block]
+        offset, shape = layout[players if block == "players" else block]
         size = 1
         for s in shape:
             size *= int(s)
@@ -148,10 +147,10 @@ def flat_features(obs: torch.Tensor, layout: Mapping[str, Any], prefix: str = ""
     return torch.cat(parts, dim=1).float()
 
 
-def flat_feature_size(layout: Mapping[str, Any], prefix: str = "") -> int:
+def flat_feature_size(layout: Mapping[str, Any], players: str = "players") -> int:
     total = 0
     for block in FEATURE_BLOCKS:
-        _, shape = layout[prefix + block]
+        _, shape = layout[players if block == "players" else block]
         size = 1
         for s in shape:
             size *= int(s)

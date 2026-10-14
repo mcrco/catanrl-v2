@@ -26,7 +26,14 @@ import pufferlib
 import pufferlib.vector
 
 from catanrl import games
-from catanrl.envs.encoding import check_dims, critic_level_of, dims_for, encoder_dims, info_level
+from catanrl.envs.encoding import (
+    check_dims,
+    critic_level_of,
+    dims_for,
+    encoder_dims,
+    info_level,
+    row_layout,
+)
 
 SCENARIO_KEYS = {"game", "weight", "seats", "shuffle_seats", "turn_limit", "maps", "value_enemies", "name"}
 DEFAULT_POOL = 1024
@@ -169,6 +176,12 @@ class CatanPufferEnv(pufferlib.PufferEnv):
             list(scenarios), num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
             seed=0 if seed is None else int(seed), num_threads=threads, vp_reward=vp_reward, **kwargs,
         )
+        if hasattr(self.vec, "layout"):
+            expected = row_layout(dims, level, critic_level_of(level, critic_level))
+            actual = {name: (int(off), tuple(int(x) for x in shape))
+                      for name, (off, shape) in self.vec.layout().items()}
+            if actual != expected:
+                raise RuntimeError("VecEnv rows do not match catanrl's row layout")
         self.dims = dims
         self.max_players = dims["max_players"]
         self.num_games = num_envs
