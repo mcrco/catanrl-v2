@@ -361,21 +361,24 @@ strong policy is near its ceiling. So an AlphaZero variant that starts from a
 network (`init_from` with the actor) is measured against that network by
 default: `config.alphazero_evals`, a layer between the defaults and the body,
 so an experiment's own `eval` keys override it. Each network plays as its fair
-raw policy, `RAW`: `POLICY` at a `private` or `public` actor (these suites are
-2p), else `BELIEF:…:worlds=16`.
+raw policy, `RAW`: `POLICY` at a `private` actor, or a `public` one in
+two-player games, else `BELIEF:…:worlds=16`. The run's network takes slot 0
+and its start fills the other N − 1 seats; the suites follow the training game
+(`base-2p` → `select-2p`/`heldout-2p`, `base-4p` → `*-4p`, `random-4p` →
+`*-random-4p`), and a mixture of games must set its own evals.
 
 | Eval | Lineup | Suite |
 |---|---|---|
-| select, every checkpoint, slot 0's score rate | `RAW ${self}` vs `RAW ${init}` | `select-2p` |
-| final | `RAW ${run}@best` vs `RAW ${init}` | `heldout-2p` |
-| final | `MCTS:ckpt=${run}@best:sims=${train.sims}:dets=1:root=${train.root}:c_puct=…:gumbel_m=…` vs `RAW ${init}` | `heldout-2p`, 500 boards |
-| final | the same search on `${init}` vs `RAW ${init}`, paired with the row above | `heldout-2p`, 500 boards |
-| final | `RAW ${run}@best` vs F, a secondary number | `heldout-2p` |
+| select, every checkpoint, slot 0's score rate | `RAW ${self}` vs N − 1 × `RAW ${init}` | `select-<game>` |
+| final | `RAW ${run}@best` vs N − 1 × `RAW ${init}` | `heldout-<game>` |
+| final | `MCTS:ckpt=${run}@best:sims=${train.sims}:dets=1:root=${train.root}:c_puct=…:gumbel_m=…` vs the start | `heldout-<game>`, 500 boards |
+| final | the same search on `${run}@init` (the run's e0: exactly its starting actor and critic) vs the start, paired with the row above | `heldout-<game>`, 500 boards |
+| final | `RAW ${run}@best` vs N − 1 × F, a secondary number | `heldout-<game>` |
 
 `best` needs no rule of its own. e0 holds the start's weights, so it scores
-exactly 50% as `POLICY` (the two rotations of a board are mirror games; as
-`BELIEF`, 50% up to world sampling) and is `best` first. `best` then moves
-only to a checkpoint above every earlier one, so above 50%. A run from
+exactly 1/N as `POLICY` (a board's rotations are mirror games; as `BELIEF`,
+1/N up to world sampling) and is `best` first. `best` then moves only to a
+checkpoint above every earlier one. A run from
 scratch has no start and keeps the global defaults.
 
 ### 6.3 Checkpoints
