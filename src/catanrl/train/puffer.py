@@ -160,6 +160,8 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.lr_schedule = dict(lr_schedule or {"kind": "constant"})
         self.decisions = 0
         self.saved_epoch: int | None = None
+        self._in_train = False
+        self._checkpoint_due = False
         #: Recorded in every trainer state and compared on resume.
         self.extra_state: dict[str, Any] = {}
         self.capture = _CaptureLogger()
@@ -228,7 +230,15 @@ class CatanPuffeRL(pufferl.PuffeRL):
     # ------------------------------------------------------------ checkpoints
 
     def save_checkpoint(self) -> str:
-        """Weights (the .pt), then trainer state (the commit), then the select eval."""
+        """Weights (the .pt), then trainer state (the commit), then the select eval.
+
+        PuffeRL calls this from inside train(); step_epoch defers that call until
+        the epoch's learning-rate adaptation is applied, so the committed state
+        holds the learning rate the next epoch uses.
+        """
+        if self._in_train:
+            self._checkpoint_due = True
+            return ""
         ref = self.writer.save_checkpoint(self.model, epoch=self.epoch, agent_steps=self.global_step)
         self.writer.save_trainer_state(self.state())
         self.saved_epoch = self.epoch
@@ -252,9 +262,15 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.decisions += env.decisions - decisions
         self.last_log_time = 0.0  # PuffeRL logs at most every 0.25 s otherwise
         self.capture.logs = None
-        self.train()
+        self._in_train, self._checkpoint_due = True, False
+        try:
+            self.train()
+        finally:
+            self._in_train = False
         logs = self.capture.logs
         if logs is None:
+            if self._checkpoint_due:
+                self.save_checkpoint()
             return None
         elapsed = time.time() - start
         rows = self.global_step - steps
@@ -271,6 +287,8 @@ class CatanPuffeRL(pufferl.PuffeRL):
         })
         logs.update({f"critic/{k}": v for k, v in self.uncompiled_policy.pop_calibration().items()})
         self._adapt_lr(logs)
+        if self._checkpoint_due:
+            self.save_checkpoint()
         return logs
 
     def _adapt_lr(self, logs: dict[str, Any]) -> None:

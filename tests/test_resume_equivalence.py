@@ -64,3 +64,25 @@ def test_resume_continues_exactly(tmp_path, monkeypatch):
     assert final["scheduler"]["last_epoch"] == reference["scheduler"]["last_epoch"]
     steps = lambda state: {int(s["step"]) for s in state["optimizer"]["state"].values()}
     assert steps(final) == steps(reference)
+
+
+def test_resume_keeps_the_kl_adapted_learning_rate(tmp_path, monkeypatch):
+    """The committed state holds the learning rate the next epoch uses, adaptation included."""
+    from catanrl.train import puffer
+
+    used = {}
+    original = puffer.CatanPuffeRL.train
+
+    def train(self):
+        used[(self.writer.path.name, self.epoch + 1)] = self.optimizer.param_groups[0]["lr"]
+        return original(self)
+
+    monkeypatch.setattr(puffer.CatanPuffeRL, "train", train)
+    # A tiny KL target: every epoch divides the learning rate by 1.5.
+    config = tiny_ppo(epochs=4, lr_schedule="kl_adaptive", kl_target=1e-9, lr_min=1e-6, lr_max=1e-1)
+    train_ppo(LocalVariant(config), LocalWriter(tmp_path / "straight"))
+    stopped = LocalWriter(tmp_path / "run", stop_after_epochs=2)
+    train_ppo(LocalVariant(config), stopped)
+    assert stopped.load_trainer_state()["learning_rate"] == used[("straight", 3)]
+    train_ppo(LocalVariant(config), LocalWriter(tmp_path / "run", mode="resume", launch=1))
+    assert used[("run", 3)] == used[("straight", 3)] != used[("straight", 2)]
