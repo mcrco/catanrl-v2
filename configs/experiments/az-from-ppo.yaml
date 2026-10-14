@@ -1,0 +1,46 @@
+# AlphaZero warm-started from PPO (Marco's "plug the PufferLib GNN into the
+# NN-MCTS loop"): graph-s trains by self-play PPO on 2p BASE, then its best
+# checkpoint (actor and critic) seeds AlphaZero, whose search uses the same
+# network for priors and per-seat values.
+name: az-from-ppo
+seed: 42
+env: {scenarios: [{game: base-2p}], num_envs: 1024}
+obs: {level: private}
+model: {preset: graph-s}
+train:
+  algo: ppo
+  total_timesteps: 50_000_000
+  learning_rate: 2.0e-4
+  lr_schedule: kl_adaptive
+  kl_target: 0.01
+  lr_min: 1.0e-5
+  lr_max: 3.0e-4
+  gamma: 1.0
+  update_epochs: 2
+  ent_coef: 0.003
+  minibatch_size: 8192
+  max_minibatch_size: 2048
+  checkpoint_interval: 50
+eval:
+  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+stages:
+  ppo: {}
+  az:
+    init_from: {ckpt: "${stages.ppo}@best", parts: [actor, critic]}
+    env.num_envs: 512
+    train!:
+      algo: alphazero
+      iterations: 300
+      steps_per_iteration: 32
+      sims: 64
+      fast_sims: 16
+      full_search_prob: 0.25
+      learning_rate: 5.0e-5
+      checkpoint_interval: 10
+    eval.select.every: 10
+    eval.final!:
+      - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+      - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=64:dets=1", F]}
+runtime: {device: cuda, threads: 12, compile: true, time_limit_hours: 8}

@@ -34,6 +34,10 @@ def _trainer(algo: str):
         from catanrl.train.imitation import train_imitation
 
         return train_imitation
+    if algo == "alphazero":
+        from catanrl.train.alphazero import train_alphazero
+
+        return train_alphazero
     raise NotImplementedError(f"train.algo {algo!r} has no trainer yet")
 
 

@@ -1,0 +1,28 @@
+# AlphaZero / expert iteration (catanrl.train.alphazero): self-play with
+# batched SearchPool searches, a replay buffer and Adam(W) on policy
+# cross-entropy plus per-seat value BCE. Exactly catanrl's ALPHAZERO_KEYS.
+algo: alphazero
+iterations: 100                # self-play + learning cycles (an epoch each; checkpoints count them)
+steps_per_iteration: 32        # VecEnv steps of self-play per iteration (one search per env per step)
+root: gumbel                   # puct | gumbel (Gumbel-Top-k + sequential halving: better at low budgets)
+sims: 64                       # simulations of a full search (a policy target)
+fast_sims: 16                  # simulations of the other moves (value targets only)
+full_search_prob: 0.25         # playout cap randomization (KataGo); 1.0 searches every move fully
+dets: 0                        # 0: search the true game (fast); K: K worlds from the seat's hand tracker (fair)
+c_puct: 0.75                   # engine units (v1's 1.5)
+gumbel_m: 16                   # actions a Gumbel root considers
+dirichlet_noise: true          # PUCT roots only (Gumbel roots add Gumbel noise)
+temperature_start: 1.0         # move sampling temperature at a game's first decision ...
+temperature_end: 0.0           # ... decaying linearly to this ...
+temperature_moves: 30          # ... over this many decisions of the game
+truncation_value: share        # a truncated game's value target: share (1/n per seat, the eval convention) | zero
+replay_capacity: 200_000       # positions; ~5.8 KB each on 2p BASE graph-s rows (float16), saved in the trainer state
+min_replay: 5_000              # positions before learning starts
+updates_per_iteration: 64      # gradient steps per iteration
+minibatch_size: 512
+learning_rate: 1.0e-4
+weight_decay: 1.0e-4           # AdamW (decoupled L2)
+value_coef: 1.0
+max_grad_norm: 1.0
+search_rows: 512               # leaf rows per network call (CUDA graphs at powers of two up to this)
+checkpoint_interval: 10        # iterations
