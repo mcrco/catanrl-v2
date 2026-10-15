@@ -220,6 +220,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.last_log_time = 0.0  # PuffeRL logs at most every 0.25 s otherwise
         self.capture.logs = None
         self._in_train, self._checkpoint_due = True, False
+        self.uncompiled_policy.snapshot_values(self.values)
         try:
             self.train()
         finally:
@@ -344,7 +345,8 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
         threads=int(runtime.get("threads", 1)), seed=rollout_seed,
         log_interval=int(train.get("log_interval", 32)),
     )
-    policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)))
+    policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)),
+                          critic_gamma=float(train["gamma"]))
     config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
                            data_dir=str(getattr(writer, "path", ".")), strict=strict)
     buffer = rollout_bytes(vecenv.num_agents, config["bptt_horizon"], vecenv.single_observation_space.shape[0])

@@ -123,7 +123,8 @@ def test_value_loss_targets_partner_rows_and_writes_back_values():
     policy = PufferPolicy.__new__(PufferPolicy)
     torch.nn.Module.__init__(policy)
     policy.max_players, policy.num_rows = players, rows
-    policy._rollout_sums = policy._trained_sums = None
+    policy._rollout_sums = policy._trained_sums = policy._gap_sums = policy._rollout_values = None
+    policy._outcomes = None
     idx = torch.tensor([3, 0])          # segments (= rows) in the minibatch
     # Minibatch row f = local_segment * horizon + t. Row 3 (env 1, seat 1) acts at t = 1;
     # row 0 (env 0, seat 0) acts at t = 2 and t = 4 (the last step: no target).
@@ -156,7 +157,8 @@ def test_a_critic_calibrated_on_truncations_shows_no_gap():
     policy = PufferPolicy.__new__(PufferPolicy)
     torch.nn.Module.__init__(policy)
     policy.max_players, policy.num_rows = players, players
-    policy._rollout_sums = policy._trained_sums = None
+    policy._rollout_sums = policy._trained_sums = policy._gap_sums = policy._rollout_values = None
+    policy._outcomes = None
     values = torch.full((players, horizon), 0.3)
     advantages = torch.zeros(players, horizon)        # returns = values: 0.3 + 0.3 per step
     logits = torch.logit(torch.full((1, players), 0.3)).requires_grad_()

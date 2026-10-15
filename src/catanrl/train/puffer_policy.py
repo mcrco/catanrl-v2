@@ -19,7 +19,8 @@ segment ``s`` holds row ``s``). In each env only the seat to move acts:
 
 The adapter also tracks the critic's calibration by player count: the sum
 over seats of the predicted win probabilities, against the sum of the
-targets it is trained on (see :meth:`PufferPolicy.pop_calibration`).
+targets it is trained on and, given the critic's discount, against the
+outcomes of finished games (see :meth:`PufferPolicy.pop_calibration`).
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from catanrl.models import CatanModel
+from catanrl.train.critic_metrics import OutcomeCalibration
 
 
 @dataclass
@@ -60,7 +62,8 @@ def seat_rows(rows: torch.Tensor, present: torch.Tensor, max_players: int) -> tu
 class PufferPolicy(nn.Module):
     """The model behind PufferLib's ``forward_eval`` / ``forward`` / ``value_loss``."""
 
-    def __init__(self, model: CatanModel, *, num_rows: int, compile: bool = False) -> None:
+    def __init__(self, model: CatanModel, *, num_rows: int, compile: bool = False,
+                 critic_gamma: float | None = None) -> None:
         super().__init__()
         self.model = model
         # torch.compile fuses the many small elementwise ops (about 1.45x on graph-s); dynamic
@@ -74,6 +77,12 @@ class PufferPolicy(nn.Module):
         # By player count: [count, predicted sum] over rollouts, [count, predicted, target] over training.
         self._rollout_sums: torch.Tensor | None = None
         self._trained_sums: torch.Tensor | None = None
+        # By player count: [count, rollout network's sum, trained network's sum] over training.
+        self._gap_sums: torch.Tensor | None = None
+        self._rollout_values: torch.Tensor | None = None
+        # Predictions against finished games' outcomes, at the critic's discount.
+        self._outcomes = None if critic_gamma is None else OutcomeCalibration(
+            num_envs=self.num_rows // self.max_players, max_players=self.max_players, gamma=critic_gamma)
 
     # ------------------------------------------------------------ rollout
 
@@ -88,6 +97,7 @@ class PufferPolicy(nn.Module):
         acting = torch.nonzero(self.model.acting(observations)).squeeze(1)
         logits = self.model.waiting_logits(rows, observations.device)
         values = torch.zeros(rows, device=observations.device, dtype=torch.float32)
+        probs = present = None
         if acting.numel():
             act_logits, value_logits, present = self._heads(observations.index_select(0, acting))
             logits.index_copy_(0, acting, act_logits.float())
@@ -95,6 +105,8 @@ class PufferPolicy(nn.Module):
             target, valid = seat_rows(acting, present, self.max_players)
             values[target[valid]] = probs[valid]
             self._track(probs, present)
+        if self._outcomes is not None and state is not None and "done" in state:
+            self._outcomes.observe(state["reward"], state["done"], acting, probs, present)
         return logits, values
 
     def _track(self, probs: torch.Tensor, present: torch.Tensor) -> None:
@@ -115,11 +127,19 @@ class PufferPolicy(nn.Module):
         the sum of their slots' targets (the seats' lambda-returns, which pay
         nobody for truncations and discount by gamma, so a calibrated critic's
         sum sits below 1 there). ``sum_gap_<n>p``: the mean predicted minus
-        target sum on the same trained decisions; 0 when calibrated.
+        target sum on the same trained decisions; 0 when the network fits its
+        targets (which bootstrap from it, so not a test of calibration).
+        ``rollout_vs_trained_gap_<n>p`` (after :meth:`snapshot_values`): on the
+        same trained decisions, the rollout network's predicted sum minus the
+        network's in training; positive when the network that collects (and
+        every checkpoint) sits above the epoch's trained mean. Given the
+        critic's discount, :class:`~catanrl.train.critic_metrics.OutcomeCalibration`'s
+        metrics against finished games: ``truth_sum_<n>p`` (what a calibrated
+        ``value_sum_<n>p`` estimates), ``brier_slot<k>_<n>p``, ...
         """
         out: dict[str, float] = {}
-        rollout, trained = self._rollout_sums, self._trained_sums
-        self._rollout_sums = self._trained_sums = None
+        rollout, trained, gap = self._rollout_sums, self._trained_sums, self._gap_sums
+        self._rollout_sums = self._trained_sums = self._gap_sums = self._rollout_values = None
         for n in range(2, self.max_players + 1):
             if rollout is not None and float(rollout[n, 0]):
                 out[f"value_sum_{n}p"] = float(rollout[n, 1] / rollout[n, 0])
@@ -127,7 +147,16 @@ class PufferPolicy(nn.Module):
                 count = float(trained[n, 0])
                 out[f"target_sum_{n}p"] = float(trained[n, 2]) / count
                 out[f"sum_gap_{n}p"] = float(trained[n, 1] - trained[n, 2]) / count
+            if gap is not None and float(gap[n, 0]):
+                out[f"rollout_vs_trained_gap_{n}p"] = float(gap[n, 1] - gap[n, 2]) / float(gap[n, 0])
+        if self._outcomes is not None:
+            out.update(self._outcomes.pop())
         return out
+
+    def snapshot_values(self, values: torch.Tensor) -> None:
+        """Keep the rollout network's stored values for ``rollout_vs_trained_gap_<n>p``:
+        call it before each PuffeRL train, which overwrites them (the next pop drops it)."""
+        self._rollout_values = values.detach().clone()
 
     # ------------------------------------------------------------ training
 
@@ -178,4 +207,9 @@ class PufferPolicy(nn.Module):
                 stats = torch.stack((torch.ones_like(mask[:, 0]), (probs[trained] * mask).sum(1),
                                      (targets[trained] * mask).sum(1)), dim=1)
                 self._trained_sums = self._add(self._trained_sums, mask.sum(1), stats)
+                if self._rollout_values is not None:
+                    rollout = self._rollout_values[target_rows, steps][trained]
+                    stats = torch.stack((torch.ones_like(mask[:, 0]), (rollout * mask).sum(1),
+                                         (probs[trained] * mask).sum(1)), dim=1)
+                    self._gap_sums = self._add(self._gap_sums, mask.sum(1), stats)
         return newvalue, loss
