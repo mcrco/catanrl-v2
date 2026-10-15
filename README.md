@@ -82,7 +82,9 @@ resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, and
 v1's research maps onto config axes: architecture (`model.preset`),
 information levels (`obs.level`, `obs.critic_level`), belief averaging
 (`BELIEF:`), determinized search (`MCTS:…:dets=K:sims=N`), reward and γ
-(`train.*`), DAgger warm starts (`stages` + `init_from`), AlphaZero
+(`train.*`), staged runs (`stages` + `init_from`; DAgger warm starts are
+superseded by from-scratch self-play PPO but still run as `train.algo:
+imitation`), AlphaZero
 (`train.algo: alphazero`; from a network, its evals default to head to head
 against that network, `${init}`), and player-count and map generalization
 (`env.scenarios` mixtures with held-out maps). See `DESIGN.md` §3 and §6.

@@ -189,7 +189,7 @@ axes:
 | belief averaging of a full-info policy | agent `BELIEF:…` |
 | determinized MCTS / ISMCTS, dets × sims | agent `MCTS:…:dets=K:sims=N`, a `kind: eval` sweep over `params` |
 | shaped vs win/loss reward, γ=0.99 vs 1 | `reward.*`, `train.gamma` |
-| DAgger warm start from F | `stages:` with `train.algo: imitation`, then `init_from:` |
+| DAgger warm start from F | superseded by self-play PPO from scratch (`puffer-graph2`: 95.2% vs F held-out, as v1's graph2); still available as a `train.algo: imitation` stage, then `init_from:` |
 | expert iteration / AlphaZero | `train.algo: alphazero` |
 | N-player and map generalization | `env.scenarios` mixture + held-out eval maps |
 
@@ -294,10 +294,10 @@ rather than copied from PufferLib's `default.ini`. Execution keys (`device`,
 `train` is an error.
 
 ```yaml
-# configs/experiments/arch-lineage.yaml: v1's lineage launch script, swept
+# configs/experiments/arch-lineage.yaml: v1's lineage launch script, swept, minus its DAgger stage
 name: arch-lineage                       # = file stem
 seed: 42
-env: {scenarios: [{game: base-2p}], num_envs: 2048}
+env: {scenarios: [{game: base-2p}], num_envs: 1024}
 obs: {level: full, critic_level: full}
 model: {preset: graph-s}
 train: {algo: ppo, total_timesteps: 400_000_000, learning_rate: 3.0e-4, gamma: 0.99, checkpoint_interval: 50}
@@ -307,15 +307,14 @@ eval:
     - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
     - {suite: heldout-2p, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
 stages:                                  # one variant each, run in order per sweep cell
-  dagger: {train!: {algo: imitation, expert: F, iterations: 24, checkpoint_interval: 8}, eval.select.every: 8}
-  warm:   {init_from: {ckpt: "${stages.dagger}@best", parts: [actor, critic]}}
-  g1:     {init_from: {ckpt: "${stages.warm}@3000"}, train.gamma: 1.0, train.total_timesteps: 200_000_000}
+  ppo: {}                                # from scratch, ~3050 epochs of 131,072 agent steps
+  g1:  {init_from: {ckpt: "${stages.ppo}@3000"}, train.gamma: 1.0, train.total_timesteps: 200_000_000}
 sweep:
   axes:
     model.preset: [graph-s, graph-m, mlp]   # list axis; a mapping is a tied axis:
     seed: [42, 43]                          #   obs: {pf: {obs.level: private, obs.critic_level: full}, …}
-  name: "{model.preset}-s{seed}"            # graph-m-s43.g1; 3 × 2 × 3 stages = 18 variants
-meta: {notes: "replaces launch-xdim-warm-lineage-20261009.sh", wandb: {project: catanrl-v2}}   # not hashed
+  name: "{model.preset}-s{seed}"            # graph-m-s43.g1; 3 × 2 × 2 stages = 12 variants
+meta: {notes: "replaces launch-xdim-warm-lineage-20261009.sh, without its DAgger stage", wandb: {project: catanrl-v2}}   # not hashed
 runtime: {device: cuda, threads: 16, time_limit_hours: 12}                                       # not hashed
 ```
 
