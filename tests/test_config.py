@@ -87,16 +87,18 @@ def test_name_collisions_and_conflicts(tmp_path):
 
 def test_stages_replace_sections_and_depend_in_order(tmp_path):
     stages = {
-        "dagger": {"train!": {"algo": "imitation", "iterations": 2}},
-        "warm": {"init_from": {"ckpt": "${stages.dagger}@best"}},
+        "ppo": {"train!": {"algo": "ppo", "gamma": 0.9}},
+        "g1": {"init_from": {"ckpt": "${stages.ppo}@best"}, "train.gamma": 1.0},
     }
     plan = load_plan(write(tmp_path, stages=stages))
-    dagger, warm = plan.variants
-    assert (dagger.name, warm.name) == ("main.dagger", "main.warm")
-    assert dagger.config["train"]["algo"] == "imitation" and "total_timesteps" not in dagger.config["train"]
-    assert dagger.config["train"]["beta0"] == 1.0
-    assert warm.config["init_from"]["ckpt"] == "exp/main.dagger@best"
-    assert warm.depends_on == ("main.dagger",) and warm.ref == "exp/main.warm"
+    ppo, g1 = plan.variants
+    assert (ppo.name, g1.name) == ("main.ppo", "main.g1")
+    # train! drops the body's total_timesteps for ppo.yaml's; a dotted key merges into the body's
+    assert (ppo.config["train"]["total_timesteps"], ppo.config["train"]["gamma"]) == (400_000_000, 0.9)
+    assert (g1.config["train"]["total_timesteps"], g1.config["train"]["gamma"]) == (1000, 1.0)
+    assert ppo.config["train"]["ent_coef"] == 0.01 and ppo.config["init_from"] is None
+    assert g1.config["init_from"]["ckpt"] == "exp/main.ppo@best"
+    assert g1.depends_on == ("main.ppo",) and g1.ref == "exp/main.g1"
     with pytest.raises(ConfigError, match="no earlier stage"):
         load_plan(write(tmp_path, stages={"a": {"init_from": {"ckpt": "${stages.b}@best"}}, "b": {}}))
 
@@ -208,7 +210,7 @@ def test_smoke_maps_epoch_refs_to_latest():
     plan = load_plan(FIXTURES / "fx-lineage.yaml", smoke=True, only="graph-tiny-s42.*")
     g1 = plan.variant("graph-tiny-s42.g1")
     assert plan.experiment == "fx-lineage+smoke"
-    assert g1.config["init_from"]["ckpt"] == "fx-lineage+smoke/graph-tiny-s42.warm@latest"
+    assert g1.config["init_from"]["ckpt"] == "fx-lineage+smoke/graph-tiny-s42.ppo@latest"
     assert g1.config["eval"]["select"]["suite"] == {"name": "select-2p", "boards": 2}
     assert g1.config["runtime"]["device"] == "cpu"
 
@@ -216,8 +218,8 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: Pinned: a change here means every existing run of these configs refuses to resume.
 GOLDEN = {
     "fx-lineage": {
-        "graph-tiny-s42.dagger": "9ff8d660e3109701", "graph-tiny-s42.warm": "7bbcefe0278b778e",
-        "graph-tiny-s42.g1": "5f433089b1b7a768", "mlp-s43.g1": "c513cec62c79b0d0",
+        "graph-tiny-s42.ppo": "20ec34c2d9d0676a", "graph-tiny-s42.g1": "15aeb57c1b609e46",
+        "mlp-s43.ppo": "f2a01f1ffa2e8221", "mlp-s43.g1": "31e1ee123fb5fcd0",
     },
     "fx-mcts": {"s16-oracle": "3ee08aa7d06abdcb", "s64-d4": "aaa5309ffd128cac"},
 }

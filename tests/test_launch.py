@@ -64,8 +64,8 @@ def test_a_refused_ppo_resume_closes_the_trainer(monkeypatch):
     assert closed  # PuffeRL's utilization thread is stopped, so the process can exit
 
 
-def _fake_children(monkeypatch, plan, status="finished"):
-    """run_child stand-in: records the variant and leaves a run with a `best` in ``status``."""
+def _fake_children(monkeypatch, plan, status="finished", epoch=0):
+    """run_child stand-in: records the variant and leaves a run with a `best` (at ``epoch``) in ``status``."""
     from types import SimpleNamespace
 
     from catanrl import runner
@@ -82,8 +82,8 @@ def _fake_children(monkeypatch, plan, status="finished"):
         with RunWriter.open(plan.variant(name), argv=["fake"]) as w:
             model = build_model({"preset": "graph-tiny"}, dims=dims, levels="private",
                                 num_actions=action_size(dims), layout=row_layout(dims, "private"))
-            ref = w.save_checkpoint(model, epoch=0, agent_steps=0)
-            w.save_trainer_state({"epoch": 0})
+            ref = w.save_checkpoint(model, epoch=epoch, agent_steps=0)
+            w.save_trainer_state({"epoch": epoch})
             w.set_alias("best", ref, record=SimpleNamespace(eval_id="x", summary={"score_rate": 0.5}))
             w.finish(status)
         return 0, False
@@ -125,10 +125,10 @@ def test_a_later_stage_runs_alone_once_its_parents_are_done(monkeypatch):
 
     path = "tests/fixtures/experiments/fx-lineage.yaml"
     full = load_plan(path, only="graph-tiny-s42.*", overrides=[])
-    launched = _fake_children(monkeypatch, full)
-    for name in ("graph-tiny-s42.dagger", "graph-tiny-s42.warm"):
+    launched = _fake_children(monkeypatch, full, epoch=3000)  # g1 starts from ppo@3000
+    for name in ("graph-tiny-s42.ppo", "graph-tiny-s42.g1"):
         runner.run_plan(load_plan(path, variant=name, overrides=[]))
-    assert launched == ["graph-tiny-s42.dagger", "graph-tiny-s42.warm"]
+    assert launched == ["graph-tiny-s42.ppo", "graph-tiny-s42.g1"]
 
 
 def test_yaml_outside_the_repo_is_refused(tmp_path):

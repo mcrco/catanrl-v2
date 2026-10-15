@@ -10,9 +10,8 @@ eval:
   final:
     - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
 stages:
-  dagger: {train!: {algo: imitation, iterations: 4, checkpoint_interval: 2}, eval.select.every: 2}
-  warm: {init_from: {ckpt: "${stages.dagger}@best", parts: [actor, critic]}}
-  g1: {init_from: {ckpt: "${stages.warm}@3000"}, train.gamma: 1.0}
+  ppo: {train!: {algo: ppo, total_timesteps: 500_000, checkpoint_interval: 25}, eval.select.every: 25}
+  g1: {init_from: {ckpt: "${stages.ppo}@3000", parts: [actor, critic]}, train.gamma: 1.0}
 sweep:
   axes:
     model.preset: [graph-tiny, mlp]
