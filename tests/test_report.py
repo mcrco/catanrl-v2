@@ -1,4 +1,4 @@
-"""Test 13: report gates, supersedes over the training lineage, dagger rows,
+"""Test 13: report gates, supersedes over the training lineage, flagged (†) rows,
 --final, the lockfile and wildcards."""
 
 from __future__ import annotations
@@ -96,7 +96,8 @@ def test_gates(env):
         report_data(write_spec(env, {"x": cite()}))
     out = report_data(write_spec(env, {"x": cite()}), run_missing=True)
     entry = yaml.safe_load(out.read_text())["entries"]["x"]
-    assert entry["n"] == 4 and entry["flags"] == [] and entry["refs"][0].startswith("exp/a@e0#")
+    assert entry["n"] == 4 and entry["flags"] == [] and not entry["flagged"]
+    assert entry["refs"][0].startswith("exp/a@e0#")
     with pytest.raises(ReportError, match="select suite"):
         report_data(write_spec(env, {"x": cite(suite={"name": "select-2p", "boards": 2})}), run_missing=True)
     with pytest.raises(ReportError, match="hidden information"):
@@ -118,11 +119,12 @@ def test_supersedes_walks_the_lineage(env):
         report_data(write_spec(env, {"x": cite("POLICY:exp/child@best")}, supersedes=[c2]), run_missing=True)
 
 
-def test_dagger_rows_and_final(env):
+def test_flagged_rows_and_final(env):
     make_run("a")
     env.state.dirty = True
     out = report_data(write_spec(env, {"x": cite()}), run_missing=True)
-    assert yaml.safe_load(out.read_text())["entries"]["x"]["flags"] == ["dirty"]
+    entry = yaml.safe_load(out.read_text())["entries"]["x"]
+    assert entry["flags"] == ["dirty"] and entry["flagged"] is True
     with pytest.raises(ReportError, match="--final refuses dirty"):
         report_data(write_spec(env, {"x": cite()}), final=True)
 

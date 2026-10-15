@@ -576,8 +576,9 @@ n, p, `eval_id`, canonical specs, `run@eN#sha`, flags), which Typst reads with
   * invalid or drift-allowed records;
   * checkpoints with any launch, in the run or an `init_from` ancestor, that
     does not descend from a `supersedes` commit.
-* **Marked †:** dirty, mixed or `fast` rows. `--final` refuses them instead,
-  and re-plays 16 games of each cited record.
+* **Marked †** (`flagged: true`, the reasons in `flags`): dirty, mixed or
+  `fast` rows. `--final` refuses them instead, and re-plays 16 games of each
+  cited record.
 * **Missing records** fail with the exact `catanrl eval …` line to run, or
   are computed with `--run-missing`.
 

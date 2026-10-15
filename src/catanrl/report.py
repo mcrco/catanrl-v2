@@ -17,7 +17,8 @@ or drift-allowed records, and checkpoints with a training launch (in the run
 or any ``init_from`` ancestor) that predates a ``supersedes`` commit. Rows
 that cannot be rebuilt from commits (dirty or moved code at eval or training
 time, mixed-code training, mixed execution, ``fast`` suites) are marked †
-and ``final`` refuses them (and re-plays ``verify_games`` games of each).
+(``flagged``, the reasons in ``flags``) and ``final`` refuses them (and
+re-plays ``verify_games`` games of each).
 """
 
 from __future__ import annotations
@@ -139,7 +140,7 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
     return {"rate": slot["score_rate"], "interval": slot["wilson"], "n": slot["games"],
             "p": slot.get("win_share_p"), "decided": slot.get("decided"), "truncated": record.summary["truncated"],
             "eval_id": record.eval_id, "specs": record.data["specs"], "refs": record.data["refs"],
-            "suite": suite.name, "flags": flags, "dagger": bool(flags), "record": record}
+            "suite": suite.name, "flags": flags, "flagged": bool(flags), "record": record}
 
 
 def report_data(spec: str | Path, *, run_missing: bool = False, update: bool = False, final: bool = False,

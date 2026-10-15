@@ -89,7 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     rep.add_argument("spec", nargs="?", default="report/results.yaml")
     rep.add_argument("--run-missing", action="store_true")
     rep.add_argument("--update", action="store_true", help="accept refs that now resolve differently")
-    rep.add_argument("--final", action="store_true", help="refuse dagger rows and re-play games of each record")
+    rep.add_argument("--final", action="store_true", help="refuse flagged (†) rows and re-play games of each record")
     rep.add_argument("--verify-games", type=int, default=16)
 
     bot = sub.add_parser("bot", help="play a catanatron-server seat with a fair agent spec")
