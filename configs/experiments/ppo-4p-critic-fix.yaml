@@ -1,0 +1,119 @@
+# Validates the per-seat critic fix on ppo-4p and decides whether gamma 1 becomes the
+# default: 100-epoch fine-tunes of ppo-4p's latest checkpoint (weights only), all with
+# lambda critic targets, at three discounts (notes 3). ppo-4p's critic sums its four
+# seats' win probabilities to about 1.2 (epoch 300) against a realized, discounted
+# 0.87, from two causes (notes 1). Everything but the critic options, the discount
+# and the learning rate is ppo-4p's recipe. Launch on the GPU alone, after ppo-4p has finished, with
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (as ppo-4p).
+name: ppo-4p-critic-fix
+seed: 42
+env:
+  scenarios: [{game: base-4p, turn_limit: 1000, maps: 4096}]
+  num_envs: 1024
+obs: {level: private}
+model: {preset: graph-s, args: {shared: true}}
+init_from: {ckpt: "ppo-4p/main@latest", parts: [actor, critic], restore: weights}
+train:
+  algo: ppo
+  total_timesteps: 26_214_400   # 100 epochs x 262,144 agent steps (ppo-4p's batch)
+  optimizer: muon
+  learning_rate: 0.0005         # ppo-4p's cosine floor (0.005 x 0.1), held constant (notes 2)
+  lr_schedule: constant
+  anneal_lr: false
+  min_lr_ratio: 0.1             # not read: anneal_lr is off
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon (nor by muon_exclude's AdamW: PyTorch's defaults)
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2             # not read: the per-seat value loss replaces the clipped MSE
+  ent_coef: 0.005
+  max_grad_norm: 4.0
+  bptt_horizon: 64
+  minibatch_size: 32768
+  max_minibatch_size: 4096
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+eval:
+  # as ppo-4p: slot 0's score share against three F (0.25 is parity); e0 is the start for every variant
+  select: {suite: select-4p, lineup: ["POLICY:ckpt=${self}", F, F, F], every: 50, metric: score_rate}
+sweep:
+  axes:
+    critic:
+      lambda: {train.critic_targets: lambda}
+      lambda-critic-g1: {train.critic_targets: lambda, train.critic_gamma: 1.0}
+      lambda-g1: {train.critic_targets: lambda, train.gamma: 1.0}
+      lambda-adamw:             # optional (notes 3); the three arms above are the A/B
+        train.critic_targets: lambda
+        train.muon_exclude: [value_head.mlp.4.weight]
+        train.muon_exclude_lr: 5.0e-5
+  name: "{critic}"
+meta:
+  parent: ppo-4p
+  notes: |
+    1. The diagnosis (2026-10-14, two independent analyses on CPU replications of ppo-4p):
+       - V-trace in the critic's targets. Only the acting seat's row gets its ratio min(r, 1);
+         the three waiting rows get 1. The ratios are fit on the same samples, so they correlate
+         with each sample's own advantage, and each seat's target values the game as if that seat
+         alone played the improved policy: four one-sided gains, a seat sum above the truth that
+         builds up through bootstrapping (2p hides it behind the gamma discount). Fixed by
+         critic_targets: lambda (plain GAE lambda-returns from the same stored values, every
+         ratio 1; the policy's advantages and the segment priorities stay V-trace's). On a toy
+         race through the real training path with exact values (tests/critic_toy.py), injected
+         PPO-like ratios push the seat sum 0.31 over the truth in 80 epochs under V-trace
+         targets (a sum of 1.24 against a realized 0.94) and not at all under lambda targets
+         (-0.003, the same as with every ratio 1).
+       - Muon normalizes the 1 x 128 value output layer's update to a fixed size, so the
+         predicted sum alternates high/low every optimizer step; with 16 steps per epoch the
+         rollout network and every checkpoint land on the high side, which seeds the bootstrap
+         targets. muon_exclude gives that layer to AdamW. This changes the dynamics, so it is a
+         variant of its own.
+    2. Learning rate. ppo-4p ends its cosine at 0.0005; a fine-tune of its last checkpoint at
+       the recipe's 0.005 would move the policy far more than the run's last epochs did, and the
+       V-trace bias grows with the clip fraction. So 0.0005, constant, with a fresh optimizer
+       (restore: weights). prio_beta0's anneal restarts at 0.2 over the 100 epochs (ppo-4p's ends
+       near 0.84); it weights the policy's advantages only, the same in every variant.
+    3. Arms (each 100 epochs, about 16 minutes), all with critic_targets lambda (Fix A):
+       - lambda: gamma 0.999 for the policy and the critic, as ppo-4p. Its seat sum should fall
+         to truth_sum_4p (about 0.88).
+       - lambda-critic-g1: the critic undiscounted (critic_gamma 1.0), the policy's advantages
+         at gamma 0.999: per-seat win probabilities whose sum is the share of games somebody
+         wins (about 1; what MCTS wants), without changing what the policy optimizes.
+       - lambda-g1: policy and critic both undiscounted (gamma 1.0): the same critic targets as
+         lambda-critic-g1, and the policy's advantages no longer favour faster wins. With
+         lambda-critic-g1 it separates the critic's discount from the policy's: whether gamma 1
+         becomes the default.
+       - lambda-adamw (optional, a fourth arm only because it costs one more run): lambda, and
+         value_head.mlp.4.weight by AdamW at 5e-5 (following the learning rate's fraction of
+         0.0005): its largest step (every gradient sign agreeing) has norm about 5e-5 x
+         sqrt(128) = 5.7e-4, Muon's 5e-4, and it shrinks when the gradient is noise, which
+         Muon's does not. The output bias stays on Muon's momentum SGD. Compare it with lambda.
+       There is no V-trace control: ppo-4p's own last epochs are the reference, and the fine-tune
+       (fresh Muon momentum, a constant learning rate) moves the metrics a little by itself.
+    4. What to read (metrics.jsonl, critic/*; the sums are over the four seats):
+       - truth_sum_4p: the realized outcomes summed over seats, gamma-discounted at the critic's
+         discount (critic_gamma or gamma), averaged over the decisions of games finished in the
+         epoch: what a calibrated value_sum_4p estimates (about 0.88 at gamma 0.999, about 1
+         undiscounted). finished_value_sum_4p is the prediction on the same decisions, and
+         pred_slot<k>_4p, real_slot<k>_4p and brier_slot<k>_4p the per-slot calibration
+         (slot 0 is the seat to move). The decisions of a game span several epochs' networks.
+       - rollout_vs_trained_gap_4p: the rollout network's predicted sum minus the network's in
+         training, on the same trained decisions: the phase-lock indicator (Muon's high side
+         caught by every rollout and checkpoint).
+       - target_sum_4p and sum_gap_4p as in ppo-4p; sum_gap 0 means the network fits its
+         targets, which bootstrap from it, so it is not calibration (ppo-4p's note 9).
+       Pass (every arm): value_sum_4p falls to its truth_sum_4p (the excess should decay with
+       a time constant of about 16 epochs) and rollout_vs_trained_gap_4p stays within 0.005,
+       with policy metrics and the select score as at ppo-4p's end. If lambda's gap stays above
+       about 0.01 or its sum stalls 0.03-0.05 high, lambda-adamw is the candidate. For the
+       default discount, compare lambda-critic-g1 and lambda-g1 on the select score, clip
+       fraction, environment/decisions (game length) and the critic's calibration.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

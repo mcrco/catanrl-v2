@@ -106,3 +106,32 @@ def test_ppo_4p_is_puffer_graph2_per_decision():
 
     assert cfg["eval"]["select"] == {"suite": "select-4p", "lineup": ["POLICY:ckpt=${self}", "F", "F", "F"],
                                      "every": 50, "metric": "score_rate"}
+
+
+def test_ppo_4p_critic_fix_is_ppo_4p_but_the_critic():
+    """Fine-tunes of ppo-4p's latest weights for 100 of its epochs at its cosine floor, all
+    with lambda critic targets: gamma 0.999, the critic undiscounted, both undiscounted, and
+    the value output layer off Muon; everything else is ppo-4p's recipe."""
+    ref = load_plan("ppo-4p").variants[0].config
+    plan = load_plan("ppo-4p-critic-fix")
+    assert [v.name for v in plan.variants] == ["lambda", "lambda-critic-g1", "lambda-g1", "lambda-adamw"]
+    changed = {"total_timesteps", "learning_rate", "anneal_lr", "gamma", "critic_targets", "critic_gamma",
+               "muon_exclude", "muon_exclude_lr"}
+    for v in plan.variants:
+        cfg = v.config
+        assert cfg["init_from"] == {"ckpt": "ppo-4p/main@latest", "parts": ["actor", "critic"], "restore": "weights"}
+        assert {k: cfg[k] for k in ("seed", "env", "obs", "model")} == {k: ref[k] for k in ("seed", "env", "obs", "model")}
+        assert cfg["eval"]["select"] == ref["eval"]["select"]
+        assert {k: cfg["train"][k] for k in cfg["train"] if k not in changed} == \
+            {k: ref["train"][k] for k in ref["train"] if k not in changed}
+        assert cfg["train"]["total_timesteps"] // (4096 * 64) == 100
+        assert cfg["train"]["learning_rate"] == ref["train"]["learning_rate"] * ref["train"]["min_lr_ratio"]
+        assert cfg["train"]["critic_targets"] == "lambda"
+    options = {v.name: {k: v.config["train"][k] for k in ("gamma", "critic_gamma", "muon_exclude")}
+               for v in plan.variants}
+    assert options == {
+        "lambda": {"gamma": 0.999, "critic_gamma": None, "muon_exclude": []},
+        "lambda-critic-g1": {"gamma": 0.999, "critic_gamma": 1.0, "muon_exclude": []},
+        "lambda-g1": {"gamma": 1.0, "critic_gamma": None, "muon_exclude": []},
+        "lambda-adamw": {"gamma": 0.999, "critic_gamma": None, "muon_exclude": ["value_head.mlp.4.weight"]},
+    }

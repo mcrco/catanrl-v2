@@ -19,6 +19,10 @@ def test_smoke(path):
     plan = load_plan(path, smoke=True)
     if plan.variants[0].kind == "eval":
         pytest.skip("eval-only experiments need their referenced runs")
+    init = plan.variants[0].config.get("init_from") or {}
+    refs = init.get("ckpt", {}).values() if isinstance(init.get("ckpt"), dict) else [init.get("ckpt")]
+    if any(ref and not str(ref).startswith(f"{plan.experiment}/") for ref in refs):
+        pytest.skip("starts from another experiment's run")
     cell = plan.variants[0].labels
     for v in [v for v in plan.variants if v.labels == cell]:
         assert run_variant(v, argv=["smoke"]) == "finished", v.ref
