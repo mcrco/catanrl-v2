@@ -3,7 +3,8 @@
 # (Turing GPUs have no bf16), no prioritized replay. These are exactly the
 # PuffeRL keys minus the runner's (device, seed, data_dir, compile,
 # batch_size, ...: set from `runtime` and the env) plus catanrl's
-# (algo, lr_schedule, kl_target, lr_min, lr_max, log_interval).
+# (algo, lr_schedule, kl_target, lr_min, lr_max, log_interval, muon_exclude,
+# muon_exclude_lr).
 algo: ppo
 total_timesteps: 400_000_000   # agent steps: rows (num_envs x max_players) per VecEnv step
 learning_rate: 3.0e-4
@@ -34,5 +35,9 @@ prio_alpha: 0.0                # uniform minibatches
 prio_beta0: 1.0
 vtrace_rho_clip: 1.0
 vtrace_c_clip: 1.0
+critic_targets: vtrace         # vtrace (the policy's V-trace returns) | lambda (plain GAE lambda-returns, every ratio 1)
+critic_gamma: null             # lambda only: the critic's discount (null: gamma; 1.0: undiscounted win probabilities)
+muon_exclude: []               # parameter-name patterns (fnmatch, e.g. value_head.mlp.4.weight) stepped by AdamW, not Muon
+muon_exclude_lr: null          # AdamW's learning rate for them while the main one is at learning_rate (it follows the schedule)
 checkpoint_interval: 50        # epochs
 log_interval: 32               # VecEnv steps between episode-stat pops

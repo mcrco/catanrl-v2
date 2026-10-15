@@ -47,10 +47,15 @@ from catanrl.canon import digest
 from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
-SCHEMA = 1
+SCHEMA = 2
 #: (schema that added it, dotted key, the value configs written before it meant, and for a
 #: ``train.*`` key the algo it belongs to, or None for every algo).
-MIGRATIONS: list[tuple[int, str, Any, str | None]] = []
+MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
+    (2, "train.critic_targets", "vtrace", "ppo"),
+    (2, "train.critic_gamma", None, "ppo"),
+    (2, "train.muon_exclude", [], "ppo"),
+    (2, "train.muon_exclude_lr", None, "ppo"),
+]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
 ALGOS = ("ppo", "imitation", "alphazero")

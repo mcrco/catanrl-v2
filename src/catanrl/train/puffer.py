@@ -24,7 +24,7 @@ from __future__ import annotations
 import copy
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
@@ -44,7 +44,8 @@ pufferl = import_pufferl()
 #: Every key PuffeRL reads from its config (tests/test_ppo_keys.py checks it by AST).
 PUFFERL_KEYS = frozenset({
     "adam_beta1", "adam_beta2", "adam_eps", "amp", "anneal_lr", "batch_size", "bptt_horizon",
-    "checkpoint_interval", "clip_coef", "compile", "compile_mode", "cpu_offload", "data_dir", "device",
+    "checkpoint_interval", "clip_coef", "compile", "compile_mode", "cpu_offload", "critic_gamma",
+    "critic_targets", "data_dir", "device",
     "ent_coef", "env", "gae_lambda", "gamma", "learning_rate", "max_grad_norm", "max_minibatch_size",
     "min_lr_ratio", "minibatch_size", "optimizer", "precision", "prio_alpha", "prio_beta0", "seed",
     "torch_deterministic", "total_timesteps", "update_epochs", "use_rnn", "vf_clip_coef", "vf_coef",
@@ -56,7 +57,8 @@ RUNNER_KEYS = frozenset({
     "torch_deterministic", "use_rnn",
 })
 #: Keys of the ``train`` section that catanrl reads and PuffeRL does not.
-CATANRL_TRAIN_KEYS = frozenset({"algo", "lr_schedule", "kl_target", "lr_min", "lr_max", "log_interval"})
+CATANRL_TRAIN_KEYS = frozenset({"algo", "lr_schedule", "kl_target", "lr_min", "lr_max", "log_interval",
+                                "muon_exclude", "muon_exclude_lr"})
 
 
 def resolve_device(device: str) -> str:
@@ -121,7 +123,8 @@ class CatanPuffeRL(pufferl.PuffeRL):
 
     def __init__(self, config: dict, vecenv: Any, policy: PufferPolicy, *, writer: Any,
                  select: Mapping[str, Any] | None = None, eval_runtime: Mapping[str, Any] | None = None,
-                 lr_schedule: Mapping[str, Any] | None = None) -> None:
+                 lr_schedule: Mapping[str, Any] | None = None, muon_exclude: Sequence[str] = (),
+                 muon_exclude_lr: float | None = None) -> None:
         self.writer = writer
         self.selector = Selector(select, writer, eval_runtime or {})
         self.lr_schedule = dict(lr_schedule or {"kind": "constant"})
@@ -134,6 +137,11 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.capture = _CaptureLogger()
         self.msg = ""
         super().__init__(config, vecenv, policy, logger=self.capture)
+        if muon_exclude:
+            from catanrl.train.muon_exclude import exclude_from_muon
+
+            exclude_from_muon(self.optimizer, self.model, muon_exclude, lr=float(muon_exclude_lr),
+                              base_lr=float(config["learning_rate"]))
         # PuffeRL.__init__ set matmul precision, cudnn.benchmark and cudnn.deterministic.
         strict = bool(config["torch_deterministic"])
         torch.backends.cudnn.benchmark = not strict
@@ -306,6 +314,28 @@ def _lr_schedule(train: Mapping[str, Any]) -> dict[str, Any]:
             "lr_max": float(train["lr_max"])}
 
 
+def _critic_options(train: Mapping[str, Any]) -> dict[str, Any]:
+    """train.critic_targets, critic_gamma, muon_exclude and muon_exclude_lr, checked."""
+    targets = train.get("critic_targets", "vtrace")
+    if targets not in ("vtrace", "lambda"):
+        raise ValueError(f"train.critic_targets must be vtrace or lambda, not {targets!r}")
+    gamma = train.get("critic_gamma")
+    if gamma is not None:
+        if targets != "lambda":
+            raise ValueError("train.critic_gamma is the discount of critic_targets: lambda")
+        gamma = float(gamma)
+        if not 0.0 < gamma <= 1.0:
+            raise ValueError(f"train.critic_gamma must be in (0, 1], not {gamma}")
+    patterns = train.get("muon_exclude") or []
+    if isinstance(patterns, str) or not all(isinstance(p, str) for p in patterns):
+        raise ValueError("train.muon_exclude is a list of parameter-name patterns")
+    lr = train.get("muon_exclude_lr")
+    if bool(patterns) != (lr is not None):
+        raise ValueError("train.muon_exclude and muon_exclude_lr (AdamW's learning rate) go together")
+    return {"critic_targets": targets, "critic_gamma": gamma, "muon_exclude": list(patterns),
+            "muon_exclude_lr": None if lr is None else float(lr)}
+
+
 def train_ppo(variant: Any, writer: Any) -> None:
     """Train ``variant`` (a :class:`catanrl.config.Variant`) into ``writer``'s run."""
     cfg = variant.config
@@ -322,6 +352,7 @@ def train_ppo(variant: Any, writer: Any) -> None:
 
 
 def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, strict) -> None:
+    train = {**train, **_critic_options(train)}
     pool_cfg = env_cfg.get("map_pool") or {}
     pool_seed = pool_cfg.get("seed")
     pool_seed = _derive_seed(seed, "map_pool") if pool_seed is None else int(pool_seed)
@@ -345,8 +376,9 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
         threads=int(runtime.get("threads", 1)), seed=rollout_seed,
         log_interval=int(train.get("log_interval", 32)),
     )
+    critic_gamma = train["critic_gamma"] if train["critic_gamma"] is not None else float(train["gamma"])
     policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)),
-                          critic_gamma=float(train["gamma"]))
+                          critic_gamma=critic_gamma)
     config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
                            data_dir=str(getattr(writer, "path", ".")), strict=strict)
     buffer = rollout_bytes(vecenv.num_agents, config["bptt_horizon"], vecenv.single_observation_space.shape[0])
@@ -356,7 +388,8 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     select = (cfg.get("eval") or {}).get("select")
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
     trainer = CatanPuffeRL(config, vecenv, policy, writer=writer, select=select, eval_runtime=eval_runtime,
-                           lr_schedule=_lr_schedule(train))
+                           lr_schedule=_lr_schedule(train), muon_exclude=train["muon_exclude"],
+                           muon_exclude_lr=train["muon_exclude_lr"])
     status = "finished"
     try:  # from here on, close() stops PuffeRL's non-daemon utilization thread
         trainer.extra_state["map_pool"] = plan.pool["hash"]

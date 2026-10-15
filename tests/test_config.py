@@ -215,13 +215,18 @@ def test_smoke_maps_epoch_refs_to_latest():
     assert g1.config["runtime"]["device"] == "cpu"
 
 
-#: Pinned: a change here means every existing run of these configs refuses to resume.
+#: Pinned: a change here means every existing run of these configs refuses to resume,
+#: unless MIGRATIONS covers it. Schema 2 added PPO's critic_targets, critic_gamma,
+#: muon_exclude and muon_exclude_lr (schema 1's hashes: graph-tiny-s42.ppo 20ec34c2d9d0676a,
+#: graph-tiny-s42.g1 15aeb57c1b609e46, mlp-s43.ppo f2a01f1ffa2e8221, mlp-s43.g1
+#: 31e1ee123fb5fcd0, s16-oracle 3ee08aa7d06abdcb, s64-d4 aaa5309ffd128cac); stored
+#: schema-1 runs migrate to the hashes below.
 GOLDEN = {
     "fx-lineage": {
-        "graph-tiny-s42.ppo": "20ec34c2d9d0676a", "graph-tiny-s42.g1": "15aeb57c1b609e46",
-        "mlp-s43.ppo": "f2a01f1ffa2e8221", "mlp-s43.g1": "31e1ee123fb5fcd0",
+        "graph-tiny-s42.ppo": "9de4ad123b1571e1", "graph-tiny-s42.g1": "8f20d8bd5eb0864c",
+        "mlp-s43.ppo": "0afc662b53b55599", "mlp-s43.g1": "2b8b04b954ec769d",
     },
-    "fx-mcts": {"s16-oracle": "3ee08aa7d06abdcb", "s64-d4": "aaa5309ffd128cac"},
+    "fx-mcts": {"s16-oracle": "57fd361629823202", "s64-d4": "3b565fffa56c89eb"},
 }
 
 
@@ -230,6 +235,20 @@ def test_golden_fixture_hashes(name):
     plan = load_plan(FIXTURES / f"{name}.yaml")
     found = {v.name: v.config_hash for v in plan.variants}
     assert {k: found[k] for k in GOLDEN[name]} == GOLDEN[name]
+
+
+def test_schema_1_ppo_configs_migrate_to_schema_2_hashes():
+    """A run stored before schema 2 (no critic keys) hashed as schema 1 did and migrates
+    to the schema-2 resolution's hash, so it still resumes."""
+    schema_1 = {("fx-lineage", "graph-tiny-s42.ppo"): "20ec34c2d9d0676a",
+                ("fx-mcts", "s64-d4"): "aaa5309ffd128cac"}
+    for (name, variant), old_hash in schema_1.items():
+        new = load_plan(FIXTURES / f"{name}.yaml").variant(variant)
+        stored = json.loads(json.dumps(new.config))
+        for key in ("critic_targets", "critic_gamma", "muon_exclude", "muon_exclude_lr"):
+            del stored["train"][key]
+        assert config_hash(stored) == old_hash
+        assert config_hash(migrate(stored, from_schema=1)) == new.config_hash
 
 
 def _keyed(key: str, algo: str | None) -> str:
