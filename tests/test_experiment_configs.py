@@ -20,10 +20,11 @@ def test_experiment_validates(path):
 
 def test_arch_lineage_shape():
     plan = load_plan("arch-lineage")
-    assert len(plan.variants) == 18
-    g1 = plan.variant("graph-m-s43.g1")
-    assert g1.depends_on == ("graph-m-s43.warm",) and g1.config["train"]["gamma"] == 1.0
-    assert g1.config["init_from"]["ckpt"] == "arch-lineage/graph-m-s43.warm@3000"
+    assert len(plan.variants) == 12
+    ppo, g1 = plan.variant("graph-m-s43.ppo"), plan.variant("graph-m-s43.g1")
+    assert ppo.config["train"]["algo"] == "ppo" and ppo.config["init_from"] is None and ppo.depends_on == ()
+    assert g1.depends_on == ("graph-m-s43.ppo",) and g1.config["train"]["gamma"] == 1.0
+    assert g1.config["init_from"]["ckpt"] == "arch-lineage/graph-m-s43.ppo@3000"
 
 
 def test_puffer_graph2_keeps_v1_shape():

@@ -1,5 +1,9 @@
-# v1's lineage launch script, swept over architectures (DESIGN 6.2): DAgger
-# from F, a PPO warm start from it, then gamma = 1 from the warm run's epoch 3000.
+# v1's lineage launch script, swept over architectures (DESIGN 6.2), minus its
+# DAgger warm start: self-play PPO from scratch, then gamma = 1 from the PPO
+# run's epoch 3000 (of about 3050 at 1024 games x 2 rows x 64 steps = 131,072
+# agent steps per epoch). Self-play PPO no longer needs a warm start:
+# puffer-graph2 reaches 95.2% vs F on heldout-2p from scratch, as v1's graph2
+# did. DAgger from F is still a stage away (train.algo: imitation, init_from).
 name: arch-lineage
 seed: 42
 env: {scenarios: [{game: base-2p}], num_envs: 1024}
@@ -12,13 +16,12 @@ eval:
     - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
     - {suite: heldout-2p, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
 stages:                        # one variant each, run in order per sweep cell
-  dagger: {train!: {algo: imitation, expert: F, iterations: 24, checkpoint_interval: 8}, eval.select.every: 8}
-  warm: {init_from: {ckpt: "${stages.dagger}@best", parts: [actor, critic]}}
-  g1: {init_from: {ckpt: "${stages.warm}@3000"}, train.gamma: 1.0, train.total_timesteps: 200_000_000}
+  ppo: {}
+  g1: {init_from: {ckpt: "${stages.ppo}@3000"}, train.gamma: 1.0, train.total_timesteps: 200_000_000}
 sweep:
   axes:
     model.preset: [graph-s, graph-m, mlp]
     seed: [42, 43]
-  name: "{model.preset}-s{seed}"   # graph-m-s43.g1: 3 presets x 2 seeds x 3 stages = 18 variants
-meta: {notes: "replaces launch-xdim-warm-lineage-20261009.sh", wandb: {project: catanrl-v2}}
+  name: "{model.preset}-s{seed}"   # graph-m-s43.g1: 3 presets x 2 seeds x 2 stages = 12 variants
+meta: {notes: "replaces launch-xdim-warm-lineage-20261009.sh, without its DAgger stage", wandb: {project: catanrl-v2}}
 runtime: {device: cuda, threads: 16, time_limit_hours: 12}
