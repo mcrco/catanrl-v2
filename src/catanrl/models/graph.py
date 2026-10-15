@@ -227,6 +227,11 @@ class GraphPolicyHead(nn.Module):
     from node embeddings (one), roads from the edge embedding plus its two
     ends' node embeddings (two), robber moves from the tile embedding and the
     victim slot's player embedding (one); the no-op's logit is 0.
+
+    Scoring each placement from its own position's embedding follows Canopy's
+    Nexus-v3 heads, by way of v1's ``CatanGraphPolicyHead``; v1's
+    ``HierarchicalPolicyHead`` (Nov 2025) had factored actions into a type and
+    its parameters before that.
     """
 
     def __init__(self, trunk: GraphTrunk, action_layout: Mapping[str, Any], *, head_hidden: int) -> None:

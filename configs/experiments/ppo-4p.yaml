@@ -133,8 +133,11 @@ meta:
        decisions of the four seats' predicted win probabilities, summed), critic/target_sum_4p
        (the same sum of the lambda-return targets trained on) and critic/sum_gap_4p (predicted
        minus target sum on the same decisions; 0 when calibrated). The four sigmoids are
-       independent, so their sum is a real check; with gamma < 1 and truncations paying nobody
-       the targets sum below 1, so a calibrated critic sits at target_sum_4p, not exactly 1.
+       independent, so their sum is a real check. target_sum_4p is not the reference: the
+       V-trace targets bootstrap from the critic itself and inherit its bias, so value_sum_4p
+       tracks target_sum_4p even when both are wrong (this run settled near 1.2 against a true
+       discounted ~0.88). The reference is critic/truth_sum_4p, the realized discounted outcomes
+       of finished games (added after this run; see ppo-4p-critic-fix for the fix).
        puffer-graph2 at epoch 1040: 0.979 / 0.981 / +0.0007.
     10. Evals. Select: select-4p (seed 124, 200 boards x 4 seat rotations = 800 games, turn
         limit 500, strict) every 50 epochs against three native F; the metric is slot 0's score
