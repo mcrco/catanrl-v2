@@ -16,7 +16,12 @@ docs/experiments-implementation.md are handled here:
 * checkpoints go through the run writer (PufferLib's ``save_checkpoint`` and
   its data_dir copy are replaced);
 * rewards are win/loss in [0, 1], inside PufferLib's clamp; VP shaping, which
-  can leave it, is refused.
+  can leave it, is refused;
+* ``train.aux_coef`` > 0 trains a graph network's aux head (``model.args.aux``)
+  on the row's critic block (``obs.critic_level`` above ``obs.level``) through
+  the fork's ``aux_loss`` hook; ``losses/aux`` and ``aux/mse_<feature>`` /
+  ``aux/var_<feature>`` are logged. At 0 (the default) the head, if any, is
+  not run and training is the plain PPO.
 """
 
 from __future__ import annotations
@@ -58,7 +63,7 @@ RUNNER_KEYS = frozenset({
 })
 #: Keys of the ``train`` section that catanrl reads and PuffeRL does not.
 CATANRL_TRAIN_KEYS = frozenset({"algo", "lr_schedule", "kl_target", "lr_min", "lr_max", "log_interval",
-                                "muon_exclude", "muon_exclude_lr"})
+                                "muon_exclude", "muon_exclude_lr", "aux_coef"})
 
 
 def resolve_device(device: str) -> str:
@@ -259,6 +264,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
         })
         logs.update({f"environment/{k}": v for k, v in env.take_stats().items()})
         logs.update({f"critic/{k}": v for k, v in self.uncompiled_policy.pop_calibration().items()})
+        logs.update({f"aux/{k}": v for k, v in self.uncompiled_policy.pop_aux().items()})
         self._adapt_lr(logs)
         if self._checkpoint_due:
             self.save_checkpoint()
@@ -325,6 +331,21 @@ def _lr_schedule(train: Mapping[str, Any]) -> dict[str, Any]:
             "lr_max": float(train["lr_max"])}
 
 
+def _aux_coef(train: Mapping[str, Any], model: CatanModel) -> float:
+    """train.aux_coef, checked against the network: a positive weight needs the aux head
+    and the critic block it is trained on; 0 leaves a head, if any, untrained."""
+    coef = float(train.get("aux_coef", 0.0) or 0.0)
+    if coef < 0.0:
+        raise ValueError(f"train.aux_coef must be >= 0, not {coef}")
+    if coef and not getattr(model, "aux", False):
+        raise ValueError("train.aux_coef > 0 needs a network with an aux head: model.args.aux on a shared graph "
+                         "trunk (model.args.shared)")
+    if coef and not model.has_critic_block:
+        raise ValueError("train.aux_coef > 0 trains the aux head on the critic block: set obs.critic_level above "
+                         "obs.level (its players block is the target, which no head reads)")
+    return coef
+
+
 def _critic_options(train: Mapping[str, Any]) -> dict[str, Any]:
     """train.critic_targets, critic_gamma, muon_exclude and muon_exclude_lr, checked."""
     targets = train.get("critic_targets", "vtrace")
@@ -389,7 +410,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     )
     critic_gamma = train["critic_gamma"] if train["critic_gamma"] is not None else float(train["gamma"])
     policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)),
-                          critic_gamma=critic_gamma)
+                          critic_gamma=critic_gamma, aux_coef=_aux_coef(train, model))
     config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
                            data_dir=str(getattr(writer, "path", ".")), strict=strict, recurrent=policy.recurrent)
     buffer = rollout_bytes(vecenv.num_agents, config["bptt_horizon"], vecenv.single_observation_space.shape[0])

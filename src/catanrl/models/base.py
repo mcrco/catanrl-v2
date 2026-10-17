@@ -27,6 +27,8 @@ class CatanModel(nn.Module):
     parts: dict[str, list[str]]
     recurrent: bool = False
     hidden_size: int = 0
+    #: An auxiliary head predicting the other seats' hidden features (graph, ``args.aux``).
+    aux: bool = False
 
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__()
@@ -40,6 +42,9 @@ class CatanModel(nn.Module):
         self.noop = self.num_actions - 1
         self.has_critic_block = CRITIC_PLAYERS in layout
         self.critic_players = CRITIC_PLAYERS if self.has_critic_block else "players"
+        #: Whether a head reads the critic block at inference (a separate critic does; a shared
+        #: trunk with an aux head only takes its training targets from it).
+        self.reads_critic_block = self.has_critic_block
 
     # Subclasses implement these three; the rest derives from them.
     def policy_logits(self, obs: torch.Tensor) -> torch.Tensor:

@@ -1,0 +1,81 @@
+# Predict the hidden information instead of sampling it (report, "exploring
+# ideas"): arch-ablation's graph-s cell exactly (puffer-graph2's recipe at the
+# fair `private` level, one shared graph-s trunk, 100M agent steps, select-2p
+# every 50 epochs) plus an auxiliary head on the shared trunk that predicts,
+# for the other seat, the 15 players-block features a private row zeroes
+# (catanrl.envs.encoding.HIDDEN_FEATURES: the hand per resource, the dev
+# cards in hand per kind, which are playable, the actual VP), trained
+# alongside PPO by a masked mean squared error in the encoder's feature
+# scale, weighted by train.aux_coef. The targets are the full-level players
+# block the env appends after the row (obs.critic_level: full); the trunk,
+# the policy and the value head read only the private row, so the checkpoint
+# plays as a fair POLICY and inference never encodes the block (the eval
+# harness drops it). The question is whether the policy's score moves, not
+# the aux loss: measured on heldout-2p against F and head to head against
+# arch-ablation/graph-s@best on the same boards. That ref is pinned when this
+# run is created if arch-ablation/graph-s is finished by then; otherwise the
+# run is created and trained without it, the head-to-head is deferred, and a
+# later `catanrl run aux-hidden` pins and plays it once the control is done.
+name: aux-hidden
+seed: 42
+env:
+  scenarios: [{game: base-2p, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+obs: {level: private, critic_level: full}   # the critic block is the aux head's target, nothing reads it
+model: {preset: graph-s, args: {shared: true, aux: true}}
+train:
+  algo: ppo
+  total_timesteps: 100_000_000  # 757 epochs x 132,096 agent steps; the cosine's T_max follows it
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95
+  adam_beta2: 0.999
+  adam_eps: 1.0e-12
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2
+  ent_coef: 0.005
+  max_grad_norm: 2.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 4096
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+  aux_coef: 0.3                 # see meta.notes for how it was chosen
+eval:
+  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=arch-ablation/graph-s@best"]}
+meta:
+  recipe: arch-ablation/graph-s
+  notes: |
+    The control is arch-ablation/graph-s (the same recipe without the head); the head-to-head
+    row pins its best checkpoint when this variant is created if that run is finished by then,
+    else when the final is first played once it is (it is not a dependency: it lives in another
+    experiment, so the final is deferred and a later `catanrl run aux-hidden` plays it).
+    losses/aux is the head's
+    mean squared error over present other seats and hidden features; aux/mse_<feature> and
+    aux/var_<feature> (the target's variance, the best constant's error) give its R^2 per
+    feature for the report.
+    aux_coef 0.3, from a CPU smoke of this network (graph-s, 64 games x 64 steps per epoch,
+    1024-row micro-batches, Adam 5e-3, three epochs): the gradient of the unweighted aux loss
+    on the shared trunk (backbone.*) was 0.2-0.6 of PPO's own trunk gradient at the same
+    steps (per-epoch medians 0.44, 0.17, 0.64; the fresh head spikes to 50x in its first two
+    micro-batches, below max_grad_norm at this weight). So 0.1 would let the head pull the
+    trunk at 2-6% of PPO's pull, 1.0 at parity; 0.3 (5-20%) shapes the representation
+    without competing with the policy. The loss itself is small in value (the targets are
+    ratios in [0, 1]: about 0.006-0.01 once the head has learned the means), which is why
+    the weight is set by gradient scale, not by loss scale.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

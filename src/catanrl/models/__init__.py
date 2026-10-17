@@ -14,7 +14,11 @@ Every model maps rows to ``(logits [B, A], values [B, P])``: logits with
 illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
 = the row's own seat, absent seats 0). Classes:
 
-* ``graph``: :mod:`catanrl.models.graph` (dims-agnostic);
+* ``graph``: :mod:`catanrl.models.graph` (dims-agnostic). With ``args.aux``
+  (a shared trunk) it carries an auxiliary head predicting the other seats'
+  hidden features (``aux_predictions``); its training targets are the
+  ``critic_players`` block of a row whose ``critic_level`` is above its
+  ``level`` (``aux_targets``), which no head reads;
 * ``mlp``: :mod:`catanrl.models.mlp` (padded dims only);
 * ``cnn``: :mod:`catanrl.models.cnn` (v1's cross-dimensional CNN; the BASE board only);
 * ``lstm``: :mod:`catanrl.models.lstm` (dims-agnostic, recurrent: the graph
@@ -34,8 +38,10 @@ import torch
 import yaml
 
 from catanrl.envs.encoding import (
+    CRITIC_PLAYERS,
     check_dims,
     critic_level_of,
+    hidden_feature_indices,
     level_name,
     make_encoder,
     row_layout,
@@ -123,13 +129,24 @@ class GraphModel(CatanModel):
         action_layout = make_encoder(dims, levels["level"]).action_space.layout()
         actor_reader = RowReader(layout, names, canonical=canonical)
         self.present_index = actor_reader.feature("players", "present")
+        self.aux = bool(args["aux"])
+        if self.aux and not args["shared"]:
+            raise ValueError("the aux head (model.args.aux) sits on a shared trunk: set model.args.shared")
         if args["shared"]:
-            if self.has_critic_block:
+            if self.has_critic_block and not self.aux:
                 raise ValueError("a shared trunk cannot read a separate critic level")
+            hidden = hidden_feature_indices(canonical["players"]) if self.aux else []
             net = GraphNetwork(actor_reader, action_layout, args=args, num_players=self.num_players,
-                               policy=True, value=True)
+                               policy=True, value=True, aux_features=len(hidden))
             self.backbone, self.policy_head, self.value_head = net.trunk, net.policy, net.value
             self.parts = {"actor": ["backbone.", "policy_head."], "critic": ["value_head."]}
+            if self.aux:
+                self.aux_head = net.aux
+                self.parts["aux"] = ["aux_head."]
+                self.register_buffer("hidden_index", torch.tensor(hidden, dtype=torch.long), persistent=False)
+            # The trunk reads the actor's row only; a critic block, when the row has one, is the
+            # aux head's target and no head reads it (the policy stays fair at the actor's level).
+            self.reads_critic_block = False
         else:
             critic_names = feature_names(dims, levels["critic_level"])
             critic_reader = RowReader(layout, critic_names, players=self.critic_players, canonical=canonical)
@@ -164,6 +181,37 @@ class GraphModel(CatanModel):
         rows = self.critic.trunk.reader(obs)
         present = self._present(self.actor.trunk.reader(obs)) if self.has_critic_block else self._present(rows)
         return self.critic.value(self.critic.trunk(obs, rows), present), present
+
+    # ---------------------------------------------------------- the aux head
+
+    def heads_with_aux(self, obs):
+        """(masked logits, value logits, present, aux predictions) in one trunk pass."""
+        if not self.aux:
+            raise ValueError("this network has no aux head (model.args.aux)")
+        rows = self.backbone.reader(obs)
+        emb = self.backbone(obs, rows)
+        present = self._present(rows)
+        return self.policy_head(emb, rows.mask), self.value_head(emb, present), present, self.aux_head(emb)
+
+    def aux_predictions(self, obs):
+        """The aux head's predictions [B, P-1, F]: row k holds slot k+1's hidden features
+        (:data:`~catanrl.envs.encoding.HIDDEN_FEATURES`, in the encoder's scale), from the
+        actor's row alone (no critic block needed)."""
+        return self.heads_with_aux(obs)[3]
+
+    def aux_targets(self, obs):
+        """(targets [B, P-1, F], present [B, P-1]) for the aux head: slots 1..P-1's hidden
+        features read from the critic block (the players block at ``critic_level``), and
+        which of those seats the game has. Training only: a row without the block raises."""
+        if not self.aux:
+            raise ValueError("this network has no aux head (model.args.aux)")
+        if not self.has_critic_block:
+            raise ValueError("aux targets come from the critic block: set obs.critic_level above obs.level")
+        reader = self.backbone.reader
+        hidden = reader.players_block(obs, CRITIC_PLAYERS)[:, 1:]              # [B, P-1, Fp]
+        targets = hidden.index_select(2, self.hidden_index)                    # [B, P-1, F]
+        present = reader.players_block(obs)[:, 1:, self.present_index]         # [B, P-1]
+        return targets, present
 
 
 class MlpModel(CatanModel):

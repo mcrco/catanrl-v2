@@ -46,6 +46,8 @@ SELF_TEST_POSITIONS = 8
 #: Tolerances of check 5: CPU kernels may differ across machines in the last bits.
 LOGIT_TOL = 1e-4
 VALUE_TOL = 1e-5
+#: What a self-test may be asked to reproduce (:meth:`Checkpoint.self_test`).
+SELF_TEST_PARTS = ("actor", "critic", "aux", "all")
 
 
 class CheckpointError(RuntimeError):
@@ -237,8 +239,11 @@ def encode_positions(positions: Sequence[Mapping[str, Any]], dims: Mapping[str, 
     return np.stack(rows).astype(np.float32)
 
 
-def _outputs(model: nn.Module, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """(logits, values, logits with every action legal): the last shows every policy head's output."""
+def _outputs(model: nn.Module, obs: torch.Tensor, *, aux: bool = True) -> tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    """(logits, values, logits with every action legal, aux predictions or None): the open
+    logits show every policy head's output; the aux head's predictions pin it when there is
+    one (``aux=False`` skips that third trunk pass when a self-test does not compare it)."""
     from catanrl.seeding import determinism
 
     offset, (size,) = model.layout["action_mask"]
@@ -248,7 +253,8 @@ def _outputs(model: nn.Module, obs: torch.Tensor) -> tuple[torch.Tensor, torch.T
             torch.no_grad():
         logits, values = model(obs)
         open_logits, _ = model(open_obs)
-    return logits.float(), values.float(), open_logits.float()
+        predictions = model.aux_predictions(obs).float() if aux and getattr(model, "aux", False) else None
+    return logits.float(), values.float(), open_logits.float(), predictions
 
 
 def make_self_test(model: nn.Module, dims: Mapping[str, int], level: str, n: int = SELF_TEST_POSITIONS,
@@ -257,9 +263,12 @@ def make_self_test(model: nn.Module, dims: Mapping[str, int], level: str, n: int
     positions = select_positions(dims, n, games)
     obs = torch.from_numpy(encode_positions(positions, dims, level, critic_level))
     cpu = _rebuild(model.spec, model.dims, model.levels, {k: v.detach().cpu() for k, v in model.state_dict().items()})
-    logits, values, open_logits = _outputs(cpu, obs)
-    return {"positions": json.dumps(positions, separators=(",", ":")), "obs": obs, "logits": logits,
+    logits, values, open_logits, aux = _outputs(cpu, obs)
+    test = {"positions": json.dumps(positions, separators=(",", ":")), "obs": obs, "logits": logits,
             "value": values, "open_logits": open_logits}
+    if aux is not None:
+        test["aux"] = aux
+    return test
 
 
 def _rebuild(spec: Mapping[str, Any], dims: Mapping[str, int], levels: Mapping[str, str],
@@ -391,13 +400,19 @@ class Checkpoint:
         return MODEL_CLASSES[self.header["model"]["class"]].recurrent
 
     def self_test(self, *, allow_drift: bool = False, part: str = "all") -> None:
-        """Checks 2, 4 and 5 (check 1 ran at load; 3 needs target dims)."""
+        """Checks 2, 4 and 5 (check 1 ran at load; 3 needs target dims). ``part`` names the
+        outputs the rebuilt network must reproduce: ``actor`` (logits), ``critic`` (values),
+        ``aux`` (the aux head's predictions) or ``all``."""
+        if part not in SELF_TEST_PARTS:
+            raise ValueError(f"part must be one of {', '.join(SELF_TEST_PARTS)}, not {part!r}")
         if (part, allow_drift) in self._tested or ("all", allow_drift) in self._tested:
             return
         levels, dims = self.levels, self.dims
         stored = self.header["obs"]["layout_hash"]
         if stored != _layout_hashes(dims, levels):
             raise SchemaMismatch(f"{self.ref}: the encoder or action layout changed since it was saved")
+        if part == "aux" and "aux" not in self.header["self_test"]:
+            raise CheckpointError(f"{self.ref} has no aux head")
         if not allow_drift:
             test = self.header["self_test"]
             positions = json.loads(test["positions"])
@@ -405,7 +420,7 @@ class Checkpoint:
             if obs.shape != tuple(test["obs"].shape) or not np.array_equal(obs, test["obs"].numpy()):
                 raise EncoderDrift(f"{self.ref}: re-encoding its self-test positions gives other rows")
             model = _rebuild(self.header["model"], dims, levels, self.state_dict)
-            logits, values, open_logits = _outputs(model, test["obs"])
+            logits, values, open_logits, aux = _outputs(model, test["obs"], aux=part in ("aux", "all"))
             legal = test["logits"] > -1e8
             logits_ok = torch.equal(legal, logits > -1e8) and torch.allclose(
                 logits[legal], test["logits"][legal], rtol=LOGIT_TOL, atol=LOGIT_TOL)
@@ -417,6 +432,9 @@ class Checkpoint:
             values_ok = torch.allclose(values, test["value"], rtol=VALUE_TOL, atol=VALUE_TOL)
             if part in ("critic", "all") and not values_ok:
                 raise ModelDrift(f"{self.ref}: the rebuilt network's values differ from its self-test")
+            if part in ("aux", "all") and "aux" in test and (aux is None or not torch.allclose(
+                    aux, test["aux"], rtol=LOGIT_TOL, atol=LOGIT_TOL)):
+                raise ModelDrift(f"{self.ref}: the rebuilt network's aux predictions differ from its self-test")
         self._tested.add((part, allow_drift))
 
     def model(self, part: Literal["actor", "critic", "all"] = "actor", device: str = "cpu", *,

@@ -16,7 +16,11 @@ Differences from v1's port, all because v2 rows carry the graph explicitly:
   victim's player embedding;
 * the value head predicts each seat's win probability (independent sigmoids,
   seat-relative, slot 0 = the row's own seat) from the pooled state and that
-  seat's embedding, starting from 1/n per seat.
+  seat's embedding, starting from 1/n per seat;
+* an optional auxiliary head (``aux``, on a shared trunk) predicts, from the
+  same inputs, the hidden features of every other seat (slots 1..P-1): the
+  players-block features a ``private`` row zeroes for them (DESIGN 2), in the
+  encoder's scale. Training only; it never feeds the policy or the value.
 
 Aggregations are dense per-sample incidence matrices (built by comparisons
 and ``bmm``, row-normalized by degree): deterministic on CUDA, free of host
@@ -45,9 +49,13 @@ GRAPH_DEFAULTS: dict[str, Any] = {
     "head_hidden": 128,
     # One trunk for both heads, or separate actor and critic networks (v1's "sep").
     "shared": False,
+    # An auxiliary head on the shared trunk predicting the other seats' hidden features
+    # (catanrl.envs.encoding.HIDDEN_FEATURES) from the row; trained by train.aux_coef.
+    "aux": False,
 }
 POLICY_OUTPUT_GAIN = 0.01
 VALUE_OUTPUT_GAIN = 0.01
+AUX_OUTPUT_GAIN = 0.01
 HIDDEN_GAIN = math.sqrt(2.0)
 
 
@@ -295,10 +303,31 @@ class GraphValueHead(nn.Module):
         return logits + value_prior(present)
 
 
-class GraphNetwork(nn.Module):
-    """A trunk with a policy head, a value head or both."""
+class GraphAuxHead(nn.Module):
+    """The other seats' hidden features (slots 1..P-1) from the pooled state and each
+    seat's embedding: ``num_features`` regressed values per seat in the encoder's scale."""
 
-    def __init__(self, reader, action_layout, *, args, num_players, policy: bool, value: bool) -> None:
+    def __init__(self, trunk: GraphTrunk, *, head_hidden: int, num_players: int, num_features: int) -> None:
+        super().__init__()
+        if num_players < 2 or num_features < 1:
+            raise ValueError("the aux head predicts at least one feature of at least one other seat")
+        self.num_players = num_players
+        self.num_features = num_features
+        self.mlp = _mlp(trunk.pooled_dim + trunk.hidden, head_hidden, num_features, 2, AUX_OUTPUT_GAIN)
+
+    def forward(self, emb: Embeddings) -> torch.Tensor:
+        """[B, P-1, F]: slot k+1's features from row k of the output."""
+        others = emb.players[:, 1 : self.num_players]
+        pooled = emb.pooled.unsqueeze(1).expand(-1, self.num_players - 1, -1)
+        return self.mlp(torch.cat((pooled, others), dim=-1)).float()
+
+
+class GraphNetwork(nn.Module):
+    """A trunk with a policy head, a value head or both, and ``aux_features`` > 0 adds the
+    auxiliary head (built last, so the other parts' initial weights do not depend on it)."""
+
+    def __init__(self, reader, action_layout, *, args, num_players, policy: bool, value: bool,
+                 aux_features: int = 0) -> None:
         super().__init__()
         self.trunk = GraphTrunk(
             reader, hidden=args["hidden"], global_hidden=args["global_hidden"], layers=args["layers"]
@@ -308,4 +337,8 @@ class GraphNetwork(nn.Module):
         )
         self.value = (
             GraphValueHead(self.trunk, head_hidden=args["head_hidden"], num_players=num_players) if value else None
+        )
+        self.aux = (
+            GraphAuxHead(self.trunk, head_hidden=args["head_hidden"], num_players=num_players,
+                         num_features=int(aux_features)) if aux_features else None
         )

@@ -39,5 +39,7 @@ critic_targets: vtrace         # vtrace (the policy's V-trace returns) | lambda 
 critic_gamma: null             # lambda only: the critic's discount (null: gamma; 1.0: undiscounted win probabilities)
 muon_exclude: []               # parameter-name patterns (fnmatch, e.g. value_head.mlp.4.weight) stepped by AdamW, not Muon
 muon_exclude_lr: null          # AdamW's learning rate for them while the main one is at learning_rate (it follows the schedule)
+aux_coef: 0.0                  # weight of the aux hidden-information loss (model.args.aux on a shared graph trunk, trained
+                               # on the critic block: obs.critic_level above obs.level); 0 = off, the plain PPO
 checkpoint_interval: 50        # epochs
 log_interval: 32               # VecEnv steps between episode-stat pops

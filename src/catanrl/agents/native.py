@@ -90,10 +90,12 @@ class NativeAgent:
         if self.recurrent and not self.needs_memory:
             raise ValueError(f"{self.key} cannot play a recurrent network (class {model.spec['class']}): "
                              "only POLICY keeps a seat's decision history")
-        if critic_level_of(self.level, model.levels["critic_level"]) is not None and heads == "policy":
+        if critic_level_of(self.level, model.levels["critic_level"]) is not None and (
+                heads == "policy" or not model.reads_critic_block):
             # Decisions read only the actor: drop the critic block (it has the players block's
-            # width, so the same weights load) and play from actor-level rows. Searches keep it:
-            # their leaves come from an ActorCriticEncoder.
+            # width, so the same weights load) and play from actor-level rows. Searches keep it
+            # when the critic reads it (their leaves come from an ActorCriticEncoder); a block
+            # no head reads (a shared trunk's aux targets) is dropped for searches too.
             self._levels["critic_level"] = self.level
             model = self._rebuild(dict(model.dims))
         self._set_model(model)

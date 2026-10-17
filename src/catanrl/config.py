@@ -49,14 +49,17 @@ from catanrl.canon import digest
 from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
-SCHEMA = 2
-#: (schema that added it, dotted key, the value configs written before it meant, and for a
-#: ``train.*`` key the algo it belongs to, or None for every algo).
+SCHEMA = 3
+#: (schema that added it, dotted key, the value configs written before it meant, and its
+#: scope: for a ``train.*`` key the algo it belongs to, for a ``model.args.*`` key (a class
+#: default, which resolution fills in) the model class, or None for every algo / class).
 MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
     (2, "train.critic_targets", "vtrace", "ppo"),
     (2, "train.critic_gamma", None, "ppo"),
     (2, "train.muon_exclude", [], "ppo"),
     (2, "train.muon_exclude_lr", None, "ppo"),
+    (3, "train.aux_coef", 0.0, "ppo"),
+    (3, "model.args.aux", False, "graph"),
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
@@ -465,8 +468,11 @@ def migrate(cfg: dict, *, from_schema: int) -> dict:
     """A stored config of ``from_schema`` with every later key at its legacy value."""
     cfg = copy.deepcopy(cfg)
     algo = (cfg.get("train") or {}).get("algo")
-    for schema, path, legacy, for_algo in MIGRATIONS:
-        if schema <= from_schema or (path.startswith("train.") and for_algo not in (None, algo)):
+    model_class = (cfg.get("model") or {}).get("class")
+    for schema, path, legacy, scope in MIGRATIONS:
+        if schema <= from_schema or (path.startswith("train.") and scope not in (None, algo)):
+            continue
+        if path.startswith("model.args.") and (cfg.get("model") is None or scope not in (None, model_class)):
             continue
         try:
             get_path(cfg, path)

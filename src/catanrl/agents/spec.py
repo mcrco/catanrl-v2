@@ -142,6 +142,15 @@ def check_spec_syntax(spec: str) -> None:
         _ckpt_syntax(params.ckpt)
 
 
+def spec_ckpt(spec: str) -> str | None:
+    """The checkpoint a model spec names, as written (``exp/var@which[#sha]``, a ``.pt`` path,
+    or one with ``${...}`` in it), or None for a bot."""
+    key, args, named = parse_spec(spec)
+    if key not in MODEL_KEYS:
+        return None
+    return _build_params(key, args, named).ckpt
+
+
 def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> Any:
     cls = _PLAYERS[key]
     try:

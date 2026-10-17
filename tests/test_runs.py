@@ -278,6 +278,63 @@ def test_init_is_pinned_at_creation_and_kept_by_forks(monkeypatch):
         runs.expand_init("POLICY:ckpt=${init}", load_experiment("exp/p").init_ref)
 
 
+def test_a_final_naming_another_experiments_run_waits_for_it(monkeypatch):
+    """A control in another experiment (aux-hidden's arch-ablation/graph-s) is not a
+    dependency the runner can order. Usable when the variant is created, it is pinned then,
+    as every ref is; otherwise the variant is created and trained without it, the final
+    waits (Unbound: not missing, nothing to play) until that run is usable, then pins its
+    best once; the finals the run can play are played meanwhile."""
+    from test_results import FakeHarness
+
+    from catanrl.eval import results
+    from catanrl.runner import _missing_finals, final_evals
+
+    harness = FakeHarness()
+    monkeypatch.setattr(results, "play_schedule", harness)
+    suite = {"name": "heldout-2p", "boards": 1}
+    control = "POLICY:ckpt=ctl/main@best"
+    ev = {"final": [{"suite": suite, "lineup": ["POLICY:ckpt=${run}@best", "F"]},
+                    {"suite": suite, "lineup": ["POLICY:ckpt=${run}@best", control]}]}
+    v = make_variant("c", eval=ev, runtime={"device": "cpu"})
+    with RunWriter.open(v, argv=["t"]) as w:  # no ctl/main anywhere: created all the same
+        assert w.bindings() == {}
+        e0 = commit(w, tiny(1), 0)
+        w.set_alias("best", e0, record=record())
+        w.finish("finished")
+    run = load_experiment("exp/c")
+    assert run.manifest["resolved"]["specs"] == {} and run.variant().depends_on == ()
+    played = final_evals(run, v)
+    assert len(played) == 1 and played[0].data["refs"][0] == str(e0)  # vs F is played, the control waits
+    assert not _missing_finals(run, v) and run.bindings() == {}
+    with pytest.raises(runs.Unbound, match="waits for ctl/main, which is not there yet"):
+        runs.bound_lineup(run, ev["final"][1]["lineup"])
+    with RunWriter.open(make_variant("main", experiment="ctl"), argv=["t"]) as w:  # there, but not usable
+        ctl = commit(w, tiny(2), 0)
+        w.set_alias("best", ctl, record=record())
+        w.finish("interrupted")
+    with pytest.raises(runs.Unbound, match="which is interrupted"):
+        runs.bound_lineup(run, ev["final"][1]["lineup"])
+    assert not _missing_finals(run, v) and len(final_evals(run, v)) == 1 and run.bindings() == {}
+    with RunWriter.open(make_variant("d", eval=ev), argv=["t"]) as w:  # a sibling created now waits too
+        assert w.bindings() == {}
+    with RunWriter.open(load_experiment("ctl/main").variant(), argv=["t"]) as w:
+        w.load_trainer_state()
+        w.finish("time_limit")
+    assert _missing_finals(run, v)
+    played = final_evals(run, v)
+    assert len(played) == 2 and played[1].data["refs"] == [str(e0), str(ctl)]
+    assert run.bindings()[control].startswith(f"POLICY:ckpt={ctl}")
+    with RunWriter.open(make_variant("e", eval=ev), argv=["t"]) as w:  # created once usable: pinned at creation
+        assert w.bindings()[control].startswith(f"POLICY:ckpt={ctl}")
+    with RunWriter.open(load_experiment("ctl/main").variant(), argv=["t"]) as w:  # the control moves on
+        w.load_trainer_state()
+        w.set_alias("best", commit(w, tiny(3), 1), record=record("def"))
+        w.finish("time_limit")
+    calls = harness.calls
+    assert not _missing_finals(run, v)
+    assert final_evals(run, v)[1].data["refs"] == [str(e0), str(ctl)] and harness.calls == calls  # pinned once
+
+
 def test_a_kill_between_provenance_and_run_json_keeps_the_run_openable(monkeypatch):
     v = make_variant()
     real = canon.atomic_write_json

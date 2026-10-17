@@ -197,6 +197,49 @@ Heads: structured policy (above) and a per-seat value head (P sigmoids). A
 checkpoint stores the network config and the observation spec it was trained
 on, and refuses an env whose spec differs.
 
+### 2.1 The hidden-information head
+
+An alternative to sampling worlds from the belief (1.5): train the network
+to predict the hidden information itself. `graph` with `args.aux` (on a
+shared trunk) carries a third head, `aux_head`, from the pooled state and
+each other seat's embedding (the value head's inputs) to that seat's
+**hidden features**: the 15 players-block features the encoder zeroes for
+every seat but the observer's below the level that shows them
+(`catanrl.envs.encoding.HIDDEN_FEATURES`: the hand per resource, shown from
+`public`; the development cards in hand per kind, which of them are playable
+this turn, and the actual victory points, shown at `full`). Own-seat features
+are identical at every level and are not targets.
+
+* **Targets without an engine change.** With `obs.level: private` and
+  `obs.critic_level: full` the VecEnv appends the full-level players block
+  (`critic_players`, engine E5) after the row. A shared trunk still refuses
+  to *read* a separate critic level; with the aux head the block is the
+  head's target only (`aux_targets`): the trunk, the policy and the value
+  head read the private row, so the policy stays fair at its level and
+  `reads_critic_block` is false. Inference needs no block: the native
+  POLICY, BELIEF and MCTS agents drop it and rebuild the network on
+  actor-level rows (the same weights load), so evals encode what a plain
+  private checkpoint needs.
+* **Loss.** Masked mean squared error in the encoder's feature scale over
+  the present other seats and the hidden features, on acting rows only like
+  the other heads, weighted by `train.aux_coef` (default 0: the head, if
+  any, is not run and training is the plain PPO, bitwise). The targets are
+  the encoder's ratios in [0, 1] (count over the bank per resource, the deck
+  per kind, the points to win; 0/1 playable flags), so they are bounded and
+  rules-agnostic; a per-count cross-entropy would need each feature's range,
+  which comes from the rules and is not in the row. The hook is the
+  PufferLib fork's `aux_loss(outputs)`, next to `value_loss`.
+* **Logged.** `losses/aux` (the mean over features) and, per hidden feature,
+  `aux/mse_<f>` and `aux/var_<f>` (the target's variance over the same pairs,
+  the best constant's error), so `1 - mse / var` is the head's R^2 per
+  feature: how much of the hidden state the trunk has learned to infer.
+* **Checkpoints** store the head as a third part, `aux`, with its own
+  self-test outputs (`part="all"` pins them); `init_from` parts stay actor
+  and critic, so a warm start leaves the head fresh.
+
+The experiment is `aux-hidden` (arch-ablation's graph-s cell plus the head);
+the question is whether the policy's score moves, not the aux loss.
+
 ## 3. Agents, evaluation, experiments
 
 Agent specs use Catanatron's registry syntax (grammar in 6.5):
@@ -381,7 +424,13 @@ counts takes `fill: F` for the empty seats.
 * Refs to other runs are resolved once, when the variant is created, and
   stored in `config.json`. If one later moves, the variant warns and keeps its
   target. A ref to another variant of the same experiment, in `eval.final`
-  too, is a dependency: the runner finishes that variant first.
+  too, is a dependency: the runner finishes that variant first. A ref in
+  `eval.final` to a run of *another* experiment (a control trained elsewhere,
+  which the runner cannot order) is pinned at creation only if that run is
+  already finished (`USABLE`); otherwise the variant is created, trained and
+  smoked without it, the final is deferred (`Unbound`), and a later
+  `catanrl run` of the experiment pins and plays it once the control is
+  finished (`bindings.jsonl`).
 * `${self}` and `${run}@best` resolve when the eval runs, and are pinned in
   its record.
 * `${init}` is the checkpoint `init_from` loads the actor from, pinned when

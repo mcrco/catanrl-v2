@@ -29,10 +29,19 @@ segment ``s`` holds row ``s``). In each env only the seat to move acts:
   The state is rollout-only: it is not checkpointed, and a resume starts
   from zero like the restarted games.
 
+* **The aux head** (``aux_coef`` > 0, a graph network with ``args.aux``): the
+  training forward also returns the head's predictions for the acting rows
+  with their targets, the hidden features of the other seats read from the
+  row's critic block (:meth:`CatanModel.aux_targets`), and ``aux_loss``
+  (the fork's third hook) adds ``aux_coef`` times their masked mean squared
+  error, over present other seats and hidden features, to PPO's loss. The
+  rollout never runs the head.
+
 The adapter also tracks the critic's calibration by player count: the sum
 over seats of the predicted win probabilities, against the sum of the
 targets it is trained on and, given the critic's discount, against the
-outcomes of finished games (see :meth:`PufferPolicy.pop_calibration`).
+outcomes of finished games (see :meth:`PufferPolicy.pop_calibration`), and
+the aux head's error per hidden feature (:meth:`PufferPolicy.pop_aux`).
 """
 
 from __future__ import annotations
@@ -43,18 +52,22 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from catanrl.envs.encoding import HIDDEN_FEATURES
 from catanrl.models import CatanModel
 from catanrl.train.critic_metrics import OutcomeCalibration
 
 
 @dataclass
 class ValueBatch:
-    """The training forward's value outputs (consumed by ``value_loss``)."""
+    """The training forward's value outputs (consumed by ``value_loss``), and the aux
+    head's when it trains (consumed by ``aux_loss``)."""
 
     index: torch.Tensor    # [M] flat minibatch rows that act
     logits: torch.Tensor   # [M, P] per-seat win logits
     present: torch.Tensor  # [M, P] seats present
     rows: int              # minibatch rows (segments x horizon)
+    #: (predictions [M, P-1, F], targets [M, P-1, F], present other seats [M, P-1]) or None.
+    aux: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
 
 def seat_rows(rows: torch.Tensor, present: torch.Tensor, max_players: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -75,10 +88,26 @@ class PufferPolicy(nn.Module):
     """The model behind PufferLib's ``forward_eval`` / ``forward`` / ``value_loss``."""
 
     def __init__(self, model: CatanModel, *, num_rows: int, compile: bool = False,
-                 critic_gamma: float | None = None) -> None:
+                 critic_gamma: float | None = None, aux_coef: float = 0.0) -> None:
         super().__init__()
         self.model = model
         self.recurrent = bool(getattr(model, "recurrent", False))
+        self.aux_coef = float(aux_coef)
+        if self.aux_coef < 0.0:
+            raise ValueError("aux_coef must be >= 0")
+        if self.aux_coef:
+            if not getattr(model, "aux", False):
+                raise ValueError("train.aux_coef > 0 needs a network with an aux head (model.args.aux on a shared "
+                                 "graph trunk)")
+            if not model.has_critic_block:
+                raise ValueError("the aux head's targets are the critic block: set obs.critic_level above obs.level")
+            if self.recurrent:
+                raise ValueError("the aux head trains a non-recurrent network")
+            self._heads_with_aux = (torch.compile(model.heads_with_aux, dynamic=True) if compile
+                                    else model.heads_with_aux)
+        # Per hidden feature over the epoch's trained (row, other seat) pairs:
+        # [count, sum of squared errors, sum of targets, sum of squared targets].
+        self._aux_sums: torch.Tensor | None = None
         # torch.compile fuses the many small elementwise ops (about 1.45x on graph-s); dynamic
         # shapes because the number of acting rows varies. A recurrent model's cell stays eager:
         # the scan over the horizon is a loop of tiny kernels.
@@ -229,9 +258,16 @@ class PufferPolicy(nn.Module):
         rows = observations.shape[0]
         acting = torch.nonzero(self.model.acting(observations)).squeeze(1)
         logits = self.model.waiting_logits(rows, observations.device)
-        act_logits, value_logits, present = self._heads(observations.index_select(0, acting))
+        acting_obs = observations.index_select(0, acting)
+        aux = None
+        if self.aux_coef:
+            act_logits, value_logits, present, predictions = self._heads_with_aux(acting_obs)
+            targets, others = self.model.aux_targets(acting_obs)
+            aux = (predictions, targets, others)
+        else:
+            act_logits, value_logits, present = self._heads(acting_obs)
         logits = logits.index_copy(0, acting, act_logits.float())
-        return logits, ValueBatch(acting, value_logits.float(), present, rows)
+        return logits, ValueBatch(acting, value_logits.float(), present, rows, aux)
 
     def _forward_recurrent(self, observations: torch.Tensor, state):
         """The training forward over segments x horizon: the rollout's recursion,
@@ -274,6 +310,41 @@ class PufferPolicy(nn.Module):
         act_logits, value_logits, present = self._decode(emb, obs_rows, memory)
         logits = logits.index_copy(0, acting, act_logits.float())
         return logits, ValueBatch(acting, value_logits.float(), present, rows)
+
+    def aux_loss(self, outputs: ValueBatch):
+        """PuffeRL's hook: ``(aux_coef x the aux head's loss, {"aux": the loss})`` on the
+        minibatch's acting rows, or None when the head does not train (the loss is then
+        untouched). The loss is the mean squared error in the encoder's feature scale over
+        the present other seats and the hidden features; its per-feature terms are summed
+        for :meth:`pop_aux`."""
+        if outputs.aux is None:
+            return None
+        predictions, targets, others = outputs.aux
+        weight = others.float().unsqueeze(-1)                                     # [M, P-1, 1]
+        errors = ((predictions.float() - targets.float()) ** 2 * weight).sum(dim=(0, 1))  # [F]
+        pairs = weight.sum()
+        loss = errors.sum() / (pairs * errors.shape[0]).clamp_min(1.0)
+        with torch.no_grad():
+            stats = torch.stack((pairs.expand(errors.shape[0]), errors, (targets.float() * weight).sum(dim=(0, 1)),
+                                 (targets.float() ** 2 * weight).sum(dim=(0, 1))), dim=1)
+            self._aux_sums = stats if self._aux_sums is None else self._aux_sums + stats
+        return self.aux_coef * loss, {"aux": loss.detach()}
+
+    def pop_aux(self) -> dict[str, float]:
+        """The aux head's error per hidden feature since the last pop, over the trained
+        (acting row, present other seat) pairs: ``mse_<feature>``, and ``var_<feature>``,
+        the variance of its target over the same pairs (the error of the best constant
+        prediction, so ``1 - mse / var`` is the head's R^2 on that feature)."""
+        sums, self._aux_sums = self._aux_sums, None
+        if sums is None or not float(sums[0, 0]):
+            return {}
+        out: dict[str, float] = {}
+        count = sums[:, 0]
+        mean = sums[:, 2] / count
+        for i, name in enumerate(HIDDEN_FEATURES):
+            out[f"mse_{name}"] = float(sums[i, 1] / count[i])
+            out[f"var_{name}"] = max(float(sums[i, 3] / count[i] - mean[i] ** 2), 0.0)
+        return out
 
     def value_loss(self, outputs: ValueBatch, returns: torch.Tensor, *, idx: torch.Tensor,
                    values: torch.Tensor, advantages: torch.Tensor):
