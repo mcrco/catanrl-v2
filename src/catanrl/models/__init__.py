@@ -15,7 +15,8 @@ illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
 = the row's own seat, absent seats 0). Classes:
 
 * ``graph``: :mod:`catanrl.models.graph` (dims-agnostic);
-* ``mlp``: :mod:`catanrl.models.mlp` (padded dims only).
+* ``mlp``: :mod:`catanrl.models.mlp` (padded dims only);
+* ``cnn``: :mod:`catanrl.models.cnn` (v1's cross-dimensional CNN; the BASE board only).
 """
 
 from __future__ import annotations
@@ -27,17 +28,16 @@ from typing import Any
 
 import torch
 import yaml
-from torch import nn
 
 from catanrl.envs.encoding import (
-    CRITIC_PLAYERS,
     check_dims,
     critic_level_of,
     level_name,
     make_encoder,
     row_layout,
-    row_size,
 )
+from catanrl.models.base import CatanModel
+from catanrl.models.cnn import CNN_DEFAULTS, CnnModel
 from catanrl.models.graph import GRAPH_DEFAULTS, GraphNetwork
 from catanrl.models.mlp import MLP_DEFAULTS, FlatNetwork
 from catanrl.models.rows import (
@@ -49,9 +49,9 @@ from catanrl.models.rows import (
 )
 
 MODEL_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "models"
-CLASSES: dict[str, dict[str, Any]] = {"graph": GRAPH_DEFAULTS, "mlp": MLP_DEFAULTS}
+CLASSES: dict[str, dict[str, Any]] = {"graph": GRAPH_DEFAULTS, "mlp": MLP_DEFAULTS, "cnn": CNN_DEFAULTS}
 
-__all__ = ["CatanModel", "build_model", "load_preset", "normalize_levels", "resolve_spec"]
+__all__ = ["MODEL_CLASSES", "CatanModel", "build_model", "load_preset", "normalize_levels", "resolve_spec"]
 
 
 def load_preset(name: str) -> dict[str, Any]:
@@ -103,55 +103,6 @@ def normalize_levels(levels: Mapping[str, Any] | str) -> dict[str, str]:
     level = level_name(levels["level"])
     critic = levels.get("critic_level")
     return {"level": level, "critic_level": level_name(critic) if critic is not None else level}
-
-
-class CatanModel(nn.Module):
-    """Base of the networks: spec, parts and the row contract."""
-
-    spec: dict[str, Any]
-    dims_agnostic: bool
-    parts: dict[str, list[str]]
-
-    def __init__(self, spec, dims, levels, layout) -> None:
-        super().__init__()
-        self.spec = spec
-        self.dims = dict(dims)
-        self.levels = dict(levels)
-        self.layout = dict(layout)
-        self.num_players = self.dims["max_players"]
-        self.obs_size = row_size(layout)
-        self.mask_offset, (self.num_actions,) = layout["action_mask"]
-        self.noop = self.num_actions - 1
-        self.has_critic_block = CRITIC_PLAYERS in layout
-        self.critic_players = CRITIC_PLAYERS if self.has_critic_block else "players"
-
-    # Subclasses implement these three; the rest derives from them.
-    def policy_logits(self, obs: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def value_logits(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-seat win logits [B, P] and the seats present [B, P]."""
-        raise NotImplementedError
-
-    def heads(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """(masked logits, value logits, present) in one pass."""
-        logits = self.policy_logits(obs)
-        values, present = self.value_logits(obs)
-        return logits, values, present
-
-    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        logits, value_logits, present = self.heads(obs)
-        return logits, torch.sigmoid(value_logits) * present
-
-    def acting(self, obs: torch.Tensor) -> torch.Tensor:
-        """[B] bool: the row must act (its mask has more than the no-op)."""
-        return obs[:, self.mask_offset + self.noop] == 0
-
-    def waiting_logits(self, rows: int, device, dtype=torch.float32) -> torch.Tensor:
-        """Logits of rows that only have the no-op."""
-        logits = torch.full((rows, self.num_actions), -1e9, device=device, dtype=dtype)
-        logits[:, self.noop] = 0.0
-        return logits
 
 
 class GraphModel(CatanModel):
@@ -281,5 +232,8 @@ def build_model(
     expected_actions = expected["action_mask"][1][0]
     if int(num_actions) != expected_actions:
         raise ValueError(f"num_actions {num_actions} != the action space's {expected_actions}")
-    cls = {"graph": GraphModel, "mlp": MlpModel}[spec["class"]]
-    return cls(spec, dims, levels, expected)
+    return MODEL_CLASSES[spec["class"]](spec, dims, levels, expected)
+
+
+#: Model class name -> the :class:`CatanModel` subclass (the ``class`` of a spec).
+MODEL_CLASSES: dict[str, type[CatanModel]] = {"graph": GraphModel, "mlp": MlpModel, "cnn": CnnModel}

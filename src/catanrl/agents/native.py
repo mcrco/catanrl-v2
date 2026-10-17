@@ -30,7 +30,7 @@ agents with ``needs_games`` also get copies of the games, and those with
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import cppanatron as cpp
@@ -111,6 +111,10 @@ class NativeAgent:
             raise ValueError(f"{self.key}: this network was trained at dims {self.dims} and is "
                              f"not dims-agnostic; the games need {dims}")
         self._set_model(self._rebuild(dims))
+
+    def check_maps(self, maps: Iterable[Any]) -> None:
+        """Refuse maps the network would misread at these dims (the cnn's board check)."""
+        self.model.check_maps(maps)
 
     def encode(self, game: cpp.Game, seat: int) -> np.ndarray:
         return self.encoder.encode(game, seat)
@@ -244,6 +248,9 @@ class BotAgent:
         self.value_enemies = {"next": cpp.ValueEnemies.NEXT, "all": cpp.ValueEnemies.ALL}[enemies]
 
     def bind(self, dims) -> None:
+        pass
+
+    def check_maps(self, maps) -> None:
         pass
 
 

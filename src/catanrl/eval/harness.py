@@ -145,6 +145,10 @@ class _Maps:
             self.cache[key] = cpp.CatanMap.from_spec(cpp.MapSpec.from_dict(spec))
         return self.cache[key]
 
+    def built(self) -> list[cpp.CatanMap]:
+        """Every map built so far (all of a schedule's, after ``_check_games``)."""
+        return list(self.cache.values())
+
 
 # ---------------------------------------------------------------- VecEnv schedule mode
 
@@ -286,4 +290,6 @@ def play_schedule(
             raise ValueError(f"{scheduled.game_id}: a seat's slot has no agent (fill missing?)")
     maps = _Maps(table)
     _check_games(games, table, maps, dims)
+    for agent in agents:  # a network tied to one board (cnn) refuses maps laid out otherwise
+        agent.check_maps(maps.built())
     _play_vecenv(agents, list(games), table, maps, dims, num_envs=num_envs, threads=threads, on_game=on_game)

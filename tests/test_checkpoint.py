@@ -41,7 +41,8 @@ def rows(model, n=4):
                                                 model.levels["critic_level"]))
 
 
-@pytest.mark.parametrize(("preset", "critic"), [("graph-tiny", None), ("mlp", None), ("graph-tiny", "full")])
+@pytest.mark.parametrize(("preset", "critic"), [("graph-tiny", None), ("mlp", None), ("graph-tiny", "full"),
+                                                 ("cnn-tiny", None), ("cnn-tiny", "full")])
 def test_round_trip_gives_identical_outputs(tmp_path, preset, critic):
     model = tiny(preset, critic=critic).eval()
     ref = saved(tmp_path, model)
@@ -113,9 +114,10 @@ def test_graph_runs_at_larger_dims_and_mlp_refuses(tmp_path):
     big = dims_for(["base-4p"])
     graph = Checkpoint.load(saved(tmp_path, tiny("graph-tiny")).path).model(dims=big)
     assert graph.dims == big
-    mlp = Checkpoint.load(saved(tmp_path, tiny("mlp"), name="mlp.pt").path)
-    with pytest.raises(DimsMismatch):
-        mlp.model(dims=big)
+    for preset in ("mlp", "cnn-tiny"):
+        flat = Checkpoint.load(saved(tmp_path, tiny(preset), name=f"{preset}.pt").path)
+        with pytest.raises(DimsMismatch):
+            flat.model(dims=big)
 
 
 def test_init_from_parts(tmp_path):
@@ -174,3 +176,44 @@ def test_positions_cover_prompts_and_full_tables():
     chosen = ck.select_positions(dims_for(["base-4p"]), 8)
     assert all(p["game"]["num_players"] == 4 for p in chosen)
     assert all(p["seat"] == ck._position_game(p).current_player_index for p in chosen)
+
+
+def test_cnn_checkpoint_gives_identical_logits_everywhere(tmp_path):
+    """build_policy, load_checkpoint and POLICY: agree on a cnn (the e2e test's check), and
+    its actor warm-starts another cnn; a perturbed forward is a drift."""
+    import catanrl
+    from catanrl.agents import resolve_agent
+    from catanrl.config import Variant, config_hash, resolve
+    from catanrl.models import CnnModel
+    from catanrl.runs import RunWriter
+
+    raw = {"seed": 1, "env": {"scenarios": [{"game": "base-2p"}]}, "model": {"preset": "cnn-tiny"}}
+    cfg = resolve(raw, experiment="exp", variant="cnn")
+    source = tiny("cnn-tiny", seed=1)
+    with RunWriter.open(Variant("exp", "cnn", None, {}, cfg, config_hash(cfg)), argv=["t"]) as w:
+        ref = w.save_checkpoint(source, epoch=0, agent_steps=0)
+        w.save_trainer_state({"epoch": 0})
+        w.finish("finished")
+    run = catanrl.load_experiment("exp/cnn")
+    net = run.build_policy("latest")
+    same = catanrl.load_checkpoint("exp/cnn@latest").model()
+    agent = resolve_agent("POLICY:exp/cnn@latest").native(device="cpu", infer_rows=4)
+    obs = rows(net)
+    with torch.no_grad():
+        logits = net(obs)[0]
+        assert torch.equal(logits, same(obs)[0]) and torch.equal(logits, agent.model(obs)[0])
+    assert net.catanrl_ref == str(ref) and net.parts == {"actor": ["actor."], "critic": ["critic."]}
+
+    target = tiny("cnn-tiny", seed=2)
+    load_parts(target, {"ckpt": str(ref.path), "parts": ["actor"]})
+    state, src = target.state_dict(), source.state_dict()
+    assert all(torch.equal(state[k], src[k]) for k in state if k.startswith("actor."))
+    assert not all(torch.equal(state[k], src[k]) for k in state if k.startswith("critic."))
+
+    original = CnnModel.policy_logits
+    CnnModel.policy_logits = lambda self, obs: original(self, obs) + 0.01
+    try:
+        with pytest.raises(ModelDrift):
+            Checkpoint.load(ref.path).model()
+    finally:
+        CnnModel.policy_logits = original

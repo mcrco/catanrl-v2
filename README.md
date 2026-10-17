@@ -100,7 +100,7 @@ draws from the exact posterior over hidden steals (DESIGN 1.5).
 | Directory             | Holds                                                                                                             |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `configs/games`       | player count, map generator and rules (`base-2p`, `base-4p`, `random-4p`, `hexagon-3p`, `extension-6p`, …)        |
-| `configs/models`      | network presets (`graph-s`, `graph-m`, `mlp`, `graph-tiny`)                                                       |
+| `configs/models`      | network presets (`graph-s`, `graph-m`, `mlp`, `cnn`, `graph-tiny`, `cnn-tiny`)                                    |
 | `configs/train`       | trainer defaults (`ppo`, `imitation`, `alphazero`)                                                                |
 | `configs/suites`      | evaluation boards: `select-*` (checkpoint selection) and `heldout-*` (reported numbers), disjoint by construction |
 | `configs/experiments` | experiments: stages, sweeps, select and final evals                                                               |

@@ -374,9 +374,9 @@ class Checkpoint:
 
     @property
     def dims_agnostic(self) -> bool:
-        from catanrl.models import GraphModel, MlpModel
+        from catanrl.models import MODEL_CLASSES
 
-        return {"graph": GraphModel, "mlp": MlpModel}[self.header["model"]["class"]].dims_agnostic
+        return MODEL_CLASSES[self.header["model"]["class"]].dims_agnostic
 
     def self_test(self, *, allow_drift: bool = False, part: str = "all") -> None:
         """Checks 2, 4 and 5 (check 1 ran at load; 3 needs target dims)."""
