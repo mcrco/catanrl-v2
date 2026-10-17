@@ -23,10 +23,15 @@ mirrored either way (or both, in turn) looks the same:
 
 The mirror is on when the experiment's ``meta.wandb.project`` (``meta`` is
 unhashed) or ``CATANRL_WANDB_PROJECT`` is set, and off under
-``WANDB_MODE=disabled`` or without the package. The wandb run id derives from
-the run's ref and config hash, so a relaunch resumes the same wandb run.
-Every wandb call runs on one worker thread fed by a queue, and every failure
-there only warns: the mirror never changes a run's outcome, timing, hashes or
+``WANDB_MODE=disabled`` or without the package. A smoke run (``meta.smoke``,
+from ``--smoke``) checks a config and is not an experiment: it stays out
+unless ``CATANRL_WANDB_SMOKE`` is set too, and the test suite disables the
+mirror outright (tests/conftest.py). The wandb run id derives from the run's
+ref and config hash, so a relaunch resumes the same wandb run; a run wandb
+already has keeps its group and tags (the API is asked before ``init``, which
+would otherwise overwrite both) unless a group is configured. Every wandb
+call runs on one worker thread fed by a queue, and every failure there only
+warns: the mirror never changes a run's outcome, timing, hashes or
 determinism, and nothing in ``catanrl.train`` knows it exists.
 
 Known limit: wandb keeps the first row logged at a step and drops rows below
@@ -102,12 +107,19 @@ def settings_for(config: Mapping[str, Any], environ: Mapping[str, str] | None = 
     """The mirror's settings from the config's ``meta.wandb`` (a project name, or
     ``{project, entity, group, tags}``) and the environment, or None when it is off.
 
-    ``CATANRL_WANDB_PROJECT`` and ``CATANRL_WANDB_ENTITY`` override the YAML (a
-    smoke run into a scratch project); ``WANDB_MODE=disabled`` turns it off."""
+    ``CATANRL_WANDB_PROJECT`` and ``CATANRL_WANDB_ENTITY`` override the YAML;
+    ``WANDB_MODE=disabled`` turns it off. A smoke run (``meta.smoke``) is off
+    either way unless ``CATANRL_WANDB_SMOKE`` is set: the YAML's project is the
+    experiment's, and ``catanrl run EXP --smoke`` must not put a throwaway
+    ``EXP+smoke`` run next to it (a scratch project for the mirror itself is
+    ``CATANRL_WANDB_SMOKE=1 CATANRL_WANDB_PROJECT=<scratch>``)."""
     env = os.environ if environ is None else environ
     if env.get("WANDB_MODE", "").strip().lower() == "disabled":
         return None
-    meta = (config.get("meta") or {}).get("wandb") or {}
+    meta_all = config.get("meta") or {}
+    if meta_all.get("smoke") and not env.get("CATANRL_WANDB_SMOKE"):
+        return None
+    meta = meta_all.get("wandb") or {}
     if isinstance(meta, str):
         meta = {"project": meta}
     project = env.get("CATANRL_WANDB_PROJECT") or meta.get("project")
@@ -246,11 +258,48 @@ def wandb_config(run: Any, *, steps_per_epoch: int | None = None) -> dict:
             "config_hash": stored_hash(run), "steps_per_epoch": steps_per_epoch, "_provenance": provenance_config(run)}
 
 
-def init_kwargs(run: Any, settings: Settings, *, tags: Iterable[str] = (), notes: str) -> dict:
-    """``wandb.init``'s arguments for ``run``: the stable id, resumable."""
+@dataclass(frozen=True)
+class RemoteRun:
+    """What the server holds of a wandb run that ``init`` would overwrite."""
+
+    group: str | None
+    tags: tuple[str, ...]
+
+
+def _offline() -> bool:
+    return os.environ.get("WANDB_MODE", "").strip().lower() in ("offline", "dryrun")
+
+
+def remote_state(wandb: ModuleType, settings: Settings, id_: str) -> RemoteRun | None:
+    """The group and tags of wandb run ``id_`` as the server has them, or None when
+    there is no such run yet (or wandb is offline and no server is asked).
+
+    ``wandb.init(resume="allow")`` sends the group and tags it is given, so a
+    re-sync or a relaunch would move a run out of a hand-chosen group (the two
+    legacy backfills live in puffer-graph-2p / puffer-graph-4p) and drop its
+    ``backfill`` tag; read first, they are kept. Raises on anything but a missing
+    run: the backfill reports it, the live mirror warns and derives."""
+    if _offline():
+        return None
+    api = wandb.Api()
+    path = f"{settings.entity}/{settings.project}/{id_}" if settings.entity else f"{settings.project}/{id_}"
+    try:
+        remote = api.run(path)
+    except ValueError:  # wandb's RunNotFoundError is one (older versions raised a bare ValueError): a new run
+        return None
+    return RemoteRun(group=getattr(remote, "group", None) or None, tags=tuple(getattr(remote, "tags", None) or ()))
+
+
+def init_kwargs(run: Any, settings: Settings, *, tags: Iterable[str] = (), notes: str,
+                existing: RemoteRun | None = None) -> dict:
+    """``wandb.init``'s arguments for ``run``: the stable id, resumable. The group is
+    the configured one, else the one the run has (``existing``), else the experiment;
+    the tags are the run's plus ``tags``, the lineage's and the configured ones."""
+    group = settings.group or (existing.group if existing else None) or run.manifest["experiment"]
+    kept = existing.tags if existing else ()
     kwargs = {"project": settings.project, "id": run_id(run.ref, stored_hash(run)), "name": run.ref,
-              "group": settings.group or run.manifest["experiment"], "job_type": run.config.get("kind", "train"),
-              "tags": list(dict.fromkeys([*tags, *lineage_tags(run), *settings.tags])), "notes": notes,
+              "group": group, "job_type": run.config.get("kind", "train"),
+              "tags": list(dict.fromkeys([*kept, *tags, *lineage_tags(run), *settings.tags])), "notes": notes,
               "config": wandb_config(run, steps_per_epoch=steps_per_epoch(run.metrics())), "resume": "allow"}
     if settings.entity:
         kwargs["entity"] = settings.entity
@@ -337,7 +386,8 @@ def backfill(run: Any, settings: Settings, *, tags: Iterable[str] = ("backfill",
     wandb = import_wandb()
     if wandb is None:
         raise RuntimeError("wandb is not installed")
-    kwargs = init_kwargs(run, settings, tags=tags, notes=BACKFILL_NOTES)
+    existing = remote_state(wandb, settings, run_id(run.ref, stored_hash(run)))  # raises: re-syncing blind moves runs
+    kwargs = init_kwargs(run, settings, tags=tags, notes=BACKFILL_NOTES, existing=existing)
     wb = wandb.init(**kwargs)
     before = wb.summary.get(THROUGH_KEY)
     through = -1 if before is None else int(before)
@@ -434,7 +484,12 @@ class Mirror:
             _warn(f"{self.run.ref}: closing the wandb run failed ({error!r})")
 
     def _open(self) -> None:
-        kwargs = init_kwargs(self.run, self.settings, notes=LIVE_NOTES)
+        try:
+            existing = remote_state(self._wandb, self.settings, run_id(self.run.ref, stored_hash(self.run)))
+        except Exception as error:  # noqa: BLE001  (a group moved beats a launch not mirrored)
+            _warn(f"{self.run.ref}: could not read the wandb run's group and tags ({error!r}); deriving them")
+            existing = None
+        kwargs = init_kwargs(self.run, self.settings, notes=LIVE_NOTES, existing=existing)
         self._steps_per_epoch = kwargs["config"]["steps_per_epoch"]
         self._wb = self._wandb.init(**kwargs)
         through = self._wb.summary.get(THROUGH_KEY)
@@ -449,7 +504,7 @@ class Mirror:
         if kind == "log":
             _, row, step = item
             steps = int(row.get("agent_steps", step))
-            self._sync_selects(limit=steps)
+            self._sync_selects(limit=steps)  # never raises: a bad select must not cost this row
             if steps <= self._through:
                 return
             if self._steps_per_epoch is None and (per_epoch := steps_per_epoch([row])) is not None:
@@ -469,14 +524,26 @@ class Mirror:
     def _sync_selects(self, *, limit: int) -> None:
         """Log the select rows of checkpoints up to ``limit`` (newer ones wait for their
         epoch's row), in step order. One at the step wandb holds the last row at (the
-        last epoch's off-interval checkpoint) joins that row; below it, wandb would drop it."""
-        new = load_records(self.run, skip=self._seen)
-        self._seen.update(r.path for r in new)
-        self._pending = sorted(self._pending + select_entries(self.run, new), key=lambda t: (t[0], str(t[2].path)))
+        last epoch's off-interval checkpoint) joins that row; below it, wandb would drop it.
+
+        Each failure costs only its own record: the row this sync precedes, and the
+        other selects, still go to wandb (a row skipped here is lost for good, since
+        the next row moves wandb's step past it)."""
+        try:
+            new = load_records(self.run, skip=self._seen)
+            self._seen.update(r.path for r in new)
+            self._pending = sorted(self._pending + select_entries(self.run, new),
+                                   key=lambda t: (t[0], str(t[2].path)))
+        except Exception as error:  # noqa: BLE001
+            _warn(f"{self.run.ref}: reading the select records failed ({error!r}); retrying at the next row")
         while self._pending and self._pending[0][0] <= limit:
             steps, epoch, record = self._pending.pop(0)
-            if steps >= self._through:
+            if steps < self._through:
+                continue
+            try:
                 self._wb.log({"epoch": epoch, "agent_steps": steps, **select_row(record)}, step=steps)
+            except Exception as error:  # noqa: BLE001
+                _warn(f"{self.run.ref}: select record {record.path.name} not mirrored ({error!r})")
 
     def _close(self) -> None:
         if self._wb is None:

@@ -3,6 +3,7 @@ each commit point, selectors, pins, fork and finish."""
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -405,6 +406,16 @@ def test_a_brief_status_probe_does_not_refuse_a_writer():
     threading.Timer(0.3, lambda: (fcntl.flock(fd, fcntl.LOCK_UN), os.close(fd))).start()
     with RunWriter.open(v, argv=["t"]) as w:
         assert w.mode == "resume"
+
+
+def test_the_test_tier_never_reaches_wandb(monkeypatch):
+    """The conftest keeps the mirror off for every test, whatever the shell exports
+    (a pytest session must never create wandb runs; tests/test_wandb_mirror.py has the stub)."""
+    assert os.environ.get("WANDB_MODE") == "disabled" and "CATANRL_WANDB_PROJECT" not in os.environ
+    monkeypatch.setenv("CATANRL_WANDB_PROJECT", "catanrl-v2")  # as the operator's shell might
+    with RunWriter.open(make_variant(), argv=["t"]) as w:
+        assert w.mirror is None
+        w.finish("finished")
 
 
 def test_a_copied_pt_is_its_own_identity(tmp_path):

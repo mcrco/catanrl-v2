@@ -4,7 +4,10 @@ Gives a run launched without the live mirror the same wandb run the mirror
 would have made (one layout, one id: ``catanrl.wandb_mirror``), and brings a
 mirrored run up to date. Idempotent: rows the wandb run already holds
 (``summary[backfilled_through_agent_steps]``) are skipped, finals and the
-status are rewritten.
+status are rewritten, and a run wandb already has keeps its group and tags
+(the two legacy backfills stay in puffer-graph-2p / puffer-graph-4p; ``--group``
+moves a run, ``--tag`` adds). The server is asked before anything is sent,
+so a re-sync needs it reachable; offline there is nothing to keep.
 
 ::
 
@@ -47,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("runs", nargs="+", help="experiment/variant, a glob over them, or a run directory")
     p.add_argument("--project", help="wandb project (default: CATANRL_WANDB_PROJECT, then meta.wandb.project)")
     p.add_argument("--entity", help="wandb entity (default: CATANRL_WANDB_ENTITY, then meta.wandb.entity)")
-    p.add_argument("--group", help="wandb group (default: meta.wandb.group, then the experiment)")
+    p.add_argument("--group", help="wandb group (default: meta.wandb.group, then the group the run has, "
+                                   "then the experiment)")
     p.add_argument("--tag", action="append", default=[], help="an extra tag (repeatable); 'backfill' is always set")
     p.add_argument("--dry-run", action="store_true", help="only count what would be logged")
     args = p.parse_args(argv)

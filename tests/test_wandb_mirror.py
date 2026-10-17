@@ -2,7 +2,9 @@
 across relaunches and backfills, failures that only warn, and the select
 curve and finals in the layout of the backfilled runs. wandb itself is a
 stub module in ``sys.modules``: every ``init``, ``log``, summary and config
-write is recorded, lower steps are dropped as wandb drops them."""
+write is recorded, lower steps are dropped as wandb drops them, and ``Api``
+answers for the runs ``init`` made. The conftest turns the mirror off for
+every test; the fixture here turns it back on."""
 
 from __future__ import annotations
 
@@ -28,8 +30,7 @@ from catanrl.wandb_mirror import FINAL_COLUMNS, FINAL_TABLE, THROUGH_KEY, Mirror
 def runs_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("CATANRL_RUNS_DIR", str(tmp_path / "runs"))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("CATANRL_WANDB_PROJECT", raising=False)
-    monkeypatch.delenv("WANDB_MODE", raising=False)
+    monkeypatch.delenv("WANDB_MODE", raising=False)  # the conftest's "disabled": the switches decide here
     monkeypatch.setenv("WANDB_DIR", str(tmp_path / "wandb"))
 
 
@@ -73,10 +74,31 @@ class _Run:
         self.finished = True
 
 
+class _Api:
+    """``wandb.Api()``: the stored runs by ``[entity/]project/id``, as the server has them."""
+
+    def __init__(self, mod):
+        self._mod = mod
+        self.default_entity = "me"
+
+    def run(self, path):
+        self._mod.lookups.append(path)
+        run = self._mod.store.get(path.rsplit("/", 1)[-1])
+        if run is None:
+            raise ValueError(f"Could not find run {path}")  # wandb's RunNotFoundError
+        return SimpleNamespace(group=run.kwargs.get("group"), tags=list(run.kwargs.get("tags") or []))
+
+
 def stub_wandb(monkeypatch, *, fail: str | None = None) -> types.ModuleType:
-    """A ``wandb`` module whose runs persist by id across ``init`` calls (as resume does)."""
+    """A ``wandb`` module whose runs persist by id across ``init`` calls (as resume does);
+    ``fail`` makes ``init``, ``log`` or ``Api`` raise."""
     mod = types.ModuleType("wandb")
-    mod.store, mod.runs, mod.Table = {}, [], _Table
+    mod.store, mod.runs, mod.lookups, mod.Table = {}, [], [], _Table
+
+    def api():
+        if fail == "api":
+            raise RuntimeError("no network")
+        return _Api(mod)
 
     def init(**kwargs):
         if fail == "init":
@@ -91,7 +113,7 @@ def stub_wandb(monkeypatch, *, fail: str | None = None) -> types.ModuleType:
         mod.runs.append(run)
         return run
 
-    mod.init = init
+    mod.init, mod.Api = init, api
     monkeypatch.setitem(sys.modules, "wandb", mod)
     return mod
 
@@ -124,13 +146,14 @@ def commit(writer, model, epoch):
     return ref
 
 
-def write_record(run, ref, *, suite, purpose, rate, opponents=("F",), eval_id=None):
-    """A record as results.py writes it, for ``ref`` against ``opponents``."""
+def write_record(run, ref, *, suite, purpose, rate, opponents=("F",), eval_id=None, **summary_over):
+    """A record as results.py writes it, for ``ref`` against ``opponents`` (``summary_over``
+    replaces summary keys, to make a record the layout does not fit)."""
     eval_id = eval_id or canon.digest([str(ref), suite, list(opponents)])
     labels = [f"POLICY:{ref.run}@e{ref.epoch}", *opponents]
     summary = {"games": 4, "score_rate": rate, "wilson": [rate - 0.1, rate + 0.1], "truncated": 0, "forfeits": 0,
                "slots": [{"label": labels[0], "games": 4, "score_rate": rate, "wilson": [rate - 0.1, rate + 0.1],
-                          "per_seat": {"0": rate, "1": rate / 2}, "expected": 0.5}]}
+                          "per_seat": {"0": rate, "1": rate / 2}, "expected": 0.5}], **summary_over}
     path = run.path / "evals" / suite / f"{eval_id}.json"
     canon.write_once_json(path, {"eval_id": eval_id, "key": {"suite": {"purpose": purpose}}, "summary": summary,
                                  "suite": suite, "labels": labels, "refs": [str(ref), *([None] * len(opponents))],
@@ -173,6 +196,28 @@ def test_off_unless_a_project_is_configured(monkeypatch):
     assert wm.settings_for({"meta": {"wandb": {"project": "p"}}}, {"CATANRL_WANDB_PROJECT": "q"}).project == "q"
     assert wm.settings_for({"meta": {"wandb": {"project": "p"}}}, {"WANDB_MODE": "disabled"}) is None
     assert wm.settings_for({"meta": {"wandb": {"project": "p"}}}, {"WANDB_MODE": "offline"}) is not None
+
+
+def test_smoke_runs_stay_out_unless_asked(monkeypatch):
+    """``catanrl run EXP --smoke`` (and the -m train smoke tier) must not put EXP+smoke runs
+    in the project EXP's YAML names, nor in an exported CATANRL_WANDB_PROJECT."""
+    mod = stub_wandb(monkeypatch)
+    cfg = load_plan("arch-lineage", smoke=True).variants[0].config  # the YAML names the real project
+    assert cfg["meta"]["wandb"]["project"] == "catanrl-v2" and cfg["meta"]["smoke"] is True
+    assert wm.settings_for(cfg, {}) is None
+    assert wm.settings_for(cfg, {"CATANRL_WANDB_PROJECT": "q"}) is None
+    assert wm.settings_for(cfg, {"CATANRL_WANDB_SMOKE": "1"}) == Settings(project="catanrl-v2")
+    assert wm.settings_for(cfg, {"CATANRL_WANDB_SMOKE": "1", "CATANRL_WANDB_PROJECT": "q"}) == Settings(project="q")
+    monkeypatch.setenv("CATANRL_WANDB_PROJECT", "p")
+    with RunWriter.open(make_variant(meta={"smoke": True, "wandb": {"project": "p"}}), argv=["t"]) as w:
+        assert w.mirror is None
+        w.finish("finished")
+    assert mod.runs == []
+    monkeypatch.setenv("CATANRL_WANDB_SMOKE", "1")
+    with RunWriter.open(make_variant("v2", meta={"smoke": True}), argv=["t"]) as w:
+        assert isinstance(w.mirror, Mirror)
+        w.finish("finished")
+    assert [r.kwargs["name"] for r in mod.runs] == ["exp/v2"]
 
 
 def test_a_missing_wandb_package_only_warns(monkeypatch, recwarn):
@@ -223,6 +268,28 @@ def test_a_relaunch_resumes_the_same_wandb_run(monkeypatch):
     assert second.summary[THROUGH_KEY] == 20 and second.summary["status"] == "finished" and second.finished
 
 
+def test_a_resync_keeps_the_runs_group_and_tags(monkeypatch):
+    """The two legacy backfills sit in hand-chosen groups: syncing them again, or a
+    relaunch under the mirror, must not move them to the experiment or drop a tag."""
+    mod = stub_wandb(monkeypatch)
+    run = train_run()
+    wm.backfill(run, Settings(project="p", group="puffer-graph-2p"))
+    id_ = mod.runs[0].kwargs["id"]
+    assert mod.lookups == [f"p/{id_}"] and mod.runs[0].kwargs["group"] == "puffer-graph-2p"
+    wm.backfill(run, Settings(project="p", entity="me"), tags=["backfill", "again"])
+    assert mod.lookups[1] == f"me/p/{id_}" and mod.runs[1].kwargs["group"] == "puffer-graph-2p"
+    assert mod.runs[1].kwargs["tags"] == ["backfill", "exp", "again"]
+    monkeypatch.setenv("CATANRL_WANDB_PROJECT", "p")
+    with RunWriter.open(run.variant(), argv=["t"]) as w:  # a relaunch of the finished run
+        assert isinstance(w.mirror, Mirror)
+    assert mod.runs[2].kwargs["group"] == "puffer-graph-2p" and mod.runs[2].kwargs["tags"] == ["backfill", "exp", "again"]
+    wm.backfill(run, Settings(project="p", group="moved"))  # a configured group wins
+    assert mod.runs[3].kwargs["group"] == "moved"
+    monkeypatch.setenv("WANDB_MODE", "offline")  # no server to ask: derived, as for a new run
+    wm.backfill(run, Settings(project="p"))
+    assert len(mod.lookups) == 4 and mod.runs[4].kwargs["group"] == "exp"
+
+
 def test_lineage_tags_follow_init_from(monkeypatch):
     stub_wandb(monkeypatch)
     with RunWriter.open(make_variant("parent"), argv=["t"]) as w:
@@ -248,6 +315,43 @@ def test_wandb_failures_only_warn(monkeypatch, recwarn, fail):
     run = load_experiment("exp/v")
     assert run.status == "finished" and [r["x"] for r in run.metrics()] == [1.0]
     assert warned(recwarn, "wandb.init failed" if fail == "init" else "wandb log failed")
+
+
+def test_an_unreachable_api_only_warns_live_and_stops_a_backfill(monkeypatch, recwarn):
+    mod = stub_wandb(monkeypatch, fail="api")
+    monkeypatch.setenv("CATANRL_WANDB_PROJECT", "p")
+    with RunWriter.open(make_variant(), argv=["t"]) as w:
+        w.log({"epoch": 1, "agent_steps": 10, "x": 1.0}, 10)
+        w.finish("finished")
+    (wb,) = mod.runs
+    assert wb.kwargs["group"] == "exp" and dict(wb.history)[10]["x"] == 1.0 and wb.finished
+    assert warned(recwarn, "group and tags")
+    with pytest.raises(RuntimeError, match="no network"):  # a re-sync blind to the server would move a group
+        wm.backfill(load_experiment("exp/v"), Settings(project="p"))
+
+
+def test_a_select_record_that_does_not_fit_costs_only_itself(monkeypatch, recwarn):
+    """A select whose summary the layout cannot read is skipped with a warning; the
+    epoch's row, the other selects and the finals still reach wandb."""
+    mod = stub_wandb(monkeypatch)
+    monkeypatch.setenv("CATANRL_WANDB_PROJECT", "p")
+    with RunWriter.open(make_variant(), argv=["t"]) as w:
+        model = tiny()
+        e0 = commit(w, model, 0)
+        write_record(w, e0, suite="select-2p", purpose="select", rate=0.2)
+        w.log({"epoch": 1, "agent_steps": 10, "x": 1.0}, 10)
+        e2 = commit(w, model, 2)
+        write_record(w, e2, suite="select-2p", purpose="select", rate=0.6, slots=[])  # no slot 0
+        w.log({"epoch": 2, "agent_steps": 20, "x": 2.0}, 20)
+        w.log({"epoch": 3, "agent_steps": 30, "x": 3.0}, 30)
+        w.finish("finished")
+        write_record(w, e2, suite="heldout-2p", purpose="heldout", rate=0.7)
+    (wb,) = mod.runs
+    rows = dict(wb.history)
+    assert list(rows) == [0, 10, 20, 30] and rows[20] == {"epoch": 2, "agent_steps": 20, "x": 2.0}
+    assert rows[0]["select/select-2p vs F/score_rate"] == 0.2 and wb.summary[THROUGH_KEY] == 30
+    assert wb.summary["final/heldout-2p/POLICY:exp/v@e2 vs F"] == 0.7 and wb.summary["status"] == "finished"
+    assert warned(recwarn, "not mirrored") and not warned(recwarn, "wandb log failed")
 
 
 def test_a_slow_wandb_finish_does_not_hold_the_run(monkeypatch, recwarn):

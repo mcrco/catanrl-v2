@@ -271,6 +271,7 @@ $CATANRL_RUNS_DIR      default <main worktree>/runs (via git-common-dir): one ro
       trainer_state.pt resume state: the commit point
       evals/<suite>/   <eval_id>.json + <eval_id>.games.jsonl
   _evals/              records whose lineup slot 0 is not a run (F vs AB)
+  _wandb/              the W&B mirror's own files (offline runs, logs), unless WANDB_DIR says where
 ```
 
 * **Names** match `^[a-z0-9][a-z0-9._+-]*$`, so they are safe inside agent
