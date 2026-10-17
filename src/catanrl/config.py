@@ -69,7 +69,7 @@ OPEN = {"meta", "params", "model.args"}
 #: Keys of each entry of these lists or optional mappings.
 ENTRY_KEYS = {
     "eval.select": {"suite", "lineup", "every", "metric", "fill"},
-    "eval.final": {"suite", "lineup", "fill"},
+    "eval.final": {"suite", "lineup", "fill", "harness"},
     "init_from": {"ckpt", "parts", "restore"},
 }
 PARTS = ("actor", "critic")
@@ -366,6 +366,8 @@ def _check_semantics(cfg: dict) -> None:
     for entry in cfg["eval"]["final"]:
         if "suite" not in entry or "lineup" not in entry:
             raise ConfigError("every eval.final entry needs suite and lineup")
+        if entry.get("harness", "native") not in ("native", "catanatron"):
+            raise ConfigError(f"eval.final harness must be native or catanatron, not {entry['harness']!r}")
 
 
 def _resolve_scenario(entry: Any) -> dict:

@@ -84,6 +84,7 @@ def _components(kind: str, harness: str) -> dict[str, dict[str, list]]:
     if harness == "catanatron":
         import catanatron
 
+        parts["catanrl"]["py"] += _py_files(PACKAGE / "eval" / "catanatron.py", "eval/catanatron.py")
         parts["catanatron"] = {"py": _py_files(Path(catanatron.__file__).parent, "catanatron"), "bin": []}
     if kind == "train":
         import pufferlib

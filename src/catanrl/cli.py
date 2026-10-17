@@ -5,6 +5,8 @@
     catanrl run arch-lineage [--only 'graph-s-*'] [--set train.gamma=1.0] [--smoke] [--next]
     catanrl run arch-lineage/graph-s-s42.g1+more        # a forked variant, from its stored config
     catanrl eval POLICY:arch-lineage/graph-s-s42.g1 F --suite heldout-2p
+    catanrl eval LLM:model=stub/random:strategy=plan F --suite heldout-2p --boards 20 --harness catanatron
+    catanrl llm-cost --strategies plan,basic --games 5 --price gpt-5=1.25,10   # a budget before any real call
     catanrl ls ['arch-lineage/*'] [--status running]
     catanrl pin arch-lineage/graph-s-s42.g1@e600 ref --note "report"
     catanrl fork arch-lineage/graph-s-s42.g1 --as graph-s-s42.g1+more --set train.total_timesteps=2e9
@@ -45,12 +47,30 @@ def _parser() -> argparse.ArgumentParser:
     ev.add_argument("--suite", required=True)
     ev.add_argument("--boards", type=int, help="only the suite's first N boards")
     ev.add_argument("--fill", help="the agent for seats past the lineup")
+    ev.add_argument("--harness", default="native", choices=["native", "catanatron"],
+                    help="native (cppanatron, batched) or catanatron (Catanatron players: LLM, AB, ...)")
     ev.add_argument("--device")
     ev.add_argument("--num-envs", type=int)
     ev.add_argument("--threads", type=int)
     ev.add_argument("--infer-rows", type=int)
     ev.add_argument("--allow-mixed", action="store_true")
     ev.add_argument("--allow-stale-build", action="store_true", help="play on an engine built from another tree")
+
+    cost = sub.add_parser("llm-cost", help="stub games through the LLM player: decisions, tokens and dollars per game")
+    cost.add_argument("--suite", default="heldout-2p")
+    cost.add_argument("--games", type=int, default=5, help="the suite's first N scheduled games per strategy")
+    cost.add_argument("--strategies", default="basic,strategy,search,rules,plan", help="comma-separated")
+    cost.add_argument("--opponent", default="F", help="the other seat's spec")
+    cost.add_argument("--model", default="stub/random", help="a stub: stub/random (default), stub/first")
+    cost.add_argument("--no-thinking", dest="thinking", action="store_false")
+    cost.add_argument("--completion-per-decision", type=int, default=1500,
+                      help="assumed completion tokens per prompted decision for a real model (the stub's "
+                           "replies are short; reasoning models write thousands)")
+    cost.add_argument("--cell-games", type=int, default=50, help="games per cell in the cost column")
+    cost.add_argument("--price", action="append", default=[], metavar="NAME=IN,OUT",
+                      help="dollars per million input and output tokens; repeatable")
+    cost.add_argument("--threads", type=int, default=1)
+    cost.add_argument("--json", action="store_true", help="print the measurements as JSON")
 
     ls = sub.add_parser("ls", help="list runs")
     ls.add_argument("pattern", nargs="?", default="*")
@@ -168,13 +188,20 @@ def _cmd_eval(args) -> int:
     if args.allow_stale_build:
         os.environ["CATANRL_ALLOW_STALE_BUILD"] = "1"
     suite = {"name": args.suite, "boards": args.boards} if args.boards else args.suite
-    record = evaluate(args.lineup, suite, fill=args.fill, device=args.device, num_envs=args.num_envs,
-                      threads=args.threads, infer_rows=args.infer_rows, allow_mixed=args.allow_mixed)
+    record = evaluate(args.lineup, suite, fill=args.fill, harness=args.harness, device=args.device,
+                      num_envs=args.num_envs, threads=args.threads, infer_rows=args.infer_rows,
+                      allow_mixed=args.allow_mixed)
     s = record.summary
     for slot in s["slots"]:
         lo, hi = slot["wilson"]
         print(f"{slot['label']:<40} {100 * slot['score_rate']:6.2f}% [{100 * lo:.2f}, {100 * hi:.2f}] "
               f"(n={slot['games']})")
+    for slot in s["slots"]:
+        if "llm" in slot:
+            llm = slot["llm"]["per_game"]
+            print(f"{slot['label']:<40} per game: {llm['decisions']:.1f} decisions, {llm['prompt_tokens']:.0f} prompt + "
+                  f"{llm['completion_tokens']:.0f} completion tokens{' (estimated)' if slot['llm']['estimated'] else ''}, "
+                  f"{llm['fallbacks']:.2f} fallbacks, {llm['wall_s']:.1f} s")
     flags = [f for f, on in (("INVALID", not record.data["valid"]), ("mixed", record.data["mixed"])) if on]
     print(f"{record.eval_id} {record.path}{'  ' + ' '.join(flags) if flags else ''}")
     return 0
@@ -242,6 +269,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_run(args, full_argv)
         if args.command == "eval":
             return _cmd_eval(args)
+        if args.command == "llm-cost":
+            from catanrl.agents.llm.cost import main as cost_main
+
+            return cost_main(args)
         if args.command == "ls":
             return _cmd_ls(args)
         if args.command == "results":

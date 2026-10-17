@@ -85,7 +85,8 @@ def final_evals(run: Any, v: Variant) -> list:
         except Unbound as error:  # a control of another experiment, not finished: a later run plays it
             print(f"{run.ref}: final deferred: {error}", flush=True)
             continue
-        record = evaluate(lineup, entry["suite"], fill=entry.get("fill"), restart_partial=True, **options)
+        record = evaluate(lineup, entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native"),
+                          restart_partial=True, **options)
         print(f"{run.ref}: {record.data['specs'][0]} on {record.data['suite']}: "
               f"{record.summary['score_rate']:.3f} (n={record.summary['games']}) {record.eval_id}", flush=True)
         records.append(record)
@@ -100,7 +101,7 @@ def _missing_finals(run: Any, v: Variant) -> bool:
     for entry in v.config["eval"]["final"]:
         try:
             lineup = bound_lineup(run, entry["lineup"], pin=False)
-            if find(lineup, entry["suite"], fill=entry.get("fill")) is None:
+            if find(lineup, entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native")) is None:
                 return True
         except Unbound:
             continue
@@ -223,7 +224,7 @@ def summarize(experiment: str) -> Path:
         for i, entry in enumerate(run.config["eval"]["final"]):
             try:
                 record = find([known.get(s) or expand_init(s, run.init_ref) for s in entry["lineup"]], entry["suite"],
-                              fill=entry.get("fill"))
+                              fill=entry.get("fill"), harness=entry.get("harness", "native"))
             except (RuntimeError, ValueError):
                 record = None
             if record is not None:

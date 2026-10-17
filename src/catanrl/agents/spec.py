@@ -12,6 +12,9 @@ params (a positional value is ``ckpt``)::
 worlds: ``pool`` (the default) deals the unknown cards uniformly, ``exact``
 draws from the exact posterior over hidden steals (``cpp.TrackerMode``).
 
+``LLM:model=…:strategy=…`` (``catanrl.agents.llm``) is a language model
+playing from the public state text; it exists only on the catanatron harness.
+
 ``resolve_agent(spec)`` pins and self-tests the checkpoint once, checks the
 games fit, derives ``fair`` and writes the canonical spec (a fixed point of
 resolution). The resolved agent plays natively (``.native()``, batched on
@@ -35,6 +38,7 @@ from catanatron.registry import REGISTRY, PlayerRegistry, SpecError, parse_spec
 from catanrl.checkpoint import Checkpoint, CheckpointRef
 
 MODEL_KEYS = ("POLICY", "MCTS", "BELIEF")
+LLM_KEY = "LLM"
 NATIVE_BOTS = ("F", "R")
 HARNESSES = ("native", "catanatron", "server")
 
@@ -113,6 +117,8 @@ class ResolvedAgent:
             out["checkpoint"] = {"weights_sha256": self.checkpoint.weights_sha256, **self.details["model"]}
             if self.key == "MCTS":
                 out["search"] = self.details["search"]
+        elif self.key == LLM_KEY:
+            out["params"] = dataclasses.asdict(self.params)
         else:
             out["params"] = dict(self.details.get("params", {}))
         return out
@@ -127,6 +133,10 @@ class ResolvedAgent:
     def player(self, color: Color) -> Player:
         if self.key in MODEL_KEYS:
             return _PLAYERS[self.key](color, self.params, resolved=self)
+        if self.key == LLM_KEY:
+            from catanrl.agents.llm.player import LlmPlayer
+
+            return LlmPlayer(color, self.params, resolved=self)
         return REGISTRY.build(self.canonical, color)
 
 
@@ -135,6 +145,13 @@ def check_spec_syntax(spec: str) -> None:
     if "," in spec:
         raise SpecError(f"{spec!r}: ',' separates lineup entries and cannot appear in a spec")
     key, args, named = parse_spec(spec)
+    if key == LLM_KEY:  # a plan's ``${params.…}`` values are filled in when it resolves
+        if "${" in spec:
+            named = {k: v for k, v in named.items() if "${" not in str(v)}
+            named.setdefault("model", "stub/first")
+            args = [a for a in args if "${" not in str(a)]
+        _llm_params(args, named)
+        return
     if key not in MODEL_KEYS:
         return
     params = _build_params(key, args, named)
@@ -210,6 +227,8 @@ def resolve_agent(spec: str | Mapping[str, Any] | ResolvedAgent, *, harness: str
         key, args, named = parse_spec(dict(spec))
     if key in MODEL_KEYS:
         return _resolve_model(key, args, named, harness, games)
+    if key == LLM_KEY:
+        return _resolve_llm(args, named, harness)
     return _resolve_bot(key, args, named, harness)
 
 
@@ -293,6 +312,40 @@ def _resolve_bot(key, args, named, harness) -> ResolvedAgent:
     return ResolvedAgent(key=key, impl="native" if harness == "native" else type(built).__name__,
                          params=params, checkpoint=None, fair=False, label=key, canonical=canonical,
                          harness=harness, details={"params": params})
+
+
+def _llm_params(args: Sequence[Any], named: Mapping[str, Any]) -> Any:
+    from catanrl.agents.llm.model import STUB_KINDS, STUB_PREFIX, is_stub
+    from catanrl.agents.llm.player import LlmPlayer
+    from catanrl.agents.llm.prompts import STRATEGIES
+
+    try:
+        params = build_params(LlmPlayer, list(args), dict(named))
+    except (ParamsError, TypeError) as error:
+        raise SpecError(f"LLM: {error}") from None
+    if not params.model or "${" in params.model:
+        raise SpecError("LLM needs a model (an OpenRouter id, or stub/first, stub/random, stub/scripted)")
+    if is_stub(params.model) and params.model[len(STUB_PREFIX):] not in STUB_KINDS:
+        raise SpecError(f"LLM: unknown stub {params.model!r}; one of " + ", ".join(STUB_PREFIX + k for k in STUB_KINDS))
+    if params.strategy not in STRATEGIES:
+        raise SpecError(f"LLM: strategy must be one of {STRATEGIES}, not {params.strategy!r}")
+    if params.max_tokens < 1 or params.retries < 0 or params.temperature < 0:
+        raise SpecError("LLM: max_tokens must be positive, retries and temperature non-negative")
+    return params
+
+
+def _resolve_llm(args: Sequence[Any], named: Mapping[str, Any], harness: str) -> ResolvedAgent:
+    """A language model player: Catanatron harness only; fair, since it reads the public
+    state text (``catanrl.agents.llm.render``, pinned by test)."""
+    params = _llm_params(args, named)
+    if harness != "catanatron":
+        raise SpecError(f"LLM plays through the catanatron harness, not {harness} "
+                        "(catanrl eval ... --harness catanatron, or harness: catanatron in eval.final)")
+    fields = [f.name for f in dataclasses.fields(params)]
+    canonical = f"{LLM_KEY}:" + ":".join(f"{name}={_fmt(getattr(params, name))}" for name in fields)
+    return ResolvedAgent(key=LLM_KEY, impl="catanrl.llm", params=params, checkpoint=None, fair=True,
+                         label=f"{LLM_KEY}:{params.model}:{params.strategy}", canonical=canonical, harness=harness,
+                         details={"params": dataclasses.asdict(params)})
 
 
 def _param_names(key: str) -> list[str]:
@@ -472,9 +525,11 @@ _PLAYERS = {"POLICY": PolicyPlayer, "MCTS": MctsPlayer, "BELIEF": BeliefPlayer}
 
 
 def register(registry: PlayerRegistry = REGISTRY) -> None:
-    """Make POLICY, MCTS and BELIEF buildable by key. Idempotent."""
+    """Make POLICY, MCTS, BELIEF and LLM buildable by key. Idempotent."""
     import catanatron.players  # noqa: F401  (registers the builtins first)
 
-    for key, cls in _PLAYERS.items():
+    from catanrl.agents.llm.player import LlmPlayer
+
+    for key, cls in {**_PLAYERS, LLM_KEY: LlmPlayer}.items():
         if registry.get(key) is not cls:
             registry.register(key, cls, replace=True)

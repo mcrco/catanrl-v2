@@ -107,7 +107,8 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
     if suite.purpose != "heldout":
         problems.append(f"{name}: {suite.name} is a {suite.purpose} suite; the report cites heldout suites only")
         return None
-    agents, fill = _resolve(lineup, suite, entry.get("fill"), "native")
+    harness = entry.get("harness", "native")
+    agents, fill = _resolve(lineup, suite, entry.get("fill"), harness)
     if not agents[0].fair and not entry.get("oracle_ok"):
         problems.append(f"{name}: {agents[0].label} sees hidden information (add oracle_ok: true to cite it)")
     train_flags: list[str] = []
@@ -117,14 +118,15 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
             for commit in supersedes:
                 if not head or not _descends(commit, head, repo):
                     problems.append(f"{name}: {agents[0].label} was trained at {str(head)[:12]}, before {commit}")
-    record = find(agents, suite, fill=fill)
+    record = find(agents, suite, fill=fill, harness=harness)
     if record is None:
         if not run_missing:
             fill_arg = f" --fill {fill.canonical}" if fill else ""
+            harness_arg = f" --harness {harness}" if harness != "native" else ""
             problems.append(f"{name}: no record; run: catanrl eval {' '.join(a.canonical for a in agents)} "
-                            f"--suite {suite.name}{fill_arg}")
+                            f"--suite {suite.name}{fill_arg}{harness_arg}")
             return None
-        record = evaluate(agents, suite, fill=fill)
+        record = evaluate(agents, suite, fill=fill, harness=harness)
     if not record.data["valid"]:
         problems.append(f"{name}: record {record.eval_id} is invalid (a bot forfeited)")
     if record.data.get("allow_drift"):
