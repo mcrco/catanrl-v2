@@ -248,6 +248,36 @@ Agent specs use Catanatron's registry syntax (grammar in 6.5):
 Catanatron registry bot (`AB:2`). The same spec plays natively (fast
 evaluation on cppanatron), as a Catanatron `Player`, or as a server client.
 
+**LLM players** (the report's "eval frontier models on how well they play
+Catan"). `LLM:model=<OpenRouter id>:strategy=<basic|strategy|search|rules|plan>`
+(`:thinking=true:max_tokens=8192:temperature=0.1:seed=0:retries=1` by
+default; `catanrl.agents.llm`) is a language model deciding from the game
+rendered as text: catanllm's (the CS 159 project) prompting strategies,
+ported as Python strings (so `code_id` hashes a prompt edit), with the board
+topology section generated per map instead of hard-coded for BASE and the
+preamble stating the game's own VP target (base-2p plays to 15). The text
+is public information only: an opponent's hand size, dev-card count, played
+cards, buildings and visible VP, never its resource kinds, unplayed cards or
+hidden VP cards (catanllm's renderer read every seat's dev cards from the
+observer's slot; the port fixes it and `tests/test_llm_agent.py` pins the
+redaction), so the agent is `fair` by construction. The model answers with
+the action number; an unusable answer (no number, out of range) is
+re-prompted with the error `retries` times, then the player falls back to
+End Turn (else the first action), counted as a `fallback`, not a forfeit.
+Models go through OpenRouter via the openai SDK (an optional extra, `uv
+sync --extra llm`, imported lazily; `OPENROUTER_API_KEY` is read from the
+environment only); `model=stub/first`, `stub/random` and `stub/scripted` play
+without a network (tests, `catanrl llm-cost`). The agent exists only on the
+catanatron harness (6.6). Each row of an LLM seat carries `llm` stats
+(prompted decisions, forced moves, calls, prompt and completion tokens from
+the SDK's usage or a characters/4 estimate, retries, fallbacks, wall time),
+totalled per slot in the record's summary. `configs/experiments/llm-eval.yaml`
+is the eval (models x {plan, basic} x {F, our best 2p network} on the first
+20 heldout-2p boards, both seats); `catanrl llm-cost` plays stub games and
+prices a cell from a $/M-token table, so a budget is approved before any
+real call. Model ids cannot contain `:` (the spec grammar splits on it), so
+OpenRouter variants like `:free` are not addressable yet.
+
 Evaluation: paired seats (every board played from every seat rotation),
 fixed seeds, Wilson intervals, exact McNemar for paired comparisons,
 head-to-head and N-player "win share vs expected 1/N".
@@ -576,6 +606,7 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
    | MCTS | not `oracle` |
    | BELIEF | always |
    | built-in bots | never |
+   | LLM | always: it reads only the public state text |
 
 4. Writes a canonical spec that is a fixed point of resolution:
    `MCTS:ckpt=arch-lineage/graph-s-s42.g1@e600#41f2a9c07d11:sims=256:dets=4:oracle=false:root=puct:c_puct=0.75:…`.
@@ -589,6 +620,7 @@ binding.
 | native, batched on cppanatron (`SearchPool` for MCTS) | `resolved.native(device=…, infer_rows=…)` |
 | Catanatron `Player` | `catanrl.player(spec, color)`, i.e. `REGISTRY.build` once `catanrl.agents` is imported. It converts via `Game.apply_setup` and runs the native agent at batch 1 |
 | server bot | `catanrl bot --spec SPEC ws://…`. Views feed the `HandTracker`. A `public`/`full` POLICY is refused (use BELIEF) |
+| Catanatron harness eval | `evaluate(…, harness="catanatron")`, `catanrl eval … --harness catanatron`, `harness: catanatron` in `eval.final`: the suite's schedule as Catanatron games (`catanrl.eval.catanatron`), every seat an `agent.player(color)`; the only harness for `LLM` |
 
 The v1 shims stay, over the same path:
 
@@ -625,6 +657,16 @@ Otherwise it:
 2. Plays only the `game_id`s missing from `.games.jsonl`. Each finished game
    appends one row, so a crash resumes exactly.
 3. Writes the record once.
+
+`harness` is in the key. `native` plays the schedule on cppanatron;
+`catanatron` plays the same games (map seed, game seed, seat order forced
+before the first action, the suite's turn limit) with Catanatron players,
+`runtime.threads` games at a time in a thread pool, with Catanatron's code
+in `code`. Catanatron's bots draw from the game's RNG, so their rows depend
+on the game seed only; a real LLM is not replayable at all, and `verify` or
+`report-data --final` on such a record makes real calls again. Rows of LLM
+seats carry `llm` stats, which `games_sha256` and `verify` leave out (wall
+time is not an outcome).
 
 Each start or restart appends its execution (device class, torch,
 `infer_rows`). Resuming under different execution needs `--allow-mixed`,
@@ -745,7 +787,7 @@ Training is `fast` by default.
 
 | Tier | Guards |
 |---|---|
-| fast (default) | hashes and `derive_seed` pinned to v1; resolution, migrations, hashes of frozen fixture YAMLs; `validate_plan` on every experiment; `ppo.yaml` matches the keys PuffeRL reads; the runs store under a foreign cwd, with a crash injected between each write; specs; schedules golden, disjoint and exact; eval resume, forfeits, pairing, report gates; provenance; PufferLib import side effects; McNemar at n = 5000 |
+| fast (default) | hashes and `derive_seed` pinned to v1; resolution, migrations, hashes of frozen fixture YAMLs; `validate_plan` on every experiment; `ppo.yaml` matches the keys PuffeRL reads; the runs store under a foreign cwd, with a crash injected between each write; specs; schedules golden, disjoint and exact; eval resume, forfeits, pairing, report gates; provenance; PufferLib import side effects; McNemar at n = 5000; the LLM agent: specs, registry, stub games through the catanatron harness and `catanrl eval`, the public-only render, answer parsing and retries, token and cost accounting, llm-eval's stub cells |
 | end to end (default, < 30 s CPU) | a tiny graph net trains 3 epochs; `best` cites a select eval; `build_policy`, `load_checkpoint` and `POLICY:` give identical logits; a repeated `evaluate()` hits the cache; stop and resume keeps the LR and optimizer step; repeated with `[POLICY, R, R, R]` |
 | engine (default) | golden maps; drift detection (byte, layout, encoder, model); eval and SearchPool invariance; spec defaults equal `SearchConfig`'s; native vs Catanatron `Player` parity per position; Catanatron action order across processes; sampled worlds give the true private row; golden outcomes of a committed 100 KB checkpoint |
 | slow (`-m train`) | seeded CPU training is bitwise; straight and resumed runs match; `--smoke` on every experiment |

@@ -130,7 +130,8 @@ def test_catanrl_eval_records_a_catanatron_harness_game(capsys):
     llm = record.summary["slots"][0]["llm"]
     assert llm["games"] == 2 and llm["decisions"] == sum(r["llm"][0]["decisions"] for r in rows)
     assert llm["fallbacks"] == 0 and llm["estimated"] and llm["per_game"]["prompt_tokens"] > 1000
-    assert find(["LLM:model=stub/first:strategy=basic", "F"], str(path)) is None  # the native key differs
+    with pytest.raises(SpecError, match="catanatron harness"):  # no native record can hold an LLM
+        find(["LLM:model=stub/first:strategy=basic", "F"], str(path))
     assert main(["eval", "LLM:model=stub/first:strategy=basic", "F", "--suite", str(path), "--harness",
                  "catanatron"]) == 0  # cached
     assert record.eval_id in capsys.readouterr().out
@@ -173,7 +174,7 @@ def test_the_state_text_never_shows_an_opponents_cards():
     # The observer's own hand and cards are shown.
     assert "Wheat: 4" in red_line and "MONOPOLY: 1" in red_line and "(you)" in red_line
     # Every hidden fact of the opponent, as a count, is absent from the prompt the model sees.
-    red._model = StubModel("first")
+    red.notes = []
     prompt = red.user_message(game, game.playable_actions)
     assert blue_line in prompt and "Previous moves" not in prompt
     hidden = [f"{label}: {state.player_state[f'{key}_{r}_IN_HAND']}" for label, r in

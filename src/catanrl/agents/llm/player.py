@@ -114,6 +114,7 @@ class LlmPlayer(Player):
             raise LLMError(f"unknown strategy {self.params.strategy!r}; one of {STRATEGIES}")
         self._resolved = resolved
         self._model = model
+        self._owned = model is None  # a model the player built itself is rebuilt per game
         self._system: str | None = None
         self.keep_log = keep_log
         self.notes: list[str] = []
@@ -123,10 +124,11 @@ class LlmPlayer(Player):
     # ------------------------------------------------------------ game hooks
 
     def before(self, game: Any) -> None:
-        """A new game: a fresh model (the stub's RNG from the spec seed and the game's), prompt and stats."""
+        """A new game: a fresh model (the stub's RNG from the spec seed and the game's), prompt and stats.
+        A model given to the constructor (tests) is kept."""
         self.notes, self.log, self.stats = [], [], new_stats()
         self._system = None
-        if self._model is None or getattr(self._model, "kind", None) is not None:
+        if self._owned:
             from catanrl.seeding import derive_seed
 
             seed = derive_seed(int(self.params.seed), "llm", int(game.seed), self.color.value)
@@ -135,6 +137,7 @@ class LlmPlayer(Player):
     def model(self) -> Any:
         if self._model is None:
             self._model = make_model(self.params.model, seed=int(self.params.seed))
+            self._owned = True
         return self._model
 
     def system(self, game: Any) -> str:
