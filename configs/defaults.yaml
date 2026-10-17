@@ -19,7 +19,8 @@ eval:
   final: []                  # [{suite, lineup: ["POLICY:ckpt=${run}@best", F], fill: null}]
                              # suite: a name, or {name, boards} for its first boards
 params: {}                   # kind: eval sweep values, referenced as ${params.NAME}
-meta: {}                     # not hashed: notes, wandb, ...
+meta: {}                     # not hashed: notes, ...; wandb: {project, entity, group, tags} turns on the
+                             # live W&B mirror (catanrl.wandb_mirror; CATANRL_WANDB_PROJECT overrides)
 runtime:                     # not hashed: how, not what
   device: auto               # auto | cpu | cuda | cuda:N
   threads: 8                 # VecEnv and eval threads
