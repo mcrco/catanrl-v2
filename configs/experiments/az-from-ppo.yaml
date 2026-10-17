@@ -46,3 +46,5 @@ stages:
       learning_rate: 5.0e-5
       checkpoint_interval: 10
 runtime: {device: cuda, threads: 12, compile: true, time_limit_hours: 8}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

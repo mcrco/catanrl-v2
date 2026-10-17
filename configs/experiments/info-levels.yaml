@@ -21,3 +21,5 @@ sweep:
     seed: [42, 43]
   name: "{info}-s{seed}"
 runtime: {device: cuda, threads: 16}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

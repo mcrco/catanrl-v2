@@ -73,6 +73,7 @@ eval:
     - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=ppo-4p/main@best", F, F]}
     - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "BELIEF:ckpt=puffer-graph2/full@best:worlds=16"]}
 meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
   recipe: ppo-4p
   notes: |
     Report idea: one model for up to n players and arbitrary maps. First run: 2-4 players,

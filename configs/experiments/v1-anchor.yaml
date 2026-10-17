@@ -16,5 +16,5 @@ eval:
 sweep:
   axes: {seed: [42, 43]}
   name: "s{seed}"
-meta: {notes: "v1's habit: a 1e9 budget stopped after 7 h; relaunch to resume, catanrl finish to end"}
+meta: {wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}, notes: "v1's habit: a 1e9 budget stopped after 7 h; relaunch to resume, catanrl finish to end"}
 runtime: {device: cuda, threads: 16, time_limit_hours: 7}

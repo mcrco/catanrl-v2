@@ -57,6 +57,7 @@ sweep:
         train.muon_exclude_lr: 5.0e-5
   name: "{critic}"
 meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
   parent: ppo-4p
   notes: |
     1. The diagnosis (2026-10-14, two independent analyses on CPU replications of ppo-4p):

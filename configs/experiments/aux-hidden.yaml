@@ -59,6 +59,7 @@ eval:
     - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
     - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=arch-ablation/graph-s@best"]}
 meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
   recipe: arch-ablation/graph-s
   notes: |
     The control is arch-ablation/graph-s (the same recipe without the head); the head-to-head

@@ -72,6 +72,7 @@ sweep:
           - {suite: {name: heldout-2p, boards: 250}, lineup: ["MCTS:ckpt=${run}@best:sims=4096:dets=1", "POLICY:ckpt=${run}@best"]}
   name: "{obs}"
 meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
   v1: {run: puffer_catan_graph2, repo: catanrl-puffer, epochs: 3786, agent_steps: 500_115_456, hours: 9.5,
        vs_F_400_games: {e100: 0.56, e200: 0.705, e300: 0.7825, e1000: 0.8675, e3786: 0.9525}}
   notes: |

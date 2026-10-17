@@ -75,6 +75,7 @@ sweep:
           - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/graph-s@best"]}
   name: "{arch}"
 meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
   recipe: puffer-graph2
   notes: |
     Report section 1. The head-to-head rows bind arch-ablation/graph-s@best when each variant is
