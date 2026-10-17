@@ -165,6 +165,33 @@ def test_rollout_memory_resets_on_done_and_steps_on_acting_rows():
             assert torch.all(h[row] == 0)  # unless their game ended
 
 
+def test_memory_stays_float32_under_autocast(monkeypatch):
+    """PuffeRL's amp runs the rollout and the training forward under autocast, where
+    CUDA's lstm_cell returns bf16 (CPU's keeps float32, so the test casts what CUDA
+    would): the rollout memory and the replayed state stay float32 and nothing
+    refuses the dtype mix."""
+    torch.manual_seed(4)
+    model = model_for("lstm-tiny")
+    remember = model.remember
+
+    def bf16_cell(pooled, h, c):
+        return tuple(m.to(torch.bfloat16) for m in remember(pooled, h, c))
+
+    monkeypatch.setattr(model, "remember", bf16_cell)
+    policy = PufferPolicy(model, num_rows=4)
+    obs, terminals = _segments(model, segments=4, horizon=3, seed=5)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        policy.begin_rollout()
+        rollout = _rollout(policy, obs, terminals)
+        h, c = policy._memory
+        assert h.dtype == c.dtype == torch.float32 and not torch.all(h == 0)
+        policy.begin_rollout()
+        logits, batch = policy(obs, {"idx": torch.arange(4), "terminals": terminals})
+    assert rollout.dtype == logits.dtype == batch.logits.dtype == torch.float32
+    assert torch.isfinite(logits[logits > -1e8]).all() and torch.isfinite(batch.logits).all()
+    assert torch.equal(logits > -1e8, rollout.reshape(12, -1) > -1e8)
+
+
 # ---------------------------------------------------------------- checkpoints and agents
 
 

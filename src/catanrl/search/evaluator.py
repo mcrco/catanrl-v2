@@ -95,17 +95,24 @@ class BatchEvaluator:
             def forward():
                 return self._forward(static[0], static[1:] if self.recurrent else None)
 
-            stream = torch.cuda.Stream(device=self.device)
-            stream.wait_stream(torch.cuda.current_stream(self.device))
-            with torch.cuda.stream(stream), torch.inference_mode():
-                for _ in range(2):
-                    forward()
-            torch.cuda.current_stream(self.device).wait_stream(stream)
-            graph = torch.cuda.CUDAGraph()
-            with torch.inference_mode(), torch.cuda.graph(graph):
-                outputs = forward()
+            graph, outputs = self._capture(forward)
             self._graphs[size] = (graph, static, outputs)
         return self._graphs[size]
+
+    def _capture(self, forward):
+        """Warm up and capture ``forward`` (which reads the static inputs) into a
+        CUDA graph: (graph, its static outputs). Separate so a CPU test can
+        stand in a replay that recomputes the outputs from the static inputs."""
+        stream = torch.cuda.Stream(device=self.device)
+        stream.wait_stream(torch.cuda.current_stream(self.device))
+        with torch.cuda.stream(stream), torch.inference_mode():
+            for _ in range(2):
+                forward()
+        torch.cuda.current_stream(self.device).wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.inference_mode(), torch.cuda.graph(graph):
+            outputs = forward()
+        return graph, outputs
 
     # ------------------------------------------------------------ evaluation
 
@@ -156,6 +163,11 @@ class BatchEvaluator:
     def _run(self, chunk: np.ndarray, memory: tuple[np.ndarray, ...] | None = None) -> tuple[np.ndarray, ...]:
         k = len(chunk)
         size = self.bucket(k)
+        if self.recurrent and memory is None:
+            # The stateless call is the zero-state step, with the zeros written explicitly: a
+            # captured graph's static memory holds what the last step left there, and a replay
+            # reads whatever the static inputs hold.
+            memory = tuple(np.zeros((k, self.hidden_size), dtype=np.float32) for _ in range(2))
         sources = (torch.from_numpy(chunk), *(torch.from_numpy(m) for m in memory or ()))
         self.rows += k
         self.forwards += 1

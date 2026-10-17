@@ -141,8 +141,10 @@ class PufferPolicy(nn.Module):
         h, c = self._memory
         emb, rows = self._embed(obs)
         h_new, c_new = self.model.remember(emb.pooled, h.index_select(0, acting), c.index_select(0, acting))
-        h.index_copy_(0, acting, h_new)
-        c.index_copy_(0, acting, c_new)
+        # The memory stays float32: under PuffeRL's amp autocast the cell returns bf16 on CUDA
+        # (lstm_cell is in autocast's lower-precision list), and index_copy_ refuses a dtype mix.
+        h.index_copy_(0, acting, h_new.to(h.dtype))
+        c.index_copy_(0, acting, c_new.to(c.dtype))
         return self._decode(emb, rows, h_new)
 
     def _reset_memory(self, rows: int, device, done: torch.Tensor | None) -> None:
@@ -259,13 +261,14 @@ class PufferPolicy(nn.Module):
             h, c = self.model.initial_state(segments, flat.device)
         else:
             h, c = (m.index_select(0, idx) for m in self._memory_start)
-        h, c = h.to(inputs.dtype), c.to(inputs.dtype)
         memories = []
         for t in range(horizon):
             h, c = h * keep[:, t], c * keep[:, t]
             h_new, c_new = self.model.remember(inputs[:, t], h, c)
-            h = torch.where(act[:, t], h_new, h)
-            c = torch.where(act[:, t], c_new, c)
+            # The state stays float32 along the horizon, as the rollout's memory does (under
+            # autocast the cell returns bf16 on CUDA; torch.where and the stack need one dtype).
+            h = torch.where(act[:, t], h_new.to(h.dtype), h)
+            c = torch.where(act[:, t], c_new.to(c.dtype), c)
             memories.append(h)
         memory = torch.stack(memories, dim=1).reshape(rows, -1).index_select(0, acting)
         act_logits, value_logits, present = self._decode(emb, obs_rows, memory)
