@@ -18,6 +18,10 @@ At a checkpoint the trainer writes the ``.pt``, then ``trainer_state.pt``
 (the commit), then ``run.json``; then the select eval runs and ``best``
 moves. A resume moves any ``.pt`` newer than the trainer state to
 ``orphaned/``, so it is never ``latest`` nor an epoch ref.
+
+When the experiment's ``meta.wandb.project`` (or ``CATANRL_WANDB_PROJECT``)
+is set, the writer also drives :mod:`catanrl.wandb_mirror`: a copy of the
+rows, select results and finals that never decides anything (DESIGN 6.10).
 """
 
 from __future__ import annotations
@@ -556,6 +560,8 @@ class RunWriter(Run):
     A context manager; leaving it by an exception records ``failed`` (or
     ``interrupted`` for KeyboardInterrupt) and releases the lock. A run that
     had already finished stays finished: only its launch row records that.
+    The wandb mirror, when on, sees every logged row, alias and the end of
+    the launch; it can only warn, never fail the run.
     """
 
     mode: Literal["new", "resume", "done"]
@@ -572,6 +578,7 @@ class RunWriter(Run):
         hours = (variant.config.get("runtime") or {}).get("time_limit_hours")
         self._deadline = None if hours is None else time.time() + float(hours) * 3600
         self._stop_requested = False
+        self.mirror: Any = None  # catanrl.wandb_mirror.Mirror, once the launch is recorded
 
     @classmethod
     def open(cls, variant: Variant, *, argv: Sequence[str], allow_code_change: bool = False,
@@ -635,6 +642,9 @@ class RunWriter(Run):
             install_signal_handlers(writer.request_stop)
         except ValueError:  # not the main thread
             pass
+        from catanrl.wandb_mirror import Mirror
+
+        writer.mirror = Mirror.start(writer)  # None unless configured; warns rather than raises
         return writer
 
     def __enter__(self) -> Self:
@@ -653,6 +663,9 @@ class RunWriter(Run):
             self.release()
 
     def release(self) -> None:
+        if self.mirror is not None:
+            self.mirror.finish()  # the finals and the status, read from the run under its lock
+            self.mirror = None
         if self._lock_fd is not None:
             _unlock(self._lock_fd)
             self._lock_fd = None
@@ -672,7 +685,10 @@ class RunWriter(Run):
 
     def log(self, logs: Mapping[str, Any], step: int) -> None:
         row = {k: v for k, v in logs.items() if isinstance(v, (int, float, str, bool)) or v is None}
-        canon.append_jsonl(self.path / "metrics.jsonl", {"launch": self.launch, "step": int(step), **row})
+        row = {"launch": self.launch, "step": int(step), **row}
+        canon.append_jsonl(self.path / "metrics.jsonl", row)
+        if self.mirror is not None:
+            self.mirror.log(row, step)
 
     def close(self, model_path: str | None = None, early_stop: bool | None = None) -> None:
         pass
@@ -753,12 +769,16 @@ class RunWriter(Run):
             metric = record.summary.get(select.get("metric", "score_rate"))
         _append_alias(self.path, name, ref, by="trainer", note=note,
                       eval_id=getattr(record, "eval_id", None), metric=metric)
+        if self.mirror is not None:
+            self.mirror.alias(name, ref, metric=metric)
 
     def finish(self, status: Status) -> None:
         run = self._run_json()
         run["status"] = status
         run["launches"][-1].update(status=status, ended=time.time())
         canon.atomic_write_json(self.path / "run.json", run)
+        if self.mirror is not None:
+            self.mirror.status(status)
 
     def _end_launch(self, status: str) -> None:
         run = self._run_json()

@@ -67,6 +67,12 @@ uv run catanrl run arch-lineage --only 'graph-s-*' --next   # several terminals 
 uv run catanrl ls 'puffer-graph2/*'
 uv run catanrl pin puffer-graph2/full@e1500 ref --note "report"
 
+# W&B mirrors a run (DESIGN 6.10: it never decides anything): set meta.wandb.project in the
+# experiment YAML or CATANRL_WANDB_PROJECT, and a relaunch resumes the same wandb run. Smoke
+# runs and tests stay out (CATANRL_WANDB_SMOKE=1 opts a smoke run in). Runs made without it
+# get the identical wandb run after the fact (idempotent; a re-sync keeps the run's group and tags):
+uv run python tools/wandb_backfill.py ppo-mixed/main --project catanrl-v2
+
 # evaluation (cached, seat-balanced, Wilson intervals; records keyed by everything that decides them)
 uv run catanrl eval POLICY:puffer-graph2/full@ref F --suite heldout-2p
 uv run catanrl eval MCTS:puffer-graph2/public@ref:sims=1024:dets=1 POLICY:puffer-graph2/public@ref --suite heldout-2p
