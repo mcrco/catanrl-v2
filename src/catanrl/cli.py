@@ -67,6 +67,12 @@ def _parser() -> argparse.ArgumentParser:
                       help="assumed completion tokens per prompted decision for a real model (the stub's "
                            "replies are short; reasoning models write thousands)")
     cost.add_argument("--cell-games", type=int, default=50, help="games per cell in the cost column")
+    cost.add_argument("--notes-chars", type=int, default=200,
+                      help="pad the stub's one-line notes to this many characters (a real model's note; every note "
+                           "is shown in every later prompt); 0 keeps the stub's own 18-24")
+    cost.add_argument("--decisions", type=int,
+                      help="also project the cost at this many prompted decisions per game (default: twice the "
+                           "measured; a competent model outlasts a random one)")
     cost.add_argument("--price", action="append", default=[], metavar="NAME=IN,OUT",
                       help="dollars per million input and output tokens; repeatable")
     cost.add_argument("--threads", type=int, default=1)
@@ -96,6 +102,8 @@ def _parser() -> argparse.ArgumentParser:
     ver = sub.add_parser("verify", help="replay games of a record and compare")
     ver.add_argument("record", help="a record path or eval id")
     ver.add_argument("--games", type=int, default=16)
+    ver.add_argument("--force", action="store_true",
+                     help="replay a real language model's record anyway (paid calls; its games will differ)")
 
     chk = sub.add_parser("check-runs", help="load and self-test every alias of every run")
     chk.add_argument("pattern", nargs="?", default="*")
@@ -303,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify":
             from catanrl.eval.results import verify
 
-            print(json.dumps(verify(_find_record(args.record), games=args.games)))
+            print(json.dumps(verify(_find_record(args.record), games=args.games, force=args.force)))
         elif args.command == "check-runs":
             from catanrl.runs import check_runs
 

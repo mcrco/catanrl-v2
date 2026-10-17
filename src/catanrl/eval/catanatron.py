@@ -19,13 +19,23 @@ model call waits on the network and releases the GIL); rows are delivered
 as games finish. Catanatron's bots draw from the game's RNG, so a row depends
 on the game seed and the seat order, not on ``threads``; a real model is not
 deterministic at all. ``preflight`` builds every agent's player once before
-the first game, so a missing API key or SDK fails before anything is played.
+the first game and calls its ``preflight()`` when it has one (the LLM's model
+client, a POLICY's checkpoint), so a missing API key or SDK fails before
+anything is played.
+
+When a game raises (or on KeyboardInterrupt), the other running games stop
+at their next tick (one more model call at most; their rows are not
+delivered), games not started are cancelled, the workers are joined, the
+rows of games that still finished are delivered, and the error is re-raised:
+nothing keeps playing (and paying) in the background, and a resume replays
+only what was not recorded.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
 import os
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -55,8 +65,14 @@ def reseat(game: Any, players: Sequence[Any]) -> None:
     game.playable_actions = generate_playable_actions(state)
 
 
-def play_game(scheduled: Any, scenario: Any, agents: Sequence[Any], *, transcripts: Path | None = None) -> dict:
-    """One scheduled game with ``agents`` (resolved, slot order; the fill last); its row."""
+class GameStopped(RuntimeError):
+    """A game abandoned at a tick because the harness is stopping; it has no row."""
+
+
+def play_game(scheduled: Any, scenario: Any, agents: Sequence[Any], *, transcripts: Path | None = None,
+              stop: threading.Event | None = None) -> dict:
+    """One scheduled game with ``agents`` (resolved, slot order; the fill last); its row.
+    ``stop`` set between ticks abandons the game (:class:`GameStopped`)."""
     n = scenario.game.num_players
     if len(scheduled.seats) != n:
         raise ValueError(f"{scheduled.game_id}: seats do not match its scenario's players")
@@ -68,6 +84,8 @@ def play_game(scheduled: Any, scenario: Any, agents: Sequence[Any], *, transcrip
     reseat(game, players)
     decisions = [0] * n
     while game.winning_color() is None and game.state.num_turns < scenario.turn_limit:
+        if stop is not None and stop.is_set():
+            raise GameStopped(f"{scheduled.game_id} was stopped before it finished")
         if len(game.playable_actions) > 1:
             decisions[game.state.current_player_index] += 1
         game.play_tick()
@@ -92,9 +110,12 @@ def play_game(scheduled: Any, scenario: Any, agents: Sequence[Any], *, transcrip
 
 
 def preflight(agents: Sequence[Any]) -> None:
-    """Build each agent's player once: clients, keys and checkpoints fail here, not mid-eval."""
+    """Build each agent's player once and let it load what it needs (``player.preflight()``:
+    the LLM's model client, a POLICY's checkpoint): keys, SDKs and refs fail here, not mid-eval."""
     for agent in agents:
-        agent.player(Color.RED)
+        player = agent.player(Color.RED)
+        if hasattr(player, "preflight"):
+            player.preflight()
 
 
 def play_catanatron(
@@ -126,12 +147,22 @@ def play_catanatron(
         for scheduled in games:
             on_game(play_game(scheduled, table[scheduled.scenario], agents, transcripts=transcripts))
         return
+    stop = threading.Event()
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=threads)
+    futures = [pool.submit(play_game, g, table[g.scenario], agents, transcripts=transcripts, stop=stop) for g in games]
+    delivered: set[concurrent.futures.Future] = set()
     try:
-        futures = [pool.submit(play_game, g, table[g.scenario], agents, transcripts=transcripts) for g in games]
         for future in concurrent.futures.as_completed(futures):
+            delivered.add(future)
             on_game(future.result())
     except BaseException:
-        pool.shutdown(wait=False, cancel_futures=True)
+        stop.set()  # running games stop at their next tick: no further model call
+        for future in futures:
+            future.cancel()  # games not started never start
+        pool.shutdown(wait=True)
+        for future in futures:  # games that still finished are kept: a resume replays only the rest
+            if future not in delivered and not future.cancelled() and future.exception() is None:
+                delivered.add(future)
+                on_game(future.result())
         raise
     pool.shutdown(wait=True)

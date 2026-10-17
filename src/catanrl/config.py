@@ -650,6 +650,20 @@ def _smoke_refs(value: Any) -> Any:
     return value
 
 
+def _smoke_spec(spec: Any) -> Any:
+    """A smoke run spends nothing on a language model: an ``LLM:`` spec plays ``stub/random``."""
+    if isinstance(spec, str) and spec.upper().startswith("LLM:"):
+        from catanatron.registry import SpecError
+
+        from catanrl.agents.spec import stub_llm_spec
+
+        try:
+            return stub_llm_spec(spec)
+        except SpecError:  # validate_plan reports it
+            return spec
+    return spec
+
+
 def _merge_existing(base: dict, over: Mapping[str, Any]) -> None:
     """Merge only keys ``base`` already has (smoke overrides fit every algo)."""
     for key, value in over.items():
@@ -763,9 +777,13 @@ def load_plan(path: str | Path, *, overrides: Sequence[str] = (), only: str | No
                 cfg["meta"] = {**cfg["meta"], "smoke": True}
                 n = int(smoke_cfg.get("eval_boards", 2))
                 entries = [e for e in [cfg["eval"]["select"], *cfg["eval"]["final"]] if e]
-                for entry in entries:  # a suite name or {name, boards}: the first n boards
+                for entry in entries:  # a suite name or {name, boards}: the first n boards; LLMs as stubs
                     suite = entry["suite"] if isinstance(entry["suite"], Mapping) else {"name": entry["suite"]}
                     entry["suite"] = {**suite, "boards": min(int(suite.get("boards", n)), n)}
+                    if entry.get("lineup"):
+                        entry["lineup"] = [_smoke_spec(s) for s in entry["lineup"]]
+                    if entry.get("fill"):
+                        entry["fill"] = _smoke_spec(entry["fill"])
                 if cfg["eval"]["select"]:
                     cfg["eval"]["select"]["every"] = 1
             own = re.compile(re.escape(f"{experiment}/") + r"([a-z0-9][a-z0-9._+-]*)")

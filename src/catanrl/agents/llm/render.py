@@ -8,8 +8,10 @@ its buildings and its visible victory points (never its resource kinds, its
 unplayed cards or its hidden victory-point cards). catanllm's renderer
 showed only hand sizes for opponents too, but read every seat's development
 cards from the observer's own slot (a bug that showed the wrong counts);
-``tests/test_llm_agent.py`` pins the redaction. ``render_actions`` numbers
-the playable actions as the model must answer them.
+``tests/test_llm_agent.py`` pins the redaction. A pending discard (a 7 was
+rolled; the fork prompts one ``Discard one X`` action per card) is stated
+with the cards still to go. ``render_actions`` numbers the playable actions
+as the model must answer them.
 """
 
 from __future__ import annotations
@@ -70,6 +72,10 @@ def render_state(game: Any, observer: Color) -> str:
     out = ["=== CATAN GAME STATE ===", f"Turn: {state.num_turns}", f"Current player: {state.current_color().name}",
            f"You are: {observer.name}", f"Victory points to win: {game.vps_to_win}", "", "=== PLAYER STATUS ==="]
     out += [player_status(state, color, observer) for color in state.colors]
+    remaining = int(state.discard_counts[state.color_to_index[observer]])  # the fork counts a pending discard down
+    if remaining > 0:
+        out.append(f"You must discard {remaining} more of your {player_num_resource_cards(state, observer)} resource "
+                   "cards (a 7 was rolled); each Discard action removes one card.")
     out += ["", "=== BOARD LAYOUT ===", f"Robber position: {tuple(board.robber_coordinate)}", "", "--- HEXAGON TILES ---"]
     for _, tile in sorted(catan_map.land_tiles.items()):
         if tile.resource is None:

@@ -4,7 +4,9 @@
 # (2p BASE to 15 VP, each board from both seats: 40 games per cell). Model ids are
 # OpenRouter ids (placeholders: edit the model axis); stub/random plays without a network.
 #   catanrl llm-cost --games 5 --strategies plan,basic --price gpt-5=1.25,10   # the budget first
-#   catanrl run llm-eval --smoke --only 'stub-*'          # the stub cells, 2 boards, no network
+#   catanrl run llm-eval --smoke     # every cell on 2 boards with stub/random in place of each model: no network
+#   OPENROUTER_API_KEY=... catanrl eval 'LLM:model=openai/gpt-5:strategy=plan' F --suite heldout-2p --boards 1 \
+#       --harness catanatron         # one real model on one board (2 games), to see it answer before the sweep
 #   OPENROUTER_API_KEY=... catanrl run llm-eval            # every cell (real calls cost money)
 name: llm-eval
 kind: eval

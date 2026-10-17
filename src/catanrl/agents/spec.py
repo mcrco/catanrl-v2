@@ -334,6 +334,11 @@ def _llm_params(args: Sequence[Any], named: Mapping[str, Any]) -> Any:
     return params
 
 
+def _llm_canonical(params: Any) -> str:
+    fields = [f.name for f in dataclasses.fields(params)]
+    return f"{LLM_KEY}:" + ":".join(f"{name}={_fmt(getattr(params, name))}" for name in fields)
+
+
 def _resolve_llm(args: Sequence[Any], named: Mapping[str, Any], harness: str) -> ResolvedAgent:
     """A language model player: Catanatron harness only; fair, since it reads the public
     state text (``catanrl.agents.llm.render``, pinned by test)."""
@@ -341,11 +346,23 @@ def _resolve_llm(args: Sequence[Any], named: Mapping[str, Any], harness: str) ->
     if harness != "catanatron":
         raise SpecError(f"LLM plays through the catanatron harness, not {harness} "
                         "(catanrl eval ... --harness catanatron, or harness: catanatron in eval.final)")
-    fields = [f.name for f in dataclasses.fields(params)]
-    canonical = f"{LLM_KEY}:" + ":".join(f"{name}={_fmt(getattr(params, name))}" for name in fields)
     return ResolvedAgent(key=LLM_KEY, impl="catanrl.llm", params=params, checkpoint=None, fair=True,
-                         label=f"{LLM_KEY}:{params.model}:{params.strategy}", canonical=canonical, harness=harness,
-                         details={"params": dataclasses.asdict(params)})
+                         label=f"{LLM_KEY}:{params.model}:{params.strategy}", canonical=_llm_canonical(params),
+                         harness=harness, details={"params": dataclasses.asdict(params)})
+
+
+def stub_llm_spec(spec: str, stub: str = "stub/random") -> str:
+    """``spec`` with a real model replaced by ``stub`` (a smoke plan pays for nothing); a stub
+    model, or another key, is returned as it is."""
+    from catanrl.agents.llm.model import is_stub
+
+    key, args, named = parse_spec(spec)
+    if key != LLM_KEY:
+        return spec
+    params = _llm_params(args, named)
+    if is_stub(params.model):
+        return spec
+    return _llm_canonical(dataclasses.replace(params, model=stub))
 
 
 def _param_names(key: str) -> list[str]:
@@ -389,6 +406,10 @@ class CatanrlPlayer(Player):
                                    "the Catanatron player does not replay")
             self._native = native
         return self._native
+
+    def preflight(self) -> None:
+        """Load the checkpoint now (the harness's preflight), so a bad ref fails before any game."""
+        self._agent()
 
     def reset_state(self) -> None:
         self._mirror = None

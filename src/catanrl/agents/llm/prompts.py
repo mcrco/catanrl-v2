@@ -129,7 +129,7 @@ Anyways, let’s get started…
 4. Avoid being the clear leader
 
 * **Early-to-mid game:** You will get knighted to oblivion and miss out on trades if you get too much of a lead early. This is why those who often start strong aren’t able to maintain it. If you have access to ample ore and grain, it may be more appropriate to buy development cards than cities. I have found that development cards are often more subtle. It doesn’t raise alarm bells while bringing you closer to earning the largest army or gaining another beneficial card.
-* **End game:** If the largest army or longest road is still up for grabs and someone else is not about to take either — delay getting it for yourself. For example, if you have two knights face-up with at least one face down (assuming nobody else is in the same boat), it may be worth holding out on flipping it. (The exception is that by not flipping it, you may encourage someone else to buy development cards in order to catch-up to you or be forced to play a knight at an inopportune time) Being close to 10 VP’s places more of a target on you. When possible, get those 2 VP’s during your move to win the game.
+* **End game:** If the largest army or longest road is still up for grabs and someone else is not about to take either — delay getting it for yourself. For example, if you have two knights face-up with at least one face down (assuming nobody else is in the same boat), it may be worth holding out on flipping it. (The exception is that by not flipping it, you may encourage someone else to buy development cards in order to catch-up to you or be forced to play a knight at an inopportune time) Being close to {vps} VP’s places more of a target on you. When possible, get those 2 VP’s during your move to win the game.
 
 5. Diversify your resources *and* number production
 
@@ -237,7 +237,7 @@ You race off to establish your respective communities by gathering resources fro
 Good luck, explorers!
 
 **OBJECTIVE**
-The first player to reach 10 victory points (VPs) on their turn wins. Earn VPs by building. Collect and trade for the resources you need to build.
+The first player to reach {vps} victory points (VPs) on their turn wins. Earn VPs by building. Collect and trade for the resources you need to build.
 
 * Settlement: 1 VP each
 * City: 2 VPs each
@@ -431,12 +431,12 @@ If another player has more Knight cards in play, they immediately receive this t
 The Largest Army tile is worth 2 VPs.
 
 **WINNING THE GAME**
-If you have 10 or more VPs at any point during your turn, the game ends immediately and you are the winner!
-Turn over any number of Victory Point cards, including ones built this turn, to show that you have reached 10 VPs.
+If you have {vps} or more VPs at any point during your turn, the game ends immediately and you are the winner!
+Turn over any number of Victory Point cards, including ones built this turn, to show that you have reached {vps} VPs.
 
 Congratulations!
-**Example:**
-Blue ends the game on their turn with 10 VPs (2 cities, 3 settlements, the Longest Route tile, and 1 Victory Point card). Victory!
+**Example (the base game, played to ten points):**
+Blue ends the game on their turn with ten VPs (2 cities, 3 settlements, the Longest Route tile, and 1 Victory Point card). Victory!
 """
 
 #: catanllm's user-message instruction (util/llm_wrapper.py).
@@ -489,6 +489,6 @@ def system_prompt(strategy: str, catan_map: Any, *, vps: int = 10) -> str:
         return basic + "\n" + board_section(catan_map)
     if strategy == "plan":
         return basic + "\n" + PLAN_EXTRA + "\n" + board_section(catan_map)
-    if strategy == "strategy":
-        return basic + "\n" + STRATEGY_GUIDE + "\n" + board_section(catan_map, intro=True)
-    return basic + "\n" + RULEBOOK + "\n" + board_section(catan_map)
+    if strategy == "strategy":  # the guide's and the rulebook's "10 VP" sentences state this game's target too
+        return basic + "\n" + STRATEGY_GUIDE.format(vps=vps) + "\n" + board_section(catan_map, intro=True)
+    return basic + "\n" + RULEBOOK.format(vps=vps) + "\n" + board_section(catan_map)

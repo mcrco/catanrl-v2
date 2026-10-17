@@ -6,6 +6,8 @@ is a stub, and a real model refuses to build without OPENROUTER_API_KEY."""
 from __future__ import annotations
 
 import json
+import re
+import threading
 
 import pytest
 from catanatron.models.enums import DEVELOPMENT_CARDS, RESOURCES
@@ -13,8 +15,15 @@ from catanatron.models.player import Color
 from catanatron.registry import REGISTRY, SpecError
 
 from catanrl.agents import check_spec_syntax, resolve_agent
-from catanrl.agents.llm import LLMError, LlmPlayer, StubModel, parse_answer, render_state
-from catanrl.agents.llm.model import OpenRouterModel, estimate_tokens, make_model
+from catanrl.agents.llm import (
+    LLMError,
+    LlmPlayer,
+    StubModel,
+    parse_answer,
+    render_state,
+    system_prompt,
+)
+from catanrl.agents.llm.model import OpenRouterModel, Reply, estimate_tokens, make_model
 from catanrl.agents.llm.player import AnswerError
 from catanrl.agents.llm.render import player_status, render_actions
 from catanrl.eval.catanatron import play_catanatron, reseat
@@ -384,3 +393,225 @@ def test_transcripts_are_saved_when_asked(monkeypatch, tmp_path):
     entries = [json.loads(line) for line in path.read_text().splitlines()]
     assert len(entries) == rows[0]["llm"][0]["decisions"]
     assert entries[0]["exchanges"][0]["index"] == 0 and "=== AVAILABLE ACTIONS ===" in entries[0]["prompt"]
+
+
+# ---------------------------------------------------------------- review fixes (wt/llm 1e61215)
+
+
+@pytest.mark.parametrize("text, index", [
+    ("Option 0 would build a road but I prefer the settlement.\nnotes\nFinal answer: 3", 3),
+    ("I considered move 1 first.\nnotes\nAnswer: 2", 2),
+    ("notes\nFinal answer: 3.", 3),
+    ("notes\nI pick 3", 3),
+    ("notes\nIndex: 3", 3),
+    ("notes\n2 (end turn)", 2),
+    ("notes\n3 (build settlement at node 12)", 3),
+    ("notes\n**Action 2**", 2),
+    ("notes\nMove 4", 4),
+])
+def test_parse_answer_reads_the_last_line_only(text, index):
+    assert parse_answer(text, 20) == (index, "notes")
+
+
+@pytest.mark.parametrize("text", [
+    "notes\nBuild settlement at node 12",  # a node id is not an action number
+    "notes\nI have 7 VP so far",
+    "notes\nMove the robber to tile 3",
+    "I choose action 2.\nLet's build toward the port.",  # the number is not on the last line
+    "Option 1 looks fine.\nnotes\nI will go with the port.",
+])
+def test_parse_answer_does_not_take_a_number_from_the_reasoning(text):
+    with pytest.raises(AnswerError, match="no action number"):
+        parse_answer(text, 20)
+
+
+class RecordingModel:
+    """Replies in order and keeps every message list it was sent."""
+
+    def __init__(self, replies):
+        self.replies, self.sent = list(replies), []
+
+    def complete(self, messages, **_):
+        self.sent.append([dict(m) for m in messages])
+        text = self.replies.pop(0)
+        return Reply(text=text, reasoning=None, prompt_tokens=1, completion_tokens=1, estimated=True)
+
+
+def test_an_empty_reply_is_retried_with_a_placeholder():
+    model = RecordingModel(["", "notes\n1"])
+    red = LlmPlayer(Color.RED, LlmPlayer.Params(model="stub/first"), model=model)
+    game = two_player_game(red, REGISTRY.build("R", Color.BLUE))
+    assert red.decide(game, game.playable_actions) is game.playable_actions[1]
+    assert red.stats["retries"] == 1 and red.stats["fallbacks"] == 0
+    first, second = model.sent
+    assert second[:2] == first and second[2] == {"role": "assistant", "content": "(no answer)"}
+    assert second[3]["role"] == "user" and "empty" in second[3]["content"]
+
+
+def test_smoke_plans_play_every_llm_cell_with_a_stub(monkeypatch, tmp_path):
+    from catanrl.config import load_plan
+    from catanrl.eval.results import find
+    from catanrl.runner import _missing_finals, run_variant
+    from catanrl.runs import load_experiment
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    real = {v.name: v.config["eval"]["final"][0]["lineup"] for v in load_plan("llm-eval").variants}
+    assert real["gpt5-plan-f"][0].startswith("LLM:model=openai/gpt-5:strategy=plan:")
+    smoke = load_plan("llm-eval", smoke=True)
+    assert [v.name for v in smoke.variants] == list(real)
+    for v in smoke.variants:
+        (entry,) = v.config["eval"]["final"]
+        assert entry["lineup"][0].startswith("LLM:model=stub/random:strategy="), v.name
+        assert entry["lineup"][1] == real[v.name][1] and v.config["meta"]["smoke"]
+    # A real-model cell plays end to end without a key, on the stub cell's record.
+    v = smoke.variant("gpt5-basic-f")
+    assert run_variant(v, argv=["test"]) == "finished"
+    assert not _missing_finals(load_experiment(v.ref), v)
+    assert find(v.config["eval"]["final"][0]["lineup"], {"name": "heldout-2p", "boards": 2}, harness="catanatron")
+    assert find(smoke.variant("stub-basic-f").config["eval"]["final"][0]["lineup"], {"name": "heldout-2p", "boards": 2},
+                harness="catanatron").eval_id == find(v.config["eval"]["final"][0]["lineup"],
+                                                      {"name": "heldout-2p", "boards": 2}, harness="catanatron").eval_id
+
+
+def test_the_llm_agent_is_outcome_code_of_the_catanatron_harness_only():
+    from catanrl import provenance
+
+    native = [label for label, _ in provenance._components("eval", "native")["catanrl"]["py"]]
+    cat = [label for label, _ in provenance._components("eval", "catanatron")["catanrl"]["py"]]
+    assert "agents/spec.py" in native and not any(label.startswith("agents/llm/") for label in native)
+    assert {"agents/llm/prompts.py", "agents/llm/player.py", "agents/llm/render.py", "eval/catanatron.py"} <= set(cat)
+    assert provenance.code_id("eval", "native")["catanrl"] != provenance.code_id("eval", "catanatron")["catanrl"]
+
+
+def test_cost_tool_grows_the_notes_and_projects_longer_games():
+    from catanrl.agents.llm.cost import dollars, measure, projected, table
+
+    short = measure(["basic"], suite=SUITE, games=1, model="stub/first")["basic"]
+    long = measure(["basic"], suite=SUITE, games=1, model="stub/first", notes_chars=200)["basic"]
+    d = short["per_game"]["decisions"]
+    assert long["per_game"]["decisions"] == d and d > 5
+    # Every note is shown in every later prompt: 176 more characters per note, k notes at decision k.
+    extra = long["per_game"]["prompt_tokens"] - short["per_game"]["prompt_tokens"]
+    assert extra == pytest.approx((200 - len("Taking the first option.")) / 4 * d * (d - 1) / 2, rel=0.05)
+    assert long["note_tokens"] == pytest.approx(201 / 4, rel=0.05) and long["base_per_decision"] > 1000
+    assert projected(long, d) == pytest.approx(long["per_game"]["prompt_tokens"], rel=0.02)
+    assert projected(long, 2 * d) > 2 * projected(long, d)  # superlinear: the notes keep growing
+    lines = table({"basic": long}, {"m": (1.0, 2.0)}, completion_per_decision=100, cell_games=50, decisions=60)
+    assert any(line.startswith("projected at more decisions") for line in lines)
+    (row,) = [line for line in lines if line.startswith("basic") and f"{60:>9} {projected(long, 60):>10.0f}" in line]
+    assert f"{dollars(projected(long, 60), 6000, (1.0, 2.0)):8.3f}" in row
+
+
+def test_preflight_builds_the_model_client_before_any_game(monkeypatch):
+    from catanrl.eval import catanatron as harness
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(harness, "play_game", lambda *a, **k: pytest.fail("a game was played without a model client"))
+    suite = load_suite(SUITE)
+    lineup = [resolve_agent("LLM:model=openai/gpt-5:strategy=basic", harness="catanatron"),
+              resolve_agent("R", harness="catanatron")]
+    with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):
+        harness.play_catanatron(lineup, suite.schedule(2)[:1], suite=suite, on_game=lambda r: None)
+    player = lineup[0].player(Color.RED)
+    with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):
+        player.preflight()
+
+
+def test_a_failing_game_stops_the_others_and_keeps_finished_rows(monkeypatch):
+    import concurrent.futures
+
+    from catanrl.eval import catanatron as harness
+
+    suite = load_suite({**SUITE, "boards": 2})
+    games = suite.schedule(2)  # two boards from both seats; the first two games share a seed
+    first_seed, first_color = games[0].game_seed, harness.SEAT_COLORS[games[0].seats.index(0)]
+    second_done = threading.Event()
+
+    class Flaky(LlmPlayer):
+        def decide(self, game, playable_actions):
+            if game.seed == first_seed and self.color == first_color:
+                second_done.wait(60)  # fail once the second game has finished
+                raise RuntimeError("boom")
+            return super().decide(game, playable_actions)
+
+    class Agent:
+        def player(self, color):
+            return Flaky(color, LlmPlayer.Params(model="stub/first", strategy="basic"))
+
+    real_row = harness._row
+
+    def row(scheduled, **kwargs):
+        if scheduled.game_id == games[1].game_id:
+            second_done.set()
+        return real_row(scheduled, **kwargs)
+
+    monkeypatch.setattr(harness, "_row", row)
+    monkeypatch.setattr(concurrent.futures, "as_completed", lambda fs: iter(list(fs)))  # the failing game first
+    rows, before = [], threading.active_count()
+    with pytest.raises(RuntimeError, match="boom"):
+        harness.play_catanatron([Agent(), resolve_agent("R", harness="catanatron")], games, suite=suite, threads=2,
+                                on_game=rows.append)
+    assert threading.active_count() == before  # every worker joined: no game keeps playing (and paying)
+    assert [r["game_id"] for r in rows] == [games[1].game_id]  # the game that finished is kept
+
+
+def test_a_forced_discard_says_how_many_cards_must_go():
+    from catanatron.models.actions import generate_playable_actions
+    from catanatron.models.enums import ActionPrompt, ActionType
+
+    red = resolve_agent(SPEC, harness="catanatron").player(Color.RED)
+    game = two_player_game(red, REGISTRY.build("R", Color.BLUE))
+    for _ in range(12):
+        game.play_tick()
+    state = game.state
+    assert "discard" not in render_state(game, Color.RED).lower()
+    idx = state.color_to_index[Color.RED]
+    for resource in RESOURCES:
+        state.player_state[f"P{idx}_{resource}_IN_HAND"] = 2
+    state.current_player_index, state.current_prompt, state.is_discarding = idx, ActionPrompt.DISCARD, True
+    state.discard_counts = [0] * len(state.colors)
+    state.discard_counts[idx] = 5
+    game.playable_actions = generate_playable_actions(state)
+    assert {a.action_type for a in game.playable_actions} == {ActionType.DISCARD_RESOURCE}
+    assert "You must discard 5 more of your 10 resource cards (a 7 was rolled)" in render_state(game, Color.RED)
+    prompt = red.user_message(game, game.playable_actions)
+    assert "discard 5 more" in prompt and "0: Discard one WOOD" in prompt
+    state.discard_counts[idx] = 1
+    assert "discard 1 more of your 10" in render_state(game, Color.RED)
+
+
+def test_the_rulebook_and_the_guide_state_this_games_target():
+    game = two_player_game(REGISTRY.build("R", Color.RED), REGISTRY.build("R", Color.BLUE))
+    catan_map = game.state.board.map
+    for strategy in ("rules", "strategy"):
+        text = system_prompt(strategy, catan_map, vps=15)
+        assert "reaching 15 victory points first" in text
+        assert not re.search(r"\b10 (?:victory points|VPs?|or more)\b", text) and "reached 10" not in text
+    rules = system_prompt("rules", catan_map, vps=15)
+    assert "reach 15 victory points" in rules and "15 or more VPs" in rules and "reached 15 VPs" in rules
+    assert "played to ten points" in rules  # the worked example keeps the base game's arithmetic
+    assert "Being close to 15 VP" in system_prompt("strategy", catan_map, vps=15)
+
+
+def test_verify_refuses_a_real_models_record_unless_forced(monkeypatch):
+    from catanrl.cli import main
+    from catanrl.eval.results import EvalRecord, Unreplayable, evaluate, real_llm_slots, verify
+    from catanrl.report import _eval_flags
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    suite = {**SUITE, "name": "llm-verify", "purpose": "heldout"}
+    record = evaluate(["LLM:model=stub/first:strategy=basic", "F"], suite, harness="catanatron", threads=1)
+    assert real_llm_slots(record.key) == [] and "nondeterministic" not in _eval_flags(record)
+    assert verify(record, games=1) == {"identical": 1, "of": 1, "differing": []}
+    assert main(["verify", record.eval_id, "--games", "1", "--force"]) == 0
+    real = record.data["specs"][0].replace("stub/first", "openai/gpt-5")
+    slot = record.key["lineup"][0]
+    key = {**record.key, "lineup": [{**slot, "params": {**slot["params"], "model": "openai/gpt-5"}}, record.key["lineup"][1]]}
+    data = {**record.data, "key": key, "specs": [real, record.data["specs"][1]]}
+    doctored = EvalRecord(eval_id=record.eval_id, key=key, summary=record.summary, path=record.path, data=data)
+    assert real_llm_slots(doctored.key) == [0] and "nondeterministic" in _eval_flags(doctored)
+    with pytest.raises(Unreplayable, match="paid"):
+        verify(doctored, games=1)
+    with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):  # forced: it goes on to play, which needs the key
+        verify(doctored, games=1, force=True)

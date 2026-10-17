@@ -16,9 +16,11 @@ non-heldout suites, unfair slots under test (unless ``oracle_ok``), invalid
 or drift-allowed records, and checkpoints with a training launch (in the run
 or any ``init_from`` ancestor) that predates a ``supersedes`` commit. Rows
 that cannot be rebuilt from commits (dirty or moved code at eval or training
-time, mixed-code training, mixed execution, ``fast`` suites) are marked †
-(``flagged``, the reasons in ``flags``) and ``final`` refuses them (and
-re-plays ``verify_games`` games of each).
+time, mixed-code training, mixed execution, ``fast`` suites, a real language
+model in the lineup: ``nondeterministic``) are marked † (``flagged``, the
+reasons in ``flags``) and ``final`` refuses them (and re-plays
+``verify_games`` games of each other record; a language model's games are
+never replayed, since they would differ and cost money).
 """
 
 from __future__ import annotations
@@ -88,6 +90,8 @@ def _training(agent: Any, problems: list[str], name: str) -> tuple[list[str], li
 
 
 def _eval_flags(record: Any) -> list[str]:
+    from catanrl.eval.results import real_llm_slots
+
     flags = []
     if record.data.get("mixed"):
         flags.append("mixed")
@@ -95,6 +99,8 @@ def _eval_flags(record: Any) -> list[str]:
         flags.append("fast")
     if any(s.get("dirty", True) for s in record.data.get("segments", [])):
         flags.append("dirty")
+    if real_llm_slots(record.key):
+        flags.append("nondeterministic")
     return flags
 
 
@@ -135,9 +141,10 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
     if final:
         if flags:
             problems.append(f"{name}: --final refuses {', '.join(flags)} record {record.eval_id}")
-        check = verify(record, games=verify_games)
-        if check["differing"]:
-            problems.append(f"{name}: {len(check['differing'])} of {check['of']} games differ on replay")
+        if "nondeterministic" not in flags:  # a real language model's games would differ, and cost money
+            check = verify(record, games=verify_games)
+            if check["differing"]:
+                problems.append(f"{name}: {len(check['differing'])} of {check['of']} games differ on replay")
     slot = record.summary["slots"][0]
     return {"rate": slot["score_rate"], "interval": slot["wilson"], "n": slot["games"],
             "p": slot.get("win_share_p"), "decided": slot.get("decided"), "truncated": record.summary["truncated"],

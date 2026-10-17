@@ -275,8 +275,12 @@ totalled per slot in the record's summary. `configs/experiments/llm-eval.yaml`
 is the eval (models x {plan, basic} x {F, our best 2p network} on the first
 20 heldout-2p boards, both seats); `catanrl llm-cost` plays stub games and
 prices a cell from a $/M-token table, so a budget is approved before any
-real call. Model ids cannot contain `:` (the spec grammar splits on it), so
-OpenRouter variants like `:free` are not addressable yet.
+real call. `catanrl run llm-eval --smoke` plays every cell with
+`stub/random`: a smoke plan replaces the model of any `LLM:` spec, so a
+smoke never makes a paid call. A real model's record is `nondeterministic`
+(flagged † in the report) and `verify` refuses to replay it unless forced.
+Model ids cannot contain `:` (the spec grammar splits on it), so OpenRouter
+variants like `:free` are not addressable yet.
 
 Evaluation: paired seats (every board played from every seat rotation),
 fixed seeds, Wilson intervals, exact McNemar for paired comparisons,
@@ -663,10 +667,11 @@ Otherwise it:
 before the first action, the suite's turn limit) with Catanatron players,
 `runtime.threads` games at a time in a thread pool, with Catanatron's code
 in `code`. Catanatron's bots draw from the game's RNG, so their rows depend
-on the game seed only; a real LLM is not replayable at all, and `verify` or
-`report-data --final` on such a record makes real calls again. Rows of LLM
-seats carry `llm` stats, which `games_sha256` and `verify` leave out (wall
-time is not an outcome).
+on the game seed only; a real LLM is not replayable at all: `verify`
+refuses such a record (`Unreplayable`) unless `--force`, and `report-data`
+flags it `nondeterministic` (so `--final` refuses it) without replaying it.
+Rows of LLM seats carry `llm` stats, which `games_sha256` and `verify` leave
+out (wall time is not an outcome).
 
 Each start or restart appends its execution (device class, torch,
 `infer_rows`). Resuming under different execution needs `--allow-mixed`,
@@ -719,9 +724,11 @@ n, p, `eval_id`, canonical specs, `run@eN#sha`, flags), which Typst reads with
 `code_id()` hashes these files when catanrl is imported:
 
 * cppanatron's `.so` and Python files;
-* catanrl's outcome code: `models`, `agents`, `search`, `envs`,
-  `eval/harness`, `maps`, `games`;
-* Catanatron, when that harness is used;
+* catanrl's outcome code: `models`, `agents` (without `agents/llm`),
+  `search`, `envs`, `eval/harness`, `maps`, `games`;
+* with the Catanatron harness, also Catanatron itself, `eval/catanatron`
+  and `agents/llm` (the prompts and the answer parser), so a native record
+  does not move when they change;
 * for training, also `catanrl/train` and PufferLib's `pufferl.py`,
   `pytorch.py` and `_C`.
 

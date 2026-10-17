@@ -8,13 +8,16 @@ catanllm, SP 25 CS 159) onto v2's agent specs::
 
 Per decision with more than one legal action the player renders the public
 state and the numbered actions (``render``), sends them under the strategy's
-system prompt, and parses the answer: the action number on the last line, or
-a number named in the text (``parse_answer``). An answer that cannot be used
-(no number, an index out of range) is re-prompted with the error ``retries``
-times, then the player falls back to End Turn if it is offered, else the
-first action (catanllm's fallback), counted in ``stats["fallbacks"]``. Its
-one-line notes are kept and shown as ``Previous moves`` on later turns, as in
-catanllm.
+system prompt, and parses the answer from its last line only: the action
+number alone, ``action N`` named there, or the number leading or alone on
+it unless it names a board feature (``node 12``); a number in the reasoning
+above never counts, as catanllm read ``int(last line)`` (``parse_answer``).
+An answer that cannot be used (no number, an index out of range) is
+re-prompted with the error ``retries`` times, then the player falls back to
+End Turn if it is offered, else the first action (catanllm's fallback),
+counted in ``stats["fallbacks"]``. Its one-line notes are kept and shown as
+``Previous moves`` on later turns, as in catanllm (every note, so prompts
+grow with the decisions; ``catanrl llm-cost`` projects it).
 
 ``stats`` per game: ``decisions`` (prompted), ``forced`` (one legal action,
 no prompt), ``prompt_tokens``, ``completion_tokens`` (the SDK's usage, or a
@@ -62,12 +65,25 @@ class AnswerError(ValueError):
 _MARKUP = re.compile(r"^[\s>*_`#\-•.:)\[\]]+|[\s*_`.:)\]]+$")
 _NAMED = re.compile(r"\b(?:action|option|choice|move)\s*(?:number|#|no\.?)?\s*[:#]?\s*(\d+)", re.IGNORECASE)
 _INT = re.compile(r"(?<![\d.])\d+(?![\d.])")
+#: A number next to one of these words names a board feature or a count, not an action.
+_BOARD_WORDS = re.compile(
+    r"(?:nodes?|tiles?|edges?|hex(?:es)?|turns?|vps?|points?|cards?|resources?|roads?|settlements?|cities|city|"
+    r"knights?|dice|rolls?|rolled|wood|brick|sheep|wheat|ore|lumber|wool|grain|players?)", re.IGNORECASE)
+
+
+def _names_a_feature(line: str, match: re.Match) -> bool:
+    """Whether the word right before or after the number is a board word (``node 12``, ``7 VP``)."""
+    before = re.search(r"([A-Za-z]+)\W*$", line[: match.start()])
+    after = re.match(r"\W*([A-Za-z]+)", line[match.end():])
+    return any(word is not None and _BOARD_WORDS.fullmatch(word.group(1)) for word in (before, after))
 
 
 def parse_answer(text: str, num_actions: int) -> tuple[int, str]:
-    """``(index, notes)`` from a reply: the last non-empty line as the number (markdown
-    stripped), else the last ``action N`` named in the text, else the only integer on
-    the last line. ``notes`` is the line before the number (catanllm's convention)."""
+    """``(index, notes)`` from a reply, read from its last non-empty line only (markdown
+    stripped): the number alone, else ``action N`` named on it, else the number leading
+    it or the only number on it, unless that number names a board feature (``node 12``,
+    ``7 VP``). Numbers in the reasoning above never count (catanllm read ``int(last
+    line)``). ``notes`` is the line before the number (catanllm's convention)."""
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     if not lines:
         raise AnswerError("the reply is empty")
@@ -75,14 +91,14 @@ def parse_answer(text: str, num_actions: int) -> tuple[int, str]:
     index = None
     if re.fullmatch(r"\d+", last):
         index = int(last)
+    elif named := _NAMED.findall(last):
+        index = int(named[-1])
     else:
-        named = _NAMED.findall(text)
-        if named:
-            index = int(named[-1])
-        else:
-            ints = _INT.findall(lines[-1])
-            if len(ints) == 1:
-                index = int(ints[0])
+        ints = list(_INT.finditer(last))
+        leading = ints[0] if ints and ints[0].start() == 0 else None
+        candidate = leading if leading is not None else (ints[0] if len(ints) == 1 else None)
+        if candidate is not None and not _names_a_feature(last, candidate):
+            index = int(candidate.group())
     if index is None:
         raise AnswerError("no action number found; end your reply with the action number alone on the last line")
     if not 0 <= index < num_actions:
@@ -117,6 +133,8 @@ class LlmPlayer(Player):
         self._owned = model is None  # a model the player built itself is rebuilt per game
         self._system: str | None = None
         self.keep_log = keep_log
+        #: Extra StubModel arguments (``catanrl llm-cost`` pads the stub's notes); ignored by a real model.
+        self.stub_options: dict[str, Any] = {}
         self.notes: list[str] = []
         self.log: list[dict[str, Any]] = []
         self.stats = new_stats()
@@ -132,13 +150,17 @@ class LlmPlayer(Player):
             from catanrl.seeding import derive_seed
 
             seed = derive_seed(int(self.params.seed), "llm", int(game.seed), self.color.value)
-            self._model = make_model(self.params.model, seed=seed)
+            self._model = make_model(self.params.model, seed=seed, **self.stub_options)
 
     def model(self) -> Any:
         if self._model is None:
-            self._model = make_model(self.params.model, seed=int(self.params.seed))
+            self._model = make_model(self.params.model, seed=int(self.params.seed), **self.stub_options)
             self._owned = True
         return self._model
+
+    def preflight(self) -> None:
+        """Build the model client now (the harness's preflight): a missing key or SDK fails before any game."""
+        self.model()
 
     def system(self, game: Any) -> str:
         if self._system is None:
@@ -181,7 +203,9 @@ class LlmPlayer(Player):
                 exchanges.append({"reply": reply.text, "reasoning": reply.reasoning, "error": str(error)})
                 if attempt < int(self.params.retries):
                     self.stats["retries"] += 1
-                    messages = [*messages, {"role": "assistant", "content": reply.text},
+                    # An empty assistant message (a reasoning budget spent with nothing left to say) is a
+                    # 400 at some providers, which the SDK does not retry; a placeholder keeps the error text.
+                    messages = [*messages, {"role": "assistant", "content": reply.text or "(no answer)"},
                                 {"role": "user", "content": RETRY.format(error=error)}]
                 continue
             exchanges.append({"reply": reply.text, "reasoning": reply.reasoning, "index": index})

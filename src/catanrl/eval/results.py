@@ -21,7 +21,10 @@ record ``valid: false``.
 (:mod:`catanrl.eval.catanatron`: the only harness for ``LLM`` agents); the
 harness is in the key, with Catanatron's code in ``code``. Rows of LLM seats
 carry an ``llm`` entry (per-game decisions, tokens, retries, fallbacks, wall
-time) that the summary totals per slot and ``verify`` ignores.
+time) that the summary totals per slot and ``verify`` ignores. A record with
+a real language model (not a stub) in its lineup is :class:`Unreplayable`:
+``verify`` refuses it unless forced, since the model never answers the same
+way twice and every replayed game is paid for.
 """
 
 from __future__ import annotations
@@ -49,6 +52,19 @@ class ExecutionMismatch(RuntimeError):
 HARNESSES = ("native", "catanatron")
 #: Row keys that are not outcomes (dropped from games_sha256 and from verify's comparison).
 NOT_OUTCOME = ("segment", "llm")
+
+
+class Unreplayable(RuntimeError):
+    """A record whose games no replay reproduces: a real language model decided them."""
+
+
+def real_llm_slots(key: Mapping[str, Any]) -> list[int]:
+    """Lineup slots (``len(lineup)`` for the fill) played by a language model other than a stub."""
+    from catanrl.agents.llm.model import is_stub
+
+    slots = [*key.get("lineup", []), key.get("fill")]
+    return [i for i, d in enumerate(slots)
+            if d and d.get("key") == "LLM" and not is_stub(str((d.get("params") or {}).get("model", "")))]
 
 
 def play_schedule(*args, **kwargs):  # indirection: tests replace the harness
@@ -390,14 +406,23 @@ def paired(a: EvalRecord, b: EvalRecord, *, slot_a: int = 0, slot_b: int = 0) ->
 
 
 def verify(record: EvalRecord | str | Path, *, games: int | None = 16, device: str | None = None,
-           num_envs: int | None = None, threads: int | None = None) -> dict:
+           num_envs: int | None = None, threads: int | None = None, force: bool = False) -> dict:
     """Replay the first ``games`` games with this code and machine; count identical rows.
 
     The suite and agents are rebuilt from the record's key; inputs that no
     longer resolve to that key (other weights at a path, an edited game) raise.
+    A record with a real language model in its lineup is refused
+    (:class:`Unreplayable`) unless ``force``: it never replays identically and
+    every replayed game is paid for.
     """
     if not isinstance(record, EvalRecord):
         record = EvalRecord.load(record)
+    if (slots := real_llm_slots(record.key)) and not force:
+        labels = record.data.get("labels") or []
+        names = ", ".join(labels[s] if s < len(labels) else f"slot {s}" for s in slots)
+        raise Unreplayable(f"{record.eval_id}: {names} is a real language model, which never replays identically, "
+                           "and every replayed game is paid for; catanrl verify --force (verify(force=True)) "
+                           "spends it anyway")
     data, suite = record.data, record.suite()
     agents, fill_agent = _resolve(data["specs"], suite, data.get("fill"), record.key["harness"])
     rebuilt = eval_key(agents, suite, harness=record.key["harness"], fill=fill_agent)

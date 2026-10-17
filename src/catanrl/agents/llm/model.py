@@ -74,20 +74,36 @@ DEFAULT_SCRIPT = (
 )
 
 
+#: The notes line of the ``first`` and ``random`` stubs (a real model's is longer: ``notes_chars``).
+STUB_NOTES = {"first": "Taking the first option.", "random": "Picking at random."}
+_FILLER = "I weigh the options and keep the one that improves my production and position the most. "
+
+
+def pad_notes(line: str, chars: int) -> str:
+    """``line`` lengthened with filler to exactly ``chars`` characters (a stub's note is a few
+    words; a real model's one-line note, shown in every later prompt, is a sentence or two)."""
+    if len(line) >= chars:
+        return line
+    return (line + " " + _FILLER * (chars // len(_FILLER) + 1))[:chars]
+
+
 class StubModel:
     """A model that answers from the prompt's action list without a network.
 
     ``first`` answers 0, ``random`` a legal index from its own RNG (seeded, so
     games replay), ``scripted`` the next entry of its script (the default one
     exercises every parsing path). Each reply ends with a notes line and the
-    index, as the prompt asks."""
+    index, as the prompt asks; ``notes_chars`` pads the notes line of ``first``
+    and ``random`` to a real model's length (``catanrl llm-cost``)."""
 
-    def __init__(self, kind: str, *, seed: int = 0, script: Sequence[str] | None = None) -> None:
+    def __init__(self, kind: str, *, seed: int = 0, script: Sequence[str] | None = None,
+                 notes_chars: int = 0) -> None:
         if kind not in STUB_KINDS:
             raise LLMError(f"unknown stub {kind!r}; one of {', '.join(STUB_PREFIX + k for k in STUB_KINDS)}")
         self.kind = kind
         self.rng = random.Random(seed)
         self.script = list(script if script is not None else DEFAULT_SCRIPT)
+        self.notes_chars = int(notes_chars)
         self.cursor = 0
         self.calls = 0
 
@@ -104,9 +120,9 @@ class StubModel:
         self.calls += 1
         n = max(1, self.count_actions(messages))
         if self.kind == "first":
-            text = "Taking the first option.\n0"
+            text = f"{pad_notes(STUB_NOTES['first'], self.notes_chars)}\n0"
         elif self.kind == "random":
-            text = f"Picking at random.\n{self.rng.randrange(n)}"
+            text = f"{pad_notes(STUB_NOTES['random'], self.notes_chars)}\n{self.rng.randrange(n)}"
         else:
             text = self.script[self.cursor % len(self.script)].format(last=n - 1)
             self.cursor += 1
@@ -161,10 +177,13 @@ class OpenRouterModel:
                      completion_tokens=estimate_tokens(text), estimated=True)
 
 
-def make_model(model: str, *, seed: int = 0, script: Sequence[str] | None = None) -> Any:
-    """A client for ``model``: a stub (``stub/<kind>``), else OpenRouter."""
+def make_model(model: str, *, seed: int = 0, script: Sequence[str] | None = None, notes_chars: int = 0) -> Any:
+    """A client for ``model``: a stub (``stub/<kind>``; ``script`` and ``notes_chars`` are its
+    options), else OpenRouter."""
     if is_stub(model):
-        return StubModel(model[len(STUB_PREFIX):], seed=seed, script=script)
+        return StubModel(model[len(STUB_PREFIX):], seed=seed, script=script, notes_chars=notes_chars)
+    if script is not None or notes_chars:
+        raise LLMError(f"{model}: script and notes_chars are options of the stubs")
     return OpenRouterModel(model)
 
 
