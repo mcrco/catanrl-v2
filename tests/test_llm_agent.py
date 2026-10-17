@@ -327,3 +327,60 @@ def test_llm_eval_stub_cells_smoke(monkeypatch, tmp_path):
     v = plan.variant("stub-basic-policy")
     assert run_variant(v, argv=["test"]) == "finished"
     assert not _missing_finals(load_experiment(v.ref), v)
+
+
+# ---------------------------------------------------------------- the real client, without a network
+
+
+def test_openrouter_client_reads_usage_and_asks_for_reasoning(monkeypatch):
+    """The SDK call shape and the usage fields, against a fake client (no request is made)."""
+    from types import SimpleNamespace
+
+    pytest.importorskip("openai")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    model = OpenRouterModel("vendor/model", api_key="not-a-key")
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        message = SimpleNamespace(content="thinking aloud\nnotes\n3", reasoning="private chain")
+        usage = SimpleNamespace(prompt_tokens=1234, completion_tokens=56)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=usage)
+
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+    reply = model.complete(messages, max_tokens=1000, temperature=0.2, seed=7, thinking=True)
+    assert (reply.text, reply.reasoning, reply.prompt_tokens, reply.completion_tokens, reply.estimated) == \
+        ("thinking aloud\nnotes\n3", "private chain", 1234, 56, False)
+    (call,) = calls
+    assert call["model"] == "vendor/model" and call["messages"] == messages and call["seed"] == 7
+    assert call["max_tokens"] == 1000 and call["temperature"] == 0.2
+    assert call["extra_body"] == {"reasoning": {"max_tokens": 750}}
+    model.complete(messages, max_tokens=1000, temperature=0.2, seed=0, thinking=False)
+    assert calls[1]["extra_body"] == {"reasoning": {"enabled": False}} and "seed" not in calls[1]
+
+    def no_usage(**kwargs):
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="2"))], usage=None)
+
+    model.client.chat.completions.create = no_usage
+    reply = model.complete(messages, max_tokens=10, temperature=0.0, seed=0, thinking=False)
+    assert reply.estimated and reply.prompt_tokens == estimate_tokens("su") and reply.completion_tokens == 1
+    player = LlmPlayer(Color.RED, LlmPlayer.Params(model="vendor/model"), model=model)
+    game = two_player_game(player, REGISTRY.build("R", Color.BLUE))
+    assert player.decide(game, game.playable_actions) is game.playable_actions[2]
+    assert player.stats["prompt_tokens"] > 1000 and player.stats["estimated"] and not player.stats["fallbacks"]
+
+
+def test_transcripts_are_saved_when_asked(monkeypatch, tmp_path):
+    suite = load_suite(SUITE)
+    lineup = [resolve_agent("LLM:model=stub/first:strategy=basic", harness="catanatron"),
+              resolve_agent("R", harness="catanatron")]
+    games = suite.schedule(2)[:1]
+    monkeypatch.setenv("CATANRL_LLM_TRANSCRIPTS", str(tmp_path / "t"))
+    rows = []
+    play_catanatron(lineup, games, suite=suite, on_game=rows.append)
+    (path,) = list((tmp_path / "t").glob("*.jsonl"))
+    assert path.name == f"{games[0].game_id}.s0.jsonl"
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(entries) == rows[0]["llm"][0]["decisions"]
+    assert entries[0]["exchanges"][0]["index"] == 0 and "=== AVAILABLE ACTIONS ===" in entries[0]["prompt"]
