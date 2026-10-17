@@ -15,6 +15,10 @@ mode. :meth:`Checkpoint.model` runs, in order:
 
 ``allow_drift`` skips 4 and 5; it is recorded on the model and in every
 agent spec and eval key that uses it, and the report refuses those.
+
+A recurrent network's positions are single decisions, so its self-test pins
+the zero-state function (``model(obs)``: the network at a seat's first
+decision); the recurrent state itself is rollout-only and never saved.
 """
 
 from __future__ import annotations
@@ -374,9 +378,17 @@ class Checkpoint:
 
     @property
     def dims_agnostic(self) -> bool:
-        from catanrl.models import GraphModel, MlpModel
+        from catanrl.models import MODEL_CLASSES
 
-        return {"graph": GraphModel, "mlp": MlpModel}[self.header["model"]["class"]].dims_agnostic
+        return MODEL_CLASSES[self.header["model"]["class"]].dims_agnostic
+
+    @property
+    def recurrent(self) -> bool:
+        """A network with a per-row state between decisions (class ``lstm``); its
+        self-test pins the zero-state function on single positions."""
+        from catanrl.models import MODEL_CLASSES
+
+        return MODEL_CLASSES[self.header["model"]["class"]].recurrent
 
     def self_test(self, *, allow_drift: bool = False, part: str = "all") -> None:
         """Checks 2, 4 and 5 (check 1 ran at load; 3 needs target dims)."""

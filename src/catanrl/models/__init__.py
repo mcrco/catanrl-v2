@@ -15,7 +15,11 @@ illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
 = the row's own seat, absent seats 0). Classes:
 
 * ``graph``: :mod:`catanrl.models.graph` (dims-agnostic);
-* ``mlp``: :mod:`catanrl.models.mlp` (padded dims only).
+* ``mlp``: :mod:`catanrl.models.mlp` (padded dims only);
+* ``lstm``: :mod:`catanrl.models.lstm` (dims-agnostic, recurrent: the graph
+  trunk with an LSTM over the seat's own decisions). Its stateless
+  ``forward`` / ``heads`` is the zero-state function; ``step`` threads the
+  state.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ from catanrl.envs.encoding import (
     row_size,
 )
 from catanrl.models.graph import GRAPH_DEFAULTS, GraphNetwork
+from catanrl.models.lstm import LSTM_DEFAULTS, LstmNetwork
 from catanrl.models.mlp import MLP_DEFAULTS, FlatNetwork
 from catanrl.models.rows import (
     RowReader,
@@ -49,9 +54,9 @@ from catanrl.models.rows import (
 )
 
 MODEL_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "models"
-CLASSES: dict[str, dict[str, Any]] = {"graph": GRAPH_DEFAULTS, "mlp": MLP_DEFAULTS}
+CLASSES: dict[str, dict[str, Any]] = {"graph": GRAPH_DEFAULTS, "mlp": MLP_DEFAULTS, "lstm": LSTM_DEFAULTS}
 
-__all__ = ["CatanModel", "build_model", "load_preset", "normalize_levels", "resolve_spec"]
+__all__ = ["MODEL_CLASSES", "CatanModel", "build_model", "load_preset", "normalize_levels", "resolve_spec"]
 
 
 def load_preset(name: str) -> dict[str, Any]:
@@ -106,11 +111,19 @@ def normalize_levels(levels: Mapping[str, Any] | str) -> dict[str, str]:
 
 
 class CatanModel(nn.Module):
-    """Base of the networks: spec, parts and the row contract."""
+    """Base of the networks: spec, parts and the row contract.
+
+    A recurrent network (``recurrent = True``) carries a state of
+    ``hidden_size`` floats per row between a seat's decisions, through
+    ``initial_state`` and ``step``; its stateless ``forward`` / ``heads`` is
+    the zero-state function (what the checkpoint self-test pins).
+    """
 
     spec: dict[str, Any]
     dims_agnostic: bool
     parts: dict[str, list[str]]
+    recurrent: bool = False
+    hidden_size: int = 0
 
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__()
@@ -257,6 +270,74 @@ class MlpModel(CatanModel):
         return self.critic(obs).float() + value_prior(present), present
 
 
+class LstmModel(CatanModel):
+    """One graph trunk, an LSTM cell over its pooled embedding, both heads
+    (:mod:`catanrl.models.lstm`)."""
+
+    dims_agnostic = True
+    recurrent = True
+
+    def __init__(self, spec, dims, levels, layout) -> None:
+        super().__init__(spec, dims, levels, layout)
+        if self.has_critic_block:
+            raise ValueError("an lstm network has one trunk for both heads and cannot read a separate critic level")
+        canonical = canonical_feature_names()
+        names = feature_names(dims, levels["level"])
+        action_layout = make_encoder(dims, levels["level"]).action_space.layout()
+        reader = RowReader(layout, names, canonical=canonical)
+        self.present_index = reader.feature("players", "present")
+        self.net = LstmNetwork(reader, action_layout, args=spec["args"], num_players=self.num_players)
+        self.hidden_size = self.net.hidden_size
+        self.parts = {"actor": ["net.trunk.", "net.cell.", "net.inject.", "net.policy."], "critic": ["net.value."]}
+        self.shared = True
+
+    def _present(self, rows) -> torch.Tensor:
+        return rows.players[:, : self.num_players, self.present_index]
+
+    # ---------------------------------------------------------- recurrent API
+
+    def initial_state(self, rows: int, device=None) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.net.initial_state(rows, device)
+
+    def embed(self, obs: torch.Tensor):
+        """The trunk's embeddings and the rows (shared by ``remember`` and ``decode``)."""
+        return self.net.embed(obs)
+
+    def remember(self, pooled: torch.Tensor, h: torch.Tensor, c: torch.Tensor):
+        return self.net.remember(pooled, h, c)
+
+    def decode(self, emb, rows, h: torch.Tensor):
+        """(masked logits, value logits, present) from embeddings and a memory."""
+        present = self._present(rows)
+        logits, values = self.net.decode(emb, rows, h, present)
+        return logits, values, present
+
+    def step(self, obs: torch.Tensor, h: torch.Tensor, c: torch.Tensor):
+        """One decision per row from state ``(h, c)``: (masked logits, value logits,
+        present, h', c')."""
+        emb, rows = self.embed(obs)
+        h, c = self.remember(emb.pooled, h, c)
+        logits, values, present = self.decode(emb, rows, h)
+        return logits, values, present, h, c
+
+    # ---------------------------------------------------------- stateless (zero state)
+
+    def heads(self, obs):
+        h, c = self.initial_state(obs.shape[0], obs.device)
+        logits, values, present, _, _ = self.step(obs, h, c)
+        return logits, values, present
+
+    def policy_logits(self, obs):
+        return self.heads(obs)[0]
+
+    def value_logits(self, obs):
+        _, values, present = self.heads(obs)
+        return values, present
+
+
+MODEL_CLASSES: dict[str, type[CatanModel]] = {"graph": GraphModel, "mlp": MlpModel, "lstm": LstmModel}
+
+
 def build_model(
     spec: Mapping[str, Any],
     *,
@@ -281,5 +362,4 @@ def build_model(
     expected_actions = expected["action_mask"][1][0]
     if int(num_actions) != expected_actions:
         raise ValueError(f"num_actions {num_actions} != the action space's {expected_actions}")
-    cls = {"graph": GraphModel, "mlp": MlpModel}[spec["class"]]
-    return cls(spec, dims, levels, expected)
+    return MODEL_CLASSES[spec["class"]](spec, dims, levels, expected)

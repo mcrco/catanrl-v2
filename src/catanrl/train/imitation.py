@@ -224,6 +224,8 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
     _seed_everything(_derive_seed(seed, "init"))
     model = build_policy_model(cfg, plan.dims)
     check_bindable(model, plan)
+    if getattr(model, "recurrent", False):
+        raise ValueError("train.algo: imitation evaluates single positions; a recurrent network trains with ppo")
     if cfg.get("init_from") and getattr(writer, "mode", "new") == "new":
         from catanrl.checkpoint import load_parts
 

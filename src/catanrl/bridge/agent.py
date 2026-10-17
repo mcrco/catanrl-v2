@@ -160,6 +160,9 @@ class ViewAgent:
         if fair is False:
             raise UnfairAgent(f"{self.label} is not fair on views (DESIGN 6.5)")
         check_fair(self.native)
+        if getattr(self.native, "recurrent", False):
+            raise BridgeError(f"{self.label}: a recurrent network needs its seat's decision history, which the "
+                              "server bridge does not replay")
         self.supply = supply
         self.strict = strict
         self.seed_fn = seed_fn

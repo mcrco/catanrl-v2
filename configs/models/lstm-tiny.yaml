@@ -1,0 +1,4 @@
+# A tiny recurrent graph network for tests and smoke runs.
+preset: lstm-tiny
+class: lstm
+args: {hidden: 16, global_hidden: 8, layers: 1, head_hidden: 16, lstm_hidden: 8}

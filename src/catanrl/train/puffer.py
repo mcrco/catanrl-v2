@@ -74,8 +74,13 @@ def rollout_bytes(rows: int, horizon: int, obs_size: int) -> int:
 
 
 def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows: int, seed: int,
-                  data_dir: str, strict: bool = False) -> dict[str, Any]:
-    """PuffeRL's config: the ``train`` section minus catanrl's keys, plus the runner's."""
+                  data_dir: str, strict: bool = False, recurrent: bool = False) -> dict[str, Any]:
+    """PuffeRL's config: the ``train`` section minus catanrl's keys, plus the runner's.
+
+    ``recurrent`` (the model's) sets ``use_rnn``: the training forward then
+    sees segments x horizon, and PuffeRL sizes its (unused) state dict by
+    the policy's ``hidden_size``.
+    """
     config = {key: value for key, value in train.items() if key not in CATANRL_TRAIN_KEYS}
     clash = RUNNER_KEYS & set(config)
     if clash:
@@ -85,7 +90,7 @@ def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows:
         seed=int(seed),
         env="catan",
         data_dir=str(data_dir),
-        use_rnn=False,
+        use_rnn=bool(recurrent),
         torch_deterministic=bool(strict),
         cpu_offload=False,
         # runtime.compile compiles the network inside PufferPolicy; PuffeRL's own compile
@@ -222,6 +227,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
         start = time.time()
         steps, env = self.global_step, self.vecenv.envs[0]
         decisions = env.decisions
+        self.uncompiled_policy.begin_rollout()
         self.evaluate()
         collected = time.time()
         self.decisions += env.decisions - decisions
@@ -380,7 +386,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)),
                           critic_gamma=critic_gamma)
     config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
-                           data_dir=str(getattr(writer, "path", ".")), strict=strict)
+                           data_dir=str(getattr(writer, "path", ".")), strict=strict, recurrent=policy.recurrent)
     buffer = rollout_bytes(vecenv.num_agents, config["bptt_horizon"], vecenv.single_observation_space.shape[0])
     if device.startswith("cuda") and buffer > torch.cuda.get_device_properties(device).total_memory:
         raise ValueError(f"the rollout buffer needs {buffer / 2**30:.1f} GiB: lower env.num_envs or "

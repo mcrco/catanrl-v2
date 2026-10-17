@@ -19,7 +19,13 @@ unchanged), then ``act(rows, masks, decision_seeds, games=..., trackers=...)``
 per batch of decisions, returning indices into the
 ``GraphActionSpace`` of those dims. ``rows`` are encoded at ``agent.level``;
 agents with ``needs_games`` also get copies of the games, and those with
-``needs_trackers`` the deciding seats' hand trackers.
+``needs_trackers`` the deciding seats' hand trackers. A recurrent POLICY
+(``needs_memory``) also gets ``streams`` (an id per row that is stable for
+one seat of one game, e.g. ``env * max_players + seat``) and ``first``
+(whether this is that seat's first decision of the game): its memory is the
+sequence of a seat's own decisions, zero at the first, so rows are the same
+whatever env slot a game plays in. MCTS and BELIEF refuse a recurrent
+network: a leaf or a sampled world has no decision history of its own.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ class NativeAgent:
     key = "NATIVE"
     needs_games = False
     needs_trackers = False
+    needs_memory = False
 
     def __init__(self, model: CatanModel, params: Any, *, device: str, infer_rows: int,
                  mode: str = "strict", heads: str = "both") -> None:
@@ -63,6 +70,10 @@ class NativeAgent:
         self._spec = model.spec
         self._levels = dict(model.levels)
         self.dims_agnostic = model.dims_agnostic
+        self.recurrent = bool(getattr(model, "recurrent", False))
+        if self.recurrent and not self.needs_memory:
+            raise ValueError(f"{self.key} cannot play a recurrent network (class {model.spec['class']}): "
+                             "only POLICY keeps a seat's decision history")
         if critic_level_of(self.level, model.levels["critic_level"]) is not None and heads == "policy":
             # Decisions read only the actor: drop the critic block (it has the players block's
             # width, so the same weights load) and play from actor-level rows. Searches keep it:
@@ -101,7 +112,8 @@ class NativeAgent:
 
     def act(self, rows: np.ndarray, masks: np.ndarray, decision_seeds: np.ndarray, *,
             games: Sequence[cpp.Game] | None = None,
-            trackers: Sequence[cpp.HandTracker | None] | None = None) -> np.ndarray:
+            trackers: Sequence[cpp.HandTracker | None] | None = None,
+            streams: np.ndarray | None = None, first: np.ndarray | None = None) -> np.ndarray:
         raise NotImplementedError
 
 
@@ -124,13 +136,43 @@ class PolicyAgent(NativeAgent):
     key = "POLICY"
 
     def __init__(self, model, params, *, device, infer_rows, mode="strict") -> None:
+        self.needs_memory = bool(getattr(model, "recurrent", False))
         super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="policy")
         self.sample = bool(_param(params, "sample", False))
         self.temperature = float(_param(params, "temperature", 1.0))
+        #: stream id -> (h, c) after the seat's last decision; entries of finished games are
+        #: overwritten at the next game's first decision in that stream.
+        self._memory: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
-    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None):
-        logits, _ = self.evaluator(rows)
+    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
+        if not self.needs_memory:
+            logits, _ = self.evaluator(rows)
+        else:
+            logits = self._recall(rows, streams, first)
         return _choose(logits, masks, decision_seeds, sample=self.sample, temperature=self.temperature)
+
+    def _recall(self, rows: np.ndarray, streams, first) -> np.ndarray:
+        """Decide from each row's memory and keep the stepped memory."""
+        if streams is None or first is None:
+            raise ValueError("POLICY with a recurrent network decides from streams and first (its rows' memory)")
+        streams = np.asarray(streams, dtype=np.int64).reshape(-1)
+        first = np.asarray(first, dtype=bool).reshape(-1)
+        if len(streams) != len(rows) or len(first) != len(rows):
+            raise ValueError("streams and first need one entry per row")
+        if len(set(streams.tolist())) != len(streams):
+            raise ValueError("a stream decides once per batch")
+        size = self.evaluator.hidden_size
+        h = np.zeros((len(rows), size), dtype=np.float32)
+        c = np.zeros((len(rows), size), dtype=np.float32)
+        for i, (stream, fresh) in enumerate(zip(streams.tolist(), first.tolist())):
+            if not fresh:
+                if stream not in self._memory:
+                    raise ValueError(f"stream {stream} has no memory: its first decision was not marked first")
+                h[i], c[i] = self._memory[stream]
+        logits, _, h, c = self.evaluator.step(rows, h, c)
+        for i, stream in enumerate(streams.tolist()):
+            self._memory[stream] = (h[i].copy(), c[i].copy())
+        return logits
 
 
 class BeliefAgent(NativeAgent):
@@ -145,7 +187,7 @@ class BeliefAgent(NativeAgent):
         if self.worlds < 1 or self.aggregate not in ("mean_prob", "mean_logit"):
             raise ValueError("BELIEF needs worlds >= 1 and aggregate mean_prob or mean_logit")
 
-    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None):
+    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
         if games is None or trackers is None:
             raise ValueError("BELIEF decides from games and hand trackers")
         k = self.worlds
@@ -188,7 +230,7 @@ class MctsAgent(NativeAgent):
         self.config.max_players = int(self.dims["max_players"])
         self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"])
 
-    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None):
+    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
         if games is None:
             raise ValueError("MCTS searches from games")
         if self.needs_trackers and trackers is None:
@@ -214,6 +256,8 @@ class BotAgent:
 
     needs_games = False
     needs_trackers = False
+    needs_memory = False
+    recurrent = False
 
     def __init__(self, key: str, params: Any = None) -> None:
         if key not in ("F", "R"):

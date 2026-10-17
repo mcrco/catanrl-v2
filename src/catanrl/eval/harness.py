@@ -10,6 +10,9 @@ on ``num_envs``, ``threads`` or the order games finish in:
   with ``ply`` the seat's own decision count;
 * networks evaluate in strict mode: every forward is padded to
   ``infer_rows`` rows, so a row's outputs do not depend on its batch;
+* a recurrent network's memory is per seat of a game, zero at its first
+  decision (``streams`` and ``first`` of ``act``), so it does not depend on
+  which env slot the game plays in;
 * the dims (and so every network's shapes) come from the scenarios'
   generator bounds, not from the games being played.
 
@@ -227,16 +230,22 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
                 rows = np.stack([agent.encode(g, int(s)) for g, s in zip(games_list, seats)])
             else:
                 rows = buffers["observations"][rows_idx]
-            seeds = []
+            seeds, first = [], []
             for e, s in zip(envs, seats):
                 scheduled, decisions = running[int(e)]
                 seeds.append(_derive_seed(int(scheduled.game_seed), "decide", int(scheduled.rotation), int(s),
                                           decisions[int(s)]))
+                first.append(decisions[int(s)] == 0)
                 decisions[int(s)] += 1
             seat_trackers = ([vec.tracker(int(e), int(s)) for e, s in zip(envs, seats)]
                              if agent.needs_trackers else None)
+            # A recurrent agent's memory stream is the row (env x seat): it is reset at the
+            # seat's first decision, so which env a game plays in does not matter.
+            memory = ({"streams": rows_idx.astype(np.int64), "first": np.array(first, dtype=bool)}
+                      if getattr(agent, "needs_memory", False) else {})
             choices = agent.act(rows, rows[:, -size:], np.array(seeds, dtype=np.uint64),
-                                games=games_list if agent.needs_games else None, trackers=seat_trackers)
+                                games=games_list if agent.needs_games else None, trackers=seat_trackers,
+                                **memory)
             buffers["actions"][rows_idx] = np.asarray(choices, dtype=np.int32)
         vec.step()
         collect()
