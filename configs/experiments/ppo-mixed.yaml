@@ -1,0 +1,80 @@
+# One network for 2, 3 and 4 players (report: "training one model for up to n
+# players and arbitrary maps"): ppo-4p's recipe, with the VecEnv drawing each
+# game from six scenarios of equal weight: 2, 3 and 4 players on BASE and on
+# `hexagon` boards (the BASE shape with shuffled numbers and generated harbors).
+# Every board here has 19 tiles, so the rows are ppo-4p's (3202 floats at
+# max_players 4) and the run costs what ppo-4p did (about 10 h). Blob-shaped
+# boards (random-4p: 15-30 tiles) would double the row and the memory, so they
+# are held out: heldout-random-4p measures zero-shot generalization to shapes
+# the network never trained on. A mixture that trains on them is the follow-up
+# if that number is poor.
+#
+# The row stays seat-relative and padded (a 2p game has two absent player
+# slots, zero everywhere), the global block one-hots the number of seats, and
+# the per-seat value head predicts a win probability for every present seat.
+# The per-decision budget is ppo-4p's: 1024 games x 64 steps = 65,536 decisions
+# per epoch, 3800 epochs, so it can be compared with ppo-4p (same decisions) on
+# heldout-4p and with puffer-graph2's belief-averaged policy on heldout-2p.
+name: ppo-mixed
+seed: 42
+env:
+  scenarios:
+    - {game: base-2p, turn_limit: 1000, maps: 2048}
+    - {game: base-3p, turn_limit: 1000, maps: 2048}
+    - {game: base-4p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-2p, num_players: 2, map: {type: hexagon, radius: 2}, victory_points_to_win: 15, discard_limit: 9},
+       turn_limit: 1000, maps: 2048}
+    - {game: hexagon-3p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-4p, num_players: 4, map: {type: hexagon, radius: 2}}, turn_limit: 1000, maps: 2048}
+  num_envs: 1024
+obs: {level: private}           # the only fair level past two players
+model: {preset: graph-s, args: {shared: true}}
+train:
+  algo: ppo
+  total_timesteps: 996_147_200    # agent steps over 4 row slots: 3800 epochs x 262,144, as ppo-4p
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95
+  adam_beta2: 0.999
+  adam_eps: 1.0e-12
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2
+  ent_coef: 0.005
+  max_grad_norm: 4.0
+  bptt_horizon: 64
+  minibatch_size: 32768
+  max_minibatch_size: 4096
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+eval:
+  # slot 0's score rate against F in every seat of 2p, 3p and 4p BASE games (a win 1, a
+  # truncation 1/N); parity is 0.5 / 0.33 / 0.25 by player count, so the number is only
+  # comparable with itself across checkpoints
+  select: {suite: select-mixed, lineup: ["POLICY:ckpt=${self}", F], fill: F, every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", F, F, F]}
+    - {suite: heldout-mixed, lineup: ["POLICY:ckpt=${run}@best", F], fill: F}
+    # zero-shot: blob-shaped boards of 15-30 tiles never seen in training
+    - {suite: heldout-random-4p, lineup: ["POLICY:ckpt=${run}@best", F, F, F]}
+    # against the specialists, head to head on their own games (F fills the other seats)
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=ppo-4p/main@best", F, F]}
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "BELIEF:ckpt=puffer-graph2/full@best:worlds=16"]}
+meta:
+  recipe: ppo-4p
+  notes: |
+    Report idea: one model for up to n players and arbitrary maps. First run: 2-4 players,
+    19-tile boards (BASE and shuffled-number hexagons), zero-shot on blob shapes.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

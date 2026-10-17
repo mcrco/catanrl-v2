@@ -1,0 +1,8 @@
+# Checkpoint selection for mixtures of player counts: 2, 3 and 4 players on BASE,
+# 100 boards each, every board in every seat rotation (900 games). Lineups shorter
+# than a game's seats need fill (e.g. fill: F).
+purpose: select
+seed: 126
+boards: 100
+scenarios: [{game: base-2p}, {game: base-3p}, {game: base-4p}]
+turn_limit: 500
