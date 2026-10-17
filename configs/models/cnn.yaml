@@ -1,0 +1,8 @@
+# v1's cross-dimensional CNN (Gendre and Kaneko, arXiv 2008.07079) at the size
+# of v1's arch-ablation `xdim-default`: about 16.8M parameters per network,
+# 15.1M of them in the projection of the convolution output. BASE board only
+# (not dims-agnostic). v1's D-S size is channels [32, 64, 64] with hidden 1024,
+# D-M is hidden 2048; norm: batch restores v1's BatchNorm.
+preset: cnn
+class: cnn
+args: {channels: [64, 128, 128], kernel: [3, 5], hidden: 512, numeric_layers: 2, norm: group, shared: false}

@@ -21,3 +21,13 @@ def test_networks_must_be_bindable_by_evals(preset, dims, ok):
     else:
         with pytest.raises(ValueError, match="dims-agnostic"):
             check_bindable(model, plan)
+
+
+def test_cnn_trains_on_base_pools_only():
+    """The cnn lays the BASE board on a plane: a random-map pool is refused at build time."""
+    cfg = {"model": {"preset": "cnn-tiny"}, "obs": {"level": "private"}}
+    plan = plan_env({"scenarios": [{"game": "random-4p", "maps": 8}], "dims": "auto"}, pool_seed=3)
+    with pytest.raises(ValueError, match="BASE"):
+        build_policy_model(cfg, plan.dims)
+    plan = plan_env({"scenarios": [{"game": "base-4p", "maps": 2}], "dims": "auto"}, pool_seed=3)
+    check_bindable(build_policy_model(cfg, plan.dims), plan)
