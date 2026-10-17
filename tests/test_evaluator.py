@@ -1,5 +1,6 @@
-"""The batched evaluator: CUDA graphs agree with eager, strict rows do not
-depend on their batch, and fast mode pads to powers of two."""
+"""The batched evaluator: CUDA graphs agree with eager (and, emulated on CPU,
+replay what the static inputs hold), strict rows do not depend on their
+batch, and fast mode pads to powers of two."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from catanrl import games
 from catanrl.search import BatchEvaluator
 
 MODEL = tiny_model(["base-2p"], level="full", seed=2, preset="graph-s")
+LSTM = tiny_model(["base-2p"], level="full", seed=2, preset="lstm-tiny")
 
 
 def rows(count=24, seed=0):
@@ -47,17 +49,67 @@ def test_values_are_probabilities_and_logits_masked():
     assert np.all((values > 0) & (values < 1))
 
 
-@pytest.mark.gpu
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-@pytest.mark.parametrize("mode", ["fast", "strict"])
-def test_cuda_graphs_match_eager(mode):
-    graphed = BatchEvaluator(MODEL, device="cuda", infer_rows=16, mode=mode, cuda_graphs=True)
-    eager = BatchEvaluator(MODEL, device="cuda", infer_rows=16, mode=mode, cuda_graphs=False)
-    for n in (1, 5, 16, 24):
+def memories(n: int, seed: int = 3) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    return tuple(rng.standard_normal((n, LSTM.hidden_size), dtype=np.float32) for _ in range(2))
+
+
+def check_graphs_match_eager(graphed: BatchEvaluator, eager: BatchEvaluator) -> None:
+    """Padded and chunked batches match; a recurrent step threads the memory; and a
+    stateless call after a step is the zero-state function, not the last step's memory."""
+    for n in (1, 5, 8, 24):
         g_logits, g_values = graphed(ROWS[:n])
         e_logits, e_values = eager(ROWS[:n])
         assert np.allclose(g_logits, e_logits, atol=1e-4) and np.allclose(g_values, e_values, atol=1e-5)
         assert np.array_equal(g_logits.argmax(1), e_logits.argmax(1))
+    if not graphed.recurrent:
+        return
+    h, c = memories(24)
+    for n in (5, 24):
+        for g, e in zip(graphed.step(ROWS[:n], h[:n], c[:n]), eager.step(ROWS[:n], h[:n], c[:n])):
+            assert np.allclose(g, e, atol=1e-4)
+    stateless = graphed(ROWS[:5])
+    zero = eager.step(ROWS[:5], np.zeros_like(h[:5]), np.zeros_like(c[:5]))
+    assert np.allclose(stateless[0], zero[0], atol=1e-4) and np.allclose(stateless[1], zero[1], atol=1e-5)
+
+
+def emulate_graphs(evaluator: BatchEvaluator, monkeypatch) -> BatchEvaluator:
+    """Run the CUDA-graph path on CPU: a captured graph is a replay that recomputes
+    the static outputs from whatever the static inputs hold at the time."""
+
+    def capture(forward):
+        outputs = tuple(out.clone() for out in forward())
+
+        class Graph:
+            def replay(self):
+                for target, out in zip(outputs, forward()):
+                    target.copy_(out)
+
+        return Graph(), outputs
+
+    monkeypatch.setattr(evaluator, "_capture", capture)
+    evaluator.use_graphs = True
+    return evaluator
+
+
+@pytest.mark.parametrize("model", [MODEL, LSTM], ids=["graph", "lstm"])
+def test_graph_replays_read_their_static_inputs(model, monkeypatch):
+    """The graph path emulated on CPU (fast mode, so the buckets pad and chunk)."""
+    graphed = emulate_graphs(BatchEvaluator(model, device="cpu", infer_rows=8, mode="fast"), monkeypatch)
+    eager = BatchEvaluator(model, device="cpu", infer_rows=8, mode="fast", cuda_graphs=False)
+    check_graphs_match_eager(graphed, eager)
+    assert sorted(graphed._graphs) == [1, 8]
+    assert len(graphed._graphs[8][1]) == (3 if model.recurrent else 1)  # rows (, h, c) static inputs
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("model", [MODEL, LSTM], ids=["graph", "lstm"])
+@pytest.mark.parametrize("mode", ["fast", "strict"])
+def test_cuda_graphs_match_eager(model, mode):
+    graphed = BatchEvaluator(model, device="cuda", infer_rows=16, mode=mode, cuda_graphs=True)
+    eager = BatchEvaluator(model, device="cuda", infer_rows=16, mode=mode, cuda_graphs=False)
+    check_graphs_match_eager(graphed, eager)
 
 
 @pytest.mark.gpu

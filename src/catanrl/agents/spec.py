@@ -225,6 +225,16 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
     pinned = str(ref)  # run@eN#sha, or /abs/path.pt#sha
     params = dataclasses.replace(params, ckpt=pinned)
     levels, dims = ckpt.levels, ckpt.dims
+    if ckpt.recurrent:
+        # A recurrent network's memory is its seat's decision history: only the native
+        # POLICY agent keeps one (MCTS leaves and BELIEF worlds have none, and the Catanatron
+        # and server bridges do not replay a seat's decisions yet).
+        if key != "POLICY":
+            raise SpecError(f"{key}: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only POLICY "
+                            "keeps a seat's decision history")
+        if harness != "native":
+            raise SpecError(f"POLICY: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only the "
+                            "native harness keeps a seat's decision history")
     configs = [g if hasattr(g, "num_players") else load_game(g) for g in games]
     if configs and not ckpt.dims_agnostic and dims_for(configs) != dims:
         raise SpecError(f"{key}: {ref} is a {ckpt.header['model']['class']} network at dims {dims}; "
@@ -311,7 +321,11 @@ class CatanrlPlayer(Player):
             self._resolved = resolve_agent({"key": self.KEY, "params": dataclasses.asdict(self.params)},
                                            harness="catanatron")
         if self._native is None:
-            self._native = self._resolved.native(infer_rows=1)
+            native = self._resolved.native(infer_rows=1)
+            if getattr(native, "recurrent", False):
+                raise RuntimeError(f"{self.KEY}: a recurrent network needs its seat's decision history, which "
+                                   "the Catanatron player does not replay")
+            self._native = native
         return self._native
 
     def reset_state(self) -> None:

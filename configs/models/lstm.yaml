@@ -1,0 +1,7 @@
+# The graph-s trunk with memory (catanrl.models.lstm): one shared trunk, an
+# LSTM cell over its pooled embedding stepped at each of the seat's own
+# decisions, and the structured policy and per-seat value heads with the
+# memory injected into their inputs. About 0.9M parameters.
+preset: lstm
+class: lstm
+args: {hidden: 96, global_hidden: 64, layers: 3, head_hidden: 128, lstm_hidden: 128}

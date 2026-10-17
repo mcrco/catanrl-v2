@@ -180,6 +180,18 @@ GNN plugs straight into search (`MCTS:ckpt=…:sims=…`).
   hexagon generator against BASE) by `CnnModel.check_maps`, which training
   (`check_bindable`), the eval harness and the bridge run over their maps
   before playing. `MODEL_CLASSES` in `catanrl.models` is the table.
+* `lstm` – the graph trunk with memory: one shared trunk, an LSTM cell over
+  its pooled embedding stepped at each of the seat's own decisions (waiting
+  rows keep their state; a game's first decision starts from zero), the
+  memory injected into both heads' inputs. The stateless `forward` is the
+  zero-state function (what the checkpoint self-test pins); the state is
+  rollout-only and never checkpointed. PPO trains it through PufferLib's
+  `use_rnn` path (segments x horizon, each segment from its stored rollout
+  state, resets at terminals, as CleanRL's PPO-LSTM); the native `POLICY`
+  agent keeps one memory stream per seat of a game, so eval rows stay
+  invariant to `num_envs`. MCTS, BELIEF and the Catanatron/server bridges
+  refuse it (a leaf, a sampled world or a replayed view has no decision
+  history of its own yet).
 
 Heads: structured policy (above) and a per-seat value head (P sigmoids). A
 checkpoint stores the network config and the observation spec it was trained
@@ -205,7 +217,7 @@ axes:
 
 | v1 experiment | v2 axis |
 |---|---|
-| architecture ablation (xdim/MLP/graph-s/graph-m) | `model.preset` sweep |
+| architecture ablation (xdim/MLP/graph-s/graph-m) | `model.preset` sweep (`mlp`, `graph-s`, `graph-m`, `lstm`) |
 | information levels for actor/critic | `obs.level` (`private`/`public`/`full`), `obs.critic_level` |
 | belief averaging of a full-info policy | agent `BELIEF:…` |
 | determinized MCTS / ISMCTS, dets × sims | agent `MCTS:…:dets=K:sims=N`, a `kind: eval` sweep over `params` |

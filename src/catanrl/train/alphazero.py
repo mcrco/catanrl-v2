@@ -382,6 +382,8 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
     seed_everything(derive_seed(seed, "init"))
     model = build_policy_model(cfg, plan.dims)
     check_bindable(model, plan)
+    if getattr(model, "recurrent", False):
+        raise ValueError("train.algo: alphazero evaluates single positions; a recurrent network trains with ppo")
     if cfg.get("init_from") and writer.mode == "new":
         from catanrl.checkpoint import load_parts
 

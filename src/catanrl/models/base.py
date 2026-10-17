@@ -14,11 +14,19 @@ __all__ = ["CatanModel"]
 
 
 class CatanModel(nn.Module):
-    """Base of the networks: spec, parts and the row contract."""
+    """Base of the networks: spec, parts and the row contract.
+
+    A recurrent network (``recurrent = True``) carries a state of
+    ``hidden_size`` floats per row between a seat's decisions, through
+    ``initial_state`` and ``step``; its stateless ``forward`` / ``heads`` is
+    the zero-state function (what the checkpoint self-test pins).
+    """
 
     spec: dict[str, Any]
     dims_agnostic: bool
     parts: dict[str, list[str]]
+    recurrent: bool = False
+    hidden_size: int = 0
 
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__()
