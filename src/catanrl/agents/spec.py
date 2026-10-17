@@ -5,8 +5,12 @@ params (a positional value is ``ckpt``)::
 
     POLICY:arch-lineage/graph-s-s42.g1@best
     MCTS:ckpt=arch-lineage/graph-s-s42.g1@e600:sims=256:dets=4
-    BELIEF:ckpt=/anywhere/e000600.pt:worlds=16
+    BELIEF:ckpt=/anywhere/e000600.pt:worlds=16:tracker=exact
     F    R    AB:2
+
+``tracker`` (MCTS with dets, BELIEF) picks how the hand tracker deals the
+worlds: ``pool`` (the default) deals the unknown cards uniformly, ``exact``
+draws from the exact posterior over hidden steals (``cpp.TrackerMode``).
 
 ``resolve_agent(spec)`` pins and self-tests the checkpoint once, checks the
 games fit, derives ``fair`` and writes the canonical spec (a fixed point of
@@ -56,6 +60,7 @@ class MctsParams:
     temperature: float = 0.0
     noise: bool = False
     allow_drift: bool = False
+    tracker: Literal["pool", "exact"] = "pool"
     device: str = field(default="auto", metadata={"execution": True})
     threads: int = field(default=0, metadata={"execution": True})
 
@@ -66,6 +71,7 @@ class BeliefParams:
     worlds: int = 16
     aggregate: Literal["mean_prob", "mean_logit"] = "mean_prob"
     allow_drift: bool = False
+    tracker: Literal["pool", "exact"] = "pool"
     device: str = field(default="auto", metadata={"execution": True})
 
 
@@ -147,6 +153,8 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
     if key == "MCTS":
         if params.oracle and params.dets > 1:
             raise SpecError("MCTS: oracle=true searches the true game and takes no dets")
+        if params.oracle and params.tracker != "pool":
+            raise SpecError("MCTS: oracle=true searches the true game and takes no tracker")
         if params.dets < 1:
             raise SpecError("MCTS: dets counts sampled worlds (>= 1); use oracle=true for the true game")
         if params.sims < 1:
@@ -343,7 +351,7 @@ class CatanrlPlayer(Player):
         if m is None or m["id"] != game.id or records[:len(m["records"])] != m["records"]:
             native = _native_game(game)
             seat = list(game.state.colors).index(self.color)
-            tracker = cpp.HandTracker(native, seat) if agent.needs_trackers else None
+            tracker = cpp.HandTracker(native, seat, agent.tracker_mode) if agent.needs_trackers else None
             m = self._mirror = {"id": game.id, "game": native, "seat": seat, "tracker": tracker, "records": [],
                                 "ply": 0}
         from catanatron.models.enums import Action, ActionType

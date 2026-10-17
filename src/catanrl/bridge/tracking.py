@@ -36,6 +36,10 @@ replay (sound: it forgets the others' cards, nothing more), counted in
 A view the replay does not explain (a TUI edit, a log the replay cannot
 follow) re-anchors it on the view's own position, which ``apply_setup``
 declares exactly at every prompt (:func:`catanrl.bridge.position.snapshot`).
+
+``mode`` is the tracker's ``cpp.TrackerMode``: exact keeps the posterior over
+hidden steals from where the tracker (re)started, which a mid-game start
+only enumerates when the unknown cards' deals are few.
 """
 
 from __future__ import annotations
@@ -136,8 +140,10 @@ class SeatTracker:
     """
 
     def __init__(self, view: Mapping[str, Any], color: Any = None, *, supply: Any = None,
-                 rules: cpp.GameRules | None = None) -> None:
+                 rules: cpp.GameRules | None = None, mode: cpp.TrackerMode = cpp.TrackerMode.POOL) -> None:
         self.seat = seat_of(view, color)
+        #: The ``cpp.HandTracker`` mode (exact keeps the posterior over hidden steals).
+        self.mode = mode
         self.color = view["colors"][self.seat]
         self.colors = tuple(view["colors"])
         self.game_id = (view.get("game") or {}).get("id")
@@ -152,7 +158,7 @@ class SeatTracker:
 
     def _start(self, view: Mapping[str, Any]) -> None:
         self.replay = Replay(view, self.seat, self.rules, self.catan_map)
-        self.tracker = cpp.HandTracker(self.replay.game, self.seat)
+        self.tracker = cpp.HandTracker(self.replay.game, self.seat, self.mode)
         self.broken = None
         self.mismatches = ()
 
@@ -213,7 +219,7 @@ class SeatTracker:
             if self.broken is None:
                 return  # keep the replay; its own mismatches stand
         self.replay = Replay(view, self.seat, self.rules, self.catan_map, game=anchor.game, entries=records)
-        self.tracker = cpp.HandTracker(anchor.game, self.seat)
+        self.tracker = cpp.HandTracker(anchor.game, self.seat, self.mode)
         self.broken = None
         self.mismatches = anchor.mismatches
         self.stats["reanchored"] += 1
@@ -275,7 +281,7 @@ class SeatTracker:
                     self.stats["monopolies_from_sizes"] += 1
                     self.stats["transitions"] += len(pending)
                     return
-        self.tracker = cpp.HandTracker(self.replay.game, self.seat)
+        self.tracker = cpp.HandTracker(self.replay.game, self.seat, self.mode)
         self.stats["tracker_resets"] += 1
 
     def options(self, legal: Sequence[cpp.Action]) -> None:

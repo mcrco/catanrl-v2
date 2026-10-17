@@ -252,7 +252,8 @@ class ViewAgent:
         if tracker is None:
             info = self._game(game_id)
             supply = info["supply"] if info["supply"] is not None else self.supply
-            tracker = SeatTracker(view, color, supply=supply)
+            tracker = SeatTracker(view, color, supply=supply,
+                                  mode=getattr(self.native, "tracker_mode", cpp.TrackerMode.POOL))
             tracker.sizes.update(info["sizes"])
             self.seats[key] = tracker
             while len(self.seats) > self.max_games:

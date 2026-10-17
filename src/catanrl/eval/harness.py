@@ -169,8 +169,11 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
     ]
     num_envs = min(int(num_envs), max(1, len(games)))
     trackers = any(agent.needs_trackers for agent in agents)
+    # Exact trackers can deal the pool too, and every agent asks for its own deal.
+    exact = any(agent.needs_trackers and agent.tracker_mode == cpp.TrackerMode.EXACT for agent in agents)
     vec = cpp.VecEnv(cpp_scenarios, num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
-                     seed=0, num_threads=int(threads), auto_reset=False, trackers=trackers)
+                     seed=0, num_threads=int(threads), auto_reset=False, trackers=trackers,
+                     tracker_mode=cpp.TrackerMode.EXACT if exact else cpp.TrackerMode.POOL)
     buffers = vec.allocate()
     vec.reset()
     size = int(vec.action_size)

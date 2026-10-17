@@ -91,7 +91,9 @@ or any Catanatron registry bot) plays natively, as a Catanatron `Player`, as a
 TUI seat and as a server bot. Fair agents use only their seat's information:
 `POLICY` at the `private` level (or `public` in two-player games, where every
 resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, and
-`BELIEF`.
+`BELIEF`. The worlds those two sample come from the seat's hand tracker:
+`tracker=pool` (default) deals the unknown cards uniformly, `tracker=exact`
+draws from the exact posterior over hidden steals (DESIGN 1.5).
 
 ## Configs
 

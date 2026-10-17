@@ -133,7 +133,7 @@ def play_reference(lineup, games, *, suite, fill=None) -> list[dict]:
                    decisions=[0] * len(seat_agents))
         for seat, agent in enumerate(seat_agents):
             if agent.needs_trackers:
-                t.trackers[seat] = cpp.HandTracker(game, seat)
+                t.trackers[seat] = cpp.HandTracker(game, seat, agent.tracker_mode)
         (active.append if t.advance() else finish)(t)
     while active:
         groups: dict[int, list[_Table]] = defaultdict(list)

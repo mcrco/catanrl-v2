@@ -13,6 +13,12 @@ agent spec (``catanrl.agents.spec.ResolvedAgent``) into one of:
 * :class:`BotAgent` (``F``, ``R``): marks a seat the harness plays with the
   engine's bots.
 
+Agents that sample worlds have a ``tracker_mode`` (``cpp.TrackerMode``, from
+the ``tracker`` param): the harness keeps VecEnv's trackers in exact mode when
+any agent asks for it, and every agent passes its own mode as the deal, so a
+pool agent deals the pool from an exact tracker and an exact agent given a
+pool tracker fails loudly rather than silently degrading.
+
 The harness drives every agent the same way: ``bind(dims)`` once (graph
 networks are rebuilt at the harness's dims, which leaves their outputs
 unchanged), then ``act(rows, masks, decision_seeds, games=..., trackers=...)``
@@ -44,12 +50,22 @@ def _param(params: Any, key: str, default: Any = None) -> Any:
     return getattr(params, key, default)
 
 
+def tracker_mode_of(params: Any) -> cpp.TrackerMode:
+    """The engine tracker mode of an agent's ``tracker`` param (default pool)."""
+    modes = {"pool": cpp.TrackerMode.POOL, "exact": cpp.TrackerMode.EXACT}
+    mode = str(_param(params, "tracker", "pool") or "pool")
+    if mode not in modes:
+        raise ValueError(f"tracker must be pool or exact, not {mode!r}")
+    return modes[mode]
+
+
 class NativeAgent:
     """Base: a network at some dims and level, evaluated in strict padded batches."""
 
     key = "NATIVE"
     needs_games = False
     needs_trackers = False
+    tracker_mode = cpp.TrackerMode.POOL
 
     def __init__(self, model: CatanModel, params: Any, *, device: str, infer_rows: int,
                  mode: str = "strict", heads: str = "both") -> None:
@@ -142,6 +158,7 @@ class BeliefAgent(NativeAgent):
         super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="policy")
         self.worlds = int(_param(params, "worlds", 16))
         self.aggregate = str(_param(params, "aggregate", "mean_prob"))
+        self.tracker_mode = tracker_mode_of(params)
         if self.worlds < 1 or self.aggregate not in ("mean_prob", "mean_logit"):
             raise ValueError("BELIEF needs worlds >= 1 and aggregate mean_prob or mean_logit")
 
@@ -153,7 +170,8 @@ class BeliefAgent(NativeAgent):
         for i, (game, tracker, seed) in enumerate(zip(games, trackers, decision_seeds)):
             seat = game.current_player_index
             for w in range(k):
-                world = cpp.sample_world(game, tracker, seed=_derive_seed(int(seed), "world", w))
+                world = cpp.sample_world(game, tracker, seed=_derive_seed(int(seed), "world", w),
+                                         deal=self.tracker_mode)
                 self.encoder.encode_into(world, seat, world_rows[i * k + w])
         logits, _ = self.evaluator(world_rows)
         logits = logits.reshape(len(games), k, -1).astype(np.float64)
@@ -176,6 +194,7 @@ class MctsAgent(NativeAgent):
         super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="both")
         self.config = search_config(params, max_players=model.num_players)
         self.needs_trackers = self.config.determinizations > 0
+        self.tracker_mode = tracker_mode_of(params)
         self.temperature = float(_param(params, "temperature", 0.0))
         self._make_pool()
 
@@ -197,7 +216,8 @@ class MctsAgent(NativeAgent):
         try:
             for i, (game, seed) in enumerate(zip(games, decision_seeds)):
                 tracker = trackers[i] if self.needs_trackers else None
-                ids.append(self.pool.add(game, seed=int(seed), tracker=tracker))
+                ids.append(self.pool.add(game, seed=int(seed), tracker=tracker,
+                                         deal=self.tracker_mode if tracker is not None else None))
             run_searches(self.pool, self.evaluator, batch_rows=len(ids) * self.config.max_pending)
             return np.array([self.pool.select(i, self.temperature) for i in ids], dtype=np.int64)
         finally:
@@ -214,6 +234,7 @@ class BotAgent:
 
     needs_games = False
     needs_trackers = False
+    tracker_mode = cpp.TrackerMode.POOL
 
     def __init__(self, key: str, params: Any = None) -> None:
         if key not in ("F", "R"):
