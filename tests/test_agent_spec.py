@@ -67,9 +67,27 @@ def test_canonical_is_a_fixed_point_and_pins_best(ckpts):
 def test_bad_specs_raise(ckpts):
     for spec in ("MCTS:ckpt=exp/v:det=8", "MCTS:ckpt=exp/v:oracle=true:dets=4", "MCTS:ckpt=exp/v:dets=0",
                  "POLICY:ckpt=exp/v,F", "POLICY:ckpt=/tmp/a:b.pt", "POLICY:sample=true",
-                 "POLICY:ckpt=exp/v@nope", "POLICY:ckpt=exp/missing", "NOPE"):
+                 "POLICY:ckpt=exp/v@nope", "POLICY:ckpt=exp/missing", "NOPE",
+                 "MCTS:ckpt=exp/v:oracle=true:tracker=exact", "BELIEF:ckpt=exp/v:tracker=perfect"):
         with pytest.raises(SpecError):
             resolve_agent(spec)
+
+
+def test_tracker_param(ckpts):
+    """``tracker`` (pool by default, or exact) is part of the canonical spec, the key dict and the
+    native agent; it decides nothing for an oracle."""
+    pool = resolve_agent("BELIEF:ckpt=exp/v:worlds=2")
+    exact = resolve_agent("BELIEF:ckpt=exp/v:worlds=2:tracker=exact")
+    assert pool.canonical.endswith(":allow_drift=false:tracker=pool") and pool.params.tracker == "pool"
+    assert exact.canonical.endswith(":tracker=exact") and resolve_agent(exact.canonical).canonical == exact.canonical
+    assert pool.key_dict()["params"]["tracker"] == "pool" and exact.key_dict()["params"]["tracker"] == "exact"
+    assert pool.key_dict() != exact.key_dict() and exact.fair
+    assert exact.native(device="cpu").tracker_mode == cpp.TrackerMode.EXACT
+    assert pool.native(device="cpu").tracker_mode == cpp.TrackerMode.POOL
+    mcts = resolve_agent("MCTS:ckpt=exp/v:sims=4:dets=2:tracker=exact:device=cpu")
+    assert mcts.fair and mcts.native().tracker_mode == cpp.TrackerMode.EXACT and mcts.native().needs_trackers
+    assert mcts.key_dict()["params"]["tracker"] == "exact"
+    assert mcts.key_dict()["search"] == resolve_agent("MCTS:ckpt=exp/v:sims=4:dets=2").key_dict()["search"]
 
 
 def test_key_dict(ckpts):

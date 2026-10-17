@@ -133,6 +133,19 @@ with the observer's information. It powers determinized MCTS
 (`dets=K`), belief-averaged raw policies, and server bots that only receive
 views.
 
+Two modes (`TrackerMode`). `pool` (the default) deals the unknown pool
+uniformly: sound, but after a hidden steal it forgets which card probably
+moved (a steal from {brick, brick, ore} is dealt brick or ore evenly instead
+of 2:1) and what later payments proved about it. `exact` also keeps the exact
+posterior over every seat's hand: a weighted set of hypotheses branched at
+hidden steals (each kind by its count in the victim's hand), weighted by seen
+steals, pruned by payments, trades and monopoly amounts, merged when
+identical, capped at 4096 hypotheses (then it deals the pool until every
+hand is known again). It is exact under the rules' chance with no model of
+what seats choose to do. Agents pick it with `tracker=exact` (6.5);
+`tools/belief_exactness.py` measures both deals against a brute-force
+posterior.
+
 ### 1.6 Search
 
 `SearchPool` (C++) runs many independent searches in lockstep (v1's fastest
@@ -472,6 +485,11 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
 * **MCTS** takes engine units: `c_puct` 0.75 equals v1's 1.5. `dets ≥ 1`
   counts sampled worlds, and `oracle=true` searches the true state. There is
   no magic 0.
+* **`tracker`** (MCTS with dets, BELIEF): `pool` (default) or `exact`, the
+  hand tracker mode the worlds are dealt from (1.5). It is in the canonical
+  spec and `key_dict()`, so eval records tell the two apart. The native
+  harness keeps VecEnv's trackers exact when any agent asks, and each agent
+  passes its own deal, so a lineup can mix both.
 
 `resolve_agent(spec)` does four things:
 

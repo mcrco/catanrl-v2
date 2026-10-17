@@ -72,7 +72,9 @@ REFERENCE_CASES = {
     "policy-F": (("POLICY", {}), "F"),
     "policy-R": (("POLICY", {}), "R"),
     "mcts-dets": (("MCTS", {"sims": 6, "dets": 2}), "R"),
+    "mcts-exact": (("MCTS", {"sims": 6, "dets": 2, "tracker": "exact"}), "R"),
     "belief": (("BELIEF", {"worlds": 3}), "F"),
+    "belief-exact": (("BELIEF", {"worlds": 3, "tracker": "exact"}), "F"),
 }
 
 
@@ -87,6 +89,42 @@ def test_vecenv_plays_exactly_the_reference_games(case):
                       agent(bot)]
     reference = play_reference(lineup(), games, suite=suite, fill=agent("F"))
     assert play(lineup(), suite, games, fill=agent("F"), num_envs=4, threads=2) == reference
+
+
+def test_mixed_tracker_modes_deal_as_each_agent_asks():
+    """A pool and an exact BELIEF in one lineup: VecEnv keeps exact trackers for both, and the
+    pool agent still deals the pool (the reference keeps a tracker in each agent's own mode)."""
+    suite = make_suite(({"game": "base-3p"},), turn_limit=120)
+    games = schedule(suite, 2, boards=2)
+    model = tiny_model(["base-3p"], level="full")
+    lineup = lambda: [agent("BELIEF", model, infer_rows=8, worlds=3),
+                      agent("BELIEF", model, infer_rows=8, worlds=3, tracker="exact")]
+    reference = play_reference(lineup(), games, suite=suite, fill=agent("F"))
+    assert play(lineup(), suite, games, fill=agent("F"), num_envs=3, threads=2) == reference
+
+
+@pytest.mark.parametrize("key, params", [("BELIEF", {"worlds": 2}), ("MCTS", {"sims": 4, "dets": 2})])
+def test_agents_ask_for_their_own_deal(key, params):
+    """BELIEF and MCTS pass their tracker mode as the deal: an exact agent given a pool tracker is
+    refused by the engine (never silently dealt the pool), and a pool agent deals the pool from any
+    tracker, deciding the same from an exact one as from a pool one."""
+    games = _decisions(2)
+    seats = [g.current_player_index for g in games]
+    exact_agent = agent(key, tiny_model(), **params, tracker="exact")
+    pool_agent = agent(key, tiny_model(), **params)
+    assert exact_agent.tracker_mode == cpp.TrackerMode.EXACT and pool_agent.tracker_mode == cpp.TrackerMode.POOL
+    rows = np.stack([pool_agent.encode(g, s) for g, s in zip(games, seats)])
+    masks, seeds = rows[:, -pool_agent.action_space.size:], np.arange(2, dtype=np.uint64)
+    pool_trackers = [cpp.HandTracker(g, s) for g, s in zip(games, seats)]
+    exact_trackers = [cpp.HandTracker(g, s, cpp.TrackerMode.EXACT) for g, s in zip(games, seats)]
+    with pytest.raises(ValueError, match="exact"):
+        exact_agent.act(rows, masks, seeds, games=games, trackers=pool_trackers)
+    from_exact = pool_agent.act(rows, masks, seeds, games=games, trackers=exact_trackers)
+    from_pool = pool_agent.act(rows, masks, seeds, games=games, trackers=pool_trackers)
+    assert from_exact.tolist() == from_pool.tolist()
+    assert len(exact_agent.act(rows, masks, seeds, games=games, trackers=exact_trackers)) == 2
+    if key == "MCTS":
+        assert len(exact_agent.pool) == 0 and len(pool_agent.pool) == 0
 
 
 def test_policy_of_an_asymmetric_critic_model_plays_from_actor_rows():
