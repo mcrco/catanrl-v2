@@ -565,12 +565,28 @@ def _cells(sweep: Mapping[str, Any]) -> list[tuple[dict[str, str], dict[str, Any
             if clash:
                 raise ConfigError(f"sweep axes set the same key {clash[0]!r}")
             paths |= new
-        layer = merge(*(over for _, _, over, _ in combo))
+        layer = _union(*(over for _, _, over, _ in combo))
         cells.append(({axis: label for axis, label, _, _ in combo}, layer, paths))
     unmatched = [ex for ex, u in zip(excludes, used) if not u]
     if unmatched:
         raise ConfigError(f"sweep.exclude {unmatched[0]} matches no cell")
     return cells
+
+
+def _union(*layers: Mapping[str, Any]) -> dict:
+    """The cell's layer: nested sections combined, keys kept verbatim.
+
+    Unlike :func:`merge`, a ``key!`` (replace the section) survives for the
+    merge onto the base config. The axes set disjoint paths, so nothing here
+    overwrites anything."""
+    out: dict[str, Any] = {}
+    for layer in layers:
+        for key, value in layer.items():
+            if isinstance(value, Mapping) and isinstance(out.get(key), dict) and not key.endswith("!"):
+                out[key] = _union(out[key], value)
+            else:
+                out[key] = copy.deepcopy(value)
+    return out
 
 
 def _same(a: Any, b: Any) -> bool:

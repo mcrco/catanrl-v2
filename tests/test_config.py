@@ -286,6 +286,14 @@ def test_tied_axes_on_one_section_merge(tmp_path):
     assert len({v.config_hash for v in plan.variants}) == 4
 
 
+def test_a_sweep_cell_can_replace_a_section(tmp_path):
+    # `key!` in a cell replaces the base's section instead of merging into it (arch-ablation's lstm cell).
+    sweep = {"axes": {"m": {"seeded": {"seed": 2}, "plain": {"model!": {"preset": "graph-tiny"}}}}, "name": "{m}"}
+    plan = load_plan(write(tmp_path, model={"preset": "graph-tiny", "args": {"shared": True}}, sweep=sweep))
+    got = {v.name: v.config["model"]["args"]["shared"] for v in plan.variants}
+    assert got == {"seeded": True, "plain": False}
+
+
 def test_set_on_a_sweep_axis_is_refused(tmp_path):
     path = write(tmp_path, sweep={"axes": {"seed": [1, 2]}, "name": "s{seed}"})
     with pytest.raises(ConfigError, match="--set and a sweep axis"):

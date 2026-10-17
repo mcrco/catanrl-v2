@@ -256,6 +256,7 @@ def test_policy_agent_decides_from_its_memory_streams():
     with torch.no_grad():
         _, _, _, h1, c1 = model.step(torch.from_numpy(rows), *zero)
         logits = model.step(torch.from_numpy(rows), h1, c1)[0].numpy()
+    assert np.allclose(h, h1.numpy(), atol=1e-5) and np.allclose(c, c1.numpy(), atol=1e-5)
     assert np.array_equal(second, np.where(masks > 0, logits, -np.inf).argmax(1))
     with pytest.raises(ValueError, match="no memory"):
         policy.act(rows, masks, seeds, streams=np.array([5, 6, 7]), first=~fresh)
@@ -346,7 +347,7 @@ def test_tiny_experiment_end_to_end_with_lstm(tmp_path, monkeypatch):
     assert record.key["suite"]["purpose"] == "select" and record.key["lineup"][0]["checkpoint"]["model"]["class"] == "lstm"
     net = run.build_policy("best")
     assert net.recurrent and net.catanrl_ref == best["ref"]
-    native = resolve_agent(f"POLICY:tiny/2p@best").native(device="cpu", infer_rows=4)
+    native = resolve_agent("POLICY:tiny/2p@best").native(device="cpu", infer_rows=4)
     assert native.needs_memory
     finals = final_evals(run, v)
     assert len(finals) == 1 and finals[0].data["refs"][0] == best["ref"]

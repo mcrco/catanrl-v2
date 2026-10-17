@@ -119,7 +119,6 @@ class BatchEvaluator:
     def __call__(self, observations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """(logits float32 [n, A], values float32 [n, P]) for rows [n, obs_size]."""
         observations = np.ascontiguousarray(observations, dtype=np.float32)
-        n = observations.shape[0]
         if observations.ndim != 2 or observations.shape[1] != self.obs_size:
             raise ValueError(f"expected rows [n, {self.obs_size}], got {observations.shape}")
         if torch.is_autocast_enabled() or (self.device.type == "cuda" and torch.is_autocast_enabled("cuda")):
