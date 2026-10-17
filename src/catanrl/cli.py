@@ -14,6 +14,7 @@
     catanrl report-data [report/results.yaml] [--run-missing] [--update] [--final]
     catanrl bot --spec MCTS:arch-lineage/graph-s-s42.g1@ref:sims=256:dets=4 ws://HOST:PORT/room/ID
     catanrl play --seats human,POLICY:arch-lineage/graph-s-s42.g1@ref,F,F
+    catanrl house deploy/house.yaml [--server wss://HOST]   # keep tables open for people
 """
 
 from __future__ import annotations
@@ -104,6 +105,12 @@ def _parser() -> argparse.ArgumentParser:
     bot.add_argument("--server-key", help="pin the server's public key (hex)")
     bot.add_argument("--key", dest="key_path", help="this bot's identity key file")
     bot.add_argument("--no-verify", dest="verify", action="store_false")
+
+    house = sub.add_parser("house", help="keep rooms open on a catanatron-server for people to play our bots")
+    house.add_argument("config", help="a YAML file: server, server_key, think_s and tables")
+    house.add_argument("--server", help="override the file's server URL")
+    house.add_argument("--state", default="house", help="keys, transcripts and games.jsonl go here")
+    house.add_argument("--device", default="cpu")
 
     play = sub.add_parser("play", help="a local TUI game against our agents and Catanatron bots")
     play.add_argument("--seats", required=True, help="comma-separated: human, Catanatron specs, POLICY/MCTS/BELIEF specs")
@@ -209,6 +216,20 @@ def _cmd_bot(args) -> int:
     return 0 if result.verified or not args.verify else 1
 
 
+def _cmd_house(args) -> int:
+    import asyncio
+    import logging
+
+    from catanrl.bridge.house import House, load_tables
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    settings, tables = load_tables(args.config)
+    house = House(args.server or settings["server"], tables, state_dir=args.state,
+                  server_key=settings.get("server_key"), think_s=settings.get("think_s", 0.8), device=args.device)
+    asyncio.run(house.run())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     from catanrl._puffer import install_signal_handlers
 
@@ -227,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_results(args)
         if args.command == "bot":
             return _cmd_bot(args)
+        if args.command == "house":
+            return _cmd_house(args)
         if args.command == "play":
             from catanrl.bridge.server_bot import play_tui
 

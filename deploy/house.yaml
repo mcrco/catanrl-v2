@@ -1,0 +1,20 @@
+# The tables catan.marcoya.ng keeps open (catanrl house, on the OCI VM).
+# max_games counts the waiting room too: at most max_games - 1 in play.
+server: wss://catan.marcoya.ng
+server_key: 36da1994b58ca3dc627a0dd495210cf279977c0871f604396e87c5bf1a9c9f2f
+think_s: 0.8
+tables:
+  - name: puffer-graph2
+    label: puffer-graph2
+    spec: BELIEF:ckpt=puffer-graph2/full@best:worlds=16
+    room:
+      name: 1v1 vs puffer-graph2
+      config: {num_players: 2, vps_to_win: 15, discard_limit: 9, decision_timeout_ms: 120000}
+    max_games: 6
+  - name: ppo-4p
+    label: ppo-4p
+    spec: POLICY:ckpt=ppo-4p/main@best
+    room:
+      name: 4p vs ppo-4p
+      config: {num_players: 4, decision_timeout_ms: 120000}
+    max_games: 4

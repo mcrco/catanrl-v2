@@ -1,0 +1,26 @@
+# The bots' side of catan.marcoya.ng, on the OCI VM: one process keeps every
+# table in deploy/house.yaml open (see src/catanrl/bridge/house.py).
+# /etc/catanrl/house.env holds CATANATRON_HOUSE_TOKEN, the same token as the
+# server's --house-token-file.
+[Unit]
+Description=catanrl house: bot tables on catan.marcoya.ng
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=catanrl
+Group=catanrl
+EnvironmentFile=/etc/catanrl/house.env
+Environment=OMP_NUM_THREADS=2
+WorkingDirectory=/opt/catanrl-v2
+ExecStart=/opt/catanrl-v2/.venv/bin/catanrl house deploy/house.yaml --state /var/lib/catanrl/house
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/catanrl
+
+[Install]
+WantedBy=multi-user.target
