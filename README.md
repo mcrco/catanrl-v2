@@ -1,3 +1,27 @@
+# Useless Overview
+
+A continuation of [my original catanrl project](https://github.com/mcrco/catanrl).
+
+When I first started working on this in September 2025, my goal was to make the
+first superhuman (and super-heuristic) Catan bot and learn reinforcement
+learning along the way because my school didn't offer a RL class and I wanted to
+learn it while also getting coursework units for it by writing it off as an
+"undergraduate research project". At the time, LLMs were not yet good enough to
+reliably implement things like PPO or AlphaZero or port the `catanatron` engine
+to another (compiled) language.
+
+But things have changed in the past year! In terms of personal progress, I
+learned about the basic RL taxonomy and the algorithms, wrote many failed
+implementations, got a bot that beat Catanatron's `ValueFunctionPlayer` with a
+90% winrate. And outside what I did, other people made really good bots and
+servers for bots (join the Catanatron discord to see), and LLMs are now good
+enough to essentially do the whole process.
+
+So now my new goal in this repo is to create a recipe for the best bot out
+there and log my process along the way. Right now, I have some raw policy bots
+queueing anyone can play against [here](catan.marcoya.ng). I keep track of an
+experiment log in `report/report.pdf`.
+
 # catanrl-v2
 
 Catan bots for any number of players (2–6) on any map, a research harness
@@ -6,12 +30,12 @@ and bots play verifiably fair games.
 
 v2 keeps a lean core and leans on open libraries:
 
-| Piece | What it does | Where |
-|---|---|---|
-| **cppanatron** | C++20 rules engine (parity-tested against Catanatron), explicit maps of any shape, seat-relative graph observations, map-agnostic action codec, threaded multi-game env, hand tracker, batched N-player MCTS | `engine/cppanatron` (submodule, branch `v2`) |
-| **Catanatron** (fork) | reference rules, per-map board graphs, the fair game server (protocol 4), the terminal UI | `third_party/catanatron` (submodule, branch `v2`) |
-| **PufferLib 3** | PPO (two small patches: acting-row losses and a value-loss hook) | `third_party/pufferlib` (submodule, branch `catanrl-v2`) |
-| **catanrl** | maps and game configs, graph networks, PPO / DAgger / AlphaZero trainers, native agents and evaluation, the experiment store, the view bridge to the server and TUI | `src/catanrl` |
+| Piece                 | What it does                                                                                                                                                                                                 | Where                                                    |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| **cppanatron**        | C++20 rules engine (parity-tested against Catanatron), explicit maps of any shape, seat-relative graph observations, map-agnostic action codec, threaded multi-game env, hand tracker, batched N-player MCTS | `engine/cppanatron` (submodule, branch `v2`)             |
+| **Catanatron** (fork) | reference rules, per-map board graphs, the fair game server (protocol 4), the terminal UI                                                                                                                    | `third_party/catanatron` (submodule, branch `v2`)        |
+| **PufferLib 3**       | PPO (two small patches: acting-row losses and a value-loss hook)                                                                                                                                             | `third_party/pufferlib` (submodule, branch `catanrl-v2`) |
+| **catanrl**           | maps and game configs, graph networks, PPO / DAgger / AlphaZero trainers, native agents and evaluation, the experiment store, the view bridge to the server and TUI                                          | `src/catanrl`                                            |
 
 The architecture and its reasons are in [DESIGN.md](DESIGN.md); the
 experiment system's module plan and test list in
@@ -71,13 +95,13 @@ resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, and
 
 ## Configs
 
-| Directory | Holds |
-|---|---|
-| `configs/games` | player count, map generator and rules (`base-2p`, `base-4p`, `random-4p`, `hexagon-3p`, `extension-6p`, …) |
-| `configs/models` | network presets (`graph-s`, `graph-m`, `mlp`, `graph-tiny`) |
-| `configs/train` | trainer defaults (`ppo`, `imitation`, `alphazero`) |
-| `configs/suites` | evaluation boards: `select-*` (checkpoint selection) and `heldout-*` (reported numbers), disjoint by construction |
-| `configs/experiments` | experiments: stages, sweeps, select and final evals |
+| Directory             | Holds                                                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `configs/games`       | player count, map generator and rules (`base-2p`, `base-4p`, `random-4p`, `hexagon-3p`, `extension-6p`, …)        |
+| `configs/models`      | network presets (`graph-s`, `graph-m`, `mlp`, `graph-tiny`)                                                       |
+| `configs/train`       | trainer defaults (`ppo`, `imitation`, `alphazero`)                                                                |
+| `configs/suites`      | evaluation boards: `select-*` (checkpoint selection) and `heldout-*` (reported numbers), disjoint by construction |
+| `configs/experiments` | experiments: stages, sweeps, select and final evals                                                               |
 
 v1's research maps onto config axes: architecture (`model.preset`),
 information levels (`obs.level`, `obs.critic_level`), belief averaging
