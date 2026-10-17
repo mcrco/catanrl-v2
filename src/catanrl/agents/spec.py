@@ -354,6 +354,19 @@ class CatanrlPlayer(Player):
                 return action
         raise RuntimeError(f"{self.KEY} chose {chosen}, which Catanatron does not offer")
 
+    @staticmethod
+    def _fit(agent, native) -> None:
+        """Play at the game's dims (a dims-agnostic network rebinds, another refuses) and
+        refuse a map the network would misread (the cnn's board check), as the harness and
+        the bridge do, once per mirrored game."""
+        from catanrl.envs.encoding import covering_dims
+
+        need = covering_dims([native.board.map], native.num_players)
+        have = agent.dims
+        if any(need[k] > have[k] for k in need):
+            agent.bind({k: max(need[k], have[k]) for k in need})
+        agent.check_maps([native.board.map])
+
     def _sync(self, game, agent) -> dict[str, Any]:
         """The cppanatron mirror of ``game``, with any new actions replayed."""
         import cppanatron as cpp
@@ -364,6 +377,7 @@ class CatanrlPlayer(Player):
         # Rebuild unless the game only grew since the last sync (an undo rewrites the log).
         if m is None or m["id"] != game.id or records[:len(m["records"])] != m["records"]:
             native = _native_game(game)
+            self._fit(agent, native)
             seat = list(game.state.colors).index(self.color)
             tracker = cpp.HandTracker(native, seat, agent.tracker_mode) if agent.needs_trackers else None
             m = self._mirror = {"id": game.id, "game": native, "seat": seat, "tracker": tracker, "records": [],

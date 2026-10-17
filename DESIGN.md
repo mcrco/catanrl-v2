@@ -380,7 +380,8 @@ counts takes `fill: F` for the empty seats.
   `kind: train`) `eval.final`. Refs are hashed as written.
 * Refs to other runs are resolved once, when the variant is created, and
   stored in `config.json`. If one later moves, the variant warns and keeps its
-  target.
+  target. A ref to another variant of the same experiment, in `eval.final`
+  too, is a dependency: the runner finishes that variant first.
 * `${self}` and `${run}@best` resolve when the eval runs, and are pinned in
   its record.
 * `${init}` is the checkpoint `init_from` loads the actor from, pinned when

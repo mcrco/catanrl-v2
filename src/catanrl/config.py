@@ -24,7 +24,9 @@ body: head to head against that network.
 
 ``config_hash`` covers everything but ``meta``, ``runtime`` and, for
 ``kind: train``, ``eval.final``. Refs are hashed as written; they are bound
-to ``run@eN#sha`` once, when a variant is created (:func:`bind_refs`).
+to ``run@eN#sha`` once, when a variant is created (:func:`bind_refs`), so a
+ref to another variant of the experiment anywhere but ``meta`` and
+``runtime`` (``eval.final`` included) is a dependency the runner waits for.
 """
 
 from __future__ import annotations
@@ -759,7 +761,8 @@ def load_plan(path: str | Path, *, overrides: Sequence[str] = (), only: str | No
                 if cfg["eval"]["select"]:
                     cfg["eval"]["select"]["every"] = 1
             own = re.compile(re.escape(f"{experiment}/") + r"([a-z0-9][a-z0-9._+-]*)")
-            deps = tuple(sorted({m for r in _refs_in(hashed_part(cfg)) for m in own.findall(r)} - {name}))
+            scanned = {k: v for k, v in cfg.items() if k not in UNHASHED}  # eval.final too: bound at creation
+            deps = tuple(sorted({m for r in _refs_in(scanned) for m in own.findall(r)} - {name}))
             variants.append(Variant(experiment=experiment, name=name, stage=stage, labels=dict(labels),
                                     config=cfg, config_hash=config_hash(cfg), depends_on=deps))
             if stage is not None:

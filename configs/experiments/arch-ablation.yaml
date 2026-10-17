@@ -5,10 +5,12 @@
 # 100M agent steps per architecture (757 epochs of 132,096; puffer-graph2 was
 # at 86% vs F by then and v1's gaps between families were 7-12 points), one
 # seed, selected on select-2p every 50 epochs, reported on heldout-2p against
-# F and head to head against the graph-s cell on the same boards. Run order:
-# graph-s first (the control the others' head-to-head rows bind to), then
-# mlp, cnn, lstm. The mlp and cnn classes are not dims-agnostic: they train and
-# play at base-2p's dims only, which every suite here uses.
+# F and head to head against the graph-s cell on the same boards. The
+# head-to-head rows bind graph-s's best checkpoint when a variant is created,
+# so mlp, cnn and lstm depend on graph-s and the runner finishes it first
+# (`${experiment}` keeps the ref inside the smoke store too). The mlp and cnn
+# classes are not dims-agnostic: they train and play at base-2p's dims only,
+# which every suite here uses.
 name: arch-ablation
 seed: 42
 env:
@@ -59,22 +61,22 @@ sweep:
         model.args: {shared: true}
         eval.final:
           - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
-          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=arch-ablation/graph-s@best"]}
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/graph-s@best"]}
       cnn:
         model.preset: cnn
         model.args: {shared: true}
         eval.final:
           - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
-          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=arch-ablation/graph-s@best"]}
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/graph-s@best"]}
       lstm:
         model.preset: lstm
         eval.final:
           - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
-          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=arch-ablation/graph-s@best"]}
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/graph-s@best"]}
   name: "{arch}"
 meta:
   recipe: puffer-graph2
   notes: |
     Report section 1. The head-to-head rows bind arch-ablation/graph-s@best when each variant is
-    created, so graph-s must finish first (catanrl run arch-ablation --only graph-s, then the rest).
+    created: mlp, cnn and lstm depend on graph-s, so the runner finishes it first.
 runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

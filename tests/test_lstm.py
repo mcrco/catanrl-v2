@@ -251,13 +251,15 @@ def test_policy_agent_decides_from_its_memory_streams():
         logits = model.step(torch.from_numpy(rows), *zero)[0].numpy()
     assert np.array_equal(first, np.where(masks > 0, logits, -np.inf).argmax(1))
     # The memory after that decision is kept per stream and used at the next decision.
-    second = policy.act(rows, masks, seeds, streams=streams, first=~fresh)
     h, c = (np.stack([policy._memory[s][i] for s in (0, 1, 2)]) for i in (0, 1))
     with torch.no_grad():
         _, _, _, h1, c1 = model.step(torch.from_numpy(rows), *zero)
-        logits = model.step(torch.from_numpy(rows), h1, c1)[0].numpy()
+        logits, _, _, h2, c2 = model.step(torch.from_numpy(rows), h1, c1)
     assert np.allclose(h, h1.numpy(), atol=1e-5) and np.allclose(c, c1.numpy(), atol=1e-5)
-    assert np.array_equal(second, np.where(masks > 0, logits, -np.inf).argmax(1))
+    second = policy.act(rows, masks, seeds, streams=streams, first=~fresh)
+    assert np.array_equal(second, np.where(masks > 0, logits.numpy(), -np.inf).argmax(1))
+    h, c = (np.stack([policy._memory[s][i] for s in (0, 1, 2)]) for i in (0, 1))
+    assert np.allclose(h, h2.numpy(), atol=1e-5) and np.allclose(c, c2.numpy(), atol=1e-5)
     with pytest.raises(ValueError, match="no memory"):
         policy.act(rows, masks, seeds, streams=np.array([5, 6, 7]), first=~fresh)
     with pytest.raises(ValueError, match="once per batch"):

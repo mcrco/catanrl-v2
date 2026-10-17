@@ -61,3 +61,30 @@ def test_eval_harness_refuses_boards_a_cnn_cannot_read():
     rows = []
     play_schedule(lineup, schedule(suite, 3, boards=1), suite=suite, on_game=rows.append)
     assert len(rows) == 3
+
+
+def test_catanatron_player_refuses_boards_a_cnn_cannot_read(tmp_path):
+    """The Catanatron player binds the game's dims and checks its map when it mirrors a game, as
+    the harness and the bridge do: a BASE cnn refuses a hexagon game (the same dims, another tile
+    order) and a game of more players than its dims, and plays a BASE game."""
+    from cppanatron import parity
+
+    from catanrl.agents import resolve_agent
+    from catanrl.checkpoint import save
+    from catanrl.games import load_game
+
+    model = tiny_model(["base-2p"], preset="cnn-tiny")
+    config = {"env": {"scenarios": [{"game": "base-2p"}]}, "model": model.spec}
+    path = save(tmp_path / "e000000.pt", model, run=None, epoch=0, agent_steps=0, config=config, code={}).path
+    resolved = resolve_agent(f"POLICY:ckpt={path}", harness="catanatron")
+
+    def catanatron_game(name, players, seed=0):
+        return parity.new_game("catanatron", players, seed=seed, map_spec=load_game(name).map_spec(seed))
+
+    for name, players, error in (("hexagon-3p", 2, "laid out"), ("base-4p", 4, "not dims-agnostic")):
+        game = catanatron_game(name, players)
+        with pytest.raises(ValueError, match=error):
+            resolved.player(game.current_color).decide(game.game, game.playable_actions)
+    game = catanatron_game("base-2p", 2)
+    assert len(game.playable_actions) > 1
+    assert resolved.player(game.current_color).decide(game.game, game.playable_actions) in game.playable_actions

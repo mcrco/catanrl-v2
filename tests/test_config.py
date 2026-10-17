@@ -294,6 +294,22 @@ def test_a_sweep_cell_can_replace_a_section(tmp_path):
     assert got == {"seeded": True, "plain": False}
 
 
+def test_a_head_to_head_row_depends_on_the_cell_it_names(tmp_path):
+    # eval.final is not hashed, but its refs are bound when the variant is created (arch-ablation's
+    # head-to-head rows), so a ref to a sibling cell orders the runner; ${experiment} keeps it in the
+    # smoke store.
+    row = {"suite": "heldout-2p", "lineup": ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/control@best"]}
+    sweep = {"axes": {"m": {"control": {"seed": 2}, "other": {"eval.final": [row]}}}, "name": "{m}"}
+    for smoke, experiment in ((False, "exp"), (True, "exp+smoke")):
+        plan = load_plan(write(tmp_path, sweep=sweep), smoke=smoke)
+        control, other = plan.variants
+        assert (control.depends_on, other.depends_on) == ((), ("control",))
+        assert other.config["eval"]["final"][0]["lineup"][1] == f"POLICY:ckpt={experiment}/control@best"
+    with pytest.raises(ConfigError, match="depends on \\['missing'\\]"):
+        row["lineup"][1] = "POLICY:ckpt=${experiment}/missing@best"
+        load_plan(write(tmp_path, sweep=sweep))
+
+
 def test_set_on_a_sweep_axis_is_refused(tmp_path):
     path = write(tmp_path, sweep={"axes": {"seed": [1, 2]}, "name": "s{seed}"})
     with pytest.raises(ConfigError, match="--set and a sweep axis"):
