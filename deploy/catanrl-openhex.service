@@ -1,0 +1,24 @@
+# Our bots queued on OpenHex, from the OCI VM (see src/catanrl/bridge/openhex.py).
+# /etc/catanrl/openhex.env holds each bot's API key (OPENHEX_KEY_1V1, OPENHEX_KEY_4P).
+[Unit]
+Description=catanrl bots on open-hex.web.app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=catanrl
+Group=catanrl
+EnvironmentFile=/etc/catanrl/openhex.env
+Environment=OMP_NUM_THREADS=1
+WorkingDirectory=/opt/catanrl-v2
+ExecStart=/opt/catanrl-v2/.venv/bin/catanrl openhex deploy/openhex.yaml --state /var/lib/catanrl/openhex
+Restart=always
+RestartSec=15
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/catanrl
+
+[Install]
+WantedBy=multi-user.target

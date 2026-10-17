@@ -17,6 +17,7 @@
     catanrl bot --spec MCTS:arch-lineage/graph-s-s42.g1@ref:sims=256:dets=4 ws://HOST:PORT/room/ID
     catanrl play --seats human,POLICY:arch-lineage/graph-s-s42.g1@ref,F,F
     catanrl house deploy/house.yaml [--server wss://HOST]   # keep tables open for people
+    catanrl openhex deploy/openhex.yaml                      # play our bots on open-hex.web.app
 """
 
 from __future__ import annotations
@@ -139,6 +140,12 @@ def _parser() -> argparse.ArgumentParser:
     house.add_argument("--server", help="override the file's server URL")
     house.add_argument("--state", default="house", help="keys, transcripts and games.jsonl go here")
     house.add_argument("--device", default="cpu")
+
+    oh = sub.add_parser("openhex", help="keep our bots queued on OpenHex (open-hex.web.app)")
+    oh.add_argument("config", help="a YAML file: bots (name, spec, mode, key_env), optional api")
+    oh.add_argument("--state", default="openhex", help="games.jsonl goes here")
+    oh.add_argument("--device", default="cpu")
+    oh.add_argument("--only", help="run just this bot (by name)")
 
     play = sub.add_parser("play", help="a local TUI game against our agents and Catanatron bots")
     play.add_argument("--seats", required=True, help="comma-separated: human, Catanatron specs, POLICY/MCTS/BELIEF specs")
@@ -265,6 +272,35 @@ def _cmd_house(args) -> int:
     return 0
 
 
+def _cmd_openhex(args) -> int:
+    import logging
+    import threading
+
+    import yaml
+
+    from catanrl.bridge.openhex import API, OpenHexBot
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    settings = yaml.safe_load(Path(args.config).read_text())
+    bots = []
+    for entry in settings["bots"]:
+        if args.only and entry["name"] != args.only:
+            continue
+        key = os.environ.get(entry["key_env"], "").strip()
+        if not key:
+            raise SystemExit(f"error: {entry['key_env']} (the API key of {entry['name']}) is not set")
+        bots.append(OpenHexBot(entry["spec"], key, entry["mode"], base=settings.get("api", API), device=args.device,
+                               state_dir=Path(args.state) / entry["name"], name=entry["name"]))
+    if not bots:
+        raise SystemExit("error: no bots to run")
+    threads = [threading.Thread(target=bot.run, name=bot.name, daemon=True) for bot in bots]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     from catanrl._puffer import install_signal_handlers
 
@@ -289,6 +325,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_bot(args)
         if args.command == "house":
             return _cmd_house(args)
+        if args.command == "openhex":
+            return _cmd_openhex(args)
         if args.command == "play":
             from catanrl.bridge.server_bot import play_tui
 

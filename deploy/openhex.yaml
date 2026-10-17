@@ -1,0 +1,11 @@
+# Our bots on OpenHex (https://open-hex.web.app): one registration per game
+# mode, each with its API key in the environment (/etc/catanrl/openhex.env).
+bots:
+  - name: catanrl-1v1
+    mode: 1v1
+    spec: BELIEF:ckpt=puffer-graph2/full@best:worlds=16
+    key_env: OPENHEX_KEY_1V1
+  - name: catanrl-4p
+    mode: 4p
+    spec: POLICY:ckpt=ppo-4p/main@best
+    key_env: OPENHEX_KEY_4P
