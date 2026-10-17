@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 import torch
@@ -45,6 +46,12 @@ class CatanModel(nn.Module):
         logits = self.policy_logits(obs)
         values, present = self.value_logits(obs)
         return logits, values, present
+
+    def check_maps(self, maps: Iterable[Any]) -> None:
+        """Refuse ``cpp.CatanMap`` objects whose rows this network would misread: none, by
+        default. Dims are the callers' check (``check_bindable``, ``Checkpoint.model``,
+        the agents' ``bind``); a class that ties slots to one board (cnn) overrides this,
+        because equal dims do not mean equal layouts."""
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         logits, value_logits, present = self.heads(obs)

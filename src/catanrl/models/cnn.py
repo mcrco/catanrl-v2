@@ -1,4 +1,4 @@
-"""Cross-dimensional CNN: v1's xdim over the BASE board laid on a plane.
+"""Cross-dimensional CNN: v1's xdim over one board laid on a plane.
 
 A port of catanrl v1's ``CrossDimensionalBackbone`` (v1
 ``src/catanrl/models/backbones.py``), after Gendre and Kaneko's
@@ -13,17 +13,19 @@ parameters (15.1M of the default's 16.8M), as it did in v1.
 two cells apart, roads on the cells between them, and each tile's resource
 probability spread onto its six corners. v2 rows carry per-tile, per-node
 and per-edge feature blocks and the topology (DESIGN 1.2) but no
-coordinates, so :func:`base_grid` derives the same grid once from the
-engine's BASE map: a tile at cube coordinate ``(x, y, z)`` sits at offset
-row ``z``, column ``x + (z - (z & 1)) // 2`` (Catanatron's ``cube_to_offset``)
-and takes v1's 3 x 5 footprint (rows two apart, columns four apart, odd rows
-shifted by two), its corners NORTH clockwise at the footprint's top middle,
-top right, bottom right, bottom middle, bottom left and top left. Edges lie
-between their ends. Every BASE map has the same tile coordinates and, since
-node and edge ids follow the tile order (``CatanMap.from_tiles``), the same
-slot order, so the gather is fixed at build time and lives in non-persistent
-buffers. The feature blocks are gathered onto the plane with ``index_select``
-(no in-place writes: batch-independent, deterministic, compile-friendly).
+coordinates, so :func:`board_grid` derives the same grid once from the
+engine's map of the ``board`` generator (BASE by default): a tile at cube
+coordinate ``(x, y, z)`` sits at offset row ``z``, column ``x + (z - (z & 1))
+// 2`` (Catanatron's ``cube_to_offset``) and takes v1's 3 x 5 footprint (rows
+two apart, columns four apart, odd rows shifted by two), its corners NORTH
+clockwise at the footprint's top middle, top right, bottom right, bottom
+middle, bottom left and top left. Edges lie between their ends. Every map of
+a fixed-shape generator lists the same tile coordinates in the same order
+and, since node and edge ids follow the tile order (``CatanMap.from_tiles``),
+has the same slot order, so the gather is fixed at build time and lives in
+non-persistent buffers. The feature blocks are gathered onto the plane with
+``index_select`` (no in-place writes: batch-independent, deterministic,
+compile-friendly).
 
 Deviations from v1, forced or chosen:
 
@@ -49,8 +51,19 @@ Deviations from v1, forced or chosen:
   no-op), masked with :func:`~catanrl.models.rows.mask_logits`.
 * **Numeric branch**: the global and players blocks (``critic_players`` for a
   critic at another level), 117 features at two players.
-* **BASE only.** The grid is the BASE board's, so the network refuses other
-  dims (any ``max_players`` is fine); it is not dims-agnostic, like the MLP.
+* **One board.** The gather ties every slot to a cell of the ``board``
+  generator's map, so the network refuses other dims (any ``max_players`` is
+  fine; it is not dims-agnostic, like the MLP). Dims do not tell boards apart,
+  though: the shipped ``hexagon`` radius-2 generator has BASE's 19/54/72 slots
+  in row-major rather than Catanatron's spiral order, and a BASE network given
+  its rows would read a scrambled board with nothing but weaker play to show
+  for it. So :meth:`CnnModel.check_maps` compares a map's topology (its tile
+  corners and edge ends by slot, which is what the encoder's topology block
+  holds) with the board's, and training (``check_bindable``), the eval harness
+  and the bridge check their maps before playing. ``board: {type: hexagon,
+  radius: 2}`` lays the plane out for those pools instead; any fixed-shape
+  generator that fits the 11 x 21 grid (MINI, small rectangles) works the
+  same way.
 
 Sizes: ``channels: [64, 128, 128], hidden: 512`` is v1's arch-ablation
 ``xdim-default`` (16.8M parameters per network); v1's D-S is ``channels: [32,
@@ -59,8 +72,9 @@ Sizes: ``channels: [64, 128, 128], hidden: 512`` is v1's arch-ablation
 
 from __future__ import annotations
 
+import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from functools import cache
 from typing import Any
@@ -72,6 +86,9 @@ from catanrl.models.base import CatanModel
 from catanrl.models.rows import feature_names, mask_logits, orthogonal_, value_prior
 
 CNN_DEFAULTS: dict[str, Any] = {
+    # The map generator (catanrl.maps.generate config) whose fixed tile order the plane is
+    # laid out from; the network trains and plays on that generator's maps only.
+    "board": {"type": "BASE"},
     # Convolution widths and kernel (rows x columns; the paper's 5 x 3 on a transposed board).
     "channels": [64, 128, 128],
     "kernel": [3, 5],
@@ -88,34 +105,54 @@ HIDDEN_GAIN = math.sqrt(2.0)
 POLICY_OUTPUT_GAIN = 0.01
 VALUE_OUTPUT_GAIN = 0.01
 
+Topology = tuple[tuple[tuple[int, ...], ...], tuple[tuple[int, int], ...]]
+
 
 @dataclass(frozen=True)
-class BaseGrid:
-    """Flat cell (``row * GRID_COLS + col``) of each BASE tile, node and edge slot."""
+class BoardGrid:
+    """Flat cell (``row * GRID_COLS + col``) of each tile, node and edge slot of a board,
+    and the board's :func:`topology`, which a map must share to be laid out the same."""
 
     tiles: tuple[int, ...]
     nodes: tuple[int, ...]
     edges: tuple[int, ...]
+    topology: Topology
 
     @property
     def dims(self) -> dict[str, int]:
         return {"max_tiles": len(self.tiles), "max_nodes": len(self.nodes), "max_edges": len(self.edges)}
 
 
-@cache
-def base_grid() -> BaseGrid:
-    """The engine's BASE map on v1's 11 x 21 grid (see the module docstring).
+def topology(catan_map: Any) -> Topology:
+    """A map's tile corners (NORTH clockwise) and edge ends, by slot: the encoder's
+    topology block. Two maps with equal topology put every slot on the same cell."""
+    tiles = tuple(tuple(int(n) for n in catan_map.land_tiles[c].nodes) for c in catan_map.land_tile_coordinates)
+    edges = tuple((int(u), int(v)) for u, v in catan_map.land_edges)
+    return tiles, edges
+
+
+def board_grid(board: Mapping[str, Any]) -> BoardGrid:
+    """The ``board`` generator's map on v1's 11 x 21 grid (see the module docstring).
 
     Slots are the encoder's: tiles in map order, nodes ascending, edges
     ascending. The derivation checks itself: every node must land on one cell
-    whichever tile places it, cells must not collide, and the grid must be
-    v1's size, so a change to the map's corner order or shape raises here.
+    whichever tile places it, cells must not collide, and the map must fit the
+    grid, so a change to the map's corner order or a board of another shape
+    raises here.
     """
+    if not isinstance(board, Mapping) or "type" not in board:
+        raise ValueError(f"cnn board must be a map generator config such as {{type: BASE}}, not {board!r}")
+    return _board_grid(json.dumps(dict(board), sort_keys=True))
+
+
+@cache
+def _board_grid(key: str) -> BoardGrid:
     import cppanatron as cpp
 
     from catanrl import maps
 
-    catan_map = cpp.CatanMap.from_spec(cpp.MapSpec.from_dict(maps.generate({"type": "BASE"}, 0)))
+    board = json.loads(key)
+    catan_map = cpp.CatanMap.from_spec(cpp.MapSpec.from_dict(maps.generate(board, 0)))
     node_cell: dict[int, tuple[int, int]] = {}
     tile_cells: list[tuple[int, int]] = []
     for x, y, z in catan_map.land_tile_coordinates:
@@ -124,32 +161,33 @@ def base_grid() -> BaseGrid:
         corners = ((r, c + 2), (r, c + 4), (r + 2, c + 4), (r + 2, c + 2), (r + 2, c), (r, c))
         for node, cell in zip(catan_map.land_tiles[(x, y, z)].nodes, corners, strict=True):
             if node_cell.setdefault(node, cell) != cell:
-                raise RuntimeError(f"BASE node {node} falls on two cells: the map's corner order changed")
+                raise RuntimeError(f"{board}: node {node} falls on two cells: the map's corner order changed")
         tile_cells.append((r + 1, c + 2))
     top = min(r for r, _ in node_cell.values())
     left = min(c for _, c in node_cell.values())
     nodes = sorted(catan_map.land_nodes)
     if nodes != sorted(node_cell):
-        raise RuntimeError("the BASE map's land nodes are not its tiles' corners")
+        raise RuntimeError(f"{board}: the map's land nodes are not its tiles' corners")
 
     def flat(cell: tuple[int, int]) -> int:
         r, c = cell[0] - top, cell[1] - left
         if not (0 <= r < GRID_ROWS and 0 <= c < GRID_COLS):
-            raise RuntimeError(f"the BASE map does not fit the {GRID_ROWS} x {GRID_COLS} grid")
+            raise RuntimeError(f"{board}: the map does not fit the cnn's {GRID_ROWS} x {GRID_COLS} grid")
         return r * GRID_COLS + c
 
     edge_cells = []
     for u, v in catan_map.land_edges:
         (r1, c1), (r2, c2) = node_cell[u], node_cell[v]
         if (r1 + r2) % 2 or (c1 + c2) % 2:
-            raise RuntimeError(f"BASE edge {(u, v)} has no cell between its ends")
+            raise RuntimeError(f"{board}: edge {(u, v)} has no cell between its ends")
         edge_cells.append(((r1 + r2) // 2, (c1 + c2) // 2))
-    grid = BaseGrid(tiles=tuple(flat(cell) for cell in tile_cells),
-                    nodes=tuple(flat(node_cell[node]) for node in nodes),
-                    edges=tuple(flat(cell) for cell in edge_cells))
+    grid = BoardGrid(tiles=tuple(flat(cell) for cell in tile_cells),
+                     nodes=tuple(flat(node_cell[node]) for node in nodes),
+                     edges=tuple(flat(cell) for cell in edge_cells),
+                     topology=topology(catan_map))
     cells = grid.tiles + grid.nodes + grid.edges
     if len(set(cells)) != len(cells):
-        raise RuntimeError("two BASE slots share a cell of the grid")
+        raise RuntimeError(f"{board}: two slots share a cell of the grid")
     return grid
 
 
@@ -170,14 +208,14 @@ class BoardPlane(nn.Module):
     a block reads zero there (the gather's extra zero row).
     """
 
-    def __init__(self, layout: Mapping[str, Any], grid: BaseGrid) -> None:
+    def __init__(self, layout: Mapping[str, Any], grid: BoardGrid) -> None:
         super().__init__()
         self.spans = {block: _span(layout, block) for block in ("tiles", "nodes", "edges")}
         self.channels = sum(shape[1] for _, shape in self.spans.values())
         for block, cells in (("tiles", grid.tiles), ("nodes", grid.nodes), ("edges", grid.edges)):
             count = self.spans[block][1][0]
             if count != len(cells):
-                raise ValueError(f"{block}: {count} slots in the row, {len(cells)} on the BASE grid")
+                raise ValueError(f"{block}: {count} slots in the row, {len(cells)} on the board's grid")
             source = torch.full((GRID_ROWS * GRID_COLS,), count, dtype=torch.long)  # count = the zero row
             source[torch.tensor(cells, dtype=torch.long)] = torch.arange(count)
             self.register_buffer(f"source_{block}", source, persistent=False)
@@ -204,7 +242,7 @@ def _norm(kind: str, channels: int) -> nn.Module:
 class CrossDimensionalTrunk(nn.Module):
     """v1's ``CrossDimensionalBackbone``: conv branch, numeric branch, fusion."""
 
-    def __init__(self, layout: Mapping[str, Any], players: str, args: Mapping[str, Any], grid: BaseGrid) -> None:
+    def __init__(self, layout: Mapping[str, Any], players: str, args: Mapping[str, Any], grid: BoardGrid) -> None:
         super().__init__()
         channels = [int(c) for c in args["channels"]]
         kernel = tuple(int(k) for k in args["kernel"])
@@ -273,28 +311,50 @@ class CnnModel(CatanModel):
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__(spec, dims, levels, layout)
         args = spec["args"]
-        grid = base_grid()
-        board = {key: self.dims[key] for key in grid.dims}
-        if board != grid.dims:
-            raise ValueError(f"the cnn network lays the BASE board on a plane: dims must be {grid.dims} "
-                             f"(any max_players), not {board}")
+        self.grid = board_grid(args["board"])  # validates the config
+        self.board = dict(args["board"])
+        board_dims = {key: self.dims[key] for key in self.grid.dims}
+        if board_dims != self.grid.dims:
+            raise ValueError(f"the cnn network lays the {self.board} board on a plane: dims must be "
+                             f"{self.grid.dims} (any max_players), not {board_dims}")
         names = feature_names(dims, levels["level"])
         self.present_index = names["players"].index("present")
         self.players_offset, (_, self.player_width) = layout["players"]
         if args["shared"]:
             if self.has_critic_block:
                 raise ValueError("a shared trunk cannot read a separate critic level")
-            net = CnnNetwork(layout, "players", args, grid, num_actions=self.num_actions,
+            net = CnnNetwork(layout, "players", args, self.grid, num_actions=self.num_actions,
                              num_players=self.num_players, policy=True, value=True)
             self.backbone, self.policy_head, self.value_head = net.trunk, net.policy, net.value
             self.parts = {"actor": ["backbone.", "policy_head."], "critic": ["value_head."]}
         else:
-            self.actor = CnnNetwork(layout, "players", args, grid, num_actions=self.num_actions,
+            self.actor = CnnNetwork(layout, "players", args, self.grid, num_actions=self.num_actions,
                                     num_players=self.num_players, policy=True, value=False)
-            self.critic = CnnNetwork(layout, self.critic_players, args, grid, num_actions=self.num_actions,
+            self.critic = CnnNetwork(layout, self.critic_players, args, self.grid, num_actions=self.num_actions,
                                      num_players=self.num_players, policy=False, value=True)
             self.parts = {"actor": ["actor."], "critic": ["critic."]}
         self.shared = bool(args["shared"])
+
+    def check_maps(self, maps: Iterable[Any]) -> None:
+        """Refuse a map whose slots are not in the board's order (see the module docstring)."""
+        for i, catan_map in enumerate(maps):
+            if topology(catan_map) != self.grid.topology:
+                raise ValueError(
+                    f"map {i} is not laid out like the cnn's board {self.board}: its tiles, nodes or edges "
+                    f"come in another order and the plane would scramble it; a cnn trains and plays on its "
+                    f"board's generator only (model.args.board)")
+
+    def check_rows(self, obs: torch.Tensor) -> None:
+        """Refuse a batch holding rows of a map laid out unlike the board, by their topology
+        blocks. For tests and diagnostics: the forward pass trusts :meth:`check_maps`, and
+        padded (all-zero) rows of a strict eval batch would fail here."""
+        bad = torch.zeros(obs.shape[0], dtype=torch.bool, device=obs.device)
+        for block, reference in zip(("tile_nodes", "edge_nodes"), self.grid.topology, strict=True):
+            expected = torch.tensor(reference, dtype=torch.long, device=obs.device)
+            bad |= (_slice(obs, _span(self.layout, block)).long() != expected).flatten(1).any(1)
+        if bool(bad.any()):
+            raise ValueError(f"{int(bad.sum())} of {obs.shape[0]} rows come from maps not laid out like "
+                             f"the cnn's board {self.board}")
 
     def _present(self, obs):
         players = obs[:, self.players_offset : self.players_offset + self.num_players * self.player_width]

@@ -1,4 +1,4 @@
-# A tiny cross-dimensional CNN for tests and smoke runs.
+# A tiny cross-dimensional CNN for tests and smoke runs (the BASE board).
 preset: cnn-tiny
 class: cnn
-args: {channels: [8, 8], kernel: [3, 5], hidden: 32, numeric_layers: 1, norm: group, shared: false}
+args: {board: {type: BASE}, channels: [8, 8], kernel: [3, 5], hidden: 32, numeric_layers: 1, norm: group, shared: false}

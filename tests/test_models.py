@@ -187,18 +187,26 @@ def test_critic_reads_the_critic_players_block(preset):
 
 # ---------------------------------------------------------------- cnn
 
+HEXAGON = {"type": "hexagon", "radius": 2}
+HEX_2P = {"name": "hexagon-2p", "num_players": 2, "map": HEXAGON}
 
-def test_cnn_grid_is_the_engines_base_board():
+
+@pytest.mark.parametrize("board, game", [({"type": "BASE"}, "base-2p"), (HEXAGON, HEX_2P)])
+def test_cnn_grid_is_the_engines_board(board, game):
     """The static gather agrees with the topology the encoder writes per row (several map
     seeds): every tile centre has its six corners around it and every edge sits between
-    its ends, on v1's 11 x 21 plane, with the blocks' valid features on exactly their cells."""
-    from catanrl.models.cnn import GRID_COLS, GRID_ROWS, base_grid
+    its ends, on v1's 11 x 21 plane, with the blocks' valid features on exactly their cells.
+    The hexagon generator has BASE's slots in another order: its own grid, same checks."""
+    from catanrl.models.cnn import GRID_COLS, GRID_ROWS, board_grid
 
-    grid = base_grid()
+    grid = board_grid(board)
     cells = grid.tiles + grid.nodes + grid.edges
     assert (GRID_ROWS, GRID_COLS) == (11, 21) and len(set(cells)) == len(cells) == 19 + 54 + 72
-    model = model_for("cnn-tiny")
-    obs = encode(played_games(count=5, seed=11), BASE_2P)
+    model = model_for("cnn-tiny", board=board)
+    played = played_games(game, count=5, seed=11)
+    model.check_maps(g.board.map for g in played)
+    obs = encode(played, BASE_2P)
+    model.check_rows(obs)
     rows = RowReader(row_layout(BASE_2P, "private"), feature_names(BASE_2P, "private"))(obs)
     for b in range(obs.shape[0]):
         for t, centre in enumerate(grid.tiles):
@@ -221,6 +229,24 @@ def test_cnn_grid_is_the_engines_base_board():
         assert torch.allclose(batched[i], alone[0], atol=1e-5)
 
 
+def test_cnn_refuses_maps_laid_out_unlike_its_board():
+    """Same dims, other tile order: hexagon rows on a BASE cnn (and the reverse) are refused
+    by check_maps and check_rows, so a pool or suite of the other generator cannot play on
+    a scrambled board. The scramble is real: the two grids put the same rows on other cells."""
+    base, hexagon = model_for("cnn-tiny"), model_for("cnn-tiny", board=HEXAGON)
+    assert base.grid.topology != hexagon.grid.topology
+    base_games, hex_games = played_games(count=2), played_games(HEX_2P, count=2)
+    for model, own, other in ((base, base_games, hex_games), (hexagon, hex_games, base_games)):
+        model.check_maps(g.board.map for g in own)
+        model.check_rows(encode(own, BASE_2P))
+        with pytest.raises(ValueError, match="laid out"):
+            model.check_maps(g.board.map for g in other)
+        with pytest.raises(ValueError, match="laid out"):
+            model.check_rows(encode(other, BASE_2P))
+    obs = encode(hex_games, BASE_2P)
+    assert not torch.equal(base.actor.trunk.plane(obs), hexagon.actor.trunk.plane(obs))
+
+
 def test_cnn_preset_matches_v1_size():
     """v1's arch-ablation xdim-default: about 16.8M parameters per network."""
     model = model_for("cnn")
@@ -231,10 +257,16 @@ def test_cnn_preset_matches_v1_size():
     assert not model.dims_agnostic
 
 
-def test_cnn_is_base_only():
-    assert model_for("cnn-tiny", BASE_4P).num_players == 4  # the BASE board at any player count
-    with pytest.raises(ValueError, match="BASE"):
+def test_cnn_is_one_board_only():
+    assert model_for("cnn-tiny", BASE_4P).num_players == 4  # the board at any player count
+    assert model_for("cnn-tiny", BASE_4P, board=HEXAGON).grid.dims == {k: v for k, v in BASE_4P.items()
+                                                                        if k != "max_players"}
+    with pytest.raises(ValueError, match="board"):
         model_for("cnn-tiny", WIDE_4P)
+    with pytest.raises(RuntimeError, match="grid"):
+        model_for("cnn-tiny", WIDE_4P, board={"type": "extension"})  # 30 tiles do not fit 11 x 21
+    with pytest.raises(ValueError, match="board"):
+        model_for("cnn-tiny", board="BASE")
     with pytest.raises(RuntimeError):
         model_for("cnn-tiny", BASE_4P).load_state_dict(model_for("cnn-tiny").state_dict())
 

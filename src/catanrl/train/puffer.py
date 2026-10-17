@@ -278,17 +278,22 @@ class CatanPuffeRL(pufferl.PuffeRL):
 
 
 def check_bindable(model: CatanModel, plan: Any) -> None:
-    """Refuse a network evals could not bind.
+    """Refuse a network evals could not bind, or a pool it would misread.
 
     Evals play at the generators' bounds (``dims_for``); a network that is not
-    dims-agnostic (mlp) trained at other dims (``env.dims: pool`` or explicit)
-    would train fine and then fail every select and heldout eval.
+    dims-agnostic (mlp, cnn) trained at other dims (``env.dims: pool`` or
+    explicit) would train fine and then fail every select and heldout eval.
+    The pool's maps then go through the network's own check: the cnn's plane
+    is one board's, and a pool with the same dims in another tile order (the
+    hexagon generator against BASE) would train on scrambled boards with
+    nothing but weaker play to show for it.
     """
     bounds = dims_for([spec.game for spec in plan.specs])
     if not model.dims_agnostic and dict(model.dims) != bounds:
         raise ValueError(
             f"a {model.spec['class']} network is not dims-agnostic: it must train at the generators' "
             f"bounds {bounds} (env.dims: auto), not {dict(model.dims)}")
+    model.check_maps(catan_map for scenario in plan.scenarios for catan_map in scenario.maps)
 
 
 def build_policy_model(cfg: Mapping[str, Any], dims: Mapping[str, int]) -> CatanModel:

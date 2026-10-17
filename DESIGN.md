@@ -159,6 +159,14 @@ GNN plugs straight into search (`MCTS:ckpt=…:sims=…`).
   nodes, nodes ↔ tiles, nodes ↔ edges) with batched per-sample adjacency built
   from the topology block, so it runs on any map. Presets `graph-s`, `graph-m`.
 * `mlp` – flat baseline over the same row (for ablations; padded maps only).
+* `cnn` – v1's cross-dimensional CNN (Gendre and Kaneko, arXiv 2008.07079):
+  the tile, node and edge blocks gathered onto v1's 11 x 21 plane, laid out
+  once from the engine's map of the preset's `board` generator (BASE by
+  default). For the architecture ablation; one board only: other dims are
+  refused at build, and a map with the same dims in another tile order (the
+  hexagon generator against BASE) by `CnnModel.check_maps`, which training
+  (`check_bindable`), the eval harness and the bridge run over their maps
+  before playing. `MODEL_CLASSES` in `catanrl.models` is the table.
 
 Heads: structured policy (above) and a per-seat value head (P sigmoids). A
 checkpoint stores the network config and the observation spec it was trained
@@ -400,7 +408,9 @@ and it is usable without its run directory:
 
 1. The weights hash matches.
 2. `layout_hash` matches, else `SchemaMismatch`.
-3. Dims match, unless the class is dims-agnostic (graph is, mlp is not).
+3. Dims match, unless the class is dims-agnostic (graph is; mlp and cnn are
+   not). A class tied to one board (cnn) also checks the maps it is about to
+   play, in `check_bindable`, the eval harness and the bridge (section 2).
 4. Re-encoding the stored positions gives the stored obs, else
    `EncoderDrift`.
 5. The rebuilt model on CPU gives the stored logits and values, else
