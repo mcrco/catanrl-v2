@@ -1,0 +1,22 @@
+# Does the exact-posterior hand tracker (DESIGN 1.5, `tracker=exact`) help a
+# belief-averaged policy where hidden information matters most, 4 players?
+# An eval-only experiment: the two tracker modes of the same network and the
+# same 16 worlds sit at one table with two F, so every game is a paired
+# comparison (parity 25% each). 500 boards x 4 seat rotations = 2,000 games.
+# If exact beats pool here, the follow-up is the same pairing with
+# `MCTS:sims=256:dets=4` (about ten times the cost).
+name: tracker-modes
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 500}
+      lineup:
+        - "BELIEF:ckpt=ppo-4p/main@best:worlds=16:tracker=exact"
+        - "BELIEF:ckpt=ppo-4p/main@best:worlds=16:tracker=pool"
+        - F
+        - F
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  notes: |
+    Report, the tracker idea, measurement (b). The record pins ppo-4p/main@best (e3650).
