@@ -1,3 +1,6 @@
+# 2026-10-18, after the run: void at the private level (every sampled world encodes to the true row,
+# so BELIEF == POLICY whatever the tracker) and the two learner slots of an [A, B, F, F] table are
+# not exchangeable (F robs the seat after it; identical copies split 40 / 53). see the report.
 # Does the exact-posterior hand tracker (DESIGN 1.5, `tracker=exact`) help a
 # belief-averaged policy where hidden information matters most, 4 players?
 # An eval-only experiment: the two tracker modes of the same network and the

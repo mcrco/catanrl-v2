@@ -1,0 +1,21 @@
+# The other slot order of ppo-mixed's 4p head to head against ppo-4p (record 32aab9f3:
+# [mixed, 4p, F, F] gave 39.3 / 53.0). A [A, B, F, F] table is not exchangeable: the suite
+# seats lineup[(seat + r) % 4], so slot 0 always moves right after the F in slot 3, and F
+# (enemies=next) robs and blocks the seat after it; two IDENTICAL copies of ppo-4p split
+# 40.45 / 52.75 (b07e5bd9) and the tracker-modes pair 40.35 / 52.65 (791479068fde30dd).
+# So the specialist-vs-generalist question needs both orders: this is [4p, mixed, F, F]
+# on the same 1,000 boards x 4 rotations; the per-agent share averaged over the two orders
+# is the paired comparison. 4,000 native policy games, a few minutes.
+name: slot-order
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 1000}
+      lineup:
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - "POLICY:ckpt=ppo-mixed/main@best"
+        - F
+        - F
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
