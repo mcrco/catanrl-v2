@@ -16,7 +16,12 @@ docs/experiments-implementation.md are handled here:
 * checkpoints go through the run writer (PufferLib's ``save_checkpoint`` and
   its data_dir copy are replaced);
 * rewards are win/loss in [0, 1], inside PufferLib's clamp; VP shaping, which
-  can leave it, is refused.
+  can leave it, is refused;
+* ``train.aux_coef`` > 0 trains a graph network's aux head (``model.args.aux``)
+  on the row's critic block (``obs.critic_level`` above ``obs.level``) through
+  the fork's ``aux_loss`` hook; ``losses/aux`` and ``aux/mse_<feature>`` /
+  ``aux/var_<feature>`` are logged. At 0 (the default) the head, if any, is
+  not run and training is the plain PPO.
 """
 
 from __future__ import annotations
@@ -58,7 +63,7 @@ RUNNER_KEYS = frozenset({
 })
 #: Keys of the ``train`` section that catanrl reads and PuffeRL does not.
 CATANRL_TRAIN_KEYS = frozenset({"algo", "lr_schedule", "kl_target", "lr_min", "lr_max", "log_interval",
-                                "muon_exclude", "muon_exclude_lr"})
+                                "muon_exclude", "muon_exclude_lr", "aux_coef"})
 
 
 def resolve_device(device: str) -> str:
@@ -74,8 +79,13 @@ def rollout_bytes(rows: int, horizon: int, obs_size: int) -> int:
 
 
 def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows: int, seed: int,
-                  data_dir: str, strict: bool = False) -> dict[str, Any]:
-    """PuffeRL's config: the ``train`` section minus catanrl's keys, plus the runner's."""
+                  data_dir: str, strict: bool = False, recurrent: bool = False) -> dict[str, Any]:
+    """PuffeRL's config: the ``train`` section minus catanrl's keys, plus the runner's.
+
+    ``recurrent`` (the model's) sets ``use_rnn``: the training forward then
+    sees segments x horizon, and PuffeRL sizes its (unused) state dict by
+    the policy's ``hidden_size``.
+    """
     config = {key: value for key, value in train.items() if key not in CATANRL_TRAIN_KEYS}
     clash = RUNNER_KEYS & set(config)
     if clash:
@@ -85,7 +95,7 @@ def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows:
         seed=int(seed),
         env="catan",
         data_dir=str(data_dir),
-        use_rnn=False,
+        use_rnn=bool(recurrent),
         torch_deterministic=bool(strict),
         cpu_offload=False,
         # runtime.compile compiles the network inside PufferPolicy; PuffeRL's own compile
@@ -222,6 +232,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
         start = time.time()
         steps, env = self.global_step, self.vecenv.envs[0]
         decisions = env.decisions
+        self.uncompiled_policy.begin_rollout()
         self.evaluate()
         collected = time.time()
         self.decisions += env.decisions - decisions
@@ -253,6 +264,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
         })
         logs.update({f"environment/{k}": v for k, v in env.take_stats().items()})
         logs.update({f"critic/{k}": v for k, v in self.uncompiled_policy.pop_calibration().items()})
+        logs.update({f"aux/{k}": v for k, v in self.uncompiled_policy.pop_aux().items()})
         self._adapt_lr(logs)
         if self._checkpoint_due:
             self.save_checkpoint()
@@ -278,17 +290,22 @@ class CatanPuffeRL(pufferl.PuffeRL):
 
 
 def check_bindable(model: CatanModel, plan: Any) -> None:
-    """Refuse a network evals could not bind.
+    """Refuse a network evals could not bind, or a pool it would misread.
 
     Evals play at the generators' bounds (``dims_for``); a network that is not
-    dims-agnostic (mlp) trained at other dims (``env.dims: pool`` or explicit)
-    would train fine and then fail every select and heldout eval.
+    dims-agnostic (mlp, cnn) trained at other dims (``env.dims: pool`` or
+    explicit) would train fine and then fail every select and heldout eval.
+    The pool's maps then go through the network's own check: the cnn's plane
+    is one board's, and a pool with the same dims in another tile order (the
+    hexagon generator against BASE) would train on scrambled boards with
+    nothing but weaker play to show for it.
     """
     bounds = dims_for([spec.game for spec in plan.specs])
     if not model.dims_agnostic and dict(model.dims) != bounds:
         raise ValueError(
             f"a {model.spec['class']} network is not dims-agnostic: it must train at the generators' "
             f"bounds {bounds} (env.dims: auto), not {dict(model.dims)}")
+    model.check_maps(catan_map for scenario in plan.scenarios for catan_map in scenario.maps)
 
 
 def build_policy_model(cfg: Mapping[str, Any], dims: Mapping[str, int]) -> CatanModel:
@@ -312,6 +329,21 @@ def _lr_schedule(train: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"train.lr_schedule kl_adaptive needs {missing}")
     return {"kind": kind, "kl_target": float(train["kl_target"]), "lr_min": float(train["lr_min"]),
             "lr_max": float(train["lr_max"])}
+
+
+def _aux_coef(train: Mapping[str, Any], model: CatanModel) -> float:
+    """train.aux_coef, checked against the network: a positive weight needs the aux head
+    and the critic block it is trained on; 0 leaves a head, if any, untrained."""
+    coef = float(train.get("aux_coef", 0.0) or 0.0)
+    if coef < 0.0:
+        raise ValueError(f"train.aux_coef must be >= 0, not {coef}")
+    if coef and not getattr(model, "aux", False):
+        raise ValueError("train.aux_coef > 0 needs a network with an aux head: model.args.aux on a shared graph "
+                         "trunk (model.args.shared)")
+    if coef and not model.has_critic_block:
+        raise ValueError("train.aux_coef > 0 trains the aux head on the critic block: set obs.critic_level above "
+                         "obs.level (its players block is the target, which no head reads)")
+    return coef
 
 
 def _critic_options(train: Mapping[str, Any]) -> dict[str, Any]:
@@ -378,9 +410,9 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     )
     critic_gamma = train["critic_gamma"] if train["critic_gamma"] is not None else float(train["gamma"])
     policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)),
-                          critic_gamma=critic_gamma)
+                          critic_gamma=critic_gamma, aux_coef=_aux_coef(train, model))
     config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
-                           data_dir=str(getattr(writer, "path", ".")), strict=strict)
+                           data_dir=str(getattr(writer, "path", ".")), strict=strict, recurrent=policy.recurrent)
     buffer = rollout_bytes(vecenv.num_agents, config["bptt_horizon"], vecenv.single_observation_space.shape[0])
     if device.startswith("cuda") and buffer > torch.cuda.get_device_properties(device).total_memory:
         raise ValueError(f"the rollout buffer needs {buffer / 2**30:.1f} GiB: lower env.num_envs or "

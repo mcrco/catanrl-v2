@@ -160,6 +160,9 @@ class ViewAgent:
         if fair is False:
             raise UnfairAgent(f"{self.label} is not fair on views (DESIGN 6.5)")
         check_fair(self.native)
+        if getattr(self.native, "recurrent", False):
+            raise BridgeError(f"{self.label}: a recurrent network needs its seat's decision history, which the "
+                              "server bridge does not replay")
         self.supply = supply
         self.strict = strict
         self.seed_fn = seed_fn
@@ -252,7 +255,8 @@ class ViewAgent:
         if tracker is None:
             info = self._game(game_id)
             supply = info["supply"] if info["supply"] is not None else self.supply
-            tracker = SeatTracker(view, color, supply=supply)
+            tracker = SeatTracker(view, color, supply=supply,
+                                  mode=getattr(self.native, "tracker_mode", cpp.TrackerMode.POOL))
             tracker.sizes.update(info["sizes"])
             self.seats[key] = tracker
             while len(self.seats) > self.max_games:
@@ -323,16 +327,20 @@ class ViewAgent:
 
     def _bind(self, game: cpp.Game) -> None:
         """Play at the agent's dims when the game fits them, else (a graph
-        network) at dims that cover both."""
+        network) at dims that cover both; a network tied to one board (cnn)
+        must also recognise the game's map."""
         from catanrl.envs.encoding import covering_dims
 
         need = covering_dims([game.board.map], game.num_players)
         have = self.native.dims
-        if all(need[k] <= have[k] for k in need):
-            return
-        if not getattr(self.native, "dims_agnostic", False):
-            raise ViewError(f"{self.label} plays at dims {have}; this game needs {need}")
-        self.native.bind({k: max(need[k], have[k]) for k in need})
+        if any(need[k] > have[k] for k in need):
+            if not getattr(self.native, "dims_agnostic", False):
+                raise ViewError(f"{self.label} plays at dims {have}; this game needs {need}")
+            self.native.bind({k: max(need[k], have[k]) for k in need})
+        try:
+            self.native.check_maps([game.board.map])
+        except ValueError as error:
+            raise ViewError(f"{self.label}: {error}") from None
 
     # ------------------------------------------------------------ reporting
 

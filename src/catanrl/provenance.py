@@ -31,6 +31,9 @@ from catanrl.canon import ast_digest, digest, sha256_file
 PACKAGE = Path(__file__).resolve().parent
 #: catanrl's outcome code: what an eval's result depends on.
 OUTCOME = ("models", "agents", "search", "envs", "eval/harness.py", "maps.py", "games.py", "seeding.py")
+#: Outcome code of the catanatron harness only: the harness and the LLM agent (its prompts and
+#: answer parser); a native record does not move when they change.
+CATANATRON_ONLY = ("eval/catanatron.py", "agents/llm")
 #: PufferLib files a training process runs (besides _C).
 PUFFERLIB = ("__init__.py", "pufferl.py", "pytorch.py", "vector.py", "emulation.py", "spaces.py")
 ENV_VARS = ("CUDA_VISIBLE_DEVICES", "CUBLAS_WORKSPACE_CONFIG", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
@@ -71,6 +74,18 @@ def _py_files(root: Path, label: str) -> list[tuple[str, Path]]:
             if "__pycache__" not in p.parts]
 
 
+def _outcome_files(harness: str) -> list[tuple[str, Path]]:
+    """catanrl's outcome files for ``harness``: OUTCOME without the catanatron-only parts, which
+    the catanatron harness adds."""
+    def catanatron_only(label: str) -> bool:
+        return any(label == name or label.startswith(name + "/") for name in CATANATRON_ONLY)
+
+    files = [f for name in OUTCOME for f in _py_files(PACKAGE / name, name) if not catanatron_only(f[0])]
+    if harness == "catanatron":
+        files += [f for name in CATANATRON_ONLY for f in _py_files(PACKAGE / name, name)]
+    return files
+
+
 def _components(kind: str, harness: str) -> dict[str, dict[str, list]]:
     """Per component: Python files (hashed by AST) and binaries (hashed by bytes)."""
     import cppanatron
@@ -78,7 +93,7 @@ def _components(kind: str, harness: str) -> dict[str, dict[str, list]]:
 
     engine_dir = Path(cppanatron.__file__).parent
     parts: dict[str, dict[str, list]] = {
-        "catanrl": {"py": [f for name in OUTCOME for f in _py_files(PACKAGE / name, name)], "bin": []},
+        "catanrl": {"py": _outcome_files(harness), "bin": []},
         "engine": {"py": _py_files(engine_dir, "cppanatron"), "bin": [Path(cppanatron._core.__file__)]},
     }
     if harness == "catanatron":

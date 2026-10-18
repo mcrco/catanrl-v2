@@ -21,7 +21,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from catanrl.envs.encoding import FEATURE_BLOCKS, MAX_PLAYERS, make_encoder
+from catanrl.envs.encoding import CRITIC_PLAYERS, FEATURE_BLOCKS, MAX_PLAYERS, make_encoder
 
 MASKED_LOGIT = -1e9
 
@@ -81,6 +81,9 @@ class RowReader(nn.Module):
         for block in ("edge_nodes", "tile_nodes", "action_mask"):
             offset, shape = layout[block]
             self.spans[block] = (int(offset), tuple(int(s) for s in shape))
+        if CRITIC_PLAYERS in layout:  # readable by name through players_block, whichever block players is
+            offset, shape = layout[CRITIC_PLAYERS]
+            self.spans[CRITIC_PLAYERS] = (int(offset), tuple(int(s) for s in shape))
         self.num_players = self.spans["players"][1][0]
         if self.num_players > MAX_PLAYERS:
             raise ValueError(f"at most {MAX_PLAYERS} seats are supported")
@@ -114,6 +117,14 @@ class RowReader(nn.Module):
     def _canonical(self, x: torch.Tensor, block: str) -> torch.Tensor:
         padded = torch.cat((x, x.new_zeros(*x.shape[:-1], 1)), dim=-1)
         return padded.index_select(-1, getattr(self, f"index_{block}"))
+
+    def players_block(self, obs: torch.Tensor, block: str = "players") -> torch.Tensor:
+        """One players block of the row, ``"players"`` (the one this reader's rows hold) or
+        ``"critic_players"``, in canonical feature order: [B, P, Fp] over the env's seats.
+        Both blocks have the players block's feature names."""
+        if block not in ("players", CRITIC_PLAYERS) or block not in self.spans:
+            raise ValueError(f"the row has no {block!r} block")
+        return self._canonical(self._slice(obs.float(), block), "players")
 
     def forward(self, obs: torch.Tensor) -> Rows:
         obs = obs.float()

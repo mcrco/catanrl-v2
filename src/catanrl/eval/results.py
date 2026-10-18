@@ -16,6 +16,15 @@ segment: its execution (device class, CPU capability, torch, numpy, and
 under another execution needs ``allow_mixed`` (the record is marked) or
 ``restart_partial`` (the partial games are set aside). A forfeit makes the
 record ``valid: false``.
+
+``harness="catanatron"`` plays the same schedule with Catanatron players
+(:mod:`catanrl.eval.catanatron`: the only harness for ``LLM`` agents); the
+harness is in the key, with Catanatron's code in ``code``. Rows of LLM seats
+carry an ``llm`` entry (per-game decisions, tokens, retries, fallbacks, wall
+time) that the summary totals per slot and ``verify`` ignores. A record with
+a real language model (not a stub) in its lineup is :class:`Unreplayable`:
+``verify`` refuses it unless forced, since the model never answers the same
+way twice and every replayed game is paid for.
 """
 
 from __future__ import annotations
@@ -40,10 +49,46 @@ class ExecutionMismatch(RuntimeError):
     pass
 
 
+HARNESSES = ("native", "catanatron")
+#: Row keys that are not outcomes (dropped from games_sha256 and from verify's comparison).
+NOT_OUTCOME = ("segment", "llm")
+
+
+class Unreplayable(RuntimeError):
+    """A record whose games no replay reproduces: a real language model decided them."""
+
+
+def real_llm_slots(key: Mapping[str, Any]) -> list[int]:
+    """Lineup slots (``len(lineup)`` for the fill) played by a language model other than a stub."""
+    from catanrl.agents.llm.model import is_stub
+
+    slots = [*key.get("lineup", []), key.get("fill")]
+    return [i for i, d in enumerate(slots)
+            if d and d.get("key") == "LLM" and not is_stub(str((d.get("params") or {}).get("model", "")))]
+
+
 def play_schedule(*args, **kwargs):  # indirection: tests replace the harness
     from catanrl.eval.harness import play_schedule as play
 
     return play(*args, **kwargs)
+
+
+def play_catanatron(*args, **kwargs):  # indirection: tests replace the harness
+    from catanrl.eval.catanatron import play_catanatron as play
+
+    return play(*args, **kwargs)
+
+
+def _play_games(agents, fill_agent, games, suite, harness, *, device, num_envs, threads, infer_rows, on_game) -> None:
+    """``games`` with ``agents`` (resolved for ``harness``), rows to ``on_game``."""
+    if harness == "catanatron":
+        play_catanatron(agents, games, fill=fill_agent, suite=suite, threads=int(threads or 1), on_game=on_game)
+        return
+    natives = [a.native(device=device, infer_rows=infer_rows, mode=suite.determinism) for a in agents]
+    fill_native = fill_agent.native(device=device, infer_rows=infer_rows, mode=suite.determinism) \
+        if fill_agent is not None else None
+    play_schedule(natives, games, fill=fill_native, device=device, num_envs=int(num_envs or 256),
+                  threads=int(threads or 8), infer_rows=infer_rows, suite=suite, on_game=on_game)
 
 
 @dataclass(frozen=True)
@@ -176,10 +221,25 @@ def summarize(rows: Sequence[Mapping[str, Any]], labels: Sequence[str]) -> dict:
             players = sizes.pop()
             info["expected"] = 1.0 / players
             info["win_share_p"] = binomial_two_sided(wins, len(decided), 1.0 / players)
+        llm = [r["llm"][slot] for r in mine if r.get("llm") and slot < len(r["llm"]) and r["llm"][slot]]
+        if llm:
+            info["llm"] = llm_totals(llm)
         slots.append(info)
     return {"games": len(rows), "score_rate": slots[0]["score_rate"], "wilson": slots[0]["wilson"],
             "truncated": sum(1 for r in rows if r.get("truncated")),
             "forfeits": sum(sum(r.get("forfeits") or []) for r in rows), "slots": slots}
+
+
+def llm_totals(stats: Sequence[Mapping[str, Any]]) -> dict:
+    """One slot's LLM stats over its games: sums, per-game means, and whether any token count
+    was an estimate (the stubs; a provider without usage) rather than the SDK's usage."""
+    keys = ("decisions", "forced", "calls", "prompt_tokens", "completion_tokens", "retries", "fallbacks", "wall_s")
+    totals = {k: sum(s.get(k, 0) for s in stats) for k in keys}
+    n = len(stats)
+    out = {"games": n, **totals, "estimated": any(s.get("estimated") for s in stats)}
+    out["per_game"] = {k: totals[k] / n for k in keys}
+    out["fallback_rate"] = totals["fallbacks"] / totals["decisions"] if totals["decisions"] else 0.0
+    return out
 
 
 def _execution(device: str, infer_rows: int) -> dict:
@@ -224,8 +284,8 @@ def evaluate(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any =
 
     ``recompute`` replays every game of an existing record and raises if any differs.
     """
-    if harness != "native":
-        raise NotImplementedError("only the native harness evaluates; Catanatron players are for play and parity")
+    if harness not in HARNESSES:
+        raise ValueError(f"harness must be one of {HARNESSES}, not {harness!r}")
     suite = load_suite(suite)
     agents, fill_agent = _resolve(lineup, suite, fill, harness)
     key = eval_key(agents, suite, harness=harness, fill=fill_agent)
@@ -233,7 +293,9 @@ def evaluate(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any =
     path = _record_path(agents, suite, eval_id)
     if path.exists() and not recompute:
         return EvalRecord.load(path)
-    device, infer_rows = device or "auto", int(infer_rows or 256)
+    # Catanatron players run their networks on the CPU at batch 1 unless their spec says otherwise.
+    device = device or ("cpu" if harness == "catanatron" else "auto")
+    infer_rows = int(infer_rows or 256)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o644)
     try:
@@ -244,7 +306,7 @@ def evaluate(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any =
                 if result["differing"]:
                     raise RuntimeError(f"{eval_id}: {len(result['differing'])} games differ on replay")
             return EvalRecord.load(path)
-        return _play(agents, fill_agent, suite, key, eval_id, path, allow_mixed=allow_mixed,
+        return _play(agents, fill_agent, suite, key, eval_id, path, harness=harness, allow_mixed=allow_mixed,
                      restart_partial=restart_partial, device=device, num_envs=num_envs, threads=threads,
                      infer_rows=infer_rows)
     finally:
@@ -272,8 +334,8 @@ def _segment(path: Path, eval_id: str, segment: int, execution: dict) -> dict:
     return row
 
 
-def _play(agents, fill_agent, suite, key, eval_id, path, *, allow_mixed, restart_partial, device, num_envs,
-          threads, infer_rows) -> EvalRecord:
+def _play(agents, fill_agent, suite, key, eval_id, path, *, harness="native", allow_mixed, restart_partial, device,
+          num_envs, threads, infer_rows) -> EvalRecord:
     games_path, segments_path = path.with_suffix(".games.jsonl"), path.with_suffix(".segments.jsonl")
     execution = _execution(device, infer_rows)
     segments = canon.read_jsonl(segments_path)
@@ -293,13 +355,10 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, allow_mixed, restart
     done = _latest_rows(games_path)
     missing = [g for g in schedule if g.game_id not in done]
     if missing:
-        natives = [a.native(device=device, infer_rows=infer_rows, mode=suite.determinism) for a in agents]
-        fill_native = fill_agent.native(device=device, infer_rows=infer_rows, mode=suite.determinism) \
-            if fill_agent is not None else None
         with _strict(suite):
-            play_schedule(natives, missing, fill=fill_native, device=device, num_envs=int(num_envs or 256),
-                          threads=int(threads or 8), infer_rows=infer_rows, suite=suite,
-                          on_game=lambda row: canon.append_jsonl(games_path, {**row, "segment": segment}))
+            _play_games(agents, fill_agent, missing, suite, harness, device=device, num_envs=num_envs,
+                        threads=threads, infer_rows=infer_rows,
+                        on_game=lambda row: canon.append_jsonl(games_path, {**row, "segment": segment}))
     rows = _latest_rows(games_path)
     if set(rows) != {g.game_id for g in schedule}:
         raise RuntimeError(f"{eval_id}: the harness did not play every scheduled game")
@@ -347,14 +406,23 @@ def paired(a: EvalRecord, b: EvalRecord, *, slot_a: int = 0, slot_b: int = 0) ->
 
 
 def verify(record: EvalRecord | str | Path, *, games: int | None = 16, device: str | None = None,
-           num_envs: int | None = None, threads: int | None = None) -> dict:
+           num_envs: int | None = None, threads: int | None = None, force: bool = False) -> dict:
     """Replay the first ``games`` games with this code and machine; count identical rows.
 
     The suite and agents are rebuilt from the record's key; inputs that no
     longer resolve to that key (other weights at a path, an edited game) raise.
+    A record with a real language model in its lineup is refused
+    (:class:`Unreplayable`) unless ``force``: it never replays identically and
+    every replayed game is paid for.
     """
     if not isinstance(record, EvalRecord):
         record = EvalRecord.load(record)
+    if (slots := real_llm_slots(record.key)) and not force:
+        labels = record.data.get("labels") or []
+        names = ", ".join(labels[s] if s < len(labels) else f"slot {s}" for s in slots)
+        raise Unreplayable(f"{record.eval_id}: {names} is a real language model, which never replays identically, "
+                           "and every replayed game is paid for; catanrl verify --force (verify(force=True)) "
+                           "spends it anyway")
     data, suite = record.data, record.suite()
     agents, fill_agent = _resolve(data["specs"], suite, data.get("fill"), record.key["harness"])
     rebuilt = eval_key(agents, suite, harness=record.key["harness"], fill=fill_agent)
@@ -366,21 +434,19 @@ def verify(record: EvalRecord | str | Path, *, games: int | None = 16, device: s
     chosen = schedule if games is None else schedule[: int(games)]
     first = (data.get("segments") or [{}])[0].get("execution") or {}
     infer_rows = int(first.get("infer_rows", 256))
-    natives = [a.native(device=device or "auto", infer_rows=infer_rows, mode=suite.determinism) for a in agents]
-    fill_native = fill_agent.native(device=device or "auto", infer_rows=infer_rows, mode=suite.determinism) \
-        if fill_agent else None
+    harness = record.key["harness"]
     found: dict[str, dict] = {}
     with _strict(suite):
-        play_schedule(natives, chosen, fill=fill_native, device=device or "auto", num_envs=int(num_envs or 256),
-                      threads=int(threads or 8), infer_rows=infer_rows, suite=suite,
-                      on_game=lambda r: found.__setitem__(r["game_id"], r))
+        _play_games(agents, fill_agent, chosen, suite, harness,
+                    device=device or ("cpu" if harness == "catanatron" else "auto"), num_envs=num_envs,
+                    threads=threads, infer_rows=infer_rows, on_game=lambda r: found.__setitem__(r["game_id"], r))
     differing = [g.game_id for g in chosen
                  if canon.canonical_json(_strip(found[g.game_id])) != canon.canonical_json(_strip(stored[g.game_id]))]
     return {"identical": len(chosen) - len(differing), "of": len(chosen), "differing": differing}
 
 
 def _strip(row: Mapping[str, Any]) -> dict:
-    return {k: v for k, v in row.items() if k != "segment"}
+    return {k: v for k, v in row.items() if k not in NOT_OUTCOME}
 
 
 def stale(pattern: str = "*") -> list[EvalRecord]:

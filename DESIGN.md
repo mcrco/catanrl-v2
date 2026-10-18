@@ -133,6 +133,19 @@ with the observer's information. It powers determinized MCTS
 (`dets=K`), belief-averaged raw policies, and server bots that only receive
 views.
 
+Two modes (`TrackerMode`). `pool` (the default) deals the unknown pool
+uniformly: sound, but after a hidden steal it forgets which card probably
+moved (a steal from {brick, brick, ore} is dealt brick or ore evenly instead
+of 2:1) and what later payments proved about it. `exact` also keeps the exact
+posterior over every seat's hand: a weighted set of hypotheses branched at
+hidden steals (each kind by its count in the victim's hand), weighted by seen
+steals, pruned by payments, trades and monopoly amounts, merged when
+identical, capped at 4096 hypotheses (then it deals the pool until every
+hand is known again). It is exact under the rules' chance with no model of
+what seats choose to do. Agents pick it with `tracker=exact` (6.5);
+`tools/belief_exactness.py` measures both deals against a brute-force
+posterior.
+
 ### 1.6 Search
 
 `SearchPool` (C++) runs many independent searches in lockstep (v1's fastest
@@ -159,10 +172,73 @@ GNN plugs straight into search (`MCTS:ckpt=…:sims=…`).
   nodes, nodes ↔ tiles, nodes ↔ edges) with batched per-sample adjacency built
   from the topology block, so it runs on any map. Presets `graph-s`, `graph-m`.
 * `mlp` – flat baseline over the same row (for ablations; padded maps only).
+* `cnn` – v1's cross-dimensional CNN (Gendre and Kaneko, arXiv 2008.07079):
+  the tile, node and edge blocks gathered onto v1's 11 x 21 plane, laid out
+  once from the engine's map of the preset's `board` generator (BASE by
+  default). For the architecture ablation; one board only: other dims are
+  refused at build, and a map with the same dims in another tile order (the
+  hexagon generator against BASE) by `CnnModel.check_maps`, which training
+  (`check_bindable`), the eval harness and the bridge run over their maps
+  before playing. `MODEL_CLASSES` in `catanrl.models` is the table.
+* `lstm` – the graph trunk with memory: one shared trunk, an LSTM cell over
+  its pooled embedding stepped at each of the seat's own decisions (waiting
+  rows keep their state; a game's first decision starts from zero), the
+  memory injected into both heads' inputs. The stateless `forward` is the
+  zero-state function (what the checkpoint self-test pins); the state is
+  rollout-only and never checkpointed. PPO trains it through PufferLib's
+  `use_rnn` path (segments x horizon, each segment from its stored rollout
+  state, resets at terminals, as CleanRL's PPO-LSTM); the native `POLICY`
+  agent keeps one memory stream per seat of a game, so eval rows stay
+  invariant to `num_envs`. MCTS, BELIEF and the Catanatron/server bridges
+  refuse it (a leaf, a sampled world or a replayed view has no decision
+  history of its own yet).
 
 Heads: structured policy (above) and a per-seat value head (P sigmoids). A
 checkpoint stores the network config and the observation spec it was trained
 on, and refuses an env whose spec differs.
+
+### 2.1 The hidden-information head
+
+An alternative to sampling worlds from the belief (1.5): train the network
+to predict the hidden information itself. `graph` with `args.aux` (on a
+shared trunk) carries a third head, `aux_head`, from the pooled state and
+each other seat's embedding (the value head's inputs) to that seat's
+**hidden features**: the 15 players-block features the encoder zeroes for
+every seat but the observer's below the level that shows them
+(`catanrl.envs.encoding.HIDDEN_FEATURES`: the hand per resource, shown from
+`public`; the development cards in hand per kind, which of them are playable
+this turn, and the actual victory points, shown at `full`). Own-seat features
+are identical at every level and are not targets.
+
+* **Targets without an engine change.** With `obs.level: private` and
+  `obs.critic_level: full` the VecEnv appends the full-level players block
+  (`critic_players`, engine E5) after the row. A shared trunk still refuses
+  to *read* a separate critic level; with the aux head the block is the
+  head's target only (`aux_targets`): the trunk, the policy and the value
+  head read the private row, so the policy stays fair at its level and
+  `reads_critic_block` is false. Inference needs no block: the native
+  POLICY, BELIEF and MCTS agents drop it and rebuild the network on
+  actor-level rows (the same weights load), so evals encode what a plain
+  private checkpoint needs.
+* **Loss.** Masked mean squared error in the encoder's feature scale over
+  the present other seats and the hidden features, on acting rows only like
+  the other heads, weighted by `train.aux_coef` (default 0: the head, if
+  any, is not run and training is the plain PPO, bitwise). The targets are
+  the encoder's ratios in [0, 1] (count over the bank per resource, the deck
+  per kind, the points to win; 0/1 playable flags), so they are bounded and
+  rules-agnostic; a per-count cross-entropy would need each feature's range,
+  which comes from the rules and is not in the row. The hook is the
+  PufferLib fork's `aux_loss(outputs)`, next to `value_loss`.
+* **Logged.** `losses/aux` (the mean over features) and, per hidden feature,
+  `aux/mse_<f>` and `aux/var_<f>` (the target's variance over the same pairs,
+  the best constant's error), so `1 - mse / var` is the head's R^2 per
+  feature: how much of the hidden state the trunk has learned to infer.
+* **Checkpoints** store the head as a third part, `aux`, with its own
+  self-test outputs (`part="all"` pins them); `init_from` parts stay actor
+  and critic, so a warm start leaves the head fresh.
+
+The experiment is `aux-hidden` (arch-ablation's graph-s cell plus the head);
+the question is whether the policy's score moves, not the aux loss.
 
 ## 3. Agents, evaluation, experiments
 
@@ -171,6 +247,40 @@ Agent specs use Catanatron's registry syntax (grammar in 6.5):
 `MCTS:ckpt=…:oracle=true`, `BELIEF:ckpt=…:worlds=16`, `F`, `R`, and any
 Catanatron registry bot (`AB:2`). The same spec plays natively (fast
 evaluation on cppanatron), as a Catanatron `Player`, or as a server client.
+
+**LLM players** (the report's "eval frontier models on how well they play
+Catan"). `LLM:model=<OpenRouter id>:strategy=<basic|strategy|search|rules|plan>`
+(`:thinking=true:max_tokens=8192:temperature=0.1:seed=0:retries=1` by
+default; `catanrl.agents.llm`) is a language model deciding from the game
+rendered as text: catanllm's (the CS 159 project) prompting strategies,
+ported as Python strings (so `code_id` hashes a prompt edit), with the board
+topology section generated per map instead of hard-coded for BASE and the
+preamble stating the game's own VP target (base-2p plays to 15). The text
+is public information only: an opponent's hand size, dev-card count, played
+cards, buildings and visible VP, never its resource kinds, unplayed cards or
+hidden VP cards (catanllm's renderer read every seat's dev cards from the
+observer's slot; the port fixes it and `tests/test_llm_agent.py` pins the
+redaction), so the agent is `fair` by construction. The model answers with
+the action number; an unusable answer (no number, out of range) is
+re-prompted with the error `retries` times, then the player falls back to
+End Turn (else the first action), counted as a `fallback`, not a forfeit.
+Models go through OpenRouter via the openai SDK (an optional extra, `uv
+sync --extra llm`, imported lazily; `OPENROUTER_API_KEY` is read from the
+environment only); `model=stub/first`, `stub/random` and `stub/scripted` play
+without a network (tests, `catanrl llm-cost`). The agent exists only on the
+catanatron harness (6.6). Each row of an LLM seat carries `llm` stats
+(prompted decisions, forced moves, calls, prompt and completion tokens from
+the SDK's usage or a characters/4 estimate, retries, fallbacks, wall time),
+totalled per slot in the record's summary. `configs/experiments/llm-eval.yaml`
+is the eval (models x {plan, basic} x {F, our best 2p network} on the first
+20 heldout-2p boards, both seats); `catanrl llm-cost` plays stub games and
+prices a cell from a $/M-token table, so a budget is approved before any
+real call. `catanrl run llm-eval --smoke` plays every cell with
+`stub/random`: a smoke plan replaces the model of any `LLM:` spec, so a
+smoke never makes a paid call. A real model's record is `nondeterministic`
+(flagged † in the report) and `verify` refuses to replay it unless forced.
+Model ids cannot contain `:` (the spec grammar splits on it), so OpenRouter
+variants like `:free` are not addressable yet.
 
 Evaluation: paired seats (every board played from every seat rotation),
 fixed seeds, Wilson intervals, exact McNemar for paired comparisons,
@@ -184,7 +294,7 @@ axes:
 
 | v1 experiment | v2 axis |
 |---|---|
-| architecture ablation (xdim/MLP/graph-s/graph-m) | `model.preset` sweep |
+| architecture ablation (xdim/MLP/graph-s/graph-m) | `model.preset` sweep (`mlp`, `graph-s`, `graph-m`, `lstm`) |
 | information levels for actor/critic | `obs.level` (`private`/`public`/`full`), `obs.critic_level` |
 | belief averaging of a full-info policy | agent `BELIEF:…` |
 | determinized MCTS / ISMCTS, dets × sims | agent `MCTS:…:dets=K:sims=N`, a `kind: eval` sweep over `params` |
@@ -271,6 +381,7 @@ $CATANRL_RUNS_DIR      default <main worktree>/runs (via git-common-dir): one ro
       trainer_state.pt resume state: the commit point
       evals/<suite>/   <eval_id>.json + <eval_id>.games.jsonl
   _evals/              records whose lineup slot 0 is not a run (F vs AB)
+  _wandb/              the W&B mirror's own files (offline runs, logs), unless WANDB_DIR says where
 ```
 
 * **Names** match `^[a-z0-9][a-z0-9._+-]*$`, so they are safe inside agent
@@ -346,7 +457,14 @@ counts takes `fill: F` for the empty seats.
   `kind: train`) `eval.final`. Refs are hashed as written.
 * Refs to other runs are resolved once, when the variant is created, and
   stored in `config.json`. If one later moves, the variant warns and keeps its
-  target.
+  target. A ref to another variant of the same experiment, in `eval.final`
+  too, is a dependency: the runner finishes that variant first. A ref in
+  `eval.final` to a run of *another* experiment (a control trained elsewhere,
+  which the runner cannot order) is pinned at creation only if that run is
+  already finished (`USABLE`); otherwise the variant is created, trained and
+  smoked without it, the final is deferred (`Unbound`), and a later
+  `catanrl run` of the experiment pins and plays it once the control is
+  finished (`bindings.jsonl`).
 * `${self}` and `${run}@best` resolve when the eval runs, and are pinned in
   its record.
 * `${init}` is the checkpoint `init_from` loads the actor from, pinned when
@@ -400,7 +518,9 @@ and it is usable without its run directory:
 
 1. The weights hash matches.
 2. `layout_hash` matches, else `SchemaMismatch`.
-3. Dims match, unless the class is dims-agnostic (graph is, mlp is not).
+3. Dims match, unless the class is dims-agnostic (graph is; mlp and cnn are
+   not). A class tied to one board (cnn) also checks the maps it is about to
+   play, in `check_bindable`, the eval harness and the bridge (section 2).
 4. Re-encoding the stored positions gives the stored obs, else
    `EncoderDrift`.
 5. The rebuilt model on CPU gives the stored logits and values, else
@@ -472,6 +592,11 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
 * **MCTS** takes engine units: `c_puct` 0.75 equals v1's 1.5. `dets ≥ 1`
   counts sampled worlds, and `oracle=true` searches the true state. There is
   no magic 0.
+* **`tracker`** (MCTS with dets, BELIEF): `pool` (default) or `exact`, the
+  hand tracker mode the worlds are dealt from (1.5). It is in the canonical
+  spec and `key_dict()`, so eval records tell the two apart. The native
+  harness keeps VecEnv's trackers exact when any agent asks, and each agent
+  passes its own deal, so a lineup can mix both.
 
 `resolve_agent(spec)` does four things:
 
@@ -485,6 +610,7 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
    | MCTS | not `oracle` |
    | BELIEF | always |
    | built-in bots | never |
+   | LLM | always: it reads only the public state text |
 
 4. Writes a canonical spec that is a fixed point of resolution:
    `MCTS:ckpt=arch-lineage/graph-s-s42.g1@e600#41f2a9c07d11:sims=256:dets=4:oracle=false:root=puct:c_puct=0.75:…`.
@@ -498,6 +624,7 @@ binding.
 | native, batched on cppanatron (`SearchPool` for MCTS) | `resolved.native(device=…, infer_rows=…)` |
 | Catanatron `Player` | `catanrl.player(spec, color)`, i.e. `REGISTRY.build` once `catanrl.agents` is imported. It converts via `Game.apply_setup` and runs the native agent at batch 1 |
 | server bot | `catanrl bot --spec SPEC ws://…`. Views feed the `HandTracker`. A `public`/`full` POLICY is refused (use BELIEF) |
+| Catanatron harness eval | `evaluate(…, harness="catanatron")`, `catanrl eval … --harness catanatron`, `harness: catanatron` in `eval.final`: the suite's schedule as Catanatron games (`catanrl.eval.catanatron`), every seat an `agent.player(color)`; the only harness for `LLM` |
 
 The v1 shims stay, over the same path:
 
@@ -534,6 +661,17 @@ Otherwise it:
 2. Plays only the `game_id`s missing from `.games.jsonl`. Each finished game
    appends one row, so a crash resumes exactly.
 3. Writes the record once.
+
+`harness` is in the key. `native` plays the schedule on cppanatron;
+`catanatron` plays the same games (map seed, game seed, seat order forced
+before the first action, the suite's turn limit) with Catanatron players,
+`runtime.threads` games at a time in a thread pool, with Catanatron's code
+in `code`. Catanatron's bots draw from the game's RNG, so their rows depend
+on the game seed only; a real LLM is not replayable at all: `verify`
+refuses such a record (`Unreplayable`) unless `--force`, and `report-data`
+flags it `nondeterministic` (so `--final` refuses it) without replaying it.
+Rows of LLM seats carry `llm` stats, which `games_sha256` and `verify` leave
+out (wall time is not an outcome).
 
 Each start or restart appends its execution (device class, torch,
 `infer_rows`). Resuming under different execution needs `--allow-mixed`,
@@ -586,9 +724,11 @@ n, p, `eval_id`, canonical specs, `run@eN#sha`, flags), which Typst reads with
 `code_id()` hashes these files when catanrl is imported:
 
 * cppanatron's `.so` and Python files;
-* catanrl's outcome code: `models`, `agents`, `search`, `envs`,
-  `eval/harness`, `maps`, `games`;
-* Catanatron, when that harness is used;
+* catanrl's outcome code: `models`, `agents` (without `agents/llm`),
+  `search`, `envs`, `eval/harness`, `maps`, `games`;
+* with the Catanatron harness, also Catanatron itself, `eval/catanatron`
+  and `agents/llm` (the prompts and the answer parser), so a native record
+  does not move when they change;
 * for training, also `catanrl/train` and PufferLib's `pufferl.py`,
   `pytorch.py` and `_C`.
 
@@ -654,7 +794,7 @@ Training is `fast` by default.
 
 | Tier | Guards |
 |---|---|
-| fast (default) | hashes and `derive_seed` pinned to v1; resolution, migrations, hashes of frozen fixture YAMLs; `validate_plan` on every experiment; `ppo.yaml` matches the keys PuffeRL reads; the runs store under a foreign cwd, with a crash injected between each write; specs; schedules golden, disjoint and exact; eval resume, forfeits, pairing, report gates; provenance; PufferLib import side effects; McNemar at n = 5000 |
+| fast (default) | hashes and `derive_seed` pinned to v1; resolution, migrations, hashes of frozen fixture YAMLs; `validate_plan` on every experiment; `ppo.yaml` matches the keys PuffeRL reads; the runs store under a foreign cwd, with a crash injected between each write; specs; schedules golden, disjoint and exact; eval resume, forfeits, pairing, report gates; provenance; PufferLib import side effects; McNemar at n = 5000; the LLM agent: specs, registry, stub games through the catanatron harness and `catanrl eval`, the public-only render, answer parsing and retries, token and cost accounting, llm-eval's stub cells |
 | end to end (default, < 30 s CPU) | a tiny graph net trains 3 epochs; `best` cites a select eval; `build_policy`, `load_checkpoint` and `POLICY:` give identical logits; a repeated `evaluate()` hits the cache; stop and resume keeps the LR and optimizer step; repeated with `[POLICY, R, R, R]` |
 | engine (default) | golden maps; drift detection (byte, layout, encoder, model); eval and SearchPool invariance; spec defaults equal `SearchConfig`'s; native vs Catanatron `Player` parity per position; Catanatron action order across processes; sampled worlds give the true private row; golden outcomes of a committed 100 KB checkpoint |
 | slow (`-m train`) | seeded CPU training is bitwise; straight and resumed runs match; `--smoke` on every experiment |

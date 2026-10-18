@@ -77,6 +77,7 @@ class _Table:
     game: cpp.Game
     agents: list[Any]
     rng: MT19937_64
+    index: int = 0
     trackers: dict[int, cpp.HandTracker] = field(default_factory=dict)
     decisions: list[int] = field(default_factory=list)
     stuck: bool = False
@@ -124,16 +125,16 @@ def play_reference(lineup, games, *, suite, fill=None) -> list[dict]:
         rows.append(harness._row(t.scheduled, num_slots=len(agents), winner_seat=winner, turns=game.num_turns,
                                  truncated=winner is None, stuck=t.stuck, decisions=t.decisions))
 
-    for scheduled in games:
+    for index, scheduled in enumerate(games):
         scenario = table[scheduled.scenario]
         game = cpp.Game(scenario.game.num_players, map=maps.get(scheduled.scenario, scheduled.map_seed),
                         rules=scenario.game.cppanatron_rules(), seed=int(scheduled.game_seed))
         seat_agents = [agents[int(slot)] for slot in scheduled.seats]
         t = _Table(scheduled, scenario.turn_limit, game, seat_agents, MT19937_64(int(scheduled.bot_seed)),
-                   decisions=[0] * len(seat_agents))
+                   index=index, decisions=[0] * len(seat_agents))
         for seat, agent in enumerate(seat_agents):
             if agent.needs_trackers:
-                t.trackers[seat] = cpp.HandTracker(game, seat)
+                t.trackers[seat] = cpp.HandTracker(game, seat, agent.tracker_mode)
         (active.append if t.advance() else finish)(t)
     while active:
         groups: dict[int, list[_Table]] = defaultdict(list)
@@ -146,10 +147,14 @@ def play_reference(lineup, games, *, suite, fill=None) -> list[dict]:
             obs = np.stack([agent.encode(t.game, s) for t, s in zip(tables, seats)])
             seeds = np.array([derive_seed(int(t.scheduled.game_seed), "decide", int(t.scheduled.rotation), s,
                                           t.decisions[s]) for t, s in zip(tables, seats)], dtype=np.uint64)
+            memory = {}
+            if getattr(agent, "needs_memory", False):  # one stream per seat of a game
+                memory = {"streams": np.array([t.index * dims["max_players"] + s for t, s in zip(tables, seats)]),
+                          "first": np.array([t.decisions[s] == 0 for t, s in zip(tables, seats)])}
             choices = agent.act(obs, obs[:, -agent.action_space.size:], seeds,
                                 games=[t.game for t in tables] if agent.needs_games else None,
                                 trackers=[t.trackers[s] for t, s in zip(tables, seats)]
-                                if agent.needs_trackers else None)
+                                if agent.needs_trackers else None, **memory)
             for t, seat, index in zip(tables, seats, choices):
                 t.decisions[seat] += 1
                 t.execute(agent.action_space.decode(t.game, int(index)))

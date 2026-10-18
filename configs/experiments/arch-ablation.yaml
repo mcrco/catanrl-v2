@@ -1,0 +1,83 @@
+# The formal architecture ablation (report section 1): MLP, LSTM, CNN and the
+# graph network under one recipe, puffer-graph2's (one shared trunk, Muon with
+# a cosine, prioritized segments, pure self-play on 2p BASE), at the fair
+# `private` level so the recurrent arm has hidden information to remember.
+# 100M agent steps per architecture (757 epochs of 132,096; puffer-graph2 was
+# at 86% vs F by then and v1's gaps between families were 7-12 points), one
+# seed, selected on select-2p every 50 epochs, reported on heldout-2p against
+# F and head to head against the graph-s cell on the same boards. The
+# head-to-head rows bind graph-s's best checkpoint when a variant is created,
+# so mlp, cnn and lstm depend on graph-s and the runner finishes it first
+# (`${experiment}` keeps the ref inside the smoke store too). The mlp and cnn
+# classes are not dims-agnostic: they train and play at base-2p's dims only,
+# which every suite here uses.
+name: arch-ablation
+seed: 42
+env:
+  scenarios: [{game: base-2p, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+obs: {level: private}
+model: {preset: graph-s}  # each cell sets its preset and `shared` below (lstm has one trunk by construction)
+train:
+  algo: ppo
+  total_timesteps: 100_000_000  # 757 epochs x 132,096 agent steps; the cosine's T_max follows it
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95
+  adam_beta2: 0.999
+  adam_eps: 1.0e-12
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2
+  ent_coef: 0.005
+  max_grad_norm: 2.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 4096
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+eval:
+  select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+sweep:
+  axes:
+    arch:
+      graph-s:
+        model.args: {shared: true}
+      mlp:
+        model.preset: mlp
+        model.args: {shared: true}
+        eval.final:
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/graph-s@best"]}
+      cnn:
+        model.preset: cnn
+        model.args: {shared: true}
+        eval.final:
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/graph-s@best"]}
+      lstm:
+        model.preset: lstm
+        eval.final:
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/graph-s@best"]}
+  name: "{arch}"
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  recipe: puffer-graph2
+  notes: |
+    Report section 1. The head-to-head rows bind arch-ablation/graph-s@best when each variant is
+    created: mlp, cnn and lstm depend on graph-s, so the runner finishes it first.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

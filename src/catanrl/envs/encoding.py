@@ -37,6 +37,19 @@ MAX_PLAYERS = 6
 FEATURE_BLOCKS = ("global", "players", "tiles", "nodes", "edges")
 #: The critic block VecEnv appends when the critic reads another level.
 CRITIC_PLAYERS = "critic_players"
+#: Players-block features the encoder zeroes, for every seat but the observer's, below the
+#: level that shows them (``GraphEncoder::write_players``): the hand per resource (shown
+#: from ``public``), the development cards in hand per kind, which of those are playable
+#: this turn, and the actual victory points (shown at ``full``). They are the hidden
+#: information of a ``private`` row; slot 0's own features are identical at every level.
+#: In the encoder's scale each is a count over the rules' total (the bank per resource,
+#: the deck per kind, the points to win) and the playable flags are 0/1.
+HIDDEN_FEATURES = (
+    "actual_vps",
+    "resource_wood", "resource_brick", "resource_sheep", "resource_wheat", "resource_ore",
+    "dev_knight", "dev_year_of_plenty", "dev_monopoly", "dev_road_building", "dev_victory_point",
+    "dev_playable_knight", "dev_playable_year_of_plenty", "dev_playable_monopoly", "dev_playable_road_building",
+)
 
 
 def info_level(level: str | cpp.InfoLevel) -> cpp.InfoLevel:
@@ -51,6 +64,15 @@ def info_level(level: str | cpp.InfoLevel) -> cpp.InfoLevel:
 def level_name(level: str | cpp.InfoLevel) -> str:
     level = info_level(level)
     return next(name for name, value in LEVELS.items() if value == level)
+
+
+def hidden_feature_indices(names: Sequence[str]) -> list[int]:
+    """Positions of :data:`HIDDEN_FEATURES`, in that order, in a players-block feature list."""
+    names = list(names)
+    missing = [name for name in HIDDEN_FEATURES if name not in names]
+    if missing:
+        raise ValueError(f"the players block lacks the hidden features {missing}")
+    return [names.index(name) for name in HIDDEN_FEATURES]
 
 
 def check_dims(dims: Mapping[str, Any]) -> dict[str, int]:

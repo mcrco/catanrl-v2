@@ -219,14 +219,17 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: unless MIGRATIONS covers it. Schema 2 added PPO's critic_targets, critic_gamma,
 #: muon_exclude and muon_exclude_lr (schema 1's hashes: graph-tiny-s42.ppo 20ec34c2d9d0676a,
 #: graph-tiny-s42.g1 15aeb57c1b609e46, mlp-s43.ppo f2a01f1ffa2e8221, mlp-s43.g1
-#: 31e1ee123fb5fcd0, s16-oracle 3ee08aa7d06abdcb, s64-d4 aaa5309ffd128cac); stored
-#: schema-1 runs migrate to the hashes below.
+#: 31e1ee123fb5fcd0, s16-oracle 3ee08aa7d06abdcb, s64-d4 aaa5309ffd128cac); schema 3 added
+#: PPO's aux_coef (schema 2's hashes: graph-tiny-s42.ppo 9de4ad123b1571e1, graph-tiny-s42.g1
+#: 8f20d8bd5eb0864c, mlp-s43.ppo 0afc662b53b55599, mlp-s43.g1 2b8b04b954ec769d, s16-oracle
+#: 57fd361629823202, s64-d4 3b565fffa56c89eb). Stored schema-1 and schema-2 runs migrate to
+#: the hashes below.
 GOLDEN = {
     "fx-lineage": {
-        "graph-tiny-s42.ppo": "9de4ad123b1571e1", "graph-tiny-s42.g1": "8f20d8bd5eb0864c",
-        "mlp-s43.ppo": "0afc662b53b55599", "mlp-s43.g1": "2b8b04b954ec769d",
+        "graph-tiny-s42.ppo": "d1bd50a558dcb0d1", "graph-tiny-s42.g1": "700cfba93f2a4e09",
+        "mlp-s43.ppo": "3666bf72fc1f3b1f", "mlp-s43.g1": "94da3f005acf8a95",
     },
-    "fx-mcts": {"s16-oracle": "57fd361629823202", "s64-d4": "3b565fffa56c89eb"},
+    "fx-mcts": {"s16-oracle": "03c620ea32b0d5f2", "s64-d4": "32c708b2b94de072"},
 }
 
 
@@ -239,16 +242,40 @@ def test_golden_fixture_hashes(name):
 
 def test_schema_1_ppo_configs_migrate_to_schema_2_hashes():
     """A run stored before schema 2 (no critic keys) hashed as schema 1 did and migrates
-    to the schema-2 resolution's hash, so it still resumes."""
+    to the current resolution's hash, so it still resumes."""
     schema_1 = {("fx-lineage", "graph-tiny-s42.ppo"): "20ec34c2d9d0676a",
                 ("fx-mcts", "s64-d4"): "aaa5309ffd128cac"}
     for (name, variant), old_hash in schema_1.items():
         new = load_plan(FIXTURES / f"{name}.yaml").variant(variant)
         stored = json.loads(json.dumps(new.config))
-        for key in ("critic_targets", "critic_gamma", "muon_exclude", "muon_exclude_lr"):
+        for key in ("critic_targets", "critic_gamma", "muon_exclude", "muon_exclude_lr", "aux_coef"):
             del stored["train"][key]
+        if stored["model"]:
+            del stored["model"]["args"]["aux"]
         assert config_hash(stored) == old_hash
         assert config_hash(migrate(stored, from_schema=1)) == new.config_hash
+
+
+def test_schema_2_ppo_configs_migrate_to_schema_3_hashes(tmp_path):
+    """A run stored under schema 2 (no aux_coef: the live runs of October 2026) hashed as
+    schema 2 did and migrates to the current resolution's hash, so it still resumes."""
+    schema_2 = {("fx-lineage", "graph-tiny-s42.ppo"): "9de4ad123b1571e1",
+                ("fx-lineage", "mlp-s43.g1"): "2b8b04b954ec769d",
+                ("fx-mcts", "s16-oracle"): "57fd361629823202"}
+    for (name, variant), old_hash in schema_2.items():
+        new = load_plan(FIXTURES / f"{name}.yaml").variant(variant)
+        stored = json.loads(json.dumps(new.config))
+        del stored["train"]["aux_coef"]
+        if stored["model"] and stored["model"]["class"] == "graph":  # resolution fills the class default
+            del stored["model"]["args"]["aux"]
+        assert config_hash(stored) == old_hash
+        assert config_hash(migrate(stored, from_schema=2)) == new.config_hash
+    # The class default is a graph key: another class's stored args stay as they are.
+    cnn = load_plan(write(tmp_path, model={"preset": "cnn-tiny"})).variants[0].config
+    stored = json.loads(json.dumps(cnn))
+    del stored["train"]["aux_coef"]
+    assert "aux" not in migrate(stored, from_schema=2)["model"]["args"]
+    assert config_hash(migrate(stored, from_schema=2)) == config_hash(cnn)
 
 
 def _keyed(key: str, algo: str | None) -> str:
@@ -284,6 +311,30 @@ def test_tied_axes_on_one_section_merge(tmp_path):
     got = {v.name: (v.config["train"]["gamma"], v.config["train"]["ent_coef"]) for v in plan.variants}
     assert got == {"lo-e0": (0.9, 0.0), "lo-e1": (0.9, 0.1), "hi-e0": (0.999, 0.0), "hi-e1": (0.999, 0.1)}
     assert len({v.config_hash for v in plan.variants}) == 4
+
+
+def test_a_sweep_cell_can_replace_a_section(tmp_path):
+    # `key!` in a cell replaces the base's section instead of merging into it (arch-ablation's lstm cell).
+    sweep = {"axes": {"m": {"seeded": {"seed": 2}, "plain": {"model!": {"preset": "graph-tiny"}}}}, "name": "{m}"}
+    plan = load_plan(write(tmp_path, model={"preset": "graph-tiny", "args": {"shared": True}}, sweep=sweep))
+    got = {v.name: v.config["model"]["args"]["shared"] for v in plan.variants}
+    assert got == {"seeded": True, "plain": False}
+
+
+def test_a_head_to_head_row_depends_on_the_cell_it_names(tmp_path):
+    # eval.final is not hashed, but its refs are bound when the variant is created (arch-ablation's
+    # head-to-head rows), so a ref to a sibling cell orders the runner; ${experiment} keeps it in the
+    # smoke store.
+    row = {"suite": "heldout-2p", "lineup": ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/control@best"]}
+    sweep = {"axes": {"m": {"control": {"seed": 2}, "other": {"eval.final": [row]}}}, "name": "{m}"}
+    for smoke, experiment in ((False, "exp"), (True, "exp+smoke")):
+        plan = load_plan(write(tmp_path, sweep=sweep), smoke=smoke)
+        control, other = plan.variants
+        assert (control.depends_on, other.depends_on) == ((), ("control",))
+        assert other.config["eval"]["final"][0]["lineup"][1] == f"POLICY:ckpt={experiment}/control@best"
+    with pytest.raises(ConfigError, match="depends on \\['missing'\\]"):
+        row["lineup"][1] = "POLICY:ckpt=${experiment}/missing@best"
+        load_plan(write(tmp_path, sweep=sweep))
 
 
 def test_set_on_a_sweep_axis_is_refused(tmp_path):

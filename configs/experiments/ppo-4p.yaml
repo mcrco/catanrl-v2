@@ -57,6 +57,7 @@ eval:
     - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${run}@best", F, F]}
     - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", R, R, R]}
 meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
   recipe: puffer-graph2
   v1_budget: {agent_steps_2p: 500_000_000, decisions: 250_000_000}
   notes: |

@@ -10,8 +10,10 @@ import torch
 from catanrl import games
 from catanrl.envs.encoding import action_size, dims_for, make_encoder, row_layout
 from catanrl.models import build_model, resolve_spec
+from catanrl.models.rows import RowReader, feature_names
 
 BASE_2P = {"max_players": 2, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
+BASE_4P = {"max_players": 4, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
 WIDE_4P = {"max_players": 4, "max_tiles": 30, "max_nodes": 90, "max_edges": 120}
 
 
@@ -44,7 +46,7 @@ def encode(games_list, dims, level="private"):
     return torch.from_numpy(np.stack([encoder.encode(g, g.current_player_index) for g in games_list]))
 
 
-@pytest.mark.parametrize("preset", ["graph-tiny", "mlp"])
+@pytest.mark.parametrize("preset", ["graph-tiny", "mlp", "cnn-tiny"])
 def test_logits_are_masked_and_values_are_probabilities(preset):
     model = model_for(preset)
     obs = encode(played_games(), BASE_2P)
@@ -57,10 +59,10 @@ def test_logits_are_masked_and_values_are_probabilities(preset):
     assert torch.all((values > 0) & (values < 1))
 
 
-def test_fresh_value_head_predicts_one_over_n_per_seat():
-    dims = {"max_players": 4, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
-    model = model_for("graph-s", dims)
-    obs = encode(played_games("base-4p", count=4), dims)
+@pytest.mark.parametrize("preset", ["graph-s", "cnn-tiny"])
+def test_fresh_value_head_predicts_one_over_n_per_seat(preset):
+    model = model_for(preset, BASE_4P)
+    obs = encode(played_games("base-4p", count=4), BASE_4P)
     _, values = model(obs)
     assert torch.allclose(values.sum(1), torch.ones(4), atol=0.1)
     assert torch.allclose(values, torch.full_like(values, 0.25), atol=0.05)
@@ -162,12 +164,13 @@ def test_graph_forward_is_deterministic_on_cuda():
     assert torch.allclose(first[0][3], one[0][0], atol=1e-5)
 
 
-def test_critic_reads_the_critic_players_block():
+@pytest.mark.parametrize("preset", ["graph-tiny", "cnn-tiny"])
+def test_critic_reads_the_critic_players_block(preset):
     """With obs.critic_level above obs.level, the critic reads E5's critic_players block."""
     layout = row_layout(BASE_2P, "private", "full")
     assert layout["critic_players"] == (make_encoder(BASE_2P, "private").size, (2, 46))
     torch.manual_seed(0)
-    model = build_model({"preset": "graph-tiny"}, dims=BASE_2P, levels={"level": "private", "critic_level": "full"},
+    model = build_model({"preset": preset}, dims=BASE_2P, levels={"level": "private", "critic_level": "full"},
                         num_actions=action_size(BASE_2P), layout=layout).eval()
     played = played_games(count=4, plies=200)
     private, full = encode(played, BASE_2P, "private"), encode(played, BASE_2P, "full")
@@ -180,3 +183,109 @@ def test_critic_reads_the_critic_players_block():
     logits2, values2 = model(other)
     assert torch.equal(logits, logits2)
     assert not torch.equal(values, values2)
+
+
+# ---------------------------------------------------------------- cnn
+
+HEXAGON = {"type": "hexagon", "radius": 2}
+HEX_2P = {"name": "hexagon-2p", "num_players": 2, "map": HEXAGON}
+
+
+@pytest.mark.parametrize("board, game", [({"type": "BASE"}, "base-2p"), (HEXAGON, HEX_2P)])
+def test_cnn_grid_is_the_engines_board(board, game):
+    """The static gather agrees with the topology the encoder writes per row (several map
+    seeds): every tile centre has its six corners around it and every edge sits between
+    its ends, on v1's 11 x 21 plane, with the blocks' valid features on exactly their cells.
+    The hexagon generator has BASE's slots in another order: its own grid, same checks."""
+    from catanrl.models.cnn import GRID_COLS, GRID_ROWS, board_grid
+
+    grid = board_grid(board)
+    cells = grid.tiles + grid.nodes + grid.edges
+    assert (GRID_ROWS, GRID_COLS) == (11, 21) and len(set(cells)) == len(cells) == 19 + 54 + 72
+    model = model_for("cnn-tiny", board=board)
+    played = played_games(game, count=5, seed=11)
+    model.check_maps(g.board.map for g in played)
+    obs = encode(played, BASE_2P)
+    model.check_rows(obs)
+    rows = RowReader(row_layout(BASE_2P, "private"), feature_names(BASE_2P, "private"))(obs)
+    for b in range(obs.shape[0]):
+        for t, centre in enumerate(grid.tiles):
+            for node in rows.tile_nodes[b, t].long().tolist():
+                dr, dc = divmod(grid.nodes[node], GRID_COLS)[0] - centre // GRID_COLS, \
+                    grid.nodes[node] % GRID_COLS - centre % GRID_COLS
+                assert abs(dr) == 1 and abs(dc) <= 2
+        for e, cell in enumerate(grid.edges):
+            u, v = rows.edge_nodes[b, e].long().tolist()
+            assert 2 * cell == grid.nodes[u] + grid.nodes[v]
+    plane = model.actor.trunk.plane
+    planes = plane(obs)
+    widths = {block: shape[1] for block, (_, shape) in plane.spans.items()}
+    assert planes.shape == (obs.shape[0], sum(widths.values()), GRID_ROWS, GRID_COLS)
+    valid = planes[:, [0, widths["tiles"], widths["tiles"] + widths["nodes"]]]  # each block's valid feature
+    assert valid.flatten(2).sum(-1).tolist() == [[19.0, 54.0, 72.0]] * obs.shape[0]
+    batched, _ = model(obs)
+    for i in range(obs.shape[0]):
+        alone, _ = model(obs[i : i + 1])
+        assert torch.allclose(batched[i], alone[0], atol=1e-5)
+
+
+def test_cnn_refuses_maps_laid_out_unlike_its_board():
+    """Same dims, other tile order: hexagon rows on a BASE cnn (and the reverse) are refused
+    by check_maps and check_rows, so a pool or suite of the other generator cannot play on
+    a scrambled board. The scramble is real: the two grids put the same rows on other cells."""
+    base, hexagon = model_for("cnn-tiny"), model_for("cnn-tiny", board=HEXAGON)
+    assert base.grid.topology != hexagon.grid.topology
+    base_games, hex_games = played_games(count=2), played_games(HEX_2P, count=2)
+    for model, own, other in ((base, base_games, hex_games), (hexagon, hex_games, base_games)):
+        model.check_maps(g.board.map for g in own)
+        model.check_rows(encode(own, BASE_2P))
+        with pytest.raises(ValueError, match="laid out"):
+            model.check_maps(g.board.map for g in other)
+        with pytest.raises(ValueError, match="laid out"):
+            model.check_rows(encode(other, BASE_2P))
+    obs = encode(hex_games, BASE_2P)
+    assert not torch.equal(base.actor.trunk.plane(obs), hexagon.actor.trunk.plane(obs))
+
+
+def test_cnn_preset_matches_v1_size():
+    """v1's arch-ablation xdim-default: about 16.8M parameters per network."""
+    model = model_for("cnn")
+    count = lambda prefix: sum(p.numel() for k, p in model.named_parameters() if k.startswith(prefix))
+    assert 16.5e6 < count("actor.") < 17.1e6
+    assert 16.5e6 < count("critic.") < 17.1e6
+    assert model.parts == {"actor": ["actor."], "critic": ["critic."]}
+    assert not model.dims_agnostic
+
+
+def test_cnn_is_one_board_only():
+    assert model_for("cnn-tiny", BASE_4P).num_players == 4  # the board at any player count
+    assert model_for("cnn-tiny", BASE_4P, board=HEXAGON).grid.dims == {k: v for k, v in BASE_4P.items()
+                                                                        if k != "max_players"}
+    with pytest.raises(ValueError, match="board"):
+        model_for("cnn-tiny", WIDE_4P)
+    with pytest.raises(RuntimeError, match="grid"):
+        model_for("cnn-tiny", WIDE_4P, board={"type": "extension"})  # 30 tiles do not fit 11 x 21
+    with pytest.raises(ValueError, match="board"):
+        model_for("cnn-tiny", board="BASE")
+    with pytest.raises(RuntimeError):
+        model_for("cnn-tiny", BASE_4P).load_state_dict(model_for("cnn-tiny").state_dict())
+
+
+def test_cnn_values_are_zero_for_absent_seats():
+    model = model_for("cnn-tiny", BASE_4P)
+    _, values = model(encode(played_games("base-2p", count=3), BASE_4P))
+    assert torch.all(values[:, 2:] == 0) and torch.all((values[:, :2] > 0) & (values[:, :2] < 1))
+
+
+def test_cnn_variants():
+    shared = model_for("cnn-tiny", shared=True)
+    assert shared.parts == {"actor": ["backbone.", "policy_head."], "critic": ["value_head."]}
+    obs = encode(played_games(count=2), BASE_2P)
+    logits, values, present = shared.heads(obs)
+    assert torch.equal(logits, shared.policy_logits(obs)) and torch.equal(values, shared.value_logits(obs)[0])
+    assert logits.shape == (2, shared.num_actions) and values.shape == present.shape == (2, 2)
+    assert model_for("cnn-tiny", norm="batch")(obs)[0].shape == (2, shared.num_actions)
+    with pytest.raises(ValueError, match="norm"):
+        model_for("cnn-tiny", norm="instance")
+    with pytest.raises(ValueError, match="kernel"):
+        model_for("cnn-tiny", kernel=[2, 4])

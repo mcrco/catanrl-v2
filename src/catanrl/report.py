@@ -16,9 +16,11 @@ non-heldout suites, unfair slots under test (unless ``oracle_ok``), invalid
 or drift-allowed records, and checkpoints with a training launch (in the run
 or any ``init_from`` ancestor) that predates a ``supersedes`` commit. Rows
 that cannot be rebuilt from commits (dirty or moved code at eval or training
-time, mixed-code training, mixed execution, ``fast`` suites) are marked †
-(``flagged``, the reasons in ``flags``) and ``final`` refuses them (and
-re-plays ``verify_games`` games of each).
+time, mixed-code training, mixed execution, ``fast`` suites, a real language
+model in the lineup: ``nondeterministic``) are marked † (``flagged``, the
+reasons in ``flags``) and ``final`` refuses them (and re-plays
+``verify_games`` games of each other record; a language model's games are
+never replayed, since they would differ and cost money).
 """
 
 from __future__ import annotations
@@ -88,6 +90,8 @@ def _training(agent: Any, problems: list[str], name: str) -> tuple[list[str], li
 
 
 def _eval_flags(record: Any) -> list[str]:
+    from catanrl.eval.results import real_llm_slots
+
     flags = []
     if record.data.get("mixed"):
         flags.append("mixed")
@@ -95,6 +99,8 @@ def _eval_flags(record: Any) -> list[str]:
         flags.append("fast")
     if any(s.get("dirty", True) for s in record.data.get("segments", [])):
         flags.append("dirty")
+    if real_llm_slots(record.key):
+        flags.append("nondeterministic")
     return flags
 
 
@@ -107,7 +113,8 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
     if suite.purpose != "heldout":
         problems.append(f"{name}: {suite.name} is a {suite.purpose} suite; the report cites heldout suites only")
         return None
-    agents, fill = _resolve(lineup, suite, entry.get("fill"), "native")
+    harness = entry.get("harness", "native")
+    agents, fill = _resolve(lineup, suite, entry.get("fill"), harness)
     if not agents[0].fair and not entry.get("oracle_ok"):
         problems.append(f"{name}: {agents[0].label} sees hidden information (add oracle_ok: true to cite it)")
     train_flags: list[str] = []
@@ -117,14 +124,15 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
             for commit in supersedes:
                 if not head or not _descends(commit, head, repo):
                     problems.append(f"{name}: {agents[0].label} was trained at {str(head)[:12]}, before {commit}")
-    record = find(agents, suite, fill=fill)
+    record = find(agents, suite, fill=fill, harness=harness)
     if record is None:
         if not run_missing:
             fill_arg = f" --fill {fill.canonical}" if fill else ""
+            harness_arg = f" --harness {harness}" if harness != "native" else ""
             problems.append(f"{name}: no record; run: catanrl eval {' '.join(a.canonical for a in agents)} "
-                            f"--suite {suite.name}{fill_arg}")
+                            f"--suite {suite.name}{fill_arg}{harness_arg}")
             return None
-        record = evaluate(agents, suite, fill=fill)
+        record = evaluate(agents, suite, fill=fill, harness=harness)
     if not record.data["valid"]:
         problems.append(f"{name}: record {record.eval_id} is invalid (a bot forfeited)")
     if record.data.get("allow_drift"):
@@ -133,9 +141,10 @@ def _row(name: str, lineup: list[str], entry: dict, *, supersedes: list[str], re
     if final:
         if flags:
             problems.append(f"{name}: --final refuses {', '.join(flags)} record {record.eval_id}")
-        check = verify(record, games=verify_games)
-        if check["differing"]:
-            problems.append(f"{name}: {len(check['differing'])} of {check['of']} games differ on replay")
+        if "nondeterministic" not in flags:  # a real language model's games would differ, and cost money
+            check = verify(record, games=verify_games)
+            if check["differing"]:
+                problems.append(f"{name}: {len(check['differing'])} of {check['of']} games differ on replay")
     slot = record.summary["slots"][0]
     return {"rate": slot["score_rate"], "interval": slot["wilson"], "n": slot["games"],
             "p": slot.get("win_share_p"), "decided": slot.get("decided"), "truncated": record.summary["truncated"],

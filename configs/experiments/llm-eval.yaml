@@ -1,0 +1,35 @@
+# Frontier language models as Catan players (the report's LLM eval idea): catanllm's
+# prompting strategies (plan, basic) ported to v2's LLM agent, through the Catanatron
+# harness, against F and against our best 2p network, on the first 20 heldout-2p boards
+# (2p BASE to 15 VP, each board from both seats: 40 games per cell). Model ids are
+# OpenRouter ids (placeholders: edit the model axis); stub/random plays without a network.
+#   catanrl llm-cost --games 5 --strategies plan,basic --price gpt-5=1.25,10   # the budget first
+#   catanrl run llm-eval --smoke     # every cell on 2 boards with stub/random in place of each model: no network
+#   OPENROUTER_API_KEY=... catanrl eval 'LLM:model=openai/gpt-5:strategy=plan' F --suite heldout-2p --boards 1 \
+#       --harness catanatron         # one real model on one board (2 games), to see it answer before the sweep
+#   OPENROUTER_API_KEY=... catanrl run llm-eval            # every cell (real calls cost money)
+name: llm-eval
+kind: eval
+params: {model: stub/random, strategy: plan, opponent: F}
+eval:
+  final:
+    - suite: {name: heldout-2p, boards: 20}
+      harness: catanatron
+      lineup: ["LLM:model=${params.model}:strategy=${params.strategy}:thinking=true:max_tokens=8192:temperature=0.1:seed=0",
+               "${params.opponent}"]
+sweep:
+  axes:
+    model:
+      stub: {params.model: stub/random}
+      gpt5: {params.model: openai/gpt-5}
+      sonnet45: {params.model: anthropic/claude-sonnet-4.5}
+      gemini25: {params.model: google/gemini-2.5-pro}
+    params.strategy: [plan, basic]
+    opponent:
+      f: {params.opponent: F}
+      policy: {params.opponent: "POLICY:ckpt=puffer-graph2/full@best:device=cpu"}
+  name: "{model}-{params.strategy}-{opponent}"
+runtime: {device: cpu, threads: 4}
+meta:
+  notes: "LLM eval (DESIGN 3): catanllm's strategies through the catanatron harness; one command plays the paid cells"
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

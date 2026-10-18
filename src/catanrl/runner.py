@@ -22,9 +22,10 @@ from typing import Any
 from catanrl import canon
 from catanrl.config import ConfigError, Plan, Variant
 from catanrl.runs import (
+    USABLE,
     RunLocked,
     RunWriter,
-    bind_spec,
+    Unbound,
     bound_lineup,
     check_stored,
     expand_init,
@@ -32,9 +33,6 @@ from catanrl.runs import (
     load_experiment,
     runs_root,
 )
-
-#: Statuses a dependent stage may start from (a time_limit run pins its epoch).
-USABLE = ("finished", "time_limit")
 
 
 def _trainer(algo: str):
@@ -82,7 +80,12 @@ def final_evals(run: Any, v: Variant) -> list:
     options = {k: runtime[k] for k in ("device", "num_envs", "threads", "infer_rows") if k in runtime}
     records = []
     for entry in v.config["eval"]["final"]:
-        record = evaluate(bound_lineup(run, entry["lineup"]), entry["suite"], fill=entry.get("fill"),
+        try:
+            lineup = bound_lineup(run, entry["lineup"])
+        except Unbound as error:  # a control of another experiment, not finished: a later run plays it
+            print(f"{run.ref}: final deferred: {error}", flush=True)
+            continue
+        record = evaluate(lineup, entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native"),
                           restart_partial=True, **options)
         print(f"{run.ref}: {record.data['specs'][0]} on {record.data['suite']}: "
               f"{record.summary['score_rate']:.3f} (n={record.summary['games']}) {record.eval_id}", flush=True)
@@ -91,15 +94,17 @@ def final_evals(run: Any, v: Variant) -> list:
 
 
 def _missing_finals(run: Any, v: Variant) -> bool:
+    """Whether a final of the plan has no record yet. One waiting for a run of another
+    experiment (:class:`Unbound`) is not missing: nothing can play it now."""
     from catanrl.eval.results import find
 
-    known = run.bindings()
     for entry in v.config["eval"]["final"]:
         try:
-            specs = [(s, expand_init(s, run.init_ref)) for s in entry["lineup"]]
-            lineup = [known.get(s) or bind_spec(spec, run.ref) or spec for s, spec in specs]
-            if find(lineup, entry["suite"], fill=entry.get("fill")) is None:
+            lineup = bound_lineup(run, entry["lineup"], pin=False)
+            if find(lineup, entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native")) is None:
                 return True
+        except Unbound:
+            continue
         except (RuntimeError, ValueError):  # unresolvable now: the child run reports why
             return True
     return False
@@ -219,7 +224,7 @@ def summarize(experiment: str) -> Path:
         for i, entry in enumerate(run.config["eval"]["final"]):
             try:
                 record = find([known.get(s) or expand_init(s, run.init_ref) for s in entry["lineup"]], entry["suite"],
-                              fill=entry.get("fill"))
+                              fill=entry.get("fill"), harness=entry.get("harness", "native"))
             except (RuntimeError, ValueError):
                 record = None
             if record is not None:

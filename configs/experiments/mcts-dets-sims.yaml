@@ -13,3 +13,5 @@ sweep:
     world: {oracle: {params.world: "oracle=true"}, d4: {params.world: "dets=4"}, d16: {params.world: "dets=16"}}
   name: "s{params.sims}-{world}"
 runtime: {device: cuda, threads: 16, num_envs: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

@@ -13,18 +13,30 @@ agent spec (``catanrl.agents.spec.ResolvedAgent``) into one of:
 * :class:`BotAgent` (``F``, ``R``): marks a seat the harness plays with the
   engine's bots.
 
+Agents that sample worlds have a ``tracker_mode`` (``cpp.TrackerMode``, from
+the ``tracker`` param): the harness keeps VecEnv's trackers in exact mode when
+any agent asks for it, and every agent passes its own mode as the deal, so a
+pool agent deals the pool from an exact tracker and an exact agent given a
+pool tracker fails loudly rather than silently degrading.
+
 The harness drives every agent the same way: ``bind(dims)`` once (graph
 networks are rebuilt at the harness's dims, which leaves their outputs
 unchanged), then ``act(rows, masks, decision_seeds, games=..., trackers=...)``
 per batch of decisions, returning indices into the
 ``GraphActionSpace`` of those dims. ``rows`` are encoded at ``agent.level``;
 agents with ``needs_games`` also get copies of the games, and those with
-``needs_trackers`` the deciding seats' hand trackers.
+``needs_trackers`` the deciding seats' hand trackers. A recurrent POLICY
+(``needs_memory``) also gets ``streams`` (an id per row that is stable for
+one seat of one game, e.g. ``env * max_players + seat``) and ``first``
+(whether this is that seat's first decision of the game): its memory is the
+sequence of a seat's own decisions, zero at the first, so rows are the same
+whatever env slot a game plays in. MCTS and BELIEF refuse a recurrent
+network: a leaf or a sampled world has no decision history of its own.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import cppanatron as cpp
@@ -44,12 +56,23 @@ def _param(params: Any, key: str, default: Any = None) -> Any:
     return getattr(params, key, default)
 
 
+def tracker_mode_of(params: Any) -> cpp.TrackerMode:
+    """The engine tracker mode of an agent's ``tracker`` param (default pool)."""
+    modes = {"pool": cpp.TrackerMode.POOL, "exact": cpp.TrackerMode.EXACT}
+    mode = str(_param(params, "tracker", "pool") or "pool")
+    if mode not in modes:
+        raise ValueError(f"tracker must be pool or exact, not {mode!r}")
+    return modes[mode]
+
+
 class NativeAgent:
     """Base: a network at some dims and level, evaluated in strict padded batches."""
 
     key = "NATIVE"
     needs_games = False
     needs_trackers = False
+    tracker_mode = cpp.TrackerMode.POOL
+    needs_memory = False
 
     def __init__(self, model: CatanModel, params: Any, *, device: str, infer_rows: int,
                  mode: str = "strict", heads: str = "both") -> None:
@@ -63,10 +86,16 @@ class NativeAgent:
         self._spec = model.spec
         self._levels = dict(model.levels)
         self.dims_agnostic = model.dims_agnostic
-        if critic_level_of(self.level, model.levels["critic_level"]) is not None and heads == "policy":
+        self.recurrent = bool(getattr(model, "recurrent", False))
+        if self.recurrent and not self.needs_memory:
+            raise ValueError(f"{self.key} cannot play a recurrent network (class {model.spec['class']}): "
+                             "only POLICY keeps a seat's decision history")
+        if critic_level_of(self.level, model.levels["critic_level"]) is not None and (
+                heads == "policy" or not model.reads_critic_block):
             # Decisions read only the actor: drop the critic block (it has the players block's
-            # width, so the same weights load) and play from actor-level rows. Searches keep it:
-            # their leaves come from an ActorCriticEncoder.
+            # width, so the same weights load) and play from actor-level rows. Searches keep it
+            # when the critic reads it (their leaves come from an ActorCriticEncoder); a block
+            # no head reads (a shared trunk's aux targets) is dropped for searches too.
             self._levels["critic_level"] = self.level
             model = self._rebuild(dict(model.dims))
         self._set_model(model)
@@ -96,12 +125,17 @@ class NativeAgent:
                              f"not dims-agnostic; the games need {dims}")
         self._set_model(self._rebuild(dims))
 
+    def check_maps(self, maps: Iterable[Any]) -> None:
+        """Refuse maps the network would misread at these dims (the cnn's board check)."""
+        self.model.check_maps(maps)
+
     def encode(self, game: cpp.Game, seat: int) -> np.ndarray:
         return self.encoder.encode(game, seat)
 
     def act(self, rows: np.ndarray, masks: np.ndarray, decision_seeds: np.ndarray, *,
             games: Sequence[cpp.Game] | None = None,
-            trackers: Sequence[cpp.HandTracker | None] | None = None) -> np.ndarray:
+            trackers: Sequence[cpp.HandTracker | None] | None = None,
+            streams: np.ndarray | None = None, first: np.ndarray | None = None) -> np.ndarray:
         raise NotImplementedError
 
 
@@ -124,13 +158,43 @@ class PolicyAgent(NativeAgent):
     key = "POLICY"
 
     def __init__(self, model, params, *, device, infer_rows, mode="strict") -> None:
+        self.needs_memory = bool(getattr(model, "recurrent", False))
         super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="policy")
         self.sample = bool(_param(params, "sample", False))
         self.temperature = float(_param(params, "temperature", 1.0))
+        #: stream id -> (h, c) after the seat's last decision; entries of finished games are
+        #: overwritten at the next game's first decision in that stream.
+        self._memory: dict[int, tuple[np.ndarray, np.ndarray]] = {}
 
-    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None):
-        logits, _ = self.evaluator(rows)
+    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
+        if not self.needs_memory:
+            logits, _ = self.evaluator(rows)
+        else:
+            logits = self._recall(rows, streams, first)
         return _choose(logits, masks, decision_seeds, sample=self.sample, temperature=self.temperature)
+
+    def _recall(self, rows: np.ndarray, streams, first) -> np.ndarray:
+        """Decide from each row's memory and keep the stepped memory."""
+        if streams is None or first is None:
+            raise ValueError("POLICY with a recurrent network decides from streams and first (its rows' memory)")
+        streams = np.asarray(streams, dtype=np.int64).reshape(-1)
+        first = np.asarray(first, dtype=bool).reshape(-1)
+        if len(streams) != len(rows) or len(first) != len(rows):
+            raise ValueError("streams and first need one entry per row")
+        if len(set(streams.tolist())) != len(streams):
+            raise ValueError("a stream decides once per batch")
+        size = self.evaluator.hidden_size
+        h = np.zeros((len(rows), size), dtype=np.float32)
+        c = np.zeros((len(rows), size), dtype=np.float32)
+        for i, (stream, fresh) in enumerate(zip(streams.tolist(), first.tolist())):
+            if not fresh:
+                if stream not in self._memory:
+                    raise ValueError(f"stream {stream} has no memory: its first decision was not marked first")
+                h[i], c[i] = self._memory[stream]
+        logits, _, h, c = self.evaluator.step(rows, h, c)
+        for i, stream in enumerate(streams.tolist()):
+            self._memory[stream] = (h[i].copy(), c[i].copy())
+        return logits
 
 
 class BeliefAgent(NativeAgent):
@@ -142,10 +206,11 @@ class BeliefAgent(NativeAgent):
         super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="policy")
         self.worlds = int(_param(params, "worlds", 16))
         self.aggregate = str(_param(params, "aggregate", "mean_prob"))
+        self.tracker_mode = tracker_mode_of(params)
         if self.worlds < 1 or self.aggregate not in ("mean_prob", "mean_logit"):
             raise ValueError("BELIEF needs worlds >= 1 and aggregate mean_prob or mean_logit")
 
-    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None):
+    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
         if games is None or trackers is None:
             raise ValueError("BELIEF decides from games and hand trackers")
         k = self.worlds
@@ -153,7 +218,8 @@ class BeliefAgent(NativeAgent):
         for i, (game, tracker, seed) in enumerate(zip(games, trackers, decision_seeds)):
             seat = game.current_player_index
             for w in range(k):
-                world = cpp.sample_world(game, tracker, seed=_derive_seed(int(seed), "world", w))
+                world = cpp.sample_world(game, tracker, seed=_derive_seed(int(seed), "world", w),
+                                         deal=self.tracker_mode)
                 self.encoder.encode_into(world, seat, world_rows[i * k + w])
         logits, _ = self.evaluator(world_rows)
         logits = logits.reshape(len(games), k, -1).astype(np.float64)
@@ -176,6 +242,7 @@ class MctsAgent(NativeAgent):
         super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="both")
         self.config = search_config(params, max_players=model.num_players)
         self.needs_trackers = self.config.determinizations > 0
+        self.tracker_mode = tracker_mode_of(params)
         self.temperature = float(_param(params, "temperature", 0.0))
         self._make_pool()
 
@@ -188,7 +255,7 @@ class MctsAgent(NativeAgent):
         self.config.max_players = int(self.dims["max_players"])
         self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"])
 
-    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None):
+    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
         if games is None:
             raise ValueError("MCTS searches from games")
         if self.needs_trackers and trackers is None:
@@ -197,7 +264,8 @@ class MctsAgent(NativeAgent):
         try:
             for i, (game, seed) in enumerate(zip(games, decision_seeds)):
                 tracker = trackers[i] if self.needs_trackers else None
-                ids.append(self.pool.add(game, seed=int(seed), tracker=tracker))
+                ids.append(self.pool.add(game, seed=int(seed), tracker=tracker,
+                                         deal=self.tracker_mode if tracker is not None else None))
             run_searches(self.pool, self.evaluator, batch_rows=len(ids) * self.config.max_pending)
             return np.array([self.pool.select(i, self.temperature) for i in ids], dtype=np.int64)
         finally:
@@ -214,6 +282,9 @@ class BotAgent:
 
     needs_games = False
     needs_trackers = False
+    tracker_mode = cpp.TrackerMode.POOL
+    needs_memory = False
+    recurrent = False
 
     def __init__(self, key: str, params: Any = None) -> None:
         if key not in ("F", "R"):
@@ -223,6 +294,9 @@ class BotAgent:
         self.value_enemies = {"next": cpp.ValueEnemies.NEXT, "all": cpp.ValueEnemies.ALL}[enemies]
 
     def bind(self, dims) -> None:
+        pass
+
+    def check_maps(self, maps) -> None:
         pass
 
 

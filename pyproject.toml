@@ -20,6 +20,9 @@ dependencies = [
     "cryptography>=42",
 ]
 
+[project.optional-dependencies]
+llm = ["openai>=1.84"]       # the LLM agent's OpenRouter client (the stubs need nothing)
+
 [project.scripts]
 catanrl = "catanrl.cli:main"
 

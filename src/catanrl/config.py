@@ -24,7 +24,9 @@ body: head to head against that network.
 
 ``config_hash`` covers everything but ``meta``, ``runtime`` and, for
 ``kind: train``, ``eval.final``. Refs are hashed as written; they are bound
-to ``run@eN#sha`` once, when a variant is created (:func:`bind_refs`).
+to ``run@eN#sha`` once, when a variant is created (:func:`bind_refs`), so a
+ref to another variant of the experiment anywhere but ``meta`` and
+``runtime`` (``eval.final`` included) is a dependency the runner waits for.
 """
 
 from __future__ import annotations
@@ -47,14 +49,17 @@ from catanrl.canon import digest
 from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
-SCHEMA = 2
-#: (schema that added it, dotted key, the value configs written before it meant, and for a
-#: ``train.*`` key the algo it belongs to, or None for every algo).
+SCHEMA = 3
+#: (schema that added it, dotted key, the value configs written before it meant, and its
+#: scope: for a ``train.*`` key the algo it belongs to, for a ``model.args.*`` key (a class
+#: default, which resolution fills in) the model class, or None for every algo / class).
 MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
     (2, "train.critic_targets", "vtrace", "ppo"),
     (2, "train.critic_gamma", None, "ppo"),
     (2, "train.muon_exclude", [], "ppo"),
     (2, "train.muon_exclude_lr", None, "ppo"),
+    (3, "train.aux_coef", 0.0, "ppo"),
+    (3, "model.args.aux", False, "graph"),
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
@@ -64,7 +69,7 @@ OPEN = {"meta", "params", "model.args"}
 #: Keys of each entry of these lists or optional mappings.
 ENTRY_KEYS = {
     "eval.select": {"suite", "lineup", "every", "metric", "fill"},
-    "eval.final": {"suite", "lineup", "fill"},
+    "eval.final": {"suite", "lineup", "fill", "harness"},
     "init_from": {"ckpt", "parts", "restore"},
 }
 PARTS = ("actor", "critic")
@@ -361,6 +366,8 @@ def _check_semantics(cfg: dict) -> None:
     for entry in cfg["eval"]["final"]:
         if "suite" not in entry or "lineup" not in entry:
             raise ConfigError("every eval.final entry needs suite and lineup")
+        if entry.get("harness", "native") not in ("native", "catanatron"):
+            raise ConfigError(f"eval.final harness must be native or catanatron, not {entry['harness']!r}")
 
 
 def _resolve_scenario(entry: Any) -> dict:
@@ -463,8 +470,11 @@ def migrate(cfg: dict, *, from_schema: int) -> dict:
     """A stored config of ``from_schema`` with every later key at its legacy value."""
     cfg = copy.deepcopy(cfg)
     algo = (cfg.get("train") or {}).get("algo")
-    for schema, path, legacy, for_algo in MIGRATIONS:
-        if schema <= from_schema or (path.startswith("train.") and for_algo not in (None, algo)):
+    model_class = (cfg.get("model") or {}).get("class")
+    for schema, path, legacy, scope in MIGRATIONS:
+        if schema <= from_schema or (path.startswith("train.") and scope not in (None, algo)):
+            continue
+        if path.startswith("model.args.") and (cfg.get("model") is None or scope not in (None, model_class)):
             continue
         try:
             get_path(cfg, path)
@@ -565,12 +575,28 @@ def _cells(sweep: Mapping[str, Any]) -> list[tuple[dict[str, str], dict[str, Any
             if clash:
                 raise ConfigError(f"sweep axes set the same key {clash[0]!r}")
             paths |= new
-        layer = merge(*(over for _, _, over, _ in combo))
+        layer = _union(*(over for _, _, over, _ in combo))
         cells.append(({axis: label for axis, label, _, _ in combo}, layer, paths))
     unmatched = [ex for ex, u in zip(excludes, used) if not u]
     if unmatched:
         raise ConfigError(f"sweep.exclude {unmatched[0]} matches no cell")
     return cells
+
+
+def _union(*layers: Mapping[str, Any]) -> dict:
+    """The cell's layer: nested sections combined, keys kept verbatim.
+
+    Unlike :func:`merge`, a ``key!`` (replace the section) survives for the
+    merge onto the base config. The axes set disjoint paths, so nothing here
+    overwrites anything."""
+    out: dict[str, Any] = {}
+    for layer in layers:
+        for key, value in layer.items():
+            if isinstance(value, Mapping) and isinstance(out.get(key), dict) and not key.endswith("!"):
+                out[key] = _union(out[key], value)
+            else:
+                out[key] = copy.deepcopy(value)
+    return out
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -622,6 +648,20 @@ def _smoke_refs(value: Any) -> Any:
     if isinstance(value, str):
         return re.sub(r"@e?\d+(?=$|[:#,])", "@latest", value)
     return value
+
+
+def _smoke_spec(spec: Any) -> Any:
+    """A smoke run spends nothing on a language model: an ``LLM:`` spec plays ``stub/random``."""
+    if isinstance(spec, str) and spec.upper().startswith("LLM:"):
+        from catanatron.registry import SpecError
+
+        from catanrl.agents.spec import stub_llm_spec
+
+        try:
+            return stub_llm_spec(spec)
+        except SpecError:  # validate_plan reports it
+            return spec
+    return spec
 
 
 def _merge_existing(base: dict, over: Mapping[str, Any]) -> None:
@@ -737,13 +777,18 @@ def load_plan(path: str | Path, *, overrides: Sequence[str] = (), only: str | No
                 cfg["meta"] = {**cfg["meta"], "smoke": True}
                 n = int(smoke_cfg.get("eval_boards", 2))
                 entries = [e for e in [cfg["eval"]["select"], *cfg["eval"]["final"]] if e]
-                for entry in entries:  # a suite name or {name, boards}: the first n boards
+                for entry in entries:  # a suite name or {name, boards}: the first n boards; LLMs as stubs
                     suite = entry["suite"] if isinstance(entry["suite"], Mapping) else {"name": entry["suite"]}
                     entry["suite"] = {**suite, "boards": min(int(suite.get("boards", n)), n)}
+                    if entry.get("lineup"):
+                        entry["lineup"] = [_smoke_spec(s) for s in entry["lineup"]]
+                    if entry.get("fill"):
+                        entry["fill"] = _smoke_spec(entry["fill"])
                 if cfg["eval"]["select"]:
                     cfg["eval"]["select"]["every"] = 1
             own = re.compile(re.escape(f"{experiment}/") + r"([a-z0-9][a-z0-9._+-]*)")
-            deps = tuple(sorted({m for r in _refs_in(hashed_part(cfg)) for m in own.findall(r)} - {name}))
+            scanned = {k: v for k, v in cfg.items() if k not in UNHASHED}  # eval.final too: bound at creation
+            deps = tuple(sorted({m for r in _refs_in(scanned) for m in own.findall(r)} - {name}))
             variants.append(Variant(experiment=experiment, name=name, stage=stage, labels=dict(labels),
                                     config=cfg, config_hash=config_hash(cfg), depends_on=deps))
             if stage is not None:

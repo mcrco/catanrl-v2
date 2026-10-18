@@ -26,7 +26,7 @@
     "losses/explained_variance": 0.9274339079856873,
     "losses/importance": 0.9987838864326477,
     "losses/old_approx_kl": 0.0012455643154680729,
-    "losses/policy_loss": -0.0018774172953834878,
+    "losses/policy_loss": -0.0018774254444560157,
     "losses/value_loss": 0.6931488811969757
    },
    {
@@ -37,10 +37,10 @@
     "losses/approx_kl": 1.8141336113330908e-05,
     "losses/clipfrac": 0.0,
     "losses/entropy": 1.8032746315002441,
-    "losses/explained_variance": 0.45667338371276855,
+    "losses/explained_variance": 0.45667368173599243,
     "losses/importance": 1.0008890628814697,
-    "losses/old_approx_kl": -0.000870909949298948,
-    "losses/policy_loss": -0.0007208594589682704,
+    "losses/old_approx_kl": -0.0008709084209747031,
+    "losses/policy_loss": -0.0007208453219691435,
     "losses/value_loss": 0.6931421160697937
    },
    {
@@ -51,10 +51,10 @@
     "losses/approx_kl": 4.438460018718615e-05,
     "losses/clipfrac": 0.0,
     "losses/entropy": 2.0440292358398438,
-    "losses/explained_variance": -0.5972367525100708,
-    "losses/importance": 1.0002471208572388,
-    "losses/old_approx_kl": -0.00020273923291824758,
-    "losses/policy_loss": -0.003102496359497664,
+    "losses/explained_variance": -0.5972425937652588,
+    "losses/importance": 1.0002471804618835,
+    "losses/old_approx_kl": -0.00020276308350730687,
+    "losses/policy_loss": -0.0031025112140925515,
     "losses/value_loss": 0.6931386590003967
    }
   ],
@@ -65,11 +65,11 @@
    ],
    [
     2,
-    "54ff7f7575afec7c7668fbb07e39366e7bb40d2aa12df94a37e32e74df39ac6d"
+    "3816cb9b3b873fe8a18ddec42c0a6dbe279df854710a9ecfe2164809853b927d"
    ],
    [
     4,
-    "683521b4477c3744c80586164ae6a654305543d3b461cb52087af065287766a5"
+    "d4f1461bf7a65ae0b695cb14a14241e61c571b9aa45a6f7bedaf1e0eb51b236d"
    ]
   ]
  },
@@ -80,84 +80,84 @@
     "critic/target_sum_4p": 0.9848619276477445,
     "critic/value_sum_4p": 0.9944183826446533,
     "learning_rate": 0.004698557158514988,
-    "losses/approx_kl": 0.00010894797742366791,
+    "losses/approx_kl": 0.00010894890874624252,
     "losses/clipfrac": 0.0,
-    "losses/entropy": 2.383021906018257,
-    "losses/explained_variance": 0.42351460456848145,
-    "losses/importance": 0.9997219629585743,
+    "losses/entropy": 2.3830218762159348,
+    "losses/explained_variance": 0.4235146641731262,
+    "losses/importance": 0.9997219666838646,
     "losses/old_approx_kl": 0.00038698548451066017,
-    "losses/policy_loss": -0.03542684414424002,
-    "losses/value_loss": 0.5581714250147343
+    "losses/policy_loss": -0.03542686207219958,
+    "losses/value_loss": 0.5581714287400246
    },
    {
-    "critic/sum_gap_4p": 0.002213251023065476,
+    "critic/sum_gap_4p": 0.002213372124565972,
     "critic/target_sum_4p": 0.9891897534567212,
     "critic/value_sum_4p": 0.9931007027626038,
     "learning_rate": 0.003875000000000001,
-    "losses/approx_kl": 0.00019003497436642647,
+    "losses/approx_kl": 0.00019003404304385185,
     "losses/clipfrac": 0.0,
-    "losses/entropy": 2.2877118438482285,
-    "losses/explained_variance": -0.17585968971252441,
-    "losses/importance": 0.9958160109817982,
-    "losses/old_approx_kl": 0.004374029114842415,
-    "losses/policy_loss": 0.0008906333241611719,
-    "losses/value_loss": 0.5593673959374428
+    "losses/entropy": 2.287711873650551,
+    "losses/explained_variance": -0.1759432554244995,
+    "losses/importance": 0.995816171169281,
+    "losses/old_approx_kl": 0.004373872186988592,
+    "losses/policy_loss": 0.0008898198138922453,
+    "losses/value_loss": 0.5593673884868622
    },
    {
-    "critic/sum_gap_4p": -0.0016457431287650603,
-    "critic/target_sum_4p": 0.9803131287356457,
-    "critic/value_sum_4p": 0.9786986112594604,
+    "critic/sum_gap_4p": -0.0016474896166698042,
+    "critic/target_sum_4p": 0.9803053155002823,
+    "critic/value_sum_4p": 0.9786977767944336,
     "learning_rate": 0.0027500000000000007,
-    "losses/approx_kl": 0.004976283685209637,
+    "losses/approx_kl": 0.004977397107722936,
     "losses/clipfrac": 0.10019841464236379,
-    "losses/entropy": 1.6724003553390503,
-    "losses/explained_variance": -1.088557481765747,
-    "losses/importance": 1.0006444081664085,
-    "losses/old_approx_kl": 0.0043318655011717055,
-    "losses/policy_loss": 0.05212422437034547,
-    "losses/value_loss": 0.556950256228447
+    "losses/entropy": 1.6723997741937637,
+    "losses/explained_variance": -1.0910203456878662,
+    "losses/importance": 1.000643115490675,
+    "losses/old_approx_kl": 0.004334281857154565,
+    "losses/policy_loss": 0.05207650293596089,
+    "losses/value_loss": 0.5569479390978813
    },
    {
-    "critic/sum_gap_4p": 0.001705456805485551,
-    "critic/target_sum_4p": 0.9834506127142137,
-    "critic/value_sum_4p": 0.9895661473274231,
+    "critic/sum_gap_4p": 0.0017033238564768145,
+    "critic/target_sum_4p": 0.9834342874506469,
+    "critic/value_sum_4p": 0.9895563721656799,
     "learning_rate": 0.0016250000000000008,
-    "losses/approx_kl": 0.0012651643663513512,
+    "losses/approx_kl": 0.0012665997011254149,
     "losses/clipfrac": 0.012500000651925802,
-    "losses/entropy": 1.9372597709298134,
-    "losses/explained_variance": 0.17634600400924683,
-    "losses/importance": 1.0052690021693707,
-    "losses/old_approx_kl": -0.00400385305376752,
-    "losses/policy_loss": -0.06986645085271448,
-    "losses/value_loss": 0.5578132458031178
+    "losses/entropy": 1.9372624978423119,
+    "losses/explained_variance": 0.17640691995620728,
+    "losses/importance": 1.0052725747227669,
+    "losses/old_approx_kl": -0.004005955929137106,
+    "losses/policy_loss": -0.07000180229078978,
+    "losses/value_loss": 0.5578088574111462
    },
    {
-    "critic/sum_gap_4p": 0.00029040657900233956,
-    "critic/target_sum_4p": 0.9718348865203041,
-    "critic/value_sum_4p": 0.9803779125213623,
+    "critic/sum_gap_4p": 0.00029171214384191176,
+    "critic/target_sum_4p": 0.9718058377026236,
+    "critic/value_sum_4p": 0.9803467988967896,
     "learning_rate": 0.000801442841485013,
-    "losses/approx_kl": 0.0009096398980545928,
+    "losses/approx_kl": 0.000910898194888432,
     "losses/clipfrac": 0.0,
-    "losses/entropy": 1.6527541503310204,
-    "losses/explained_variance": 0.2665296196937561,
-    "losses/importance": 0.9943803139030933,
-    "losses/old_approx_kl": 0.006529337007925601,
-    "losses/policy_loss": -0.0723751342156902,
-    "losses/value_loss": 0.5543676279485226
+    "losses/entropy": 1.6527660563588142,
+    "losses/explained_variance": 0.2572212815284729,
+    "losses/importance": 0.9943600296974182,
+    "losses/old_approx_kl": 0.0065508614223709905,
+    "losses/policy_loss": -0.07228531059809029,
+    "losses/value_loss": 0.5543602034449577
    },
    {
-    "critic/sum_gap_4p": 0.0015571840347782257,
-    "critic/target_sum_4p": 0.9598283337008569,
-    "critic/value_sum_4p": 0.966860830783844,
+    "critic/sum_gap_4p": 0.0015648626512096775,
+    "critic/target_sum_4p": 0.9597569619455645,
+    "critic/value_sum_4p": 0.9667983651161194,
     "learning_rate": 0.0005,
-    "losses/approx_kl": 0.0004475602222555608,
+    "losses/approx_kl": 0.0004472633812042659,
     "losses/clipfrac": 0.0,
-    "losses/entropy": 1.5997597724199295,
-    "losses/explained_variance": 0.4770027995109558,
-    "losses/importance": 1.0024915747344494,
-    "losses/old_approx_kl": -0.002044020024186466,
-    "losses/policy_loss": -0.15177336824126542,
-    "losses/value_loss": 0.5509290471673012
+    "losses/entropy": 1.5997546389698982,
+    "losses/explained_variance": 0.4780295491218567,
+    "losses/importance": 1.0025059096515179,
+    "losses/old_approx_kl": -0.002058645957731642,
+    "losses/policy_loss": -0.1517004549386911,
+    "losses/value_loss": 0.5509081557393074
    }
   ],
   "weights": [
@@ -167,15 +167,15 @@
    ],
    [
     2,
-    "00ea361df4d03dc7ba8c3be7a92329f8112c93e5fc906fedddb0c8ce41a2fb71"
+    "6e8ae78e44d5b2e71d19501a7b238f8574b402fe92c70dd5e3a8427cf43b151d"
    ],
    [
     4,
-    "d5356bd02d523024093731d7d542c1b09e97fe0379ba9212069426c414f8c6cc"
+    "7638733dffec9c467fea4659b0feda936c4769ecefed2c9f0e4697f0c1195939"
    ],
    [
     6,
-    "c2ddad2998552469f663ebc3f33da233c0b75a0b692a86aac25c7281d5d2f807"
+    "5fe58095729cbc5288c51dc75a310e96deb943745d30730f01c777490577d022"
    ]
   ]
  }

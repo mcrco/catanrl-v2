@@ -18,6 +18,10 @@ At a checkpoint the trainer writes the ``.pt``, then ``trainer_state.pt``
 (the commit), then ``run.json``; then the select eval runs and ``best``
 moves. A resume moves any ``.pt`` newer than the trainer state to
 ``orphaned/``, so it is never ``latest`` nor an epoch ref.
+
+When the experiment's ``meta.wandb.project`` (or ``CATANRL_WANDB_PROJECT``)
+is set, the writer also drives :mod:`catanrl.wandb_mirror`: a copy of the
+rows, select results and finals that never decides anything (DESIGN 6.10).
 """
 
 from __future__ import annotations
@@ -59,6 +63,9 @@ REF_RE = re.compile(r"^(?P<run>[a-z0-9][a-z0-9._+-]*(?:/[a-z0-9][a-z0-9._+-]*)?)
                     r"(?:@(?P<which>[A-Za-z0-9._+-]+))?(?:#(?P<sha>[0-9a-f]{6,64}))?$")
 #: How long a writer waits for a lock that a status probe may hold for an instant.
 LOCK_WAIT_S = 2.0
+#: Statuses another run may be used from: a dependent stage starts, a final's ref to a run
+#: of another experiment is pinned (a time_limit run pins its epoch).
+USABLE = ("finished", "time_limit")
 
 
 class RunError(RuntimeError):
@@ -67,6 +74,11 @@ class RunError(RuntimeError):
 
 class RunLocked(RunError):
     pass
+
+
+class Unbound(RunError):
+    """A final's ref to a run of another experiment that cannot be pinned yet: that run is
+    missing or not usable (:data:`USABLE`). The final waits for it (:func:`bound_lineup`)."""
 
 
 def runs_root() -> Path:
@@ -158,6 +170,10 @@ class Run:
 
     def __repr__(self) -> str:
         return f"Run({self.ref!r}, {self.status})"
+
+    @property
+    def experiment(self) -> str:
+        return self.manifest["experiment"]
 
     def _run_json(self) -> dict:
         path = self.path / "run.json"
@@ -479,9 +495,39 @@ def bind_spec(spec: str, own: str | None) -> str | None:
     return resolve_agent(spec).canonical
 
 
+def spec_run(spec: str) -> str | None:
+    """The run (``experiment/variant``, or an experiment with one variant) whose checkpoint a
+    lineup spec names, or None: a bot, a ``.pt`` path, an unexpanded ``${...}``."""
+    if "${" in spec or not spec.startswith(("POLICY", "MCTS", "BELIEF")):
+        return None
+    from catanrl.agents.spec import spec_ckpt
+
+    ckpt = spec_ckpt(spec)
+    if ckpt is None or "${" in ckpt or ckpt.partition("#")[0].endswith(".pt"):
+        return None
+    return parse_ref(ckpt)[0]
+
+
+def foreign_run(spec: str, experiment: str) -> str | None:
+    """The run of an experiment other than ``experiment`` that ``spec`` names, or None."""
+    run = spec_run(spec)
+    return run if run is not None and run.partition("/")[0] != experiment else None
+
+
+def run_status(ref: str) -> Status | None:
+    """The status of the run ``ref`` names, None when there is no such run."""
+    try:
+        return load_experiment(ref).status
+    except RunError:
+        return None
+
+
 def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
     """Refs to other runs, pinned once at creation: ``init_from`` per part and eval.final
-    specs (``${init}`` as the actor's ``init_from``, keyed as written)."""
+    specs (``${init}`` as the actor's ``init_from``, keyed as written). A final's ref to a
+    run of another experiment that is not usable yet (missing, or still training: the runner
+    cannot order it) is left to :func:`bound_lineup`, which pins it when the final is first
+    played."""
     out: dict[str, Any] = {}
     init = cfg.get("init_from")
     if init:
@@ -489,23 +535,41 @@ def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
         out["init_from"] = {part: str(load_checkpoint(ckpt[part] if isinstance(ckpt, Mapping) else ckpt).ref)
                             for part in init_parts(init)}
     start = (out.get("init_from") or {}).get("actor")
-    specs = {spec: bind_spec(expand_init(spec, start), own) for entry in (cfg.get("eval") or {}).get("final") or []
-             for spec in entry["lineup"]}
-    out["specs"] = {spec: bound for spec, bound in specs.items() if bound is not None}
+    experiment = own.partition("/")[0] if own else None
+    out["specs"] = {}
+    for entry in (cfg.get("eval") or {}).get("final") or []:
+        for spec in entry["lineup"]:
+            other = foreign_run(spec, experiment) if experiment is not None else None
+            if other is not None and run_status(other) not in USABLE:
+                continue
+            bound = bind_spec(expand_init(spec, start), own)
+            if bound is not None:
+                out["specs"][spec] = bound
     return out
 
 
-def bound_lineup(run: Run, lineup: Sequence[str]) -> list[str]:
-    """``lineup`` with refs to other runs as first pinned for ``run`` (pinning new ones now)."""
+def bound_lineup(run: Run, lineup: Sequence[str], *, pin: bool = True) -> list[str]:
+    """``lineup`` with refs to other runs as first pinned for ``run``, pinning new ones now
+    (``pin=False`` only resolves them: nothing is written). A ref to a run of another
+    experiment waits for that run to be usable (:data:`USABLE`): :class:`Unbound` before."""
     known = run.bindings()
     out = []
     for spec in lineup:
-        if spec not in known:
-            bound = bind_spec(expand_init(spec, run.init_ref), run.ref)
-            if bound is not None:
+        bound = known.get(spec)
+        if bound is None:
+            other = foreign_run(spec, run.experiment)
+            if other is not None:
+                status = run_status(other)
+                if status not in USABLE:
+                    raise Unbound(f"{spec} waits for {other}, which is {status or 'not there yet'}; "
+                                  "the final is played once it is finished")
+            expanded = expand_init(spec, run.init_ref)
+            bound = bind_spec(expanded, run.ref)
+            if bound is None:  # a bot, ``${...}`` or the run itself: resolved when the eval runs
+                bound = expanded
+            elif pin:
                 canon.append_jsonl(run.path / "bindings.jsonl", {"spec": spec, "bound": bound, "time": time.time()})
-                known[spec] = bound
-        out.append(known.get(spec) or expand_init(spec, run.init_ref))
+        out.append(bound)
     return out
 
 
@@ -556,6 +620,8 @@ class RunWriter(Run):
     A context manager; leaving it by an exception records ``failed`` (or
     ``interrupted`` for KeyboardInterrupt) and releases the lock. A run that
     had already finished stays finished: only its launch row records that.
+    The wandb mirror, when on, sees every logged row, alias and the end of
+    the launch; it can only warn, never fail the run.
     """
 
     mode: Literal["new", "resume", "done"]
@@ -572,6 +638,7 @@ class RunWriter(Run):
         hours = (variant.config.get("runtime") or {}).get("time_limit_hours")
         self._deadline = None if hours is None else time.time() + float(hours) * 3600
         self._stop_requested = False
+        self.mirror: Any = None  # catanrl.wandb_mirror.Mirror, once the launch is recorded
 
     @classmethod
     def open(cls, variant: Variant, *, argv: Sequence[str], allow_code_change: bool = False,
@@ -635,6 +702,9 @@ class RunWriter(Run):
             install_signal_handlers(writer.request_stop)
         except ValueError:  # not the main thread
             pass
+        from catanrl.wandb_mirror import Mirror
+
+        writer.mirror = Mirror.start(writer)  # None unless configured; warns rather than raises
         return writer
 
     def __enter__(self) -> Self:
@@ -653,6 +723,9 @@ class RunWriter(Run):
             self.release()
 
     def release(self) -> None:
+        if self.mirror is not None:
+            self.mirror.finish()  # the finals and the status, read from the run under its lock
+            self.mirror = None
         if self._lock_fd is not None:
             _unlock(self._lock_fd)
             self._lock_fd = None
@@ -672,7 +745,10 @@ class RunWriter(Run):
 
     def log(self, logs: Mapping[str, Any], step: int) -> None:
         row = {k: v for k, v in logs.items() if isinstance(v, (int, float, str, bool)) or v is None}
-        canon.append_jsonl(self.path / "metrics.jsonl", {"launch": self.launch, "step": int(step), **row})
+        row = {"launch": self.launch, "step": int(step), **row}
+        canon.append_jsonl(self.path / "metrics.jsonl", row)
+        if self.mirror is not None:
+            self.mirror.log(row, step)
 
     def close(self, model_path: str | None = None, early_stop: bool | None = None) -> None:
         pass
@@ -753,12 +829,16 @@ class RunWriter(Run):
             metric = record.summary.get(select.get("metric", "score_rate"))
         _append_alias(self.path, name, ref, by="trainer", note=note,
                       eval_id=getattr(record, "eval_id", None), metric=metric)
+        if self.mirror is not None:
+            self.mirror.alias(name, ref, metric=metric)
 
     def finish(self, status: Status) -> None:
         run = self._run_json()
         run["status"] = status
         run["launches"][-1].update(status=status, ended=time.time())
         canon.atomic_write_json(self.path / "run.json", run)
+        if self.mirror is not None:
+            self.mirror.status(status)
 
     def _end_launch(self, status: str) -> None:
         run = self._run_json()

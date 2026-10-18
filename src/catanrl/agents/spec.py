@@ -5,8 +5,15 @@ params (a positional value is ``ckpt``)::
 
     POLICY:arch-lineage/graph-s-s42.g1@best
     MCTS:ckpt=arch-lineage/graph-s-s42.g1@e600:sims=256:dets=4
-    BELIEF:ckpt=/anywhere/e000600.pt:worlds=16
+    BELIEF:ckpt=/anywhere/e000600.pt:worlds=16:tracker=exact
     F    R    AB:2
+
+``tracker`` (MCTS with dets, BELIEF) picks how the hand tracker deals the
+worlds: ``pool`` (the default) deals the unknown cards uniformly, ``exact``
+draws from the exact posterior over hidden steals (``cpp.TrackerMode``).
+
+``LLM:model=…:strategy=…`` (``catanrl.agents.llm``) is a language model
+playing from the public state text; it exists only on the catanatron harness.
 
 ``resolve_agent(spec)`` pins and self-tests the checkpoint once, checks the
 games fit, derives ``fair`` and writes the canonical spec (a fixed point of
@@ -31,6 +38,7 @@ from catanatron.registry import REGISTRY, PlayerRegistry, SpecError, parse_spec
 from catanrl.checkpoint import Checkpoint, CheckpointRef
 
 MODEL_KEYS = ("POLICY", "MCTS", "BELIEF")
+LLM_KEY = "LLM"
 NATIVE_BOTS = ("F", "R")
 HARNESSES = ("native", "catanatron", "server")
 
@@ -56,6 +64,7 @@ class MctsParams:
     temperature: float = 0.0
     noise: bool = False
     allow_drift: bool = False
+    tracker: Literal["pool", "exact"] = "pool"
     device: str = field(default="auto", metadata={"execution": True})
     threads: int = field(default=0, metadata={"execution": True})
 
@@ -66,6 +75,7 @@ class BeliefParams:
     worlds: int = 16
     aggregate: Literal["mean_prob", "mean_logit"] = "mean_prob"
     allow_drift: bool = False
+    tracker: Literal["pool", "exact"] = "pool"
     device: str = field(default="auto", metadata={"execution": True})
 
 
@@ -107,6 +117,8 @@ class ResolvedAgent:
             out["checkpoint"] = {"weights_sha256": self.checkpoint.weights_sha256, **self.details["model"]}
             if self.key == "MCTS":
                 out["search"] = self.details["search"]
+        elif self.key == LLM_KEY:
+            out["params"] = dataclasses.asdict(self.params)
         else:
             out["params"] = dict(self.details.get("params", {}))
         return out
@@ -121,6 +133,10 @@ class ResolvedAgent:
     def player(self, color: Color) -> Player:
         if self.key in MODEL_KEYS:
             return _PLAYERS[self.key](color, self.params, resolved=self)
+        if self.key == LLM_KEY:
+            from catanrl.agents.llm.player import LlmPlayer
+
+            return LlmPlayer(color, self.params, resolved=self)
         return REGISTRY.build(self.canonical, color)
 
 
@@ -129,11 +145,27 @@ def check_spec_syntax(spec: str) -> None:
     if "," in spec:
         raise SpecError(f"{spec!r}: ',' separates lineup entries and cannot appear in a spec")
     key, args, named = parse_spec(spec)
+    if key == LLM_KEY:  # a plan's ``${params.…}`` values are filled in when it resolves
+        if "${" in spec:
+            named = {k: v for k, v in named.items() if "${" not in str(v)}
+            named.setdefault("model", "stub/first")
+            args = [a for a in args if "${" not in str(a)]
+        _llm_params(args, named)
+        return
     if key not in MODEL_KEYS:
         return
     params = _build_params(key, args, named)
     if "${" not in params.ckpt:
         _ckpt_syntax(params.ckpt)
+
+
+def spec_ckpt(spec: str) -> str | None:
+    """The checkpoint a model spec names, as written (``exp/var@which[#sha]``, a ``.pt`` path,
+    or one with ``${...}`` in it), or None for a bot."""
+    key, args, named = parse_spec(spec)
+    if key not in MODEL_KEYS:
+        return None
+    return _build_params(key, args, named).ckpt
 
 
 def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> Any:
@@ -147,6 +179,8 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
     if key == "MCTS":
         if params.oracle and params.dets > 1:
             raise SpecError("MCTS: oracle=true searches the true game and takes no dets")
+        if params.oracle and params.tracker != "pool":
+            raise SpecError("MCTS: oracle=true searches the true game and takes no tracker")
         if params.dets < 1:
             raise SpecError("MCTS: dets counts sampled worlds (>= 1); use oracle=true for the true game")
         if params.sims < 1:
@@ -193,6 +227,8 @@ def resolve_agent(spec: str | Mapping[str, Any] | ResolvedAgent, *, harness: str
         key, args, named = parse_spec(dict(spec))
     if key in MODEL_KEYS:
         return _resolve_model(key, args, named, harness, games)
+    if key == LLM_KEY:
+        return _resolve_llm(args, named, harness)
     return _resolve_bot(key, args, named, harness)
 
 
@@ -217,6 +253,16 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
     pinned = str(ref)  # run@eN#sha, or /abs/path.pt#sha
     params = dataclasses.replace(params, ckpt=pinned)
     levels, dims = ckpt.levels, ckpt.dims
+    if ckpt.recurrent:
+        # A recurrent network's memory is its seat's decision history: only the native
+        # POLICY agent keeps one (MCTS leaves and BELIEF worlds have none, and the Catanatron
+        # and server bridges do not replay a seat's decisions yet).
+        if key != "POLICY":
+            raise SpecError(f"{key}: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only POLICY "
+                            "keeps a seat's decision history")
+        if harness != "native":
+            raise SpecError(f"POLICY: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only the "
+                            "native harness keeps a seat's decision history")
     configs = [g if hasattr(g, "num_players") else load_game(g) for g in games]
     if configs and not ckpt.dims_agnostic and dims_for(configs) != dims:
         raise SpecError(f"{key}: {ref} is a {ckpt.header['model']['class']} network at dims {dims}; "
@@ -268,6 +314,57 @@ def _resolve_bot(key, args, named, harness) -> ResolvedAgent:
                          harness=harness, details={"params": params})
 
 
+def _llm_params(args: Sequence[Any], named: Mapping[str, Any]) -> Any:
+    from catanrl.agents.llm.model import STUB_KINDS, STUB_PREFIX, is_stub
+    from catanrl.agents.llm.player import LlmPlayer
+    from catanrl.agents.llm.prompts import STRATEGIES
+
+    try:
+        params = build_params(LlmPlayer, list(args), dict(named))
+    except (ParamsError, TypeError) as error:
+        raise SpecError(f"LLM: {error}") from None
+    if not params.model or "${" in params.model:
+        raise SpecError("LLM needs a model (an OpenRouter id, or stub/first, stub/random, stub/scripted)")
+    if is_stub(params.model) and params.model[len(STUB_PREFIX):] not in STUB_KINDS:
+        raise SpecError(f"LLM: unknown stub {params.model!r}; one of " + ", ".join(STUB_PREFIX + k for k in STUB_KINDS))
+    if params.strategy not in STRATEGIES:
+        raise SpecError(f"LLM: strategy must be one of {STRATEGIES}, not {params.strategy!r}")
+    if params.max_tokens < 1 or params.retries < 0 or params.temperature < 0:
+        raise SpecError("LLM: max_tokens must be positive, retries and temperature non-negative")
+    return params
+
+
+def _llm_canonical(params: Any) -> str:
+    fields = [f.name for f in dataclasses.fields(params)]
+    return f"{LLM_KEY}:" + ":".join(f"{name}={_fmt(getattr(params, name))}" for name in fields)
+
+
+def _resolve_llm(args: Sequence[Any], named: Mapping[str, Any], harness: str) -> ResolvedAgent:
+    """A language model player: Catanatron harness only; fair, since it reads the public
+    state text (``catanrl.agents.llm.render``, pinned by test)."""
+    params = _llm_params(args, named)
+    if harness != "catanatron":
+        raise SpecError(f"LLM plays through the catanatron harness, not {harness} "
+                        "(catanrl eval ... --harness catanatron, or harness: catanatron in eval.final)")
+    return ResolvedAgent(key=LLM_KEY, impl="catanrl.llm", params=params, checkpoint=None, fair=True,
+                         label=f"{LLM_KEY}:{params.model}:{params.strategy}", canonical=_llm_canonical(params),
+                         harness=harness, details={"params": dataclasses.asdict(params)})
+
+
+def stub_llm_spec(spec: str, stub: str = "stub/random") -> str:
+    """``spec`` with a real model replaced by ``stub`` (a smoke plan pays for nothing); a stub
+    model, or another key, is returned as it is."""
+    from catanrl.agents.llm.model import is_stub
+
+    key, args, named = parse_spec(spec)
+    if key != LLM_KEY:
+        return spec
+    params = _llm_params(args, named)
+    if is_stub(params.model):
+        return spec
+    return _llm_canonical(dataclasses.replace(params, model=stub))
+
+
 def _param_names(key: str) -> list[str]:
     from catanatron.params import schema_of
 
@@ -303,8 +400,16 @@ class CatanrlPlayer(Player):
             self._resolved = resolve_agent({"key": self.KEY, "params": dataclasses.asdict(self.params)},
                                            harness="catanatron")
         if self._native is None:
-            self._native = self._resolved.native(infer_rows=1)
+            native = self._resolved.native(infer_rows=1)
+            if getattr(native, "recurrent", False):
+                raise RuntimeError(f"{self.KEY}: a recurrent network needs its seat's decision history, which "
+                                   "the Catanatron player does not replay")
+            self._native = native
         return self._native
+
+    def preflight(self) -> None:
+        """Load the checkpoint now (the harness's preflight), so a bad ref fails before any game."""
+        self._agent()
 
     def reset_state(self) -> None:
         self._mirror = None
@@ -332,6 +437,19 @@ class CatanrlPlayer(Player):
                 return action
         raise RuntimeError(f"{self.KEY} chose {chosen}, which Catanatron does not offer")
 
+    @staticmethod
+    def _fit(agent, native) -> None:
+        """Play at the game's dims (a dims-agnostic network rebinds, another refuses) and
+        refuse a map the network would misread (the cnn's board check), as the harness and
+        the bridge do, once per mirrored game."""
+        from catanrl.envs.encoding import covering_dims
+
+        need = covering_dims([native.board.map], native.num_players)
+        have = agent.dims
+        if any(need[k] > have[k] for k in need):
+            agent.bind({k: max(need[k], have[k]) for k in need})
+        agent.check_maps([native.board.map])
+
     def _sync(self, game, agent) -> dict[str, Any]:
         """The cppanatron mirror of ``game``, with any new actions replayed."""
         import cppanatron as cpp
@@ -342,8 +460,9 @@ class CatanrlPlayer(Player):
         # Rebuild unless the game only grew since the last sync (an undo rewrites the log).
         if m is None or m["id"] != game.id or records[:len(m["records"])] != m["records"]:
             native = _native_game(game)
+            self._fit(agent, native)
             seat = list(game.state.colors).index(self.color)
-            tracker = cpp.HandTracker(native, seat) if agent.needs_trackers else None
+            tracker = cpp.HandTracker(native, seat, agent.tracker_mode) if agent.needs_trackers else None
             m = self._mirror = {"id": game.id, "game": native, "seat": seat, "tracker": tracker, "records": [],
                                 "ply": 0}
         from catanatron.models.enums import Action, ActionType
@@ -427,9 +546,11 @@ _PLAYERS = {"POLICY": PolicyPlayer, "MCTS": MctsPlayer, "BELIEF": BeliefPlayer}
 
 
 def register(registry: PlayerRegistry = REGISTRY) -> None:
-    """Make POLICY, MCTS and BELIEF buildable by key. Idempotent."""
+    """Make POLICY, MCTS, BELIEF and LLM buildable by key. Idempotent."""
     import catanatron.players  # noqa: F401  (registers the builtins first)
 
-    for key, cls in _PLAYERS.items():
+    from catanrl.agents.llm.player import LlmPlayer
+
+    for key, cls in {**_PLAYERS, LLM_KEY: LlmPlayer}.items():
         if registry.get(key) is not cls:
             registry.register(key, cls, replace=True)

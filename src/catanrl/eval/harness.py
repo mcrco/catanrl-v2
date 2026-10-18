@@ -10,6 +10,9 @@ on ``num_envs``, ``threads`` or the order games finish in:
   with ``ply`` the seat's own decision count;
 * networks evaluate in strict mode: every forward is padded to
   ``infer_rows`` rows, so a row's outputs do not depend on its batch;
+* a recurrent network's memory is per seat of a game, zero at its first
+  decision (``streams`` and ``first`` of ``act``), so it does not depend on
+  which env slot the game plays in;
 * the dims (and so every network's shapes) come from the scenarios'
   generator bounds, not from the games being played.
 
@@ -145,6 +148,10 @@ class _Maps:
             self.cache[key] = cpp.CatanMap.from_spec(cpp.MapSpec.from_dict(spec))
         return self.cache[key]
 
+    def built(self) -> list[cpp.CatanMap]:
+        """Every map built so far (all of a schedule's, after ``_check_games``)."""
+        return list(self.cache.values())
+
 
 # ---------------------------------------------------------------- VecEnv schedule mode
 
@@ -169,8 +176,11 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
     ]
     num_envs = min(int(num_envs), max(1, len(games)))
     trackers = any(agent.needs_trackers for agent in agents)
+    # Exact trackers can deal the pool too, and every agent asks for its own deal.
+    exact = any(agent.needs_trackers and agent.tracker_mode == cpp.TrackerMode.EXACT for agent in agents)
     vec = cpp.VecEnv(cpp_scenarios, num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
-                     seed=0, num_threads=int(threads), auto_reset=False, trackers=trackers)
+                     seed=0, num_threads=int(threads), auto_reset=False, trackers=trackers,
+                     tracker_mode=cpp.TrackerMode.EXACT if exact else cpp.TrackerMode.POOL)
     buffers = vec.allocate()
     vec.reset()
     size = int(vec.action_size)
@@ -227,16 +237,22 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
                 rows = np.stack([agent.encode(g, int(s)) for g, s in zip(games_list, seats)])
             else:
                 rows = buffers["observations"][rows_idx]
-            seeds = []
+            seeds, first = [], []
             for e, s in zip(envs, seats):
                 scheduled, decisions = running[int(e)]
                 seeds.append(_derive_seed(int(scheduled.game_seed), "decide", int(scheduled.rotation), int(s),
                                           decisions[int(s)]))
+                first.append(decisions[int(s)] == 0)
                 decisions[int(s)] += 1
             seat_trackers = ([vec.tracker(int(e), int(s)) for e, s in zip(envs, seats)]
                              if agent.needs_trackers else None)
+            # A recurrent agent's memory stream is the row (env x seat): it is reset at the
+            # seat's first decision, so which env a game plays in does not matter.
+            memory = ({"streams": rows_idx.astype(np.int64), "first": np.array(first, dtype=bool)}
+                      if getattr(agent, "needs_memory", False) else {})
             choices = agent.act(rows, rows[:, -size:], np.array(seeds, dtype=np.uint64),
-                                games=games_list if agent.needs_games else None, trackers=seat_trackers)
+                                games=games_list if agent.needs_games else None, trackers=seat_trackers,
+                                **memory)
             buffers["actions"][rows_idx] = np.asarray(choices, dtype=np.int32)
         vec.step()
         collect()
@@ -283,4 +299,6 @@ def play_schedule(
             raise ValueError(f"{scheduled.game_id}: a seat's slot has no agent (fill missing?)")
     maps = _Maps(table)
     _check_games(games, table, maps, dims)
+    for agent in agents:  # a network tied to one board (cnn) refuses maps laid out otherwise
+        agent.check_maps(maps.built())
     _play_vecenv(agents, list(games), table, maps, dims, num_envs=num_envs, threads=threads, on_game=on_game)

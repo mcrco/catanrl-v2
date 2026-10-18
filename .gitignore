@@ -5,6 +5,8 @@ __pycache__/
 .ruff_cache/
 build/
 runs/
+runs-local/
 wandb/
 *.so
 resources
+runs-local/

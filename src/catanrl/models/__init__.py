@@ -14,8 +14,17 @@ Every model maps rows to ``(logits [B, A], values [B, P])``: logits with
 illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
 = the row's own seat, absent seats 0). Classes:
 
-* ``graph``: :mod:`catanrl.models.graph` (dims-agnostic);
-* ``mlp``: :mod:`catanrl.models.mlp` (padded dims only).
+* ``graph``: :mod:`catanrl.models.graph` (dims-agnostic). With ``args.aux``
+  (a shared trunk) it carries an auxiliary head predicting the other seats'
+  hidden features (``aux_predictions``); its training targets are the
+  ``critic_players`` block of a row whose ``critic_level`` is above its
+  ``level`` (``aux_targets``), which no head reads;
+* ``mlp``: :mod:`catanrl.models.mlp` (padded dims only);
+* ``cnn``: :mod:`catanrl.models.cnn` (v1's cross-dimensional CNN; the BASE board only);
+* ``lstm``: :mod:`catanrl.models.lstm` (dims-agnostic, recurrent: the graph
+  trunk with an LSTM over the seat's own decisions). Its stateless
+  ``forward`` / ``heads`` is the zero-state function; ``step`` threads the
+  state.
 """
 
 from __future__ import annotations
@@ -27,18 +36,20 @@ from typing import Any
 
 import torch
 import yaml
-from torch import nn
 
 from catanrl.envs.encoding import (
     CRITIC_PLAYERS,
     check_dims,
     critic_level_of,
+    hidden_feature_indices,
     level_name,
     make_encoder,
     row_layout,
-    row_size,
 )
+from catanrl.models.base import CatanModel
+from catanrl.models.cnn import CNN_DEFAULTS, CnnModel
 from catanrl.models.graph import GRAPH_DEFAULTS, GraphNetwork
+from catanrl.models.lstm import LSTM_DEFAULTS, LstmNetwork
 from catanrl.models.mlp import MLP_DEFAULTS, FlatNetwork
 from catanrl.models.rows import (
     RowReader,
@@ -49,9 +60,11 @@ from catanrl.models.rows import (
 )
 
 MODEL_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "models"
-CLASSES: dict[str, dict[str, Any]] = {"graph": GRAPH_DEFAULTS, "mlp": MLP_DEFAULTS}
+CLASSES: dict[str, dict[str, Any]] = {
+    "graph": GRAPH_DEFAULTS, "mlp": MLP_DEFAULTS, "cnn": CNN_DEFAULTS, "lstm": LSTM_DEFAULTS,
+}
 
-__all__ = ["CatanModel", "build_model", "load_preset", "normalize_levels", "resolve_spec"]
+__all__ = ["MODEL_CLASSES", "CatanModel", "build_model", "load_preset", "normalize_levels", "resolve_spec"]
 
 
 def load_preset(name: str) -> dict[str, Any]:
@@ -105,55 +118,6 @@ def normalize_levels(levels: Mapping[str, Any] | str) -> dict[str, str]:
     return {"level": level, "critic_level": level_name(critic) if critic is not None else level}
 
 
-class CatanModel(nn.Module):
-    """Base of the networks: spec, parts and the row contract."""
-
-    spec: dict[str, Any]
-    dims_agnostic: bool
-    parts: dict[str, list[str]]
-
-    def __init__(self, spec, dims, levels, layout) -> None:
-        super().__init__()
-        self.spec = spec
-        self.dims = dict(dims)
-        self.levels = dict(levels)
-        self.layout = dict(layout)
-        self.num_players = self.dims["max_players"]
-        self.obs_size = row_size(layout)
-        self.mask_offset, (self.num_actions,) = layout["action_mask"]
-        self.noop = self.num_actions - 1
-        self.has_critic_block = CRITIC_PLAYERS in layout
-        self.critic_players = CRITIC_PLAYERS if self.has_critic_block else "players"
-
-    # Subclasses implement these three; the rest derives from them.
-    def policy_logits(self, obs: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def value_logits(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-seat win logits [B, P] and the seats present [B, P]."""
-        raise NotImplementedError
-
-    def heads(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """(masked logits, value logits, present) in one pass."""
-        logits = self.policy_logits(obs)
-        values, present = self.value_logits(obs)
-        return logits, values, present
-
-    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        logits, value_logits, present = self.heads(obs)
-        return logits, torch.sigmoid(value_logits) * present
-
-    def acting(self, obs: torch.Tensor) -> torch.Tensor:
-        """[B] bool: the row must act (its mask has more than the no-op)."""
-        return obs[:, self.mask_offset + self.noop] == 0
-
-    def waiting_logits(self, rows: int, device, dtype=torch.float32) -> torch.Tensor:
-        """Logits of rows that only have the no-op."""
-        logits = torch.full((rows, self.num_actions), -1e9, device=device, dtype=dtype)
-        logits[:, self.noop] = 0.0
-        return logits
-
-
 class GraphModel(CatanModel):
     dims_agnostic = True
 
@@ -165,13 +129,24 @@ class GraphModel(CatanModel):
         action_layout = make_encoder(dims, levels["level"]).action_space.layout()
         actor_reader = RowReader(layout, names, canonical=canonical)
         self.present_index = actor_reader.feature("players", "present")
+        self.aux = bool(args["aux"])
+        if self.aux and not args["shared"]:
+            raise ValueError("the aux head (model.args.aux) sits on a shared trunk: set model.args.shared")
         if args["shared"]:
-            if self.has_critic_block:
+            if self.has_critic_block and not self.aux:
                 raise ValueError("a shared trunk cannot read a separate critic level")
+            hidden = hidden_feature_indices(canonical["players"]) if self.aux else []
             net = GraphNetwork(actor_reader, action_layout, args=args, num_players=self.num_players,
-                               policy=True, value=True)
+                               policy=True, value=True, aux_features=len(hidden))
             self.backbone, self.policy_head, self.value_head = net.trunk, net.policy, net.value
             self.parts = {"actor": ["backbone.", "policy_head."], "critic": ["value_head."]}
+            if self.aux:
+                self.aux_head = net.aux
+                self.parts["aux"] = ["aux_head."]
+                self.register_buffer("hidden_index", torch.tensor(hidden, dtype=torch.long), persistent=False)
+            # The trunk reads the actor's row only; a critic block, when the row has one, is the
+            # aux head's target and no head reads it (the policy stays fair at the actor's level).
+            self.reads_critic_block = False
         else:
             critic_names = feature_names(dims, levels["critic_level"])
             critic_reader = RowReader(layout, critic_names, players=self.critic_players, canonical=canonical)
@@ -206,6 +181,37 @@ class GraphModel(CatanModel):
         rows = self.critic.trunk.reader(obs)
         present = self._present(self.actor.trunk.reader(obs)) if self.has_critic_block else self._present(rows)
         return self.critic.value(self.critic.trunk(obs, rows), present), present
+
+    # ---------------------------------------------------------- the aux head
+
+    def heads_with_aux(self, obs):
+        """(masked logits, value logits, present, aux predictions) in one trunk pass."""
+        if not self.aux:
+            raise ValueError("this network has no aux head (model.args.aux)")
+        rows = self.backbone.reader(obs)
+        emb = self.backbone(obs, rows)
+        present = self._present(rows)
+        return self.policy_head(emb, rows.mask), self.value_head(emb, present), present, self.aux_head(emb)
+
+    def aux_predictions(self, obs):
+        """The aux head's predictions [B, P-1, F]: row k holds slot k+1's hidden features
+        (:data:`~catanrl.envs.encoding.HIDDEN_FEATURES`, in the encoder's scale), from the
+        actor's row alone (no critic block needed)."""
+        return self.heads_with_aux(obs)[3]
+
+    def aux_targets(self, obs):
+        """(targets [B, P-1, F], present [B, P-1]) for the aux head: slots 1..P-1's hidden
+        features read from the critic block (the players block at ``critic_level``), and
+        which of those seats the game has. Training only: a row without the block raises."""
+        if not self.aux:
+            raise ValueError("this network has no aux head (model.args.aux)")
+        if not self.has_critic_block:
+            raise ValueError("aux targets come from the critic block: set obs.critic_level above obs.level")
+        reader = self.backbone.reader
+        hidden = reader.players_block(obs, CRITIC_PLAYERS)[:, 1:]              # [B, P-1, Fp]
+        targets = hidden.index_select(2, self.hidden_index)                    # [B, P-1, F]
+        present = reader.players_block(obs)[:, 1:, self.present_index]         # [B, P-1]
+        return targets, present
 
 
 class MlpModel(CatanModel):
@@ -257,6 +263,77 @@ class MlpModel(CatanModel):
         return self.critic(obs).float() + value_prior(present), present
 
 
+class LstmModel(CatanModel):
+    """One graph trunk, an LSTM cell over its pooled embedding, both heads
+    (:mod:`catanrl.models.lstm`)."""
+
+    dims_agnostic = True
+    recurrent = True
+
+    def __init__(self, spec, dims, levels, layout) -> None:
+        super().__init__(spec, dims, levels, layout)
+        if self.has_critic_block:
+            raise ValueError("an lstm network has one trunk for both heads and cannot read a separate critic level")
+        canonical = canonical_feature_names()
+        names = feature_names(dims, levels["level"])
+        action_layout = make_encoder(dims, levels["level"]).action_space.layout()
+        reader = RowReader(layout, names, canonical=canonical)
+        self.present_index = reader.feature("players", "present")
+        self.net = LstmNetwork(reader, action_layout, args=spec["args"], num_players=self.num_players)
+        self.hidden_size = self.net.hidden_size
+        self.parts = {"actor": ["net.trunk.", "net.cell.", "net.inject.", "net.policy."], "critic": ["net.value."]}
+        self.shared = True
+
+    def _present(self, rows) -> torch.Tensor:
+        return rows.players[:, : self.num_players, self.present_index]
+
+    # ---------------------------------------------------------- recurrent API
+
+    def initial_state(self, rows: int, device=None) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.net.initial_state(rows, device)
+
+    def embed(self, obs: torch.Tensor):
+        """The trunk's embeddings and the rows (shared by ``remember`` and ``decode``)."""
+        return self.net.embed(obs)
+
+    def remember(self, pooled: torch.Tensor, h: torch.Tensor, c: torch.Tensor):
+        return self.net.remember(pooled, h, c)
+
+    def decode(self, emb, rows, h: torch.Tensor):
+        """(masked logits, value logits, present) from embeddings and a memory."""
+        present = self._present(rows)
+        logits, values = self.net.decode(emb, rows, h, present)
+        return logits, values, present
+
+    def step(self, obs: torch.Tensor, h: torch.Tensor, c: torch.Tensor):
+        """One decision per row from state ``(h, c)``: (masked logits, value logits,
+        present, h', c')."""
+        emb, rows = self.embed(obs)
+        h, c = self.remember(emb.pooled, h, c)
+        logits, values, present = self.decode(emb, rows, h)
+        return logits, values, present, h, c
+
+    # ---------------------------------------------------------- stateless (zero state)
+
+    def heads(self, obs):
+        h, c = self.initial_state(obs.shape[0], obs.device)
+        logits, values, present, _, _ = self.step(obs, h, c)
+        return logits, values, present
+
+    def policy_logits(self, obs):
+        return self.heads(obs)[0]
+
+    def value_logits(self, obs):
+        _, values, present = self.heads(obs)
+        return values, present
+
+
+#: Model class name -> the :class:`CatanModel` subclass (the ``class`` of a spec).
+MODEL_CLASSES: dict[str, type[CatanModel]] = {
+    "graph": GraphModel, "mlp": MlpModel, "cnn": CnnModel, "lstm": LstmModel,
+}
+
+
 def build_model(
     spec: Mapping[str, Any],
     *,
@@ -281,5 +358,4 @@ def build_model(
     expected_actions = expected["action_mask"][1][0]
     if int(num_actions) != expected_actions:
         raise ValueError(f"num_actions {num_actions} != the action space's {expected_actions}")
-    cls = {"graph": GraphModel, "mlp": MlpModel}[spec["class"]]
-    return cls(spec, dims, levels, expected)
+    return MODEL_CLASSES[spec["class"]](spec, dims, levels, expected)
