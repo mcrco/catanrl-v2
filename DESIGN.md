@@ -240,11 +240,38 @@ are identical at every level and are not targets.
 The experiment is `aux-hidden` (arch-ablation's graph-s cell plus the head);
 the question is whether the policy's score moves, not the aux loss.
 
+**Acting on the prediction.** The literal reading of the idea is an eval-only
+agent, `PREDICT:ckpt=<public or full policy>:predictor=<private checkpoint
+with the head>` (6.5): the policy decides on *one* row, the deciding seat's
+private row with, for every other present seat, the hidden features the
+policy's level shows (the hand per resource at `public`, all 15 at `full`;
+`encoding.shown_hidden_features`) overwritten by the predictor's aux output on
+that same private row. A row at `public` or `full` is exactly the private row
+plus those features (the global, tile, node, edge, topology and mask blocks,
+the own slot and absent slots are bitwise the same; `tests/test_predict_agent.py`
+pins it), so the policy sees the row it was trained on with predictions in
+place of the truth, and with the true features in the head's place it chooses
+exactly what `POLICY` chooses on the level's row (the oracle test). The
+alternative to a sampled belief is one deterministic forward of each network
+per decision instead of `worlds` forwards. `round=true` snaps each prediction
+to the encoder's grid: a count over the game's rules (the bank per resource,
+the deck per kind, the points to win, read from the game as the encoder reads
+them), the playable flags to 0/1; the flags are rounded independently of the
+counts. The agent is fair (it reads only the private row and a learned
+predictor); both checkpoints are pinned in the spec, the eval key and the
+record (`refs` holds the policy's, `predictors` the predictor's); the
+predictor self-tests its `aux` part. It plays natively and as a Catanatron
+player; the server bridge refuses it for now. `configs/experiments/predict-vs-belief.yaml`
+measures it: puffer-graph2/full with aux-hidden/main's head against BELIEF
+(16 worlds) of the same network, against F, rounded against BELIEF, and against
+the private-level arch-ablation/graph-s, on heldout-2p.
+
 ## 3. Agents, evaluation, experiments
 
 Agent specs use Catanatron's registry syntax (grammar in 6.5):
 `POLICY:ckpt=…[:sample=true]`, `MCTS:ckpt=…:sims=256:dets=4`,
-`MCTS:ckpt=…:oracle=true`, `BELIEF:ckpt=…:worlds=16`, `F`, `R`, and any
+`MCTS:ckpt=…:oracle=true`, `BELIEF:ckpt=…:worlds=16`,
+`PREDICT:ckpt=…:predictor=…[:round=true]` (2.1), `F`, `R`, and any
 Catanatron registry bot (`AB:2`). The same spec plays natively (fast
 evaluation on cppanatron), as a Catanatron `Player`, or as a server client.
 
@@ -578,14 +605,16 @@ on `,`, so neither character appears in a value. This replaces §3's
 
 ```
 spec := KEY (":" param)*         param := value | name "=" value   (a positional value is ckpt)
-KEY  := POLICY | MCTS | BELIEF | F | R | any Catanatron registry key
+KEY  := POLICY | MCTS | BELIEF | PREDICT | F | R | any Catanatron registry key
 ckpt := run ["@" which] ["#" sha] | path ending in ".pt"
 run  := experiment ["/" variant]  which := best | latest | init | <alias> | N | eN   (epoch; default best)
 ```
 
 Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
 `MCTS:ckpt=…@best:sims=256:dets=4`, `MCTS:ckpt=…:oracle=true`,
-`BELIEF:ckpt=…@1500:worlds=16`, `AB:2`.
+`BELIEF:ckpt=…@1500:worlds=16`,
+`PREDICT:ckpt=puffer-graph2/full@best:predictor=aux-hidden/main@best:round=true`
+(`predictor` is a second `ckpt`, resolved and pinned the same way), `AB:2`.
 
 * **Params** are frozen dataclasses on the registered players. Unknown or
   mistyped params raise.
@@ -597,6 +626,13 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   spec and `key_dict()`, so eval records tell the two apart. The native
   harness keeps VecEnv's trackers exact when any agent asks, and each agent
   passes its own deal, so a lineup can mix both.
+* **PREDICT** (2.1) takes `ckpt` (a `public` or `full` policy; a `private`
+  one has nothing to fill and is refused), `predictor` (a `private`
+  checkpoint whose network has the aux head; any other level, no head, or a
+  recurrent network is refused), `round`, and POLICY's `sample` and
+  `temperature`. Both refs are pinned (`@best`, `#sha`) and both are in
+  `key_dict()` and the record; a final naming either in another experiment
+  waits for that run like any foreign ref (6.2).
 
 `resolve_agent(spec)` does four things:
 
@@ -609,6 +645,7 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
    | POLICY | its actor is `private`, or `public` in 2p |
    | MCTS | not `oracle` |
    | BELIEF | always |
+   | PREDICT | always: it reads the private row and a learned predictor |
    | built-in bots | never |
    | LLM | always: it reads only the public state text |
 
@@ -623,7 +660,7 @@ binding.
 |---|---|
 | native, batched on cppanatron (`SearchPool` for MCTS) | `resolved.native(device=…, infer_rows=…)` |
 | Catanatron `Player` | `catanrl.player(spec, color)`, i.e. `REGISTRY.build` once `catanrl.agents` is imported. It converts via `Game.apply_setup` and runs the native agent at batch 1 |
-| server bot | `catanrl bot --spec SPEC ws://…`. Views feed the `HandTracker`. A `public`/`full` POLICY is refused (use BELIEF) |
+| server bot | `catanrl bot --spec SPEC ws://…`. Views feed the `HandTracker`. A `public`/`full` POLICY is refused (use BELIEF); PREDICT is not played here yet |
 | Catanatron harness eval | `evaluate(…, harness="catanatron")`, `catanrl eval … --harness catanatron`, `harness: catanatron` in `eval.final`: the suite's schedule as Catanatron games (`catanrl.eval.catanatron`), every seat an `agent.player(color)`; the only harness for `LLM` |
 
 The v1 shims stay, over the same path:

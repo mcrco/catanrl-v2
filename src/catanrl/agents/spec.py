@@ -6,11 +6,22 @@ params (a positional value is ``ckpt``)::
     POLICY:arch-lineage/graph-s-s42.g1@best
     MCTS:ckpt=arch-lineage/graph-s-s42.g1@e600:sims=256:dets=4
     BELIEF:ckpt=/anywhere/e000600.pt:worlds=16:tracker=exact
+    PREDICT:ckpt=puffer-graph2/full@best:predictor=aux-hidden/main@best:round=false
     F    R    AB:2
 
 ``tracker`` (MCTS with dets, BELIEF) picks how the hand tracker deals the
 worlds: ``pool`` (the default) deals the unknown cards uniformly, ``exact``
 draws from the exact posterior over hidden steals (``cpp.TrackerMode``).
+
+``PREDICT`` (DESIGN 2.1) plays a ``public`` or ``full`` policy (``ckpt``) on one
+row: the game's private row with the other seats' hidden features filled in
+by the aux head of ``predictor``, a ``private`` checkpoint trained with
+``model.args.aux`` (aux-hidden). ``predictor`` is a second checkpoint ref with
+``ckpt``'s grammar (``run@which#sha`` or a ``.pt`` path), pinned the same way;
+``round=true`` snaps each prediction to the encoder's grid (a count over the
+rules' total; flags to 0/1); ``sample`` and ``temperature`` as POLICY's. It is
+fair (it reads the private row and a learned predictor), plays natively and
+as a Catanatron player, and is refused on the server harness.
 
 ``LLM:model=…:strategy=…`` (``catanrl.agents.llm``) is a language model
 playing from the public state text; it exists only on the catanatron harness.
@@ -37,7 +48,7 @@ from catanatron.registry import REGISTRY, PlayerRegistry, SpecError, parse_spec
 
 from catanrl.checkpoint import Checkpoint, CheckpointRef
 
-MODEL_KEYS = ("POLICY", "MCTS", "BELIEF")
+MODEL_KEYS = ("POLICY", "MCTS", "BELIEF", "PREDICT")
 LLM_KEY = "LLM"
 NATIVE_BOTS = ("F", "R")
 HARNESSES = ("native", "catanatron", "server")
@@ -79,6 +90,17 @@ class BeliefParams:
     device: str = field(default="auto", metadata={"execution": True})
 
 
+@dataclass(frozen=True)
+class PredictParams:
+    ckpt: str
+    predictor: str = ""  # required: _build_params refuses an empty one
+    round: bool = False
+    sample: bool = False
+    temperature: float = 1.0
+    allow_drift: bool = False
+    device: str = field(default="auto", metadata={"execution": True})
+
+
 def _execution(params_cls: type) -> set[str]:
     return {f.name for f in dataclasses.fields(params_cls) if f.metadata.get("execution")}
 
@@ -103,20 +125,29 @@ class ResolvedAgent:
     canonical: str
     harness: str = "native"
     details: dict = field(default_factory=dict, compare=False, repr=False)
+    #: PREDICT's second checkpoint (the aux-head network), pinned like ``checkpoint``.
+    predictor: CheckpointRef | None = None
 
     def __str__(self) -> str:
         return self.canonical
 
+    @property
+    def checkpoints(self) -> tuple[CheckpointRef, ...]:
+        """Every checkpoint the agent runs: the policy's and, for PREDICT, the predictor's."""
+        return tuple(ref for ref in (self.checkpoint, self.predictor) if ref is not None)
+
     def key_dict(self) -> dict:
-        """What decides this agent's moves: no execution params, the model and
-        (for MCTS) the full engine SearchConfig."""
+        """What decides this agent's moves: no execution params, the model (both models for
+        PREDICT) and (for MCTS) the full engine SearchConfig."""
         out: dict[str, Any] = {"key": self.key, "harness": self.harness}
         if self.key in MODEL_KEYS:
-            skip = _execution(type(self.params)) | {"ckpt"}
+            skip = _execution(type(self.params)) | {"ckpt", "predictor"}
             out["params"] = {k: v for k, v in dataclasses.asdict(self.params).items() if k not in skip}
             out["checkpoint"] = {"weights_sha256": self.checkpoint.weights_sha256, **self.details["model"]}
             if self.key == "MCTS":
                 out["search"] = self.details["search"]
+            if self.key == "PREDICT":
+                out["predictor"] = {"weights_sha256": self.predictor.weights_sha256, **self.details["predictor"]}
         elif self.key == LLM_KEY:
             out["params"] = dataclasses.asdict(self.params)
         else:
@@ -155,17 +186,31 @@ def check_spec_syntax(spec: str) -> None:
     if key not in MODEL_KEYS:
         return
     params = _build_params(key, args, named)
-    if "${" not in params.ckpt:
-        _ckpt_syntax(params.ckpt)
+    for ref in _ckpt_refs(params):
+        if "${" not in ref:
+            _ckpt_syntax(ref)
+
+
+def _ckpt_refs(params: Any) -> list[str]:
+    """The checkpoint refs of model params: ``ckpt`` and, for PREDICT, ``predictor``."""
+    return [params.ckpt] + ([params.predictor] if isinstance(params, PredictParams) else [])
 
 
 def spec_ckpt(spec: str) -> str | None:
     """The checkpoint a model spec names, as written (``exp/var@which[#sha]``, a ``.pt`` path,
-    or one with ``${...}`` in it), or None for a bot."""
+    or one with ``${...}`` in it), or None for a bot. PREDICT's is its policy's; see
+    :func:`spec_ckpts` for every checkpoint a spec names."""
+    refs = spec_ckpts(spec)
+    return refs[0] if refs else None
+
+
+def spec_ckpts(spec: str) -> list[str]:
+    """Every checkpoint a model spec names, as written: ``[ckpt]``, or for PREDICT
+    ``[ckpt, predictor]``; empty for a bot."""
     key, args, named = parse_spec(spec)
     if key not in MODEL_KEYS:
-        return None
-    return _build_params(key, args, named).ckpt
+        return []
+    return _ckpt_refs(_build_params(key, args, named))
 
 
 def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> Any:
@@ -187,6 +232,8 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
             raise SpecError("MCTS: sims must be positive")
     if key == "BELIEF" and params.worlds < 1:
         raise SpecError("BELIEF: worlds must be positive")
+    if key == "PREDICT" and not params.predictor:
+        raise SpecError("PREDICT needs a predictor (a private checkpoint with an aux head, e.g. aux-hidden/main@best)")
     return params
 
 
@@ -239,20 +286,30 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
     from catanrl.search.pool import search_config
 
     params = _build_params(key, args, named)
-    _ckpt_syntax(params.ckpt)
-    try:
-        ckpt = load_checkpoint(params.ckpt)
-    except (RuntimeError, OSError, ValueError) as error:  # no such run or checkpoint, or it fails to load
-        raise SpecError(f"{key}: {params.ckpt}: {error}") from None
-    ref = ckpt.ref
-    part = "all" if key == "MCTS" else "actor"
-    try:
-        ckpt = _tested_checkpoint(str(ref.path), ref.weights_sha256, part, params.allow_drift)
-    except (RuntimeError, ValueError) as error:  # CheckpointError: drift, corruption, schema
-        raise SpecError(f"{key}: {ref}: {error}") from None
-    pinned = str(ref)  # run@eN#sha, or /abs/path.pt#sha
-    params = dataclasses.replace(params, ckpt=pinned)
+    for text in _ckpt_refs(params):
+        _ckpt_syntax(text)
+
+    def pin(text: str, part: str) -> tuple[Checkpoint, CheckpointRef]:
+        """One checkpoint ref loaded, self-tested (``part``'s outputs) and pinned: the tested
+        checkpoint and its ref as resolved (``run@eN#sha``, or ``/abs/path.pt#sha``)."""
+        try:
+            found = load_checkpoint(text)
+        except (RuntimeError, OSError, ValueError) as error:  # no such run or checkpoint, or it fails to load
+            raise SpecError(f"{key}: {text}: {error}") from None
+        try:
+            tested = _tested_checkpoint(str(found.ref.path), found.ref.weights_sha256, part, params.allow_drift)
+        except (RuntimeError, ValueError) as error:  # CheckpointError: drift, corruption, schema
+            raise SpecError(f"{key}: {found.ref}: {error}") from None
+        return tested, found.ref
+
+    ckpt, ref = pin(params.ckpt, "all" if key == "MCTS" else "actor")
+    params = dataclasses.replace(params, ckpt=str(ref))
     levels, dims = ckpt.levels, ckpt.dims
+    predictor, predictor_ref = None, None
+    if key == "PREDICT":
+        predictor, predictor_ref = pin(params.predictor, "aux")  # the trunk and the aux head: what the agent runs
+        params = dataclasses.replace(params, predictor=str(predictor_ref))
+        _check_predict(ref, levels, predictor, predictor_ref)
     if ckpt.recurrent:
         # A recurrent network's memory is its seat's decision history: only the native
         # POLICY agent keeps one (MCTS leaves and BELIEF worlds have none, and the Catanatron
@@ -273,10 +330,13 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
         fair = level == "private" or (level == "public" and players == {2})
     elif key == "MCTS":
         fair = not params.oracle
-    else:
+    else:  # BELIEF samples worlds from what its seat saw; PREDICT reads the private row and a learned predictor
         fair = True
     if harness == "server" and key == "POLICY" and level != "private":
         raise SpecError(f"POLICY with a {level} actor reads hidden state; on the server use BELIEF")
+    if harness == "server" and key == "PREDICT":
+        raise SpecError("PREDICT is not played on the server harness yet (the bridge plays POLICY, MCTS and "
+                        "BELIEF from views); on the server use BELIEF")
     skip = _execution(type(params))
     fields = [f.name for f in dataclasses.fields(params) if f.name not in skip]
     canonical = f"{key}:" + ":".join(f"{name}={_fmt(getattr(params, name))}" for name in fields)
@@ -286,9 +346,32 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
         config = search_config(params, max_players=dims["max_players"], threads=0)
         details["search"] = {name: _plain(getattr(config, name)) for name in dir(config)
                              if not name.startswith("_") and name != "threads"}
+    label = f"{key}:{ref.run or ref.path.name}@e{ref.epoch}"
+    if predictor is not None:
+        details["predictor"] = {"model": predictor.header["model"], "levels": predictor.levels,
+                                "dims": predictor.dims, "allow_drift": params.allow_drift}
+        label += f"+{predictor_ref.run or predictor_ref.path.name}@e{predictor_ref.epoch}"
     return ResolvedAgent(key=key, impl=f"catanrl.{key.lower()}", params=params, checkpoint=ref, fair=fair,
-                         label=f"{key}:{ref.run or ref.path.name}@e{ref.epoch}", canonical=canonical,
-                         harness=harness, details=details)
+                         label=label, canonical=canonical, harness=harness, details=details,
+                         predictor=predictor_ref)
+
+
+def _check_predict(ref: CheckpointRef, levels: Mapping[str, str], predictor: Checkpoint,
+                   predictor_ref: CheckpointRef) -> None:
+    """PREDICT's pair: a policy above ``private`` (there is something to fill) and a
+    ``private`` predictor with an aux head (it reads what the policy's seat sees)."""
+    if levels["level"] == "private":
+        raise SpecError(f"PREDICT: {ref} is a private actor, so there is nothing to fill in; it plays as POLICY. "
+                        "PREDICT runs a public or full policy on the private row plus the predictor's fill")
+    header = predictor.header
+    if "aux" not in (header.get("parts") or {}) or not (header["model"].get("args") or {}).get("aux"):
+        raise SpecError(f"PREDICT: predictor {predictor_ref} has no aux head (model.args.aux); train one as "
+                        "aux-hidden does")
+    if predictor.levels["level"] != "private":
+        raise SpecError(f"PREDICT: predictor {predictor_ref} reads {predictor.levels['level']} rows; the predictor "
+                        "must be a private network, since it fills in what the private row hides")
+    if predictor.recurrent:
+        raise SpecError(f"PREDICT: predictor {predictor_ref} is a recurrent network, which has no aux head")
 
 
 def _plain(value: Any) -> Any:
@@ -380,7 +463,7 @@ def player(spec: str, color: Color) -> Player:
 
 
 class CatanrlPlayer(Player):
-    """Base of POLICY/MCTS/BELIEF as Catanatron players.
+    """Base of POLICY/MCTS/BELIEF/PREDICT as Catanatron players.
 
     ``decide`` mirrors the Catanatron game on cppanatron (replaying its action
     records with their dice, card and steal outcomes, so every prompt is
@@ -542,11 +625,19 @@ class BeliefPlayer(CatanrlPlayer):
     Params = BeliefParams
 
 
-_PLAYERS = {"POLICY": PolicyPlayer, "MCTS": MctsPlayer, "BELIEF": BeliefPlayer}
+class PredictPlayer(CatanrlPlayer):
+    """A public/full catanrl policy on the private row with the other seats' hidden features
+    filled in by a predictor network's aux head (DESIGN 2.1)."""
+
+    KEY = "PREDICT"
+    Params = PredictParams
+
+
+_PLAYERS = {"POLICY": PolicyPlayer, "MCTS": MctsPlayer, "BELIEF": BeliefPlayer, "PREDICT": PredictPlayer}
 
 
 def register(registry: PlayerRegistry = REGISTRY) -> None:
-    """Make POLICY, MCTS, BELIEF and LLM buildable by key. Idempotent."""
+    """Make POLICY, MCTS, BELIEF, PREDICT and LLM buildable by key. Idempotent."""
     import catanatron.players  # noqa: F401  (registers the builtins first)
 
     from catanrl.agents.llm.player import LlmPlayer

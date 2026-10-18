@@ -370,6 +370,8 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, harness="native", al
         "eval_id": eval_id, "key": key, "summary": summary, "suite": suite.name,
         "specs": [a.canonical for a in agents], "fill": fill_agent.canonical if fill_agent else None,
         "refs": [str(a.checkpoint) if a.checkpoint else None for a in agents],
+        # PREDICT's second checkpoint per slot (None elsewhere): both are pinned in the key.
+        "predictors": [str(a.predictor) if getattr(a, "predictor", None) else None for a in agents],
         "fair": [a.fair for a in agents], "labels": labels,
         "allow_drift": any(bool(getattr(a.params, "allow_drift", False)) for a in agents),
         "valid": summary["forfeits"] == 0, "mixed": len({canon.digest(s["execution"]) for s in segments}) > 1,

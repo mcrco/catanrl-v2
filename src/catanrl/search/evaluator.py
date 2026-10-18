@@ -30,7 +30,9 @@ import torch
 
 from catanrl.models import CatanModel
 
-Heads = Literal["both", "policy"]
+#: Which outputs a forward computes: both heads, the policy alone, or (``aux``) the aux
+#: head's predictions, flattened to ``(P - 1) * F`` per row in the logits' place.
+Heads = Literal["both", "policy", "aux"]
 
 
 class BatchEvaluator:
@@ -54,8 +56,13 @@ class BatchEvaluator:
         self.mode = mode
         self.heads = heads
         self.obs_size = int(model.obs_size)
-        self.num_actions = int(model.num_actions)
         self.num_players = int(model.num_players)
+        if heads == "aux":
+            if not getattr(model, "aux", False):
+                raise ValueError("heads='aux' needs a network with an aux head (model.args.aux)")
+            self.num_actions = (self.num_players - 1) * int(model.aux_head.num_features)
+        else:
+            self.num_actions = int(model.num_actions)
         self.use_graphs = bool(cuda_graphs) and self.device.type == "cuda"
         self._graphs: dict[int, tuple[torch.cuda.CUDAGraph, tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]] = {}
         self.recurrent = bool(getattr(model, "recurrent", False))
@@ -84,6 +91,9 @@ class BatchEvaluator:
         if self.heads == "policy":
             logits = self.model.policy_logits(obs)
             return logits, logits.new_zeros(obs.shape[0], self.num_players)
+        if self.heads == "aux":  # [B, P-1, F] flattened: the caller reshapes
+            predictions = self.model.aux_predictions(obs).flatten(1)
+            return predictions, predictions.new_zeros(obs.shape[0], self.num_players)
         return self.model(obs)
 
     def _graph(self, size: int):
@@ -117,7 +127,8 @@ class BatchEvaluator:
     # ------------------------------------------------------------ evaluation
 
     def __call__(self, observations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """(logits float32 [n, A], values float32 [n, P]) for rows [n, obs_size]."""
+        """(logits float32 [n, A], values float32 [n, P]) for rows [n, obs_size]; with
+        ``heads="aux"`` the first is the aux head's predictions, [n, (P - 1) * F]."""
         observations = np.ascontiguousarray(observations, dtype=np.float32)
         if observations.ndim != 2 or observations.shape[1] != self.obs_size:
             raise ValueError(f"expected rows [n, {self.obs_size}], got {observations.shape}")

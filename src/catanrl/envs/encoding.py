@@ -75,6 +75,19 @@ def hidden_feature_indices(names: Sequence[str]) -> list[int]:
     return [names.index(name) for name in HIDDEN_FEATURES]
 
 
+def shown_hidden_features(level: str | cpp.InfoLevel) -> tuple[str, ...]:
+    """The :data:`HIDDEN_FEATURES` a row at ``level`` shows for the other seats: none at
+    ``private``, the hand per resource from ``public``, all of them at ``full``. A row at
+    ``level`` is the private row with exactly these features of the other present seats
+    filled in (``GraphEncoder::write_players``; pinned by ``tests/test_predict_agent.py``)."""
+    name = level_name(level)
+    if name == "private":
+        return ()
+    if name == "public":
+        return tuple(f for f in HIDDEN_FEATURES if f.startswith("resource_"))
+    return HIDDEN_FEATURES
+
+
 def check_dims(dims: Mapping[str, Any]) -> dict[str, int]:
     """``dims`` as a plain dict of ints with exactly :data:`DIM_KEYS`."""
     if isinstance(dims, cpp.EncoderDims):
