@@ -483,10 +483,17 @@ def expand_init(value: Any, init: str | None) -> Any:
     return value.replace("${init}", init)
 
 
+def _model_spec(spec: str) -> bool:
+    """Whether ``spec`` names a model key (POLICY, MCTS, BELIEF, PREDICT) with no ``${...}`` left."""
+    from catanrl.agents.spec import MODEL_KEYS
+
+    return "${" not in spec and spec.startswith(MODEL_KEYS)
+
+
 def bind_spec(spec: str, own: str | None) -> str | None:
     """The canonical form of a lineup spec naming another run's checkpoint, or None
     when it names no run (a bot, ``${...}``) or the run ``own`` (bound at eval time)."""
-    if "${" in spec or not spec.startswith(("POLICY", "MCTS", "BELIEF")):
+    if not _model_spec(spec):
         return None
     if own and re.search(rf"(^|[:=]){re.escape(own)}(@|#|:|$)", spec):
         return None
@@ -495,23 +502,36 @@ def bind_spec(spec: str, own: str | None) -> str | None:
     return resolve_agent(spec).canonical
 
 
-def spec_run(spec: str) -> str | None:
-    """The run (``experiment/variant``, or an experiment with one variant) whose checkpoint a
-    lineup spec names, or None: a bot, a ``.pt`` path, an unexpanded ``${...}``."""
-    if "${" in spec or not spec.startswith(("POLICY", "MCTS", "BELIEF")):
-        return None
-    from catanrl.agents.spec import spec_ckpt
+def spec_runs(spec: str) -> list[str]:
+    """The runs (``experiment/variant``, or an experiment with one variant) whose checkpoints
+    a lineup spec names: one for POLICY, MCTS and BELIEF, the policy's then the predictor's
+    for PREDICT; none for a bot, a ``.pt`` path or an unexpanded ``${...}``."""
+    if not _model_spec(spec):
+        return []
+    from catanrl.agents.spec import spec_ckpts
 
-    ckpt = spec_ckpt(spec)
-    if ckpt is None or "${" in ckpt or ckpt.partition("#")[0].endswith(".pt"):
-        return None
-    return parse_ref(ckpt)[0]
+    out = []
+    for ckpt in spec_ckpts(spec):
+        if "${" not in ckpt and not ckpt.partition("#")[0].endswith(".pt"):
+            out.append(parse_ref(ckpt)[0])
+    return out
+
+
+def spec_run(spec: str) -> str | None:
+    """The run whose checkpoint a lineup spec names (PREDICT: its policy's), or None."""
+    runs = spec_runs(spec)
+    return runs[0] if runs else None
+
+
+def foreign_runs(spec: str, experiment: str) -> list[str]:
+    """The runs of experiments other than ``experiment`` that ``spec`` names."""
+    return [run for run in spec_runs(spec) if run.partition("/")[0] != experiment]
 
 
 def foreign_run(spec: str, experiment: str) -> str | None:
-    """The run of an experiment other than ``experiment`` that ``spec`` names, or None."""
-    run = spec_run(spec)
-    return run if run is not None and run.partition("/")[0] != experiment else None
+    """The first run of another experiment that ``spec`` names, or None."""
+    runs = foreign_runs(spec, experiment)
+    return runs[0] if runs else None
 
 
 def run_status(ref: str) -> Status | None:
@@ -539,8 +559,8 @@ def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
     out["specs"] = {}
     for entry in (cfg.get("eval") or {}).get("final") or []:
         for spec in entry["lineup"]:
-            other = foreign_run(spec, experiment) if experiment is not None else None
-            if other is not None and run_status(other) not in USABLE:
+            others = foreign_runs(spec, experiment) if experiment is not None else []
+            if any(run_status(other) not in USABLE for other in others):
                 continue
             bound = bind_spec(expand_init(spec, start), own)
             if bound is not None:
@@ -557,8 +577,7 @@ def bound_lineup(run: Run, lineup: Sequence[str], *, pin: bool = True) -> list[s
     for spec in lineup:
         bound = known.get(spec)
         if bound is None:
-            other = foreign_run(spec, run.experiment)
-            if other is not None:
+            for other in foreign_runs(spec, run.experiment):
                 status = run_status(other)
                 if status not in USABLE:
                     raise Unbound(f"{spec} waits for {other}, which is {status or 'not there yet'}; "

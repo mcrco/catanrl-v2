@@ -16,9 +16,11 @@ sizes are known::
     result.verified, result.summary()
 
 :func:`tui_decide_fns` makes ``decide_fns`` for ``catanatron.tui.run``, and
-:func:`play_tui` opens a local TUI game in which seats may be our specs
-(``POLICY:...``, ``MCTS:...``, ``BELIEF:...``) next to people and Catanatron's
-registry bots.
+:func:`play_tui` opens a local TUI game in which seats may be our model specs
+(:data:`catanrl.agents.spec.MODEL_KEYS`: ``POLICY:...``, ``MCTS:...``,
+``BELIEF:...``, played through :class:`ViewAgent`; a ``PREDICT:...`` seat is
+routed the same way and refused by its server resolution, as on the server)
+next to people and Catanatron's registry bots.
 """
 
 from __future__ import annotations
@@ -30,9 +32,6 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from catanrl.bridge.agent import ViewAgent
-
-#: Spec keys the bridge plays (the rest are Catanatron registry bots).
-MODEL_KEYS = ("POLICY", "MCTS", "BELIEF")
 
 
 @dataclass
@@ -108,6 +107,11 @@ def run_bot(agent: Any, url: str, *, new_room: Mapping[str, Any] | None = None, 
 
 
 def is_model_spec(spec: str) -> bool:
+    """Whether ``spec`` names one of our model keys (``catanrl.agents.spec.MODEL_KEYS``,
+    the one enumeration), which the bridge plays through :class:`ViewAgent`; the
+    rest are Catanatron registry bots."""
+    from catanrl.agents.spec import MODEL_KEYS
+
     return isinstance(spec, str) and spec.split(":", 1)[0].strip().upper() in MODEL_KEYS
 
 
@@ -137,9 +141,11 @@ def tui_decide_fns(agents: Mapping[str, Any] | Sequence[str], *, device: str = "
 def play_tui(seats: Sequence[str], *, device: str = "cpu", infer_rows: int = 1, config: Any = None,
              seed: int | None = None, **kwargs: Any) -> Any:
     """Open a local TUI game whose seats (RED, BLUE, ... in order) are
-    ``human``, Catanatron registry specs, ``oracle:SPEC``, or our POLICY /
-    MCTS / BELIEF specs (played through :class:`ViewAgent` from their
-    views). Other keywords go to ``catanatron.tui.run``; returns its session.
+    ``human``, Catanatron registry specs, ``oracle:SPEC``, or our model specs
+    (every key in ``catanrl.agents.spec.MODEL_KEYS``, played through
+    :class:`ViewAgent` from their views; ``PREDICT`` is refused there with a
+    :class:`~catanatron.registry.SpecError` before the TUI opens, as on the
+    server). Other keywords go to ``catanatron.tui.run``; returns its session.
     """
     from catanatron.tui import run
 

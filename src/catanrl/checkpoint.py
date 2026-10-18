@@ -437,15 +437,16 @@ class Checkpoint:
                 raise ModelDrift(f"{self.ref}: the rebuilt network's aux predictions differ from its self-test")
         self._tested.add((part, allow_drift))
 
-    def model(self, part: Literal["actor", "critic", "all"] = "actor", device: str = "cpu", *,
+    def model(self, part: Literal["actor", "critic", "aux", "all"] = "actor", device: str = "cpu", *,
               allow_drift: bool = False, dims: Mapping[str, int] | None = None) -> nn.Module:
         """The self-tested network (every part's weights), on ``device``, in eval mode.
 
-        ``part`` says which outputs the self-test must reproduce. ``dims``
-        rebuilds a dims-agnostic network at other dims; others raise.
+        ``part`` says which outputs the self-test must reproduce (``aux``: the aux head's
+        predictions, what a PREDICT agent runs). ``dims`` rebuilds a dims-agnostic network
+        at other dims; others raise.
         """
-        if part not in ("actor", "critic", "all"):
-            raise ValueError(f"part must be actor, critic or all, not {part!r}")
+        if part not in SELF_TEST_PARTS:
+            raise ValueError(f"part must be one of {', '.join(SELF_TEST_PARTS)}, not {part!r}")
         self.self_test(allow_drift=allow_drift, part=part)
         target = self.dims if dims is None else {k: int(v) for k, v in dict(dims).items()}
         if target != self.dims and not self.dims_agnostic:

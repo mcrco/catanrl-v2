@@ -63,12 +63,21 @@ def _descends(commit: str, head: str, repo: Path) -> bool:
 
 
 def _training(agent: Any, problems: list[str], name: str) -> tuple[list[str], list[str]]:
-    """(superproject HEAD of every training launch over the lineage, training-side flags)."""
+    """(superproject HEAD of every training launch over the lineage, training-side flags) of
+    every checkpoint the agent runs (PREDICT: the policy's and the predictor's)."""
+    heads, flags = [], set()
+    for ref in getattr(agent, "checkpoints", None) or (agent.checkpoint,):
+        found, found_flags = _training_of(ref, problems, name)
+        heads += found
+        flags.update(found_flags)
+    return heads, sorted(flags)
+
+
+def _training_of(ref: Any, problems: list[str], name: str) -> tuple[list[str], list[str]]:
     from catanrl import provenance
     from catanrl.checkpoint import Checkpoint
     from catanrl.runs import RunError, load_experiment
 
-    ref = agent.checkpoint
     if ref.run is None:  # a free-standing .pt: its header is all there is
         code = Checkpoint.load(ref.path).header.get("code") or {}
         return [code.get("git")], ["dirty-train"] if code.get("dirty") else []

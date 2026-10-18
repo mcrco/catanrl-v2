@@ -10,6 +10,9 @@ agent spec (``catanrl.agents.spec.ResolvedAgent``) into one of:
   deciding seat's hand tracker, ``oracle = true`` searches the true game;
 * :class:`BeliefAgent` (``BELIEF``): the policy averaged over K worlds
   sampled from the deciding seat's hand tracker;
+* :class:`PredictAgent` (``PREDICT``): a public/full policy on one row, the
+  private row with the other seats' hidden features filled in by a private
+  network's aux head (DESIGN 2.1);
 * :class:`BotAgent` (``F``, ``R``): marks a seat the harness plays with the
   engine's bots.
 
@@ -43,8 +46,18 @@ import cppanatron as cpp
 import numpy as np
 import torch
 
-from catanrl.envs.encoding import action_size, check_dims, critic_level_of, make_encoder, row_layout
+from catanrl.envs.encoding import (
+    HIDDEN_FEATURES,
+    action_size,
+    check_dims,
+    critic_level_of,
+    hidden_feature_indices,
+    make_encoder,
+    row_layout,
+    shown_hidden_features,
+)
 from catanrl.models import CatanModel, build_model
+from catanrl.models.rows import feature_names
 from catanrl.search.evaluator import BatchEvaluator
 from catanrl.search.pool import make_pool, run_searches, search_config
 from catanrl.seeding import derive_seed as _derive_seed
@@ -75,13 +88,15 @@ class NativeAgent:
     needs_memory = False
 
     def __init__(self, model: CatanModel, params: Any, *, device: str, infer_rows: int,
-                 mode: str = "strict", heads: str = "both") -> None:
+                 mode: str = "strict", heads: str = "both", reads_level: str | None = None) -> None:
         self.params = params
         self.device = device
         self.infer_rows = int(infer_rows)
         self.mode = mode
         self.heads = heads
-        self.level = model.levels["level"]
+        #: The level of the rows the agent reads (``act``'s ``rows``, ``encode``): the
+        #: network's, unless the agent builds the network's rows itself (PREDICT).
+        self.level = reads_level or model.levels["level"]
         self._weights = {k: v.detach().cpu() for k, v in model.state_dict().items()}
         self._spec = model.spec
         self._levels = dict(model.levels)
@@ -90,20 +105,20 @@ class NativeAgent:
         if self.recurrent and not self.needs_memory:
             raise ValueError(f"{self.key} cannot play a recurrent network (class {model.spec['class']}): "
                              "only POLICY keeps a seat's decision history")
-        if critic_level_of(self.level, model.levels["critic_level"]) is not None and (
+        if critic_level_of(self._levels["level"], self._levels["critic_level"]) is not None and (
                 heads == "policy" or not model.reads_critic_block):
             # Decisions read only the actor: drop the critic block (it has the players block's
             # width, so the same weights load) and play from actor-level rows. Searches keep it
             # when the critic reads it (their leaves come from an ActorCriticEncoder); a block
             # no head reads (a shared trunk's aux targets) is dropped for searches too.
-            self._levels["critic_level"] = self.level
+            self._levels["critic_level"] = self._levels["level"]
             model = self._rebuild(dict(model.dims))
         self._set_model(model)
 
     def _rebuild(self, dims: dict) -> CatanModel:
         critic = critic_level_of(self._levels["level"], self._levels["critic_level"])
         model = build_model(self._spec, dims=dims, levels=self._levels, num_actions=action_size(dims),
-                            layout=row_layout(dims, self.level, critic))
+                            layout=row_layout(dims, self._levels["level"], critic))
         model.load_state_dict(self._weights)
         return model
 
@@ -234,6 +249,126 @@ class BeliefAgent(NativeAgent):
         return score.argmax(axis=1)
 
 
+class PredictAgent(NativeAgent):
+    """``PREDICT``: the policy (a ``public`` or ``full`` network) decides on the private row of
+    the deciding seat with, for every other present seat, the hidden features its level
+    shows (:func:`~catanrl.envs.encoding.shown_hidden_features`: the hand per resource for
+    ``public``, all 15 for ``full``) overwritten by the predictor's aux head, run on that same
+    private row. ``private + fill == <level>`` row for row (pinned by test), so the policy
+    sees exactly the row it was trained on, with predictions in place of the truth.
+
+    ``round=true`` snaps each prediction onto the encoder's grid: a count over the rules'
+    total (the bank per resource, the deck per kind, the points to win, read from each game's
+    rules as the encoder does), the playable flags to 0/1. Flags are rounded independently of
+    the counts (a predicted playable card with a predicted count of 0 stays as predicted).
+    """
+
+    key = "PREDICT"
+    needs_games = True
+
+    def __init__(self, model, params, *, device, infer_rows, mode="strict", predictor: CatanModel | None = None
+                 ) -> None:
+        if predictor is None:
+            raise ValueError("PREDICT needs its predictor network (the aux-head checkpoint)")
+        if not getattr(predictor, "aux", False):
+            raise ValueError("PREDICT: the predictor has no aux head (model.args.aux)")
+        if predictor.levels["level"] != "private":
+            raise ValueError(f"PREDICT: the predictor reads {predictor.levels['level']} rows; it must be private")
+        if getattr(predictor, "recurrent", False) or getattr(model, "recurrent", False):
+            raise ValueError("PREDICT cannot play a recurrent network: a filled row has no decision history")
+        self.policy_level = model.levels["level"]
+        if self.policy_level == "private":
+            raise ValueError("PREDICT: a private policy has nothing to fill in; it plays as POLICY")
+        self.sample = bool(_param(params, "sample", False))
+        self.temperature = float(_param(params, "temperature", 1.0))
+        self.round = bool(_param(params, "round", False))
+        self._predictor_weights = {k: v.detach().cpu() for k, v in predictor.state_dict().items()}
+        self._predictor_spec = predictor.spec
+        if not predictor.dims_agnostic:
+            raise ValueError("PREDICT: the predictor must be dims-agnostic (a graph network)")
+        #: Which of HIDDEN_FEATURES (by position) the fill writes: those the policy's level shows.
+        shown = shown_hidden_features(self.policy_level)
+        self.fill_features = [k for k, name in enumerate(HIDDEN_FEATURES) if name in shown]
+        super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="policy",
+                         reads_level="private")
+
+    def _set_model(self, model: CatanModel) -> None:
+        super()._set_model(model)
+        dims = self.dims
+        # The predictor at the policy's dims, on private rows (no critic block: the agent reads
+        # actor-level rows; the same weights load), evaluated like the policy.
+        predictor = build_model(self._predictor_spec, dims=dims, levels={"level": "private"},
+                                num_actions=action_size(dims), layout=row_layout(dims, "private"))
+        predictor.load_state_dict(self._predictor_weights)
+        self.predictor = predictor
+        self.predictor_evaluator = BatchEvaluator(predictor, device=self.device, infer_rows=self.infer_rows,
+                                                  mode=self.mode, heads="aux")
+        self.num_features = int(predictor.aux_head.num_features)
+        if self.num_features != len(HIDDEN_FEATURES):
+            raise ValueError(f"PREDICT: the predictor predicts {self.num_features} features, not {len(HIDDEN_FEATURES)}")
+        # Where the fill goes in a private row: the players block, each slot's hidden features.
+        offset, (players, width) = self.encoder.layout()["players"]
+        self.players_span = (int(offset), int(players), int(width))
+        names = feature_names(dims, "private")["players"]
+        self.hidden_index = hidden_feature_indices(names)
+        self.present_index = names.index("present")
+        if self.model.obs_size != self.encoder.size:
+            raise ValueError("PREDICT: the policy's row and the private row differ in size")
+
+    def predict(self, rows: np.ndarray) -> np.ndarray:
+        """The predictor's aux output on private rows: [B, P-1, F] (row k = slot k+1), in the
+        encoder's scale."""
+        flat, _ = self.predictor_evaluator(rows)
+        return flat.reshape(len(rows), self.dims["max_players"] - 1, self.num_features)
+
+    def policy_rows(self, rows: np.ndarray, games: Sequence[cpp.Game] | None = None) -> np.ndarray:
+        """The rows the policy decides on: ``rows`` (private) with, for each other present
+        seat, the hidden features the policy's level shows replaced by the predictions
+        (rounded with ``round``). ``games`` give the rules' totals for rounding."""
+        rows = np.ascontiguousarray(rows, dtype=np.float32)
+        predicted = self.predict(rows)
+        if self.round:
+            if games is None:
+                raise ValueError("PREDICT with round=true reads each game's rules for the totals")
+            predicted = self.round_predictions(predicted, games)
+        out = rows.copy()
+        offset, players, width = self.players_span
+        block = out[:, offset : offset + players * width].reshape(len(out), players, width)
+        present = block[:, 1:, self.present_index] > 0                        # [B, P-1]
+        for k in self.fill_features:
+            column = block[:, 1:, self.hidden_index[k]]
+            column[...] = np.where(present, predicted[:, :, k], column)
+        return out
+
+    @staticmethod
+    def round_predictions(predicted: np.ndarray, games: Sequence[cpp.Game]) -> np.ndarray:
+        """Each prediction snapped to the nearest value the encoder can write: ``count /
+        total`` (as the engine computes it: a double ratio cast to float32) for the actual
+        VP over the game's points to win, the hand per resource over the rules' bank and
+        the development cards per kind over the rules' deck; the playable flags to 0/1."""
+        out = np.empty_like(predicted)
+        for i, game in enumerate(games):
+            rules = game.rules
+            totals = [int(game.vps_to_win), *(int(n) for n in rules.resource_bank),
+                      *(int(n) for n in rules.development_deck)]
+            for k, total in enumerate(totals):
+                if total <= 0:
+                    out[i, :, k] = 0.0
+                    continue
+                counts = np.clip(np.rint(predicted[i, :, k].astype(np.float64) * total), 0, total)
+                out[i, :, k] = (counts / float(total)).astype(np.float32)
+            out[i, :, len(totals):] = (predicted[i, :, len(totals):] >= 0.5).astype(np.float32)
+        return out
+
+    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
+        if games is None:
+            raise ValueError("PREDICT decides from games (their rules give the fill's totals)")
+        if len(games) != len(rows):
+            raise ValueError("PREDICT needs one game per row")
+        logits, _ = self.evaluator(self.policy_rows(rows, games))
+        return _choose(logits, masks, decision_seeds, sample=self.sample, temperature=self.temperature)
+
+
 class MctsAgent(NativeAgent):
     key = "MCTS"
     needs_games = True
@@ -300,22 +435,24 @@ class BotAgent:
         pass
 
 
-AGENTS = {"POLICY": PolicyAgent, "MCTS": MctsAgent, "BELIEF": BeliefAgent}
+AGENTS = {"POLICY": PolicyAgent, "MCTS": MctsAgent, "BELIEF": BeliefAgent, "PREDICT": PredictAgent}
 
 
-def _load_model(resolved: Any, part: str) -> CatanModel:
+def _load_model(resolved: Any, part: str, ref: Any = None) -> CatanModel:
     from catanrl.checkpoint import Checkpoint
 
-    ckpt = Checkpoint.load(resolved.checkpoint.path, ref=resolved.checkpoint)
+    ref = resolved.checkpoint if ref is None else ref
+    ckpt = Checkpoint.load(ref.path, ref=ref)
     return ckpt.model(part, device="cpu", allow_drift=bool(_param(resolved.params, "allow_drift", False)))
 
 
 def make_native_agent(resolved: Any, *, device: str, infer_rows: int, mode: str = "strict",
-                      model: CatanModel | None = None) -> NativeAgent | BotAgent:
+                      model: CatanModel | None = None, predictor: CatanModel | None = None) -> NativeAgent | BotAgent:
     """The native backend of a resolved agent spec.
 
-    ``model`` overrides loading the network from ``resolved.checkpoint``
-    (tests and in-memory agents). ``mode`` is the evaluator's determinism.
+    ``model`` (and, for PREDICT, ``predictor``) overrides loading the network from
+    ``resolved.checkpoint`` (``resolved.predictor``): tests and in-memory agents.
+    ``mode`` is the evaluator's determinism.
     """
     key = resolved.key
     if key in ("F", "R"):
@@ -326,4 +463,9 @@ def make_native_agent(resolved: Any, *, device: str, infer_rows: int, mode: str 
         model = _load_model(resolved, "all" if key == "MCTS" else "actor")
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    if key == "PREDICT":
+        if predictor is None:
+            predictor = _load_model(resolved, "aux", resolved.predictor)
+        return PredictAgent(model, resolved.params, device=device, infer_rows=infer_rows, mode=mode,
+                            predictor=predictor)
     return AGENTS[key](model, resolved.params, device=device, infer_rows=infer_rows, mode=mode)

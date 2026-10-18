@@ -5,9 +5,9 @@ Catanatron game on the same map and game seed the native harness would use
 (``GameConfig.catanatron_game``), with the schedule's seat order forced (a
 Catanatron game shuffles its seats from the game RNG; the reseating happens
 before any action, as ``cppanatron.catanatron.reference_game`` does) and the
-suite's turn limit. Each seat is ``agent.player(color)``: POLICY, MCTS and
-BELIEF through their cppanatron mirror, Catanatron's own bots, and ``LLM``
-players, which exist only here. Rows have the native harness's shape
+suite's turn limit. Each seat is ``agent.player(color)``: POLICY, MCTS,
+BELIEF and PREDICT through their cppanatron mirror, Catanatron's own bots,
+and ``LLM`` players, which exist only here. Rows have the native harness's shape
 (``game_id``, ``seats``, ``winner``, ``winner_seat``, ``turns``,
 ``truncated``, ``stuck``, ``scores``, ``forfeits``, ``decisions``) and, when
 a seat is an LLM, ``llm``: that player's per-game stats per lineup slot

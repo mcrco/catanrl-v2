@@ -1,0 +1,58 @@
+# Predict the hidden information instead of sampling it, the second half
+# (report, "exploring ideas"; DESIGN 2.1): act on the prediction. aux-hidden
+# trained a private graph-s whose aux head predicts the other seat's 15
+# hidden features (hand per resource, dev cards per kind, which are playable,
+# actual VP) from the private row; its own policy did not improve (a
+# regulariser). PREDICT runs the strongest 2p network, puffer-graph2/full
+# (a full-information policy: 95.2% vs F as the oracle POLICY on the true
+# row, 95.1% as the fair BELIEF over 16 sampled worlds), on ONE row: the
+# game's private row with the opponent's hidden features overwritten by
+# aux-hidden/main's prediction. An eval-only experiment on heldout-2p's
+# 2,500 boards x 2 seat rotations = 5,000 games per row, as puffer-graph2's
+# own finals:
+#   1. PREDICT vs BELIEF (worlds=16), the same network: head to head.
+#   2. PREDICT vs F: the number comparable to BELIEF's 95.06 vs F.
+#   3. PREDICT with round=true (each prediction snapped to the encoder's
+#      grid: a count over the bank / deck / points to win, flags 0/1) vs
+#      BELIEF: does the policy prefer rows that look like real ones?
+#   4. PREDICT vs arch-ablation/graph-s (the private-level policy of the
+#      same recipe): the fill against seeing nothing.
+# PREDICT is fair (it reads the private row and a learned predictor). The
+# three runs it cites live in other experiments: each is pinned when this
+# variant is created if that run is finished by then, else the row is
+# deferred and a later `catanrl run predict-vs-belief` pins and plays it.
+name: predict-vs-belief
+kind: eval
+eval:
+  final:
+    - suite: heldout-2p
+      lineup:
+        - "PREDICT:ckpt=puffer-graph2/full@best:predictor=aux-hidden/main@best"
+        - "BELIEF:ckpt=puffer-graph2/full@best:worlds=16"
+    - suite: heldout-2p
+      lineup:
+        - "PREDICT:ckpt=puffer-graph2/full@best:predictor=aux-hidden/main@best"
+        - F
+    - suite: heldout-2p
+      lineup:
+        - "PREDICT:ckpt=puffer-graph2/full@best:predictor=aux-hidden/main@best:round=true"
+        - "BELIEF:ckpt=puffer-graph2/full@best:worlds=16"
+    - suite: heldout-2p
+      lineup:
+        - "PREDICT:ckpt=puffer-graph2/full@best:predictor=aux-hidden/main@best"
+        - "POLICY:ckpt=arch-ablation/graph-s@best"
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  notes: |
+    Report, the predict-the-hidden-information idea, measurement (b): acting on the prediction.
+    The records pin puffer-graph2/full@best (e3350), aux-hidden/main@best (e700) and
+    arch-ablation/graph-s@best (e750); both of PREDICT's checkpoints are in each record's key,
+    so a moved best on either side is another record. Rows 1 and 3 are paired with each other
+    (same opponent, same boards). Row 2 is compared with puffer-graph2's BELIEF-vs-F final
+    (0.951, record 67869e7a) but is NOT paired with it as recorded: results.paired needs equal
+    code ids, and PREDICT's code (agents/, envs/) is outcome code, so every native record made
+    before it merged has another eval_id under the merged code (DESIGN 6.10). Pairing row 2
+    needs that final replayed under this code, which the merge budgets: `catanrl eval
+    "BELIEF:ckpt=puffer-graph2/full@best:worlds=16" F --suite heldout-2p` (5,000 games,
+    ~390 s on the GPU; it lands under puffer-graph2/full/evals, where the report finds it).
