@@ -1,0 +1,26 @@
+# The tracker comparison that can show a difference: search reads the sampled worlds
+# (steals, discards and what the others can build are played out with the dealt hands),
+# unlike a private-level policy, for which exact and pool encode the same row
+# (tracker-modes). ppo-4p's network, MCTS 256 sims x 4 worlds, exact against pool at one
+# 4p table with two F, in BOTH slot orders because [A, B, F, F] is not exchangeable
+# (F robs the seat after it): per-agent share averaged over the two orders is the paired
+# comparison. 2 x 50 boards x 4 rotations = 400 games.
+name: tracker-search
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 50}
+      lineup:
+        - "MCTS:ckpt=ppo-4p/main@best:sims=256:dets=4:tracker=exact"
+        - "MCTS:ckpt=ppo-4p/main@best:sims=256:dets=4:tracker=pool"
+        - F
+        - F
+    - suite: {name: heldout-4p, boards: 50}
+      lineup:
+        - "MCTS:ckpt=ppo-4p/main@best:sims=256:dets=4:tracker=pool"
+        - "MCTS:ckpt=ppo-4p/main@best:sims=256:dets=4:tracker=exact"
+        - F
+        - F
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

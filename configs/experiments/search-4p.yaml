@@ -1,0 +1,21 @@
+# The 4p search rows: MCTS (1024 sims, one world from the hand tracker) against three
+# copies of the same network's raw policy on heldout-4p. The network is the critic-fix
+# arm with undiscounted per-seat values (ppo-4p-critic-fix/lambda-critic-g1@e100): its
+# four win probabilities sum to the realized 1.00, which is what the max^n backup wants;
+# its raw policy is ppo-4p's to within noise. 100 boards x 4 rotations = 400 games; the
+# F-free table has no F targeting, but slot 0 still sits in a fixed neighbour order, so
+# read the four rotations summed. Timing probe (3e38ada6, 8 games in flight): 27 min for
+# 8 games; with 256 games in flight the search batches across games, expect 2-3 h.
+name: search-4p
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 100}
+      lineup:
+        - "MCTS:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100:sims=1024:dets=1"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
