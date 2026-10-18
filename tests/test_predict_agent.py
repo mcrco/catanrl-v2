@@ -464,6 +464,26 @@ def test_a_whole_catanatron_game_stays_in_sync(ckpts):
     assert isinstance(native, PredictAgent) and native.round and native.predictor.aux
 
 
+def test_the_tui_bridge_routes_predict_through_the_view_agent_and_refuses_it(ckpts, monkeypatch):
+    """The bridge enumerates model keys from the spec module: ``catanrl play`` hands a PREDICT seat
+    to ViewAgent like POLICY / MCTS / BELIEF (not to the TUI as a registry bot), and ViewAgent's
+    server resolution refuses it before the TUI opens."""
+    import catanatron.tui
+
+    from catanrl.bridge.server_bot import is_model_spec, play_tui
+
+    spec = "PREDICT:ckpt=exp/pol:predictor=exp/aux"
+    assert is_model_spec(spec) and is_model_spec("predict:ckpt=exp/pol:predictor=exp/aux")
+    assert not is_model_spec("F") and not is_model_spec("AB:2")
+    opened = []
+    monkeypatch.setattr(catanatron.tui, "run", lambda seats, **kw: opened.append((seats, kw)))
+    with pytest.raises(SpecError, match="server"):
+        play_tui(["human", spec, "F"], config={"num_players": 3})
+    assert opened == []
+    play_tui(["human", "F"], config={"num_players": 2})  # no model seats: straight to the TUI
+    assert opened == [(["human", "F"], {"decide_fns": None, "config": {"num_players": 2}, "seed": None})]
+
+
 def test_catanrl_eval_records_both_checkpoints_as_fair(ckpts, monkeypatch, capsys):
     """A record written by ``catanrl eval`` (native, then the catanatron harness) marks the
     PREDICT slot fair, pins the policy in ``refs`` and the predictor in ``predictors`` (both in

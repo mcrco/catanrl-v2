@@ -261,7 +261,8 @@ counts. The agent is fair (it reads only the private row and a learned
 predictor); both checkpoints are pinned in the spec, the eval key and the
 record (`refs` holds the policy's, `predictors` the predictor's); the
 predictor self-tests its `aux` part. It plays natively and as a Catanatron
-player; the server bridge refuses it for now. `configs/experiments/predict-vs-belief.yaml`
+player; the server bridge and the TUI (`catanrl play`, which routes every model
+key through the bridge's ViewAgent) refuse it for now. `configs/experiments/predict-vs-belief.yaml`
 measures it: puffer-graph2/full with aux-hidden/main's head against BELIEF
 (16 worlds) of the same network, against F, rounded against BELIEF, and against
 the private-level arch-ablation/graph-s, on heldout-2p.

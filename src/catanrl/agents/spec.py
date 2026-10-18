@@ -21,7 +21,8 @@ by the aux head of ``predictor``, a ``private`` checkpoint trained with
 ``round=true`` snaps each prediction to the encoder's grid (a count over the
 rules' total; flags to 0/1); ``sample`` and ``temperature`` as POLICY's. It is
 fair (it reads the private row and a learned predictor), plays natively and
-as a Catanatron player, and is refused on the server harness.
+as a Catanatron player, and is refused on the server harness (so by the bridge's
+ViewAgent, which ``catanrl play`` routes every model key through).
 
 ``LLM:model=…:strategy=…`` (``catanrl.agents.llm``) is a language model
 playing from the public state text; it exists only on the catanatron harness.
