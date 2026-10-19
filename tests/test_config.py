@@ -234,8 +234,9 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: 31e1ee123fb5fcd0, s16-oracle 3ee08aa7d06abdcb, s64-d4 aaa5309ffd128cac); schema 3 added
 #: PPO's aux_coef (schema 2's hashes: graph-tiny-s42.ppo 9de4ad123b1571e1, graph-tiny-s42.g1
 #: 8f20d8bd5eb0864c, mlp-s43.ppo 0afc662b53b55599, mlp-s43.g1 2b8b04b954ec769d, s16-oracle
-#: 57fd361629823202, s64-d4 3b565fffa56c89eb). Stored schema-1 and schema-2 runs migrate to
-#: the hashes below.
+#: 57fd361629823202, s64-d4 3b565fffa56c89eb); schema 4 added the lstm class's aux default,
+#: which moves no fixture here (none is an lstm: the stored lstm hashes are pinned below).
+#: Stored schema-1, schema-2 and schema-3 runs migrate to the hashes below.
 GOLDEN = {
     "fx-lineage": {
         "graph-tiny-s42.ppo": "d1bd50a558dcb0d1", "graph-tiny-s42.g1": "700cfba93f2a4e09",
@@ -288,6 +289,23 @@ def test_schema_2_ppo_configs_migrate_to_schema_3_hashes(tmp_path):
     del stored["train"]["aux_coef"]
     assert "aux" not in migrate(stored, from_schema=2)["model"]["args"]
     assert config_hash(migrate(stored, from_schema=2)) == config_hash(cnn)
+
+
+def test_schema_3_lstm_configs_migrate_to_schema_4_hashes():
+    """A run stored under schema 3 (no lstm aux default: lstm-4p/main and arch-ablation/lstm,
+    the October 2026 runs) hashed as schema 3 did and migrates to the current resolution's
+    hash, so it still resumes; a graph run's args already carry the key and keep their hash."""
+    schema_3 = {("lstm-4p", "main"): "4cae1a6d57797381", ("arch-ablation", "lstm"): "1c936a7fa0cbdddc"}
+    for (name, variant), old_hash in schema_3.items():
+        new = load_plan(name).variant(variant)
+        stored = json.loads(json.dumps(new.config))
+        assert stored["model"]["class"] == "lstm" and stored["model"]["args"]["aux"] is False
+        del stored["model"]["args"]["aux"]
+        assert config_hash(stored) == old_hash
+        assert config_hash(migrate(stored, from_schema=3)) == new.config_hash
+    graph = load_plan("aux-hidden-4p").variant("plain").config
+    stored = json.loads(json.dumps(graph))
+    assert config_hash(migrate(stored, from_schema=3)) == config_hash(graph)
 
 
 def _keyed(key: str, algo: str | None) -> str:

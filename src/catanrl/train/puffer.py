@@ -17,7 +17,7 @@ docs/experiments-implementation.md are handled here:
   its data_dir copy are replaced);
 * rewards are win/loss in [0, 1], inside PufferLib's clamp; VP shaping, which
   can leave it, is refused;
-* ``train.aux_coef`` > 0 trains a graph network's aux head (``model.args.aux``)
+* ``train.aux_coef`` > 0 trains a graph or lstm network's aux head (``model.args.aux``)
   on the row's critic block (``obs.critic_level`` above ``obs.level``) through
   the fork's ``aux_loss`` hook; ``losses/aux`` and ``aux/mse_<feature>`` /
   ``aux/var_<feature>`` are logged. At 0 (the default) the head, if any, is
@@ -339,7 +339,7 @@ def _aux_coef(train: Mapping[str, Any], model: CatanModel) -> float:
         raise ValueError(f"train.aux_coef must be >= 0, not {coef}")
     if coef and not getattr(model, "aux", False):
         raise ValueError("train.aux_coef > 0 needs a network with an aux head: model.args.aux on a shared graph "
-                         "trunk (model.args.shared)")
+                         "trunk (model.args.shared) or on an lstm network")
     if coef and not model.has_critic_block:
         raise ValueError("train.aux_coef > 0 trains the aux head on the critic block: set obs.critic_level above "
                          "obs.level (its players block is the target, which no head reads)")

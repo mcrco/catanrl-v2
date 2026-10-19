@@ -372,7 +372,8 @@ def _check_predict(ref: CheckpointRef, levels: Mapping[str, str], predictor: Che
         raise SpecError(f"PREDICT: predictor {predictor_ref} reads {predictor.levels['level']} rows; the predictor "
                         "must be a private network, since it fills in what the private row hides")
     if predictor.recurrent:
-        raise SpecError(f"PREDICT: predictor {predictor_ref} is a recurrent network, which has no aux head")
+        raise SpecError(f"PREDICT: predictor {predictor_ref} is a recurrent network; PREDICT runs the head on "
+                        "single positions, without the seat's decision history its predictions read")
 
 
 def _plain(value: Any) -> Any:

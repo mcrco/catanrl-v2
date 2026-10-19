@@ -24,7 +24,11 @@ illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
 * ``lstm``: :mod:`catanrl.models.lstm` (dims-agnostic, recurrent: the graph
   trunk with an LSTM over the seat's own decisions). Its stateless
   ``forward`` / ``heads`` is the zero-state function; ``step`` threads the
-  state.
+  state. With ``args.aux`` it carries the same auxiliary head on the
+  memory-injected embeddings (``aux_predictions`` from the zero state,
+  ``decode_with_aux`` with a memory), with the graph network's targets
+  (``aux_targets``) and the same rule: the critic block is the head's
+  target and no head reads it.
 """
 
 from __future__ import annotations
@@ -118,6 +122,22 @@ def normalize_levels(levels: Mapping[str, Any] | str) -> dict[str, str]:
     return {"level": level, "critic_level": level_name(critic) if critic is not None else level}
 
 
+def aux_targets_from_block(model: CatanModel, reader: RowReader, obs: torch.Tensor
+                           ) -> tuple[torch.Tensor, torch.Tensor]:
+    """``aux_targets`` of the classes with an aux head (graph, lstm): (targets [B, P-1, F],
+    present [B, P-1]), slots 1..P-1's hidden features read from the critic block (the
+    players block at ``critic_level``, which ``reader`` locates in the row) and which of
+    those seats the game has. Training only: a row without the block raises."""
+    if not model.aux:
+        raise ValueError("this network has no aux head (model.args.aux)")
+    if not model.has_critic_block:
+        raise ValueError("aux targets come from the critic block: set obs.critic_level above obs.level")
+    hidden = reader.players_block(obs, CRITIC_PLAYERS)[:, 1:]              # [B, P-1, Fp]
+    targets = hidden.index_select(2, model.hidden_index)                   # [B, P-1, F]
+    present = reader.players_block(obs)[:, 1:, model.present_index]        # [B, P-1]
+    return targets, present
+
+
 class GraphModel(CatanModel):
     dims_agnostic = True
 
@@ -203,15 +223,7 @@ class GraphModel(CatanModel):
         """(targets [B, P-1, F], present [B, P-1]) for the aux head: slots 1..P-1's hidden
         features read from the critic block (the players block at ``critic_level``), and
         which of those seats the game has. Training only: a row without the block raises."""
-        if not self.aux:
-            raise ValueError("this network has no aux head (model.args.aux)")
-        if not self.has_critic_block:
-            raise ValueError("aux targets come from the critic block: set obs.critic_level above obs.level")
-        reader = self.backbone.reader
-        hidden = reader.players_block(obs, CRITIC_PLAYERS)[:, 1:]              # [B, P-1, Fp]
-        targets = hidden.index_select(2, self.hidden_index)                    # [B, P-1, F]
-        present = reader.players_block(obs)[:, 1:, self.present_index]         # [B, P-1]
-        return targets, present
+        return aux_targets_from_block(self, self.backbone.reader, obs)
 
 
 class MlpModel(CatanModel):
@@ -264,24 +276,34 @@ class MlpModel(CatanModel):
 
 
 class LstmModel(CatanModel):
-    """One graph trunk, an LSTM cell over its pooled embedding, both heads
-    (:mod:`catanrl.models.lstm`)."""
+    """One graph trunk, an LSTM cell over its pooled embedding, both heads, and with
+    ``args.aux`` the aux head on the memory-injected embeddings (:mod:`catanrl.models.lstm`)."""
 
     dims_agnostic = True
     recurrent = True
 
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__(spec, dims, levels, layout)
-        if self.has_critic_block:
+        args = spec["args"]
+        self.aux = bool(args["aux"])
+        if self.has_critic_block and not self.aux:
             raise ValueError("an lstm network has one trunk for both heads and cannot read a separate critic level")
         canonical = canonical_feature_names()
         names = feature_names(dims, levels["level"])
         action_layout = make_encoder(dims, levels["level"]).action_space.layout()
         reader = RowReader(layout, names, canonical=canonical)
         self.present_index = reader.feature("players", "present")
-        self.net = LstmNetwork(reader, action_layout, args=spec["args"], num_players=self.num_players)
+        hidden = hidden_feature_indices(canonical["players"]) if self.aux else []
+        self.net = LstmNetwork(reader, action_layout, args=args, num_players=self.num_players,
+                               aux_features=len(hidden))
         self.hidden_size = self.net.hidden_size
         self.parts = {"actor": ["net.trunk.", "net.cell.", "net.inject.", "net.policy."], "critic": ["net.value."]}
+        if self.aux:
+            self.parts["aux"] = ["net.aux."]
+            self.register_buffer("hidden_index", torch.tensor(hidden, dtype=torch.long), persistent=False)
+        # As GraphModel's shared trunk: the trunk reads the actor's row only, and a critic block,
+        # when the row has one, is the aux head's target that no head reads.
+        self.reads_critic_block = False
         self.shared = True
 
     def _present(self, rows) -> torch.Tensor:
@@ -305,6 +327,13 @@ class LstmModel(CatanModel):
         logits, values = self.net.decode(emb, rows, h, present)
         return logits, values, present
 
+    def decode_with_aux(self, emb, rows, h: torch.Tensor):
+        """(masked logits, value logits, present, aux predictions [B, P-1, F]) from
+        embeddings and a memory: ``decode`` plus the aux head on the same inputs."""
+        present = self._present(rows)
+        logits, values, predictions = self.net.decode_with_aux(emb, rows, h, present)
+        return logits, values, present, predictions
+
     def step(self, obs: torch.Tensor, h: torch.Tensor, c: torch.Tensor):
         """One decision per row from state ``(h, c)``: (masked logits, value logits,
         present, h', c')."""
@@ -326,6 +355,24 @@ class LstmModel(CatanModel):
     def value_logits(self, obs):
         _, values, present = self.heads(obs)
         return values, present
+
+    # ---------------------------------------------------------- the aux head
+
+    def aux_predictions(self, obs):
+        """The aux head's predictions [B, P-1, F] from the zero state (one cell step from
+        zero, as ``heads``: what the checkpoint self-test pins): row k holds slot k+1's
+        hidden features in the encoder's scale, from the actor's row alone."""
+        if not self.aux:
+            raise ValueError("this network has no aux head (model.args.aux)")
+        h, c = self.initial_state(obs.shape[0], obs.device)
+        emb, rows = self.embed(obs)
+        h, _ = self.remember(emb.pooled, h, c)
+        return self.decode_with_aux(emb, rows, h)[3]
+
+    def aux_targets(self, obs):
+        """GraphModel's targets: slots 1..P-1's hidden features from the critic block and
+        which of those seats the game has (training only; see ``aux_targets_from_block``)."""
+        return aux_targets_from_block(self, self.net.trunk.reader, obs)
 
 
 #: Model class name -> the :class:`CatanModel` subclass (the ``class`` of a spec).

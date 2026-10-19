@@ -29,13 +29,16 @@ segment ``s`` holds row ``s``). In each env only the seat to move acts:
   The state is rollout-only: it is not checkpointed, and a resume starts
   from zero like the restarted games.
 
-* **The aux head** (``aux_coef`` > 0, a graph network with ``args.aux``): the
-  training forward also returns the head's predictions for the acting rows
-  with their targets, the hidden features of the other seats read from the
-  row's critic block (:meth:`CatanModel.aux_targets`), and ``aux_loss``
-  (the fork's third hook) adds ``aux_coef`` times their masked mean squared
-  error, over present other seats and hidden features, to PPO's loss. The
-  rollout never runs the head.
+* **The aux head** (``aux_coef`` > 0, a graph or lstm network with
+  ``args.aux``): the training forward also returns the head's predictions
+  for the acting rows with their targets, the hidden features of the other
+  seats read from the row's critic block (:meth:`CatanModel.aux_targets`),
+  and ``aux_loss`` (the fork's third hook) adds ``aux_coef`` times their
+  masked mean squared error, over present other seats and hidden features,
+  to PPO's loss. A recurrent network's head reads the replayed memory
+  (``decode_with_aux`` in place of ``decode``), so the aux loss trains the
+  cell through the horizon as the policy and value losses do. The rollout
+  never runs the head.
 
 The adapter also tracks the critic's calibration by player count: the sum
 over seats of the predicted win probabilities, against the sum of the
@@ -98,13 +101,15 @@ class PufferPolicy(nn.Module):
         if self.aux_coef:
             if not getattr(model, "aux", False):
                 raise ValueError("train.aux_coef > 0 needs a network with an aux head (model.args.aux on a shared "
-                                 "graph trunk)")
+                                 "graph trunk or an lstm network)")
             if not model.has_critic_block:
                 raise ValueError("the aux head's targets are the critic block: set obs.critic_level above obs.level")
             if self.recurrent:
-                raise ValueError("the aux head trains a non-recurrent network")
-            self._heads_with_aux = (torch.compile(model.heads_with_aux, dynamic=True) if compile
-                                    else model.heads_with_aux)
+                self._decode_with_aux = (torch.compile(model.decode_with_aux, dynamic=True) if compile
+                                         else model.decode_with_aux)
+            else:
+                self._heads_with_aux = (torch.compile(model.heads_with_aux, dynamic=True) if compile
+                                        else model.heads_with_aux)
         # Per hidden feature over the epoch's trained (row, other seat) pairs:
         # [count, sum of squared errors, sum of targets, sum of squared targets].
         self._aux_sums: torch.Tensor | None = None
@@ -287,7 +292,8 @@ class PufferPolicy(nn.Module):
         flat = observations.reshape(rows, -1)
         acting = torch.nonzero(self.model.acting(flat)).squeeze(1)
         logits = self.model.waiting_logits(rows, flat.device)
-        emb, obs_rows = self._embed(flat.index_select(0, acting))
+        acting_obs = flat.index_select(0, acting)
+        emb, obs_rows = self._embed(acting_obs)
         inputs = emb.pooled.new_zeros(rows, emb.pooled.shape[1]).index_copy(0, acting, emb.pooled)
         inputs = inputs.reshape(segments, horizon, -1)
         act = self.model.acting(flat).reshape(segments, horizon, 1)
@@ -307,9 +313,15 @@ class PufferPolicy(nn.Module):
             c = torch.where(act[:, t], c_new.to(c.dtype), c)
             memories.append(h)
         memory = torch.stack(memories, dim=1).reshape(rows, -1).index_select(0, acting)
-        act_logits, value_logits, present = self._decode(emb, obs_rows, memory)
+        aux = None
+        if self.aux_coef:
+            act_logits, value_logits, present, predictions = self._decode_with_aux(emb, obs_rows, memory)
+            targets, others = self.model.aux_targets(acting_obs)
+            aux = (predictions, targets, others)
+        else:
+            act_logits, value_logits, present = self._decode(emb, obs_rows, memory)
         logits = logits.index_copy(0, acting, act_logits.float())
-        return logits, ValueBatch(acting, value_logits.float(), present, rows)
+        return logits, ValueBatch(acting, value_logits.float(), present, rows, aux)
 
     def aux_loss(self, outputs: ValueBatch):
         """PuffeRL's hook: ``(aux_coef x the aux head's loss, {"aux": the loss})`` on the

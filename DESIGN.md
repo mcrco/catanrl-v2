@@ -236,6 +236,15 @@ are identical at every level and are not targets.
 * **Checkpoints** store the head as a third part, `aux`, with its own
   self-test outputs (`part="all"` pins them); `init_from` parts stay actor
   and critic, so a warm start leaves the head fresh.
+* **On the recurrent network.** `lstm` with `args.aux` carries the same head
+  on its memory-injected embeddings (the pooled state concatenated with the
+  memory, each seat's embedding), so its predictions are a function of the
+  row and of what the seat remembers, and the aux loss trains the cell
+  through the horizon (`decode_with_aux` in the training forward; the
+  rollout and inference never run it). Its R^2 per feature against the
+  markov head's measures the hand information memory adds beyond the row's
+  tracker. The same rules: the block is the target only, the self-test pins
+  the zero-state predictions, POLICY drops the block.
 
 The experiment is `aux-hidden` (arch-ablation's graph-s cell plus the head);
 the question is whether the policy's score moves, not the aux loss.

@@ -1,0 +1,119 @@
+# The lstm's expected contribution at 4p (Marco, 2026-10-19): inferring the
+# other hands from player activity, what a seat built, what it chose not to
+# build, who stole from whom, which the row's hand tracker (a card counter)
+# cannot encode. arch-ablation's lstm cell and lstm-4p measure only whether
+# memory moves the score; this run measures the inference directly: the aux
+# hidden-feature head (aux-hidden-4p's setup: the same 15 HIDDEN_FEATURES
+# per other seat, the same masked MSE at the same train.aux_coef 0.3, the
+# same full-level players block as the target) on the lstm's memory-injected
+# embeddings (catanrl.models.lstm: the head reads what the policy and the
+# value head read, the trunk's embeddings with the memory added and the
+# memory concatenated to the pooled state), so its per-feature R^2
+# (1 - aux/mse_<f> / aux/var_<f>, logged every epoch) against
+# aux-hidden-4p/aux's markov head (resources 0.48-0.59, actual VP 0.95, VP
+# cards 0.65, knights 0.51 at 4p; 0.90-0.99 for the resources in 2p, where
+# every card movement is seen) says how much hand information the memory
+# adds beyond the tracker row. The finals say whether an aux-shaped memory
+# moves the policy: the F,F,F row, and the paired head to head against
+# lstm-4p/main@best (the same network without the head, the same recipe,
+# budget, seed and critic) in BOTH slot orders ([A, B, F, F] is not
+# exchangeable, F robs the seat after it; tracker-search's header), 8,000
+# games, the per-agent share averaged over the two orders as lstm-4p and
+# aux-hidden-4p read theirs.
+#
+# Everything else is lstm-4p.yaml verbatim: the lstm preset on ppo-4p's
+# recipe at aux-hidden-4p's budget (750 epochs = 196.6M agent steps = 49.2M
+# decisions; its header has the arithmetic), the lambda critic written out.
+# The policy, the value head and the memory read only the private row (the
+# block is the head's target and nothing reads it, as in aux-hidden-4p; the
+# eval harness drops it), so the checkpoint plays as a fair POLICY row.
+#
+# Cost: lstm-4p runs at 22.9k agent steps/s and peaks at 5.1 GiB; the aux
+# block adds 184 floats per row (4 seats x 46 players-block features: +0.18
+# GiB of rollout, aux-hidden-4p's arithmetic) and a small head (a two-layer
+# MLP from the pooled state with the memory and each seat's embedding to 15
+# values), so about 2.5 h of training plus the finals (3 x 4,000 native
+# policy games, minutes); the 8 GB card alone, with
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True as lstm-4p. The lstm-4p
+# ref is pinned (epoch and weights hash) when this run is created, so this
+# experiment is created after lstm-4p finishes.
+name: lstm-aux-4p
+seed: 42
+env:
+  scenarios: [{game: base-4p, turn_limit: 1000, maps: 4096}]
+  num_envs: 1024
+obs: {level: private, critic_level: full}   # private is the only fair level in 4p (ppo-4p notes 3); the block is the head's target
+model: {preset: lstm, args: {aux: true}}    # lstm-4p's network plus the aux head on the memory-injected embeddings (header)
+train:
+  algo: ppo
+  total_timesteps: 196_608_000    # agent steps, all four rows: 750 epochs, 49.2M decisions (aux-hidden-4p's header)
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 0.999                  # per decision (ppo-4p notes 8)
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0                  # puffer-graph2's acting-row balance; the per-seat loss is a mean over seats (ppo-4p notes 4)
+  vf_clip_coef: 0.2             # not read: the per-seat value loss replaces the clipped MSE
+  ent_coef: 0.005
+  max_grad_norm: 4.0            # 8 accumulated micro-batches sum to 2x puffer-graph2's gradient (ppo-4p notes 5)
+  bptt_horizon: 64              # also the LSTM's truncated-BPTT length, as in the 2p cell
+  minibatch_size: 32768         # rows: 8192 decisions per optimizer step, as puffer-graph2
+  max_minibatch_size: 4096      # rows: about 1210 acting; 8192 would not leave room on the 8 GB card (ppo-4p notes 5)
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+  critic_targets: lambda        # the critic fix, written out as in aux-hidden-4p (the default since 2026-10-19)
+  critic_gamma: 1.0             # the critic undiscounted: per-seat win probabilities summing to 1
+  aux_coef: 0.3                 # aux-hidden-4p's weight (aux-hidden's, set by gradient scale; not re-measured here, notes 3)
+eval:
+  # slot 0's score share against three F (a win 1, a truncation 1/4 per seat): 0.25 is parity
+  select: {suite: select-4p, lineup: ["POLICY:ckpt=${self}", F, F, F], every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", F, F, F]}
+    # the paired comparison against the same network without the head, both slot orders (header)
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=lstm-4p/main@best", F, F]}
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=lstm-4p/main@best", "POLICY:ckpt=${run}@best", F, F]}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  recipe: ppo-4p
+  notes: |
+    What to read:
+    1. The R^2 per feature, the question this run answers. Every epoch the run logs
+       losses/aux (the head's masked MSE over the three other seats and the 15 hidden
+       features) and, per feature, aux/mse_<feature> and aux/var_<feature> (the target's
+       variance, the best constant's error): R^2 = 1 - mse/var. The markov reference is
+       aux-hidden-4p/aux at its last epoch (the same head on graph-s's trunk, the same
+       budget): resources 0.48-0.59, actual VP 0.95, VP cards 0.65, knights 0.51; in 2p
+       (aux-hidden/main) the resources were 0.90-0.99 because every card movement is seen
+       there. Resources above aux-hidden-4p/aux's say the memory recovers hand information
+       the row's tracker cannot hold (steals between two other seats, what a seat chose not
+       to build); the dev cards and the playable flags say the same about the order of
+       events. Compare at matched epochs, not only at the end: the head's R^2 climbs with
+       the hands over the run.
+    2. The policy. The F,F,F row (4,000 games, Wilson about +-1.5 points) against lstm-4p's
+       and aux-hidden-4p's (plain 64.0 #ci[62.5][65.5], aux 63.2), and the paired head to
+       head against lstm-4p/main@best: the per-agent share averaged over the two slot orders,
+       8,000 games, as lstm-4p read its own against aux-hidden-4p/plain (aux-hidden-4p's aux
+       arm was paired 0.0 pp [-2.0, 1.9] against its plain). The select curve (select-4p
+       every 50 epochs, 800 games) is the noisier second view; its best of fifteen is 2-5
+       points optimistic.
+    3. The head and the knob. The head is graph's GraphAuxHead on the lstm's memory-injected
+       embeddings (the pooled state concatenated with the memory, and each seat's embedding),
+       so its gradient trains the cell through the 64-step horizon as the policy and value
+       losses do. aux_coef 0.3 is aux-hidden's, set on the 2p graph network so the head's
+       pull on the trunk is 5-20% of PPO's own; it is not re-measured for the lstm, where
+       the pull also reaches the cell. Read losses/aux and the policy metrics against
+       lstm-4p's before trusting a negative result on the policy; throughput and peak
+       memory against lstm-4p's 22.9k steps/s and 5.1 GiB (header).
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

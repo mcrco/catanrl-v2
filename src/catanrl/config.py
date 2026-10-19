@@ -49,7 +49,7 @@ from catanrl.canon import digest
 from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
-SCHEMA = 3
+SCHEMA = 4
 #: (schema that added it, dotted key, the value configs written before it meant, and its
 #: scope: for a ``train.*`` key the algo it belongs to, for a ``model.args.*`` key (a class
 #: default, which resolution fills in) the model class, or None for every algo / class).
@@ -60,6 +60,7 @@ MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
     (2, "train.muon_exclude_lr", None, "ppo"),
     (3, "train.aux_coef", 0.0, "ppo"),
     (3, "model.args.aux", False, "graph"),
+    (4, "model.args.aux", False, "lstm"),
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
