@@ -348,6 +348,8 @@ def _aux_coef(train: Mapping[str, Any], model: CatanModel) -> float:
 
 def _critic_options(train: Mapping[str, Any]) -> dict[str, Any]:
     """train.critic_targets, critic_gamma, muon_exclude and muon_exclude_lr, checked."""
+    # the fallbacks (vtrace, None) are the pre-2026-10-19 defaults, for callers that bypass config
+    # resolution; a resolved config carries both keys from configs/train/ppo.yaml (lambda, 1.0 since then)
     targets = train.get("critic_targets", "vtrace")
     if targets not in ("vtrace", "lambda"):
         raise ValueError(f"train.critic_targets must be vtrace or lambda, not {targets!r}")

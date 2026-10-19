@@ -35,8 +35,15 @@ prio_alpha: 0.0                # uniform minibatches
 prio_beta0: 1.0
 vtrace_rho_clip: 1.0
 vtrace_c_clip: 1.0
-critic_targets: vtrace         # vtrace (the policy's V-trace returns) | lambda (plain GAE lambda-returns, every ratio 1)
-critic_gamma: null             # lambda only: the critic's discount (null: gamma; 1.0: undiscounted win probabilities)
+critic_targets: lambda         # lambda (plain GAE lambda-returns, every ratio 1) | vtrace (the policy's V-trace returns,
+                               # whose one-sided ratios push the per-seat sum above the truth; it takes critic_gamma: null,
+                               # so pin both or the config is refused). lambda is the default since 2026-10-19, after
+                               # ppo-4p-critic-fix; experiment YAMLs with stored runs pin vtrace / null so their hashes
+                               # still match, the others take the new default.
+critic_gamma: 1.0              # lambda only: the critic's discount (1.0: undiscounted per-seat win probabilities, summing
+                               # to the share of games somebody wins; null: the policy's gamma). 1.0 is the default since
+                               # 2026-10-19 (ppo-4p-critic-fix/lambda-critic-g1: calibrated in 20 epochs, policy unchanged);
+                               # experiment YAMLs with stored runs pin null so their hashes still match.
 muon_exclude: []               # parameter-name patterns (fnmatch, e.g. value_head.mlp.4.weight) stepped by AdamW, not Muon
 muon_exclude_lr: null          # AdamW's learning rate for them while the main one is at learning_rate (it follows the schedule)
 aux_coef: 0.0                  # weight of the aux hidden-information loss (model.args.aux on a shared graph trunk, trained

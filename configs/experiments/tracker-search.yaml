@@ -21,6 +21,8 @@ eval:
         - "MCTS:ckpt=ppo-4p/main@best:sims=256:dets=4:tracker=exact"
         - F
         - F
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}   # pinned at the pre-2026-10-19 defaults: a run made before the change still matches
 runtime: {device: cuda, threads: 12, num_envs: 256}
 meta:
   wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

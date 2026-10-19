@@ -27,6 +27,9 @@ def tiny_ppo(seed: int = 3, epochs: int = 4, **train) -> dict:
             "adam_beta2": 0.999, "adam_eps": 1e-8, "anneal_lr": False, "min_lr_ratio": 0.0, "amp": False,
             "precision": "float32", "prio_alpha": 0.0, "prio_beta0": 1.0, "vtrace_rho_clip": 1.0,
             "vtrace_c_clip": 1.0, "checkpoint_interval": 2, "log_interval": 2,
+            # the pre-2026-10-19 critic defaults (ppo.yaml now defaults to lambda, 1.0): the golden
+            # training stays bit-identical to the code before the critic options existed
+            "critic_targets": "vtrace", "critic_gamma": None,
         },
         "runtime": {"device": "cpu", "threads": 2, "determinism": "strict"},
     }

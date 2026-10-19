@@ -1,9 +1,10 @@
 """train.critic_targets and critic_gamma (PufferLib's catanrl-v2 patch in PuffeRL.train).
 
-* ``vtrace`` (the default) hands the value-loss hook the policy's V-trace
-  advantages; ``lambda`` hands it plain GAE lambda-returns from the same stored
-  values (every ratio 1, clips 1) at ``critic_gamma`` (default gamma), while
-  the policy's advantages stay V-trace's.
+* ``vtrace`` (the default before 2026-10-19; configs/train/ppo.yaml now
+  defaults to ``lambda`` with ``critic_gamma`` 1.0) hands the value-loss hook
+  the policy's V-trace advantages; ``lambda`` hands it plain GAE lambda-returns
+  from the same stored values (every ratio 1, clips 1) at ``critic_gamma``
+  (null: the policy's gamma), while the policy's advantages stay V-trace's.
 * On a toy race with exact values (tests/critic_toy.py), advantage-correlated
   V-trace ratios inflate the per-seat critic's seat sum under ``vtrace`` and
   not under ``lambda`` (the critic4p diagnosis); ``critic_gamma: 1.0`` trains

@@ -12,6 +12,8 @@ sweep:
     params.sims: [64, 256, 1024]
     world: {oracle: {params.world: "oracle=true"}, d4: {params.world: "dets=4"}, d16: {params.world: "dets=16"}}
   name: "s{params.sims}-{world}"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}   # pinned at the pre-2026-10-19 defaults: a run made before the change still matches
 runtime: {device: cuda, threads: 16, num_envs: 512}
 meta:
   wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

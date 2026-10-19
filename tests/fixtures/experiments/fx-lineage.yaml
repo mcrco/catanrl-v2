@@ -1,16 +1,20 @@
-# Frozen fixture (tests/test_config.py pins its hashes): do not edit.
+# Frozen fixture (tests/test_config.py pins its hashes): do not edit. critic_targets and
+# critic_gamma are pinned at the pre-2026-10-19 defaults (vtrace, null), as every experiment
+# YAML with stored runs is, so the hashes stayed when ppo.yaml's defaults became lambda, 1.0.
 name: fx-lineage
 seed: 42
 env: {scenarios: [{game: base-2p}], num_envs: 64}
 obs: {level: full, critic_level: full}
 model: {preset: graph-tiny}
-train: {algo: ppo, total_timesteps: 1_000_000, learning_rate: 3e-4, gamma: 0.99, checkpoint_interval: 50}
+train: {algo: ppo, total_timesteps: 1_000_000, learning_rate: 3e-4, gamma: 0.99, checkpoint_interval: 50,
+        critic_targets: vtrace, critic_gamma: null}
 eval:
   select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
   final:
     - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
 stages:
-  ppo: {train!: {algo: ppo, total_timesteps: 500_000, checkpoint_interval: 25}, eval.select.every: 25}
+  ppo: {train!: {algo: ppo, total_timesteps: 500_000, checkpoint_interval: 25, critic_targets: vtrace, critic_gamma: null},
+        eval.select.every: 25}
   g1: {init_from: {ckpt: "${stages.ppo}@3000", parts: [actor, critic]}, train.gamma: 1.0}
 sweep:
   axes:
