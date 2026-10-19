@@ -5,6 +5,9 @@
 # 0.87, from two causes (notes 1). Everything but the critic options, the discount
 # and the learning rate is ppo-4p's recipe. Launch on the GPU alone, after ppo-4p has finished, with
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (as ppo-4p).
+# Outcome (2026-10-19): lambda-critic-g1's options, critic_targets lambda and critic_gamma 1.0,
+# are configs/train/ppo.yaml's defaults from then on; this file pins critic_gamma null in its
+# base so the four stored arms keep their hashes (the g1 cell still sets 1.0).
 name: ppo-4p-critic-fix
 seed: 42
 env:
@@ -39,6 +42,7 @@ train:
   prio_beta0: 0.2
   vtrace_rho_clip: 1.0
   vtrace_c_clip: 1.0
+  critic_gamma: null            # pinned: keeps the stored runs' hash (pre-2026-10-19 default); the critic axis sets critic_targets
   precision: float32
   amp: false
   checkpoint_interval: 50

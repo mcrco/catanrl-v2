@@ -1,0 +1,161 @@
+# aux-hidden's question at 4p (report, "exploring ideas"): the same cell at 4p,
+# where steals and the robber hide more. In 2p every resource movement is seen
+# by both seats, so the other hand is a card counter's knowledge and the aux
+# head's resource R^2 was 0.91-0.99 (aux-hidden/main's last epoch); in 4p a
+# robber steal between two other seats moves a card nobody else sees, so the
+# resource R^2 should drop, and the question is again whether the policy's
+# score moves. Two arms of ppo-4p's recipe verbatim (graph-s with one shared
+# trunk, Muon with a cosine LR, prioritized segments, pure self-play at the
+# fair `private` level, 1024 games x 4 rows, 32768-row minibatches as 8
+# accumulated 4096-row micro-batches, select-4p every 50 epochs against three
+# F, seed 42) that differ only in the head: `plain` is the base as is, the
+# control; `aux` adds aux-hidden's auxiliary head (model.args.aux: true,
+# train.aux_coef: 0.3, obs.critic_level: full): on the shared trunk, for each
+# of the three other seats, it regresses the 15 players-block features a
+# private row zeroes (catanrl.envs.encoding.HIDDEN_FEATURES: the hand per
+# resource, the dev cards in hand per kind, which are playable, the actual VP)
+# by a masked MSE in the encoder's scale, trained on the full-level players
+# block the env appends after each row. The trunk, the policy and the value
+# head read only the private row, so both arms' checkpoints play as fair
+# POLICY rows and inference never encodes the block (the eval harness drops it).
+#
+# Budget, matched to the 2p cell per DECISION, as ppo-4p matched puffer-graph2:
+# aux-hidden trained 100M agent steps = 757 epochs x 132,096 (1032 games x 2
+# rows x 64 steps) = 757 x 66,048 = 50.0M decisions. A 4p epoch is 1024 games
+# x 4 rows x 64 steps = 262,144 agent steps = 65,536 decisions, so 750 epochs
+# x 262,144 = 196,608,000 agent steps = 49,152,000 decisions (49.2M against
+# 50.0M), a whole multiple of the select interval (15 selects, e50..e750, the
+# last at the bottom of the cosine); PuffeRL's cosine T_max = 196,608,000 /
+# 262,144 = exactly 750 epochs. Everything else is ppo-4p's, for its reasons
+# (its meta.notes).
+#
+# The critic: train.critic_targets lambda and train.critic_gamma 1.0, written
+# out in the train block (the fix ppo-4p-critic-fix validated: plain GAE
+# lambda-returns, the critic undiscounted so its four per-seat win
+# probabilities sum to 1, while the policy's advantages keep gamma 0.999).
+# They are configs/train/ppo.yaml's defaults since 2026-10-19, so the merged
+# config and the hash are what the defaults give; written here, both arms are
+# the same from any tree (main before the merge still defaults to vtrace /
+# null) and survive a later move of the defaults. The plain arm is the first
+# from-scratch run with that critic (notes 4).
+#
+# Wall time, estimated: ppo-4p ran 996M agent steps in 9.3 h, about 30k agent
+# steps/s (performance/*: env 1.0k s, rollout 7.1k s, train 26.3k s), so
+# 196.6M is about 1.8 h per arm; the aux arm costs a little more (in 2p,
+# aux-hidden took 1.66 h against arch-ablation/graph-s's 1.61 h; here each row
+# also carries 184 more floats to the GPU per step), about 1.9 h; the finals
+# are 4 rows x 4,000 native policy games, minutes. About 4 h for the
+# experiment, plain first.
+# Memory: ppo-4p's rollout is 4096 rows x 64 steps x (3202 + 8) floats = 3.13
+# GiB and its peak allocation crept to 5.59 GiB by epoch 3800 (5.0 early). The
+# aux cell appends the full-level players block to every row: 4 seats x 46
+# players-block features = 184 floats (a 3386-float row), so its rollout is
+# 4096 x 64 x (3386 + 8) x 4 B = 3.31 GiB, +0.18 GiB; the head itself (a
+# two-layer MLP from the pooled trunk and each seat's embedding to 15 values)
+# adds nothing noticeable (2p: aux-hidden peaked at 4.30 GiB at its last epoch,
+# 758, against puffer-graph2/full's 4.21 at that epoch, same batch shape; 4.74
+# at its own end, epoch 3786). So about 5.6 GiB (plain) and 5.8 GiB (aux)
+# allocated at the end, about 6.5 GB on the card: the 8 GB card alone.
+# Launch alone on the GPU with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# (as ppo-4p): `catanrl run aux-hidden-4p` runs plain, then aux (which depends
+# on plain through its head-to-head rows; the ref is pinned when aux is created).
+name: aux-hidden-4p
+seed: 42
+env:
+  scenarios: [{game: base-4p, turn_limit: 1000, maps: 4096}]
+  num_envs: 1024
+obs: {level: private}           # the only fair level in 4p (ppo-4p notes 3); the aux cell adds critic_level: full
+model: {preset: graph-s, args: {shared: true}}
+train:
+  algo: ppo
+  total_timesteps: 196_608_000    # agent steps, all four rows: 750 epochs, 49.2M decisions, the 2p cell's budget (header)
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 0.999                  # per decision (ppo-4p notes 8)
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0                  # puffer-graph2's acting-row balance; the per-seat loss is a mean over seats (ppo-4p notes 4)
+  vf_clip_coef: 0.2             # not read: the per-seat value loss replaces the clipped MSE
+  ent_coef: 0.005
+  max_grad_norm: 4.0            # 8 accumulated micro-batches sum to 2x puffer-graph2's gradient (ppo-4p notes 5)
+  bptt_horizon: 64
+  minibatch_size: 32768         # rows: 8192 decisions per optimizer step, as puffer-graph2
+  max_minibatch_size: 4096      # rows: about 1210 acting; 8192 would not leave room on the 8 GB card (ppo-4p notes 5)
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+  critic_targets: lambda        # the critic fix, written out so the arms do not depend on ppo.yaml's defaults (header)
+  critic_gamma: 1.0             # the critic undiscounted: per-seat win probabilities summing to 1 (header)
+eval:
+  # slot 0's score share against three F (a win 1, a truncation 1/4 per seat): 0.25 is parity
+  select: {suite: select-4p, lineup: ["POLICY:ckpt=${self}", F, F, F], every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", F, F, F]}
+sweep:
+  axes:
+    head:                       # plain first on purpose: the plan runs the cells in this order, and aux's head-to-head
+                                # rows wait for plain ('waits for [plain]' if reversed; --next lets the runner skip ahead)
+      plain: {}                 # the base as is: the control
+      aux:
+        model.args.aux: true
+        train.aux_coef: 0.3     # aux-hidden's weight, set by gradient scale (its meta.notes); not re-measured at 4p (notes 3)
+        obs.critic_level: full  # the critic block is the aux head's target, nothing else reads it
+        eval.final:             # replaces the base's list: the headline row, then the head to head in BOTH slot orders
+          - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", F, F, F]}
+          # [A, B, F, F] is not exchangeable (F robs the seat after it; tracker-search's header): the per-agent
+          # share averaged over the two orders is the paired comparison. ${experiment} is this experiment's name
+          # (aux-hidden-4p; aux-hidden-4p+smoke under --smoke, so a smoke binds its own plain arm).
+          - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${experiment}/plain@best", F, F]}
+          - {suite: heldout-4p, lineup: ["POLICY:ckpt=${experiment}/plain@best", "POLICY:ckpt=${run}@best", F, F]}
+  name: "{head}"
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  recipe: ppo-4p
+  notes: |
+    What to read, and why the arms are as they are:
+    1. The R^2 per feature. Every epoch the aux arm logs losses/aux (the head's masked MSE over
+       the three other seats and the 15 hidden features) and, per feature, aux/mse_<feature>
+       (the head's error) and aux/var_<feature> (the target's variance, the best constant's
+       error): R^2 = 1 - mse/var. The 2p reference (aux-hidden/main at its last epoch): the
+       five resources 0.91-0.99, actual VP 0.99, knights in hand 0.62, VP cards 0.86, the
+       other dev cards and the playable flags 0.1-0.5. Expect the resources to fall here:
+       a steal between two other seats is unseen, so the hand per resource is no longer public
+       knowledge, and three hands are tracked instead of one.
+    2. The policy. Each arm's headline is its F,F,F row on heldout-4p (4,000 games, Wilson
+       about +-1.5 points); the paired comparison is the aux arm's head to head against
+       aux-hidden-4p/plain@best on the same 1,000 boards x 4 rotations in both slot orders
+       ([aux, plain, F, F] and [plain, aux, F, F]): the per-agent share averaged over the two
+       orders, 8,000 games, as slot-order and tracker-search read theirs. The select curves
+       (select-4p every 50 epochs, 800 games) are a second, noisier view.
+    3. The head. graph-s's aux head (model.args.aux) is a two-layer MLP from the pooled trunk
+       and each seat's embedding to the 15 HIDDEN_FEATURES per other seat, 45 values a row in
+       4p (15 in 2p), trained alongside PPO at train.aux_coef 0.3 on the full-level players
+       block VecEnv appends after each row (obs.critic_level: full; 4 x 46 = 184 floats, so
+       3386 per row against 3202). aux_coef 0.3 is aux-hidden's, chosen there so the head's
+       pull on the trunk is 5-20% of PPO's own (its meta.notes); it was measured on the 2p
+       network and is not re-measured at 4p, where the head regresses three seats: the
+       trunk's aux gradient could be somewhat larger. Read losses/aux against the policy
+       metrics before trusting a negative result.
+    4. The critic, in both arms: critic_targets lambda, critic_gamma 1.0 (header). This is
+       the first from-scratch run with the fix, so look at critic/value_sum_4p against
+       critic/truth_sum_4p (the realized, undiscounted seat sum of finished games: about 1,
+       minus the truncated share) and critic/sum_gap_4p:
+       ppo-4p-critic-fix saw a V-trace-trained critic calibrate within 20 epochs of a 100-epoch
+       fine-tune; here the question is whether a critic trained that way from the start stays
+       calibrated over 750 epochs, with the policy metrics as at ppo-4p's. ppo-4p's critic
+       (V-trace targets) summed to about 1.2 against a true discounted 0.88 (its notes 9).
+    5. Recipe and budget: ppo-4p's verbatim but for total_timesteps (header). The 4p cell keeps
+       ppo-4p's eval.final F,F,F row only (no two-copies or R,R,R rows); eval.final is not
+       hashed for a train run, so rows can be added later with a `catanrl run aux-hidden-4p`.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

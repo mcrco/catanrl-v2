@@ -29,6 +29,8 @@ sweep:
       f: {params.opponent: F}
       policy: {params.opponent: "POLICY:ckpt=puffer-graph2/full@best:device=cpu"}
   name: "{model}-{params.strategy}-{opponent}"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}   # pinned at the pre-2026-10-19 defaults: a run made before the change still matches
 runtime: {device: cpu, threads: 4}
 meta:
   notes: "LLM eval (DESIGN 3): catanllm's strategies through the catanatron harness; one command plays the paid cells"

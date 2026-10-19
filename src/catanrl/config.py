@@ -332,6 +332,11 @@ def _check_train(train: Any) -> dict:
         if key not in base:
             raise ConfigError(f"unknown key 'train.{key}' for algo {algo}{_suggest(key, list(base))}")
         out[key] = _coerce(value, base[key], f"train.{key}")
+    if algo == "ppo" and out.get("critic_gamma") is not None and out.get("critic_targets") != "lambda":
+        # the trainer's _critic_options refuses this too, but only after the run dir exists; ppo.yaml
+        # defaults critic_gamma to 1.0, so a YAML pinning critic_targets: vtrace alone lands here
+        raise ConfigError(f"train.critic_gamma is the discount of critic_targets: lambda; critic_targets: "
+                          f"{out['critic_targets']} takes critic_gamma: null (set both)")
     return out
 
 

@@ -18,6 +18,8 @@ eval:
         - "BELIEF:ckpt=ppo-4p/main@best:worlds=16:tracker=pool"
         - F
         - F
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}   # pinned: keeps the stored runs' hash (pre-2026-10-19 default)
 runtime: {device: cuda, threads: 12, num_envs: 256}
 meta:
   wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

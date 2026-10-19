@@ -4,9 +4,10 @@ Two tiny runs: tiny_ppo's Adam on 2p (self-play and against R), and a Muon
 run in ppo-4p's shape (four-seat self-play, prioritized segments, cosine,
 accumulated micro-batches, one shared trunk). The pinned values were taken
 before the critic options (train.critic_targets, critic_gamma, muon_exclude)
-existed, so at their defaults training stays bit-identical to the code
-before them. Only the keys pinned are compared: metrics added later do not
-count.
+existed; tiny_ppo pins the first two at their values of that time (vtrace,
+null; ppo.yaml's defaults are lambda, 1.0 since 2026-10-19), so training
+stays bit-identical to the code before them. Only the keys pinned are
+compared: metrics added later do not count.
 
 ``CATANRL_UPDATE_GOLDEN=1`` rewrites tests/data/golden_train.json; review
 the diff, since any change means training changed.

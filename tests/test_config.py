@@ -48,6 +48,18 @@ def test_execution_keys_under_train_raise(tmp_path):
         load_plan(write(tmp_path, train={"algo": "ppo", "device": "cuda"}))
 
 
+def test_vtrace_critic_targets_take_a_null_critic_gamma(tmp_path):
+    """ppo.yaml defaults critic_gamma to 1.0 (lambda's discount), so a YAML pinning
+    critic_targets: vtrace alone is refused at resolution, not by the trainer after its
+    run dir exists."""
+    with pytest.raises(ConfigError, match="critic_gamma"):
+        load_plan(write(tmp_path, train={**BASE["train"], "critic_targets": "vtrace"}))
+    pinned = load_plan(write(tmp_path, train={**BASE["train"], "critic_targets": "vtrace", "critic_gamma": None}))
+    assert pinned.variants[0].config["train"]["critic_gamma"] is None
+    train = load_plan(write(tmp_path)).variants[0].config["train"]
+    assert (train["critic_targets"], train["critic_gamma"]) == ("lambda", 1.0)  # the defaults since 2026-10-19
+
+
 def test_no_default_architecture(tmp_path):
     path = write(tmp_path)
     data = yaml.safe_load(path.read_text())

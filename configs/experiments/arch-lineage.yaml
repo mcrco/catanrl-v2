@@ -9,7 +9,9 @@ seed: 42
 env: {scenarios: [{game: base-2p}], num_envs: 1024}
 obs: {level: full, critic_level: full}
 model: {preset: graph-s}
-train: {algo: ppo, total_timesteps: 400_000_000, learning_rate: 3.0e-4, gamma: 0.99, checkpoint_interval: 50}
+# critic_targets / critic_gamma pinned to v1's (V-trace targets at the policy's discount, the pre-2026-10-19
+# default): a port of v1's lineage, whose g1 stage moves the critic's discount with the policy's
+train: {algo: ppo, total_timesteps: 400_000_000, learning_rate: 3.0e-4, gamma: 0.99, checkpoint_interval: 50, critic_targets: vtrace, critic_gamma: null}
 eval:
   select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
   final:

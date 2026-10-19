@@ -1,6 +1,8 @@
-# Frozen fixture (tests/test_config.py pins its hashes): do not edit.
+# Frozen fixture (tests/test_config.py pins its hashes): do not edit. An eval config's hash
+# carries the ppo train defaults, pinned here at the pre-2026-10-19 values (as fx-lineage).
 name: fx-mcts
 kind: eval
+train: {critic_targets: vtrace, critic_gamma: null}
 params: {sims: 64}
 eval:
   final:

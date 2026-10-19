@@ -1,0 +1,61 @@
+# search-4p's table at 2,000 games: MCTS (1024 sims, one world from the hand
+# tracker) against three copies of the same network's raw policy on heldout-4p,
+# 500 boards x 4 rotations. The 400-game record 90a1f06c (search-4p, 100 boards)
+# gave the search seat a 27.0 [22.9, 31.6] share against parity 25; at 2,000
+# games the Wilson interval is about +-2 points (SE 1.0 at p = 0.27), enough to
+# separate a two-point edge. The suite plays its first `boards` seeds, so this
+# table's first 100 boards are search-4p's 400 games: the record stands alone
+# and is NOT pooled with 90a1f06c. Same network: ppo-4p-critic-fix/
+# lambda-critic-g1@e100, the critic-fix arm with undiscounted per-seat values
+# (its four win probabilities sum to the realized 1.00, which the max^n backup
+# wants; its raw policy is ppo-4p's within noise). No F: the F-free table has
+# no F targeting, but slot 0 still sits in a fixed neighbour order, so read the
+# four rotations summed.
+#
+# Games in flight set the leaf batch (runtime.num_envs 512, up from 256).
+# The harness (catanrl.eval.harness._play_vecenv) steps num_envs games in
+# lockstep and hands each lineup slot all its acting rows in one act(); the
+# MCTS agent (catanrl.agents.native.MctsAgent) adds one search per row to its
+# pool and run_searches collects one leaf per search per round (max_pending 1),
+# evaluates the batch in one forward, and applies. So each round's batch is the
+# number of in-flight games whose MCTS seat is to move, about a quarter of
+# num_envs: 64 at 256. The strict evaluator pads every forward to infer_rows =
+# 256 rows (one CUDA graph), so the GPU does a 256-row forward per round
+# whatever the batch is, and the wall time per game falls with the games in
+# flight until the batch reaches 256 (about 1024 in flight): the probe
+# (3e38ada6, 8 in flight) took 27 min for 8 games and the record (90a1f06c,
+# 256) 71 min for 400, 19x the throughput for 32x the games; the rest is the
+# CPU side (the pool's collect/apply on hardware-concurrency lanes, 16 here,
+# and the VecEnv on runtime.threads 12). At 512 the batch is about 128 rows,
+# still under the padded 256, so expect 1.6-1.9x the throughput of 256.
+# Memory is not the limit: a 1024-sim dets=1 4p search measured on CPU with
+# this network from random mid-game positions holds about 2,700 nodes (Node 96
+# B), 14,700 edges (12 B) and 850 Game copies (release_games keeps one only
+# where children are still being created), 3.3 MB of tree storage by
+# SearchStats.tree_bytes and 7.7 MB of process RSS; the pool holds at most
+# num_envs searches at once (every in-flight game whose MCTS seat is to move,
+# typically a quarter) and removes each after its decision, so 512 is at most
+# 4 GB of host memory, about 1 GB typically, on a 31 GB box; the GPU holds the
+# network, one 256-row graph and 256 x 3202-float inputs, well under 1 GB; the
+# VecEnv's 512 x 4 rows x 3202 floats are 26 MB. The rows do not depend on
+# num_envs (strict evaluator, per-game seeds; the harness's docstring), and
+# runtime is unhashed, so it can be set back to 256 without a conflict if 512
+# turns out CPU-bound.
+# Expected wall time: about 6 h at 256 in flight (five times the record's 71
+# min); 3-4 h at 512 if the scaling above holds. GPU alone, as search-4p.
+name: search-4p-2000
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 500}
+      lineup:
+        - "MCTS:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100:sims=1024:dets=1"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+# an eval config's hash carries the ppo train defaults (nothing reads them): search-4p's values, pinned,
+# so the hash is the same from any tree (main before the 2026-10-19 critic-default change included)
+train: {critic_targets: vtrace, critic_gamma: null}
+runtime: {device: cuda, threads: 12, num_envs: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

@@ -7,7 +7,9 @@ seed: 42
 env: {scenarios: [{game: base-2p}], num_envs: 1024}
 obs: {level: full, critic_level: full}
 model: {preset: graph-s}
-train: {algo: ppo, total_timesteps: 1_000_000_000, gamma: 0.99}
+# critic_targets / critic_gamma pinned to v1's (V-trace targets at the policy's discount, the pre-2026-10-19
+# default): this is a replication of v1's recipe, so it does not take the lambda / undiscounted default
+train: {algo: ppo, total_timesteps: 1_000_000_000, gamma: 0.99, critic_targets: vtrace, critic_gamma: null}
 eval:
   select: {suite: select-2p, lineup: ["POLICY:ckpt=${self}", F], every: 50}
   final:
