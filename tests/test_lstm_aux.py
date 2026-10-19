@@ -5,8 +5,10 @@ block), the memory's reach into the predictions and the aux loss's reach into th
 cell through the training forward, the knob at 0 (the plain recurrent forward,
 bitwise) and above 0 (losses/aux and the per-feature errors logged), and a
 checkpoint with the head self-testing and playing through the harness and
-``catanrl eval`` without the block. The graph head's own tests are
-tests/test_aux_head.py, whose helpers these reuse."""
+``catanrl eval`` without the block. The rollout and inference never run the head
+(a call counter pins it) and the batch evaluator's ``aux`` mode refuses the
+recurrent network. The graph head's own tests are tests/test_aux_head.py, whose
+helpers these reuse."""
 
 from __future__ import annotations
 
@@ -22,6 +24,8 @@ from catanrl.agents import resolve_agent
 from catanrl.checkpoint import Checkpoint, ModelDrift
 from catanrl.envs.encoding import HIDDEN_FEATURES, action_size, row_layout
 from catanrl.models import LstmModel, build_model
+from catanrl.models.graph import GraphAuxHead
+from catanrl.search.evaluator import BatchEvaluator
 from catanrl.train import puffer
 from catanrl.train.puffer_policy import PufferPolicy
 
@@ -70,6 +74,10 @@ def test_aux_head_on_the_memory_predicts_the_other_seats():
     assert torch.equal(targets, graph_targets) and torch.equal(others, graph_others)
     assert bool((targets[3:] > 0).any(dim=(0, 1)).all())                         # every feature is exercised in 4p
     assert bool((targets[:3, 1:] == 0).all())                                     # absent seats are all zero
+    # The evaluator's aux mode (PREDICT's predictor) runs the head on single positions, which
+    # carry no memory: refused, not the zero-state predictions in the policy logits' place.
+    with pytest.raises(ValueError, match="recurrent"):
+        BatchEvaluator(model, device="cpu", infer_rows=4, heads="aux")
 
 
 def test_aux_head_leaves_the_other_parts_initial_weights_unchanged():
@@ -140,10 +148,12 @@ def _segments_with_block(model, segments: int, horizon: int, seed: int = 0):
     return obs, terminals
 
 
-def test_aux_predictions_read_the_memory_and_the_aux_loss_trains_the_cell():
-    """The predictions change with the memory; through the training forward the aux
-    loss's gradient reaches the cell's recurrent weights and the trunk, and none of the
-    policy or value head; at aux_coef 0 the forward is the plain one, bitwise."""
+def test_aux_predictions_read_the_memory_and_the_aux_loss_trains_the_cell(monkeypatch):
+    """The predictions change with the memory; the rollout, a step and the stateless
+    forward never run the head and the training forward runs it once; through that
+    forward the aux loss's gradient reaches the cell's recurrent weights and the trunk,
+    and none of the policy or value head; at aux_coef 0 the forward is the plain one,
+    bitwise."""
     model = lstm_model(seed=1)
     obs = rows_with_block(declared_positions("base-2p", 4, seed=3), BASE_2P)
     with torch.no_grad():
@@ -154,11 +164,26 @@ def test_aux_predictions_read_the_memory_and_the_aux_loss_trains_the_cell():
         first = model.decode_with_aux(emb, rows, h1)[3]
         second = model.decode_with_aux(emb, rows, h2)[3]
     assert first.shape == (4, 1, len(HIDDEN_FEATURES)) and not torch.allclose(first, second)
+    calls: list[int] = []
+    head_forward = GraphAuxHead.forward
+
+    def counted(head, emb):
+        calls.append(emb.pooled.shape[0])
+        return head_forward(head, emb)
+
+    monkeypatch.setattr(GraphAuxHead, "forward", counted)
     model.train()
     policy = PufferPolicy(model, num_rows=4, aux_coef=1.0)
     segments, terminals = _segments_with_block(model, segments=4, horizon=3, seed=4)
+    with torch.no_grad():
+        for t in range(3):                                     # the rollout, step by step
+            policy.forward_eval(segments[:, t], {"done": terminals[:, t].bool()})
+        model.step(obs, h0, c0)
+        model(obs)
+    assert calls == []                                         # the rollout and inference never run the head
     state = {"idx": torch.arange(4), "terminals": terminals}
     _logits, batch = policy(segments, state)
+    assert calls == [batch.index.numel()]                      # the training forward: once, on the acting rows
     predictions, targets, others = batch.aux
     acting = batch.index.numel()
     assert predictions.shape == targets.shape == (acting, 1, len(HIDDEN_FEATURES)) and others.shape == (acting, 1)

@@ -6,9 +6,9 @@
 # hidden-feature head (aux-hidden-4p's setup: the same 15 HIDDEN_FEATURES
 # per other seat, the same masked MSE at the same train.aux_coef 0.3, the
 # same full-level players block as the target) on the lstm's memory-injected
-# embeddings (catanrl.models.lstm: the head reads what the policy and the
-# value head read, the trunk's embeddings with the memory added and the
-# memory concatenated to the pooled state), so its per-feature R^2
+# embeddings (catanrl.models.lstm: the head reads what the value head reads,
+# the pooled state with the memory concatenated and each other seat's
+# embedding), so its per-feature R^2
 # (1 - aux/mse_<f> / aux/var_<f>, logged every epoch) against
 # aux-hidden-4p/aux's markov head (resources 0.48-0.59, actual VP 0.95, VP
 # cards 0.65, knights 0.51 at 4p; 0.90-0.99 for the resources in 2p, where
@@ -28,7 +28,9 @@
 # block is the head's target and nothing reads it, as in aux-hidden-4p; the
 # eval harness drops it), so the checkpoint plays as a fair POLICY row.
 #
-# Cost: lstm-4p runs at 22.9k agent steps/s and peaks at 5.1 GiB; the aux
+# Cost: lstm-4p runs at about 22k agent steps/s (the mean of
+# throughput/agent_steps_per_s over its run so far, 2026-10-19; re-read when
+# this run is created) and peaks at 5.1 GiB; the aux
 # block adds 184 floats per row (4 seats x 46 players-block features: +0.18
 # GiB of rollout, aux-hidden-4p's arithmetic) and a small head (a two-layer
 # MLP from the pooled state with the memory and each seat's embedding to 15
@@ -93,8 +95,9 @@ meta:
        losses/aux (the head's masked MSE over the three other seats and the 15 hidden
        features) and, per feature, aux/mse_<feature> and aux/var_<feature> (the target's
        variance, the best constant's error): R^2 = 1 - mse/var. The markov reference is
-       aux-hidden-4p/aux at its last epoch (the same head on graph-s's trunk, the same
-       budget): resources 0.48-0.59, actual VP 0.95, VP cards 0.65, knights 0.51; in 2p
+       aux-hidden-4p/aux over its last 50 epochs (the report's reading, 2026-10-19; the same
+       head on graph-s's trunk, the same budget): resources 0.48-0.59, actual VP 0.95, VP
+       cards 0.65, knights 0.51 (0.53 at the last epoch); in 2p
        (aux-hidden/main) the resources were 0.90-0.99 because every card movement is seen
        there. Resources above aux-hidden-4p/aux's say the memory recovers hand information
        the row's tracker cannot hold (steals between two other seats, what a seat chose not
@@ -115,5 +118,5 @@ meta:
        pull on the trunk is 5-20% of PPO's own; it is not re-measured for the lstm, where
        the pull also reaches the cell. Read losses/aux and the policy metrics against
        lstm-4p's before trusting a negative result on the policy; throughput and peak
-       memory against lstm-4p's 22.9k steps/s and 5.1 GiB (header).
+       memory against lstm-4p's about 22k steps/s and 5.1 GiB (header).
 runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

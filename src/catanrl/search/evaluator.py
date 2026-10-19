@@ -18,7 +18,8 @@ position in the batch, which CUDA's do not.
 
 A recurrent model (``model.recurrent``) is evaluated through :meth:`step`
 with each row's memory ``(h, c)``, padded and chunked like the rows; the
-stateless call runs it at the zero state.
+stateless call runs it at the zero state. ``heads="aux"`` is refused for it:
+its aux head reads the memory, which single positions do not carry.
 """
 
 from __future__ import annotations
@@ -57,15 +58,18 @@ class BatchEvaluator:
         self.heads = heads
         self.obs_size = int(model.obs_size)
         self.num_players = int(model.num_players)
+        self.recurrent = bool(getattr(model, "recurrent", False))
         if heads == "aux":
             if not getattr(model, "aux", False):
                 raise ValueError("heads='aux' needs a network with an aux head (model.args.aux)")
+            if self.recurrent:
+                raise ValueError("heads='aux' evaluates single positions; a recurrent network's aux head "
+                                 "reads the memory (PREDICT refuses a recurrent predictor for the same reason)")
             self.num_actions = (self.num_players - 1) * int(model.aux_head.num_features)
         else:
             self.num_actions = int(model.num_actions)
         self.use_graphs = bool(cuda_graphs) and self.device.type == "cuda"
         self._graphs: dict[int, tuple[torch.cuda.CUDAGraph, tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]] = {}
-        self.recurrent = bool(getattr(model, "recurrent", False))
         self.hidden_size = int(getattr(model, "hidden_size", 0)) if self.recurrent else 0
         self.rows = 0
         self.forwards = 0

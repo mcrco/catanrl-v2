@@ -27,7 +27,7 @@ class CatanModel(nn.Module):
     parts: dict[str, list[str]]
     recurrent: bool = False
     hidden_size: int = 0
-    #: An auxiliary head predicting the other seats' hidden features (graph, ``args.aux``).
+    #: An auxiliary head predicting the other seats' hidden features (graph and lstm, ``args.aux``).
     aux: bool = False
 
     def __init__(self, spec, dims, levels, layout) -> None:
