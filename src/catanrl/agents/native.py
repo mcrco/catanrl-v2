@@ -500,9 +500,8 @@ class MctsAgent(NativeAgent):
                 self.pool.remove(sid)
 
     def _record(self, stats: cpp.SearchStats) -> None:
-        for name in ("nodes", "evaluations", "simulations", "coalesced_outcomes", "max_depth"):
+        for name in ("nodes", "evaluations", "simulations", "coalesced_outcomes", "transpositions", "max_depth"):
             self.search_stats[name] += int(getattr(stats, name))
-        self.search_stats["transpositions"] += int(getattr(stats, "transpositions", 0))
 
 
 class BotAgent:

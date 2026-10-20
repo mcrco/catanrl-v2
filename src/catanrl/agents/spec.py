@@ -383,11 +383,7 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
     details: dict[str, Any] = {"model": {"model": ckpt.header["model"], "levels": levels, "dims": dims,
                                          "allow_drift": params.allow_drift}}
     if key == "MCTS":
-        try:
-            config = search_config(params, max_players=dims["max_players"], threads=0)
-        except ValueError as error:  # an option this engine build lacks (transpositions)
-            raise SpecError(f"MCTS: {error}") from None
-        details["search"] = search_details(config)
+        details["search"] = search_details(search_config(params, max_players=dims["max_players"], threads=0))
     label = f"{key}:{ref.run or ref.path.name}@e{ref.epoch}"
     if predictor is not None:
         details["predictor"] = {"model": predictor.header["model"], "levels": predictor.levels,

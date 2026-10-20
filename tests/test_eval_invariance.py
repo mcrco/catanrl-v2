@@ -32,6 +32,9 @@ CASES = {
     "mcts-dets": ("MCTS", {"sims": 6, "dets": 2}),
     "mcts-reuse": ("MCTS", {"sims": 6, "oracle": True, "reuse": True}),
     "mcts-reuse-dets": ("MCTS", {"sims": 6, "dets": 2, "reuse": True}),
+    # Enough simulations for the transposition table to link nodes in these games.
+    "mcts-reuse-tt": ("MCTS", {"sims": 16, "oracle": True, "reuse": True, "transpositions": True}),
+    "mcts-reuse-tt-dets": ("MCTS", {"sims": 16, "dets": 2, "reuse": True, "transpositions": True}),
     "belief": ("BELIEF", {"worlds": 3}),
 }
 

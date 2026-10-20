@@ -640,11 +640,11 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   counts sampled worlds, and `oracle=true` searches the true state. There is
   no magic 0. `reuse=true` keeps a seat's search between its decisions
   (1.6; native harness only, since the search is the seat's own history);
-  `transpositions=true` turns on the engine's transposition table (refused
-  on an engine build without it); `dedup` (execution-only, default true)
-  evaluates byte-identical leaf rows once. `reuse` and `transpositions` are
-  in the canonical spec and `key_dict()` only when set, so adding them
-  moved no stored record's key.
+  `transpositions=true` turns on the engine's transposition table (one node
+  for a position reached by reordered actions); `dedup` (execution-only,
+  default true) evaluates byte-identical leaf rows once. `reuse` and
+  `transpositions` are in the canonical spec and `key_dict()` only when set,
+  so adding them moved no stored record's key.
 * **`tracker`** (MCTS with dets, BELIEF): `pool` (default) or `exact`, the
   hand tracker mode the worlds are dealt from (1.5). It is in the canonical
   spec and `key_dict()`, so eval records tell the two apart. The native

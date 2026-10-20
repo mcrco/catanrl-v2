@@ -128,16 +128,18 @@ def test_reuse_transpositions_and_dedup_are_keyed_only_when_set(ckpts):
     nodedup = resolve_agent("MCTS:ckpt=exp/v:sims=8:dedup=false")
     assert nodedup.canonical == base.canonical and nodedup.key_dict() == base.key_dict()
     assert not nodedup.native(device="cpu").dedup and base.native(device="cpu").dedup
-    if hasattr(cpp.SearchConfig, "transpositions"):
-        table = resolve_agent("MCTS:ckpt=exp/v:sims=8:transpositions=true")
-        assert table.canonical == base.canonical + ":transpositions=true"
-        assert resolve_agent(table.canonical).canonical == table.canonical
-        assert table.key_dict()["params"] == {**base.key_dict()["params"], "transpositions": True}
-        assert table.key_dict()["search"] == {**base.key_dict()["search"], "transpositions": True}
-        assert table.native(device="cpu").config.transpositions
-    else:
-        with pytest.raises(SpecError, match="transpositions"):
-            resolve_agent("MCTS:ckpt=exp/v:sims=8:transpositions=true")
+    table = resolve_agent("MCTS:ckpt=exp/v:sims=8:transpositions=true")
+    assert table.canonical == base.canonical + ":transpositions=true"
+    assert resolve_agent(table.canonical).canonical == table.canonical
+    assert table.key_dict()["params"] == {**base.key_dict()["params"], "transpositions": True}
+    assert table.key_dict()["search"] == {**base.key_dict()["search"], "transpositions": True}
+    assert table.native(device="cpu").config.transpositions
+    both = resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true:transpositions=true")
+    assert both.canonical == base.canonical + ":reuse=true:transpositions=true" and both.fair
+    assert both.key_dict()["params"] == {**base.key_dict()["params"], "reuse": True, "transpositions": True}
+    assert both.key_dict()["search"] == table.key_dict()["search"]
+    native = both.native(device="cpu")
+    assert native.reuse and native.needs_memory and native.config.transpositions
 
 
 def _rebuilds_unchanged(entry: dict) -> None:

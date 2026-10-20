@@ -1,8 +1,9 @@
 """Test 32: MCTS tree reuse (``reuse=true``): a seat's search is re-rooted at the action
 it played when the game handed is exactly the previous one plus that action, dropped at
 a stream's first decision, refused by the agent (before the engine) when the game
-diverged and by the engine after a chance action, and the counters add up. Rows with
-reuse are invariant to num_envs, threads and worker splits in test_eval_invariance."""
+diverged and by the engine after a chance action, and the counters add up; with
+``transpositions`` the re-rooted search keeps its linked nodes. Rows with reuse are
+invariant to num_envs, threads and worker splits in test_eval_invariance."""
 
 from __future__ import annotations
 
@@ -18,10 +19,12 @@ from catanrl.search import make_pool, run_searches
 SUITE = make_suite(({"game": "base-2p"}, {"game": "base-3p"}), turn_limit=160)
 GAMES = schedule(SUITE, 3, boards=2)
 MODEL = tiny_model(["base-2p", "base-3p"], level="full", seed=11)
+#: Actions whose root edge is a chance node: advance refuses them.
+CHANCE = (cpp.ActionType.ROLL, cpp.ActionType.BUY_DEVELOPMENT_CARD, cpp.ActionType.MOVE_ROBBER)
 
 
-def mcts(**params):
-    return agent("MCTS", MODEL, infer_rows=8, sims=6, **params)
+def mcts(sims: int = 6, **params):
+    return agent("MCTS", MODEL, infer_rows=8, sims=sims, **params)
 
 
 def play(first, games=GAMES, **kwargs):
@@ -40,11 +43,15 @@ def decide(mcts, games, streams, first, seeds=None):
                     streams=np.asarray(streams, dtype=np.int64), first=np.asarray(first, dtype=bool))
 
 
-def position(seed: int, want_roll: bool = False) -> cpp.Game:
-    """A base-2p game stepped with ``seed`` to a decision: the first with at least two
-    options, or (``want_roll``) the first whose only option is the mover's roll."""
+def position(seed: int, want_roll: bool = False, steps: int = 0) -> cpp.Game:
+    """A base-2p game stepped with ``seed``, past ``steps`` random actions, to a decision:
+    the first with at least two options, or (``want_roll``) the first whose only option
+    is the mover's roll."""
     game = game_configs.load_game("base-2p").cppanatron_game(seed, seed)
     rng = np.random.default_rng(seed)
+    for _ in range(steps):
+        actions = game.playable_actions
+        game.execute(actions[int(rng.integers(len(actions)))])
     while True:
         actions = game.playable_actions
         if want_roll:
@@ -119,7 +126,7 @@ def test_the_next_position_reuses_and_a_diverged_one_is_refused_before_the_engin
     action = first.action_space.decode(game, chosen)
     following = game.copy()
     following.execute(action)
-    if action.action_type in (cpp.ActionType.ROLL, cpp.ActionType.BUY_DEVELOPMENT_CARD, cpp.ActionType.MOVE_ROBBER):
+    if action.action_type in CHANCE:
         pytest.skip("the chosen action is a chance action (the engine's refusal, tested below)")
     if following.current_player_index != game.current_player_index:
         pytest.skip("the chosen action hands the turn over")
@@ -156,6 +163,31 @@ def test_a_chance_action_is_refused_by_the_engine_and_the_fresh_search_is_the_pl
     run_searches(pool, first.evaluator, batch_rows=first.config.max_pending)
     assert pool.visits(sid).tolist() == first.pool.visits(first._live[1][0]).tolist()
     assert int(pool.select(sid, 0.0)) == choice
+
+
+def test_reuse_advances_a_search_with_transpositions():
+    """Both options at once: the re-rooted search is a graph (nodes another order of
+    actions reached are linked), the engine re-parents what it keeps, the link count
+    carries over and the budget is fresh on top of the retained visits."""
+    first = mcts(reuse=True, transpositions=True, oracle=True, sims=64)
+    assert first.config.transpositions
+    # Mid-game positions with a bank trade or a build to make, where orders of actions meet.
+    for seed, steps in ((4, 80), (5, 140), (10, 80), (3, 80)):
+        game = position(seed, steps=steps)
+        chosen = int(decide(first, [game], streams=[0], first=[True])[0])
+        links = first.pool.stats(first._live[0][0]).transpositions
+        action = first.action_space.decode(game, chosen)
+        following = game.copy()
+        following.execute(action)
+        if links > 0 and action.action_type not in CHANCE and following.current_player_index == game.current_player_index:
+            break
+    else:
+        pytest.fail("no probed position links nodes and keeps the turn after the action played")
+    decide(first, [following], streams=[0], first=[False])
+    assert first.counters["reused"] == 1 and first.counters["refused_engine"] == 0
+    stats = first.pool.stats(first._live[0][0])
+    assert stats.simulations == 64 and stats.transpositions >= links
+    assert first.pool.visits(first._live[0][0]).sum() > 64 and first.search_stats["transpositions"] >= 2 * links
 
 
 def test_streams_are_required_and_checked():

@@ -29,7 +29,8 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
 
     ``dets = K`` samples K root worlds from the hand tracker; ``oracle =
     true`` searches the true game (``determinizations = 0``). ``c_puct`` is
-    in engine units (0.75 = v1's 1.5).
+    in engine units (0.75 = v1's 1.5). ``transpositions`` turns on the engine's
+    transposition table (one node for a position reached by reordered actions).
     """
     get = params.get if isinstance(params, Mapping) else lambda key, default=None: getattr(params, key, default)
     oracle = bool(get("oracle", False))
@@ -44,13 +45,6 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
         raise ValueError(f"root must be puct or gumbel, not {root!r}")
     noise = bool(get("noise", False))
     threads = int(get("threads", 0) if threads is None else threads)
-    options = {}
-    if bool(get("transpositions", False)):
-        # The engine's transposition table (one node for a position reached by reordered
-        # actions): passed through only when set, and only to an engine build that has it.
-        if not hasattr(cpp.SearchConfig, "transpositions"):
-            raise ValueError("this engine build has no SearchConfig.transpositions")
-        options["transpositions"] = True
     return cpp.SearchConfig(
         c_puct=float(get("c_puct", 0.75)),
         simulations=int(get("sims", 256)),
@@ -62,7 +56,7 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
         determinizations=0 if oracle else dets,
         max_players=int(max_players),
         threads=threads,
-        **options,
+        transpositions=bool(get("transpositions", False)),
     )
 
 

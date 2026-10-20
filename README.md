@@ -102,7 +102,7 @@ resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, and
 draws from the exact posterior over hidden steals (DESIGN 1.5). `MCTS` also
 takes `reuse=true` (a seat's search is re-rooted at the action it played
 when the game followed exactly, native harness only), `transpositions=true`
-(the engine's transposition table, on builds that have it) and `dedup=false`
+(the engine's transposition table) and `dedup=false`
 (execution-only: byte-identical leaf rows are otherwise evaluated once);
 `reuse` and `transpositions` enter the record key only when set.
 
