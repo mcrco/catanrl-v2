@@ -49,9 +49,15 @@ The submodule branches exist only locally until they are pushed.
 
 ```bash
 git clone --recurse-submodules <this repo> && cd catanrl-v2
-uv sync                       # builds cppanatron and PufferLib (NO_OCEAN) into .venv
+uv sync --extra cu130         # builds cppanatron and PufferLib (NO_OCEAN) into .venv; torch for
+                              # CUDA 13 (Turing and newer), or --extra cu126 for Pascal (GTX 1080)
 uv run pytest -q              # fast tier (~6 min); -m train / -m gpu / -m runs for the slow tiers
 ```
+
+Pick the torch extra once; `uv run` keeps it. Where nvcc's CUDA is not the
+wheel's (CUDA 12.9 on a machine with the cu130 torch, say), build PufferLib
+without it: `env -u CUDA_HOME PATH=$(echo "$PATH" | tr : '\n' | grep -vi cuda | paste -sd:) uv sync --extra ...`
+(its CUDA extension is only used by training).
 
 `uv sync` rebuilds the engine whenever its sources or commit change. Runs and
 evals refuse an engine built from another commit (`CATANRL_ALLOW_STALE_BUILD=1`
@@ -96,7 +102,11 @@ One agent spec string (`POLICY:…`, `MCTS:…:sims=N:dets=K`, `BELIEF:…:world
 `TRADE:…:critic=…`, or any Catanatron registry bot) plays natively, as a
 Catanatron `Player`, as a TUI seat and as a server bot (`TRADE`, which offers,
 answers and confirms domestic trades by its critic's win probabilities, plays
-natively only). Fair agents use only their seat's information:
+natively only).
+`MCTS:…:pending=P` sends P leaves to the network
+per forward (virtual visits while they wait): at the default 1 a decision is
+`sims` forwards of one row each, which no GPU speeds up; at 32 a 16k-simulation
+decision takes about a second on a GPU. Fair agents use only their seat's information:
 `POLICY` at the `private` level (or `public` in two-player games, where every
 resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, `BELIEF`,
 and `TRADE` with a `private` critic unless `oracle=true` (true hands). The

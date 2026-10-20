@@ -99,6 +99,12 @@ class MctsParams:
     reuse: bool = field(default=False, metadata={"key_if_set": True})
     transpositions: bool = field(default=False, metadata={"key_if_set": True})
     dedup: bool = field(default=True, metadata={"execution": True})
+    #: Leaves one search sends to the network per forward (virtual visits while they
+    #: wait). More leaves per forward is what makes a GPU pay: at 1 the search is one
+    #: row per forward, 1024 forwards per decision. It changes the search, so it is
+    #: keyed through the engine SearchConfig (``max_pending`` in ``key_dict()["search"]``),
+    #: not the canonical spec, which stays as it was for every record made at 1.
+    pending: int = field(default=1, metadata={"execution": True})
     device: str = field(default="auto", metadata={"execution": True})
     threads: int = field(default=0, metadata={"execution": True})
 
@@ -334,6 +340,8 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
             raise SpecError("MCTS: dets counts sampled worlds (>= 1); use oracle=true for the true game")
         if params.sims < 1:
             raise SpecError("MCTS: sims must be positive")
+        if params.pending < 1:
+            raise SpecError("MCTS: pending counts leaves per forward (>= 1)")
     if key == "BELIEF" and params.worlds < 1:
         raise SpecError("BELIEF: worlds must be positive")
     if key == "PREDICT" and not params.predictor:

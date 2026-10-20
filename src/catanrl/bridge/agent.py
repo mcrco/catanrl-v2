@@ -112,6 +112,8 @@ def native_agent(agent: Any, *, device: str = "cpu", infer_rows: int = 1,
     if isinstance(agent, (NativeAgent, BotAgent)):
         native, fair, label = agent, None, str(getattr(agent, "key", "agent"))
     elif callable(getattr(agent, "native", None)):
+        # A search's pending leaves go to the network in one forward.
+        infer_rows = max(infer_rows, int(getattr(getattr(agent, "params", None), "pending", 1)))
         native = agent.native(device=device, infer_rows=infer_rows, mode=mode)
         fair, label = getattr(agent, "fair", None), str(getattr(agent, "label", agent))
     elif hasattr(agent, "key") and hasattr(agent, "params"):

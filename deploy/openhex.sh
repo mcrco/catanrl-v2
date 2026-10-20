@@ -10,6 +10,7 @@
 #
 # Keys: $OPENHEX_ENV (default ~/.config/catanrl/openhex.env, mode 600) with
 # OPENHEX_KEY_1V1, OPENHEX_KEY_1V1_SEARCH, OPENHEX_KEY_4P (deploy/openhex.yaml).
+# Device: $OPENHEX_DEVICE (default cuda; cpu where there is no GPU).
 # Records: $OPENHEX_STATE (default ~/.local/state/catanrl/openhex): one dir per
 # bot with games.jsonl and boards/, and openhex.log, the session's output.
 set -euo pipefail
@@ -17,6 +18,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SESSION=openhex
 ENV_FILE=${OPENHEX_ENV:-$HOME/.config/catanrl/openhex.env}
 STATE=${OPENHEX_STATE:-$HOME/.local/state/catanrl/openhex}
+DEVICE=${OPENHEX_DEVICE:-cuda}
 CONFIG=deploy/openhex.yaml
 MATCH="catanrl openhex $CONFIG"
 
@@ -24,7 +26,7 @@ bot_pid() { pgrep -f "^$ROOT/.venv/bin/python .*$MATCH" | head -1; }
 load_env() {
     [ -r "$ENV_FILE" ] || { echo "no key file at $ENV_FILE" >&2; exit 1; }
     set -a; . "$ENV_FILE"; set +a
-    export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1} CUDA_VISIBLE_DEVICES=
+    export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
 }
 
 case ${1:-} in
@@ -35,10 +37,10 @@ start)
     mkdir -p "$STATE"
     load_env
     tmux new-session -d -s "$SESSION" -c "$ROOT" \
-        "exec $ROOT/.venv/bin/catanrl openhex $CONFIG --state '$STATE' $* 2>&1 | tee -a '$STATE/openhex.log'"
+        "exec $ROOT/.venv/bin/catanrl openhex $CONFIG --state '$STATE' --device $DEVICE $* 2>&1 | tee -a '$STATE/openhex.log'"
     tmux set-option -t "$SESSION" remain-on-exit on >/dev/null
-    sleep 1
-    echo "started in tmux session $SESSION (pid $(bot_pid)); log: $STATE/openhex.log"
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [ -n "$(bot_pid)" ] && break; sleep 1; done
+    echo "started in tmux session $SESSION (pid $(bot_pid), device $DEVICE); log: $STATE/openhex.log"
     ;;
 attach)
     exec tmux attach -t "$SESSION"

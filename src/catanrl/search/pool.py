@@ -48,6 +48,7 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
     return cpp.SearchConfig(
         c_puct=float(get("c_puct", 0.75)),
         simulations=int(get("sims", 256)),
+        max_pending=int(get("pending", 1)),
         root=roots[root],
         dirichlet_alpha=DIRICHLET_ALPHA if noise and root == "puct" else 0.0,
         dirichlet_fraction=DIRICHLET_FRACTION,

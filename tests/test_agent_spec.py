@@ -74,6 +74,15 @@ def test_canonical_is_a_fixed_point_and_pins_best(ckpts):
     assert resolve_agent(mcts.canonical).canonical == mcts.canonical
     assert "device" not in mcts.canonical and "threads" not in mcts.canonical
     assert mcts.params.threads == 3  # still used to execute
+    # pending leaves per forward change the search, keyed through the engine config
+    # (so records made before the option keep their canonical spec and key).
+    batched = resolve_agent("MCTS:ckpt=exp/v@latest:sims=8:dets=2:pending=4")
+    assert batched.canonical == resolve_agent("MCTS:ckpt=exp/v@latest:sims=8:dets=2").canonical
+    assert "pending" not in batched.canonical and batched.params.pending == 4
+    assert batched.key_dict()["search"]["max_pending"] == 4 and mcts.key_dict()["search"]["max_pending"] == 1
+    assert batched.key_dict() != mcts.key_dict()
+    with pytest.raises(SpecError, match="pending"):
+        resolve_agent("MCTS:ckpt=exp/v@latest:pending=0")
     path = resolve_agent(f"BELIEF:ckpt={ckpts['full']}")
     sha = path.checkpoint.weights_sha256[:12]
     assert path.canonical.startswith(f"BELIEF:ckpt={ckpts['full'].resolve()}#{sha}:worlds=16")
