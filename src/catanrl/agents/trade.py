@@ -25,15 +25,35 @@ from here, so its records keep their meaning (same enumeration order, same
 engine route). This module is hashed outcome code (``agents/`` is in
 ``catanrl.provenance.OUTCOME``): a change to the enumeration moves every new
 eval id.
+
+:class:`TradeAgent` (``TRADE``) is the harness agent built on them: a POLICY
+seat that proposes, answers and confirms domestic trades by a critic's
+per-seat win probabilities, read on the proposer's play-turn row only. The
+proposer scores every bundle of the fair menu against every partner on
+stand-in clones, keeps the Pareto front of (own gain, partner gain) in ego
+view and offers it in order over the turn; a responder accepts when its own
+mean gain over worlds dealt from its tracker clears ``accept_margin``; the
+confirmer takes the acceptee that gains it most. Nothing it reads of another
+seat's hand is more than its public size.
 """
 
 from __future__ import annotations
 
+import copy
 import itertools
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import cppanatron as cpp
+import numpy as np
+
+from catanrl.agents.native import NativeAgent, PolicyAgent, _param, tracker_mode_of
+from catanrl.agents.spec import trade_shapes
+from catanrl.envs.encoding import action_size, critic_level_of, make_encoder, row_layout
+from catanrl.models import CatanModel, build_model
+from catanrl.search.evaluator import BatchEvaluator
+from catanrl.seeding import derive_seed
 
 #: Resource kinds in the engine's hand order.
 RESOURCES = ("wood", "brick", "sheep", "wheat", "ore")
@@ -280,3 +300,472 @@ def respond_route(world: cpp.Game, proposer: int, responder: int, trade: Trade) 
     responder accepting and everyone else rejecting, confirmed on the responder. Ends at
     the proposer's PLAY_TURN with the two hands swapped."""
     return apply_trade(rewind(world), proposer, responder, trade)
+
+
+# ---------------------------------------------------------------- the TRADE agent
+
+DECIDE_TRADE = cpp.ActionPrompt.DECIDE_TRADE
+DECIDE_ACCEPTEES = cpp.ActionPrompt.DECIDE_ACCEPTEES
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """A bundle the proposer scored: its partner (after the collapse over partners, the one
+    whose row gains the proposer most), the proposer's and that partner's gain in win
+    probability (both read from the proposer's play-turn row) and the fraction of the
+    dealt worlds in which the partner could pay."""
+
+    trade: Trade
+    partner: int
+    gain: float
+    partner_gain: float
+    feasibility: float
+
+
+@dataclass(frozen=True)
+class TradeDecision:
+    """What a TRADE seat did at one forwarded row: ``offer`` or ``policy`` at its play turn,
+    ``accept`` / ``reject`` at DECIDE_TRADE, ``confirm`` / ``cancel`` at DECIDE_ACCEPTEES.
+    ``gain`` is the seat's own gain behind the choice (the offered bundle's, the mean over
+    worlds, the confirmed acceptee's); ``front`` is the ordered front when this row read the
+    critic for one (empty when nothing cleared the margins). The audit compares these across
+    games of one public state."""
+
+    kind: str
+    seat: int
+    bundle: Trade | None = None
+    partner: int | None = None
+    gain: float | None = None
+    partner_gain: float | None = None
+    front: tuple[Candidate, ...] | None = None
+    note: str = ""
+
+
+@dataclass
+class _Stream:
+    """A seat's state over one game (a harness stream), reset on its first forwarded row.
+    The per-turn fields reset when ``num_turns`` moves: ``rejected_bundles`` holds the
+    bundles offered this turn and not confirmed (never re-offered this turn); ``front`` is
+    the ordered Pareto front read this turn, offered one bundle per negotiation round and
+    dropped by a confirm; ``front_hand`` keys it for ``when=every``."""
+
+    turn: int = -1
+    offers_this_turn: int = 0
+    rejected_bundles: set[Trade] = field(default_factory=set)
+    evaluated: bool = False
+    front: list[Candidate] | None = None
+    front_hand: Counts | None = None
+    policy_started: bool = False
+
+
+def check_critic(critic: CatanModel) -> None:
+    """The critic v1 reads: stateless, ``private``, no separate critic block (the agent
+    encodes one row per candidate at the actor's level; a public or full critic would need
+    a row per dealt world, a recurrent one the seat's decision history)."""
+    if getattr(critic, "recurrent", False):
+        raise ValueError(f"TRADE: the critic is a recurrent ({critic.spec['class']}) network; its values read a "
+                         "seat's decision history, which the trade rows do not carry")
+    levels = critic.levels
+    if critic_level_of(levels["level"], levels["critic_level"]) is not None:
+        raise ValueError("TRADE: the critic reads a separate critic block; the agent encodes one row per candidate")
+    if levels["level"] != "private":
+        raise ValueError(f"TRADE: the critic reads {levels['level']} rows; v1 reads the critic on private rows")
+
+
+class TradeAgent(NativeAgent):
+    """``TRADE``: ``model`` (the policy) plays as POLICY does at every row that is not an
+    offer or a trade prompt; ``critic`` (``None``: the policy's own value head) judges the
+    trades. ``params`` are :class:`catanrl.agents.spec.TradeParams`.
+
+    * ``act`` (the seat's own rows): at a proposal moment (its PLAY_TURN after the roll,
+      ``propose``, a card in hand, under ``offers`` this turn) the first eligible row of the
+      turn (``when=first``; every row with a new hand for ``every``) reads the critic once on
+      the pre row and one post row per (bundle, partner) of :func:`mover_menu` whose partner
+      can pay in at least ``min_feasible`` of ``dets`` worlds dealt from the seat's tracker;
+      candidates gaining both seats more than ``margin`` are collapsed per bundle to the
+      partner gaining the proposer most, Pareto-filtered, ordered by own gain, partner gain,
+      fewer cards given, enumeration order, and cached as the turn's front. Each eligible
+      row then offers the front's next bundle not yet offered this turn; otherwise the policy
+      decides (and only then steps a recurrent policy's memory).
+    * ``respond_trade`` (trade prompts): at DECIDE_TRADE it rejects its own offer, else deals
+      worlds from its tracker keeping those where the proposer can pay (``dets`` kept or
+      ``4 * dets`` drawn; none: REJECT) and accepts iff its own slot of the proposer's row,
+      pre to post, gains more than ``accept_margin`` on average; at DECIDE_ACCEPTEES it
+      confirms the acceptee whose engine post-confirm row gains it most above ``margin``
+      (ties: the lower slot), else cancels and never re-offers the bundle this turn.
+
+    Every critic read is a proposer's play-turn row after the roll: the live game and
+    stand-in clones (fact: at private a partner's hand shows as its size), dealt worlds
+    rewound and routed, or the engine's post-confirm state. ``oracle=true`` reads the true
+    game in place of worlds (unfair); ``audit=true`` repeats every decision on a world of the
+    same public state and raises on a divergence. ``stats`` counts what happened;
+    ``decisions`` holds the last call's :class:`TradeDecision` per row.
+    """
+
+    key = "TRADE"
+    needs_games = True
+    needs_memory = True
+
+    def __init__(self, model: CatanModel, params: Any, *, device: str, infer_rows: int, mode: str = "strict",
+                 critic: CatanModel | None = None) -> None:
+        critic = model if critic is None else critic
+        check_critic(critic)
+        self.oracle = bool(_param(params, "oracle", False))
+        self.audit = bool(_param(params, "audit", False))
+        if self.audit and self.oracle:
+            raise ValueError("TRADE: audit=true checks that no true hand is read; oracle=true reads them by design")
+        self.needs_trackers = not self.oracle
+        self.tracker_mode = tracker_mode_of(params)
+        # Margins are written in points of win probability; the critic's values are probabilities.
+        self.margin = float(_param(params, "margin", 0.0)) / 100.0
+        self.accept_margin = float(_param(params, "accept_margin", 0.0)) / 100.0
+        self.dets = int(_param(params, "dets", 8))
+        self.min_feasible = float(_param(params, "min_feasible", 0.25))
+        self.offers = int(_param(params, "offers", 3))
+        self.when = str(_param(params, "when", "first"))
+        self.propose = bool(_param(params, "propose", True))
+        shapes = _param(params, "shapes", "11-21-12")
+        self.shapes = trade_shapes(shapes) if isinstance(shapes, str) else tuple((int(g), int(r)) for g, r in shapes)
+        if self.margin < 0 or self.accept_margin < 0:
+            raise ValueError("TRADE: margin and accept_margin are points of win probability (>= 0)")
+        if self.dets < 1 or self.offers < 1 or not 0 < self.min_feasible <= 1 or self.when not in ("first", "every"):
+            raise ValueError("TRADE needs dets >= 1, offers >= 1, min_feasible in (0, 1] and when first or every")
+        self._shared = critic is model
+        self._critic_weights = {k: v.detach().cpu() for k, v in critic.state_dict().items()}
+        self._critic_spec = critic.spec
+        self._critic_levels = dict(critic.levels)
+        self._critic_dims = dict(critic.dims)
+        self._critic_agnostic = bool(critic.dims_agnostic)
+        self.critic_level = critic.levels["level"]
+        #: evaluations: proposal reads (a menu built, the critic read when it is not empty);
+        #: critic_rows: rows the critic read; the rest count decisions by kind, the responder's
+        #: rejects for want of a payable world, and the audit's checks and failures.
+        self.stats = {"evaluations": 0, "critic_rows": 0, "offers": 0, "accepts": 0, "rejects": 0, "confirms": 0,
+                      "cancels": 0, "no_feasible_world": 0, "audits": 0, "audit_divergences": 0}
+        self._streams: dict[int, _Stream] = {}
+        self.decisions: list[TradeDecision] = []
+        super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="policy")
+
+    def _set_model(self, model: CatanModel) -> None:
+        self.model = model
+        self.dims = dict(model.dims)
+        self.encoder = make_encoder(self.dims, self.level)
+        self.action_space = self.encoder.action_space
+        self.policy = PolicyAgent(model, self.params, device=self.device, infer_rows=self.infer_rows, mode=self.mode)
+        self.evaluator = self.policy.evaluator
+        if self._shared:
+            critic = model
+        else:
+            if not self._critic_agnostic and self.dims != self._critic_dims:
+                raise ValueError(f"TRADE: the critic was trained at dims {self._critic_dims} and is not "
+                                 f"dims-agnostic; the games need {self.dims}")
+            critic = build_model(self._critic_spec, dims=self.dims, levels=self._critic_levels,
+                                 num_actions=action_size(self.dims), layout=row_layout(self.dims, self.critic_level))
+            critic.load_state_dict(self._critic_weights)
+        self.critic_encoder = make_encoder(self.dims, self.critic_level)
+        self.critic = BatchEvaluator(critic, device=self.device, infer_rows=self.infer_rows, mode=self.mode,
+                                     heads="both")
+
+    def check_maps(self, maps) -> None:
+        self.model.check_maps(maps)
+        self.critic.model.check_maps(maps)
+
+    # ------------------------------------------------------------ the harness entry points
+
+    def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None
+            ) -> list[int | cpp.Action]:
+        games, trackers, streams, first = self._inputs(len(rows), games, trackers, streams, first)
+        states = [self._stream(stream, fresh) for stream, fresh in zip(streams, first)]
+        audit = [copy.deepcopy(state) for state in states] if self.audit else None
+        decisions, read = self._propose(games, trackers, decision_seeds, states)
+        if audit is not None:
+            self._check_audit(self._propose, games, trackers, decision_seeds, audit, decisions)
+        self._count(decisions, read)
+        choices: list[int | cpp.Action] = [0] * len(rows)
+        policy_rows = []
+        for i, decision in enumerate(decisions):
+            if decision.kind == "offer":
+                choices[i] = offer_action(games[i], decision.seat, decision.bundle)
+            else:
+                policy_rows.append(i)
+        if policy_rows:
+            idx = np.array(policy_rows)
+            fresh = np.array([not states[i].policy_started for i in policy_rows], dtype=bool)
+            chosen = self.policy.act(rows[idx], masks[idx], np.asarray(decision_seeds)[idx], streams=streams[idx],
+                                     first=fresh)
+            for i, choice in zip(policy_rows, chosen):
+                choices[i] = int(choice)
+                states[i].policy_started = True
+        self.decisions = decisions
+        return choices
+
+    def respond_trade(self, games, decision_seeds, *, trackers=None, streams=None, first=None) -> list[cpp.Action]:
+        games, trackers, streams, first = self._inputs(len(games), games, trackers, streams, first)
+        states = [self._stream(stream, fresh) for stream, fresh in zip(streams, first)]
+        audit = [copy.deepcopy(state) for state in states] if self.audit else None
+        decisions, read = self._respond(games, trackers, decision_seeds, states)
+        if audit is not None:
+            self._check_audit(self._respond, games, trackers, decision_seeds, audit, decisions)
+        self._count(decisions, read)
+        self.decisions = decisions
+        actions = []
+        for game, decision in zip(games, decisions):
+            if decision.kind in ("accept", "reject"):
+                actions.append(response(game, accept=decision.kind == "accept"))
+            elif decision.kind == "confirm":
+                actions.append(confirm_action(game, decision.partner))
+            else:
+                actions.append(cancel_action(game))
+        return actions
+
+    # ------------------------------------------------------------ state and bookkeeping
+
+    def _inputs(self, n: int, games, trackers, streams, first):
+        if games is None or len(games) != n:
+            raise ValueError("TRADE decides from games (one per row)")
+        if self.needs_trackers and (trackers is None or len(trackers) != n):
+            raise ValueError("TRADE deals worlds from the deciding seats' hand trackers (one per row)")
+        if streams is None or first is None:
+            raise ValueError("TRADE keeps a state per seat of a game: it decides from streams and first")
+        streams = np.asarray(streams, dtype=np.int64).reshape(-1)
+        first = np.asarray(first, dtype=bool).reshape(-1)
+        if len(streams) != n or len(first) != n:
+            raise ValueError("streams and first need one entry per row")
+        if len(set(streams.tolist())) != n:
+            raise ValueError("a stream decides once per batch")
+        return games, trackers, streams, first
+
+    def _stream(self, stream: int, fresh: bool) -> _Stream:
+        if fresh:
+            self._streams[int(stream)] = _Stream()
+        elif int(stream) not in self._streams:
+            raise ValueError(f"stream {stream} has no state: its first row was not marked first")
+        return self._streams[int(stream)]
+
+    @staticmethod
+    def _sync_turn(state: _Stream, game: cpp.Game) -> None:
+        """The per-turn fields start afresh when the game's turn count moves (a trade adds no turn)."""
+        if state.turn != game.num_turns:
+            state.turn = game.num_turns
+            state.offers_this_turn = 0
+            state.rejected_bundles = set()
+            state.evaluated = False
+            state.front = None
+            state.front_hand = None
+
+    def _count(self, decisions: Sequence[TradeDecision], read: int) -> None:
+        stats = self.stats
+        stats["critic_rows"] += read
+        for decision in decisions:
+            stats["evaluations"] += decision.front is not None
+            if decision.kind != "policy":
+                stats[decision.kind + "s"] += 1
+            stats["no_feasible_world"] += decision.note == "no feasible world"
+
+    def _check_audit(self, decide, games, trackers, seeds, states, decisions) -> None:
+        """The same decisions on worlds of the games' public state (own hand exact, the others
+        dealt by the seat's own tracker): any difference means a true hand was read."""
+        worlds = [cpp.sample_world(game, tracker, seed=derive_seed(int(seed), "audit"), deal=self.tracker_mode)
+                  for game, tracker, seed in zip(games, trackers, seeds)]
+        again, _ = decide(worlds, trackers, seeds, states)
+        self.stats["audits"] += len(decisions)
+        for game, decision, other in zip(games, decisions, again):
+            if decision != other:
+                self.stats["audit_divergences"] += 1
+                raise RuntimeError(f"TRADE audit: seat {decision.seat} at {game.current_prompt.name} decided "
+                                   f"{decision} on the true game but {other} on a world of its public state")
+
+    def _worlds(self, game: cpp.Game, tracker, seed: int, count: int, start: int = 0) -> list[cpp.Game]:
+        """``count`` worlds dealt from the seat's tracker (the true game alone with ``oracle``)."""
+        if self.oracle:
+            return [game]
+        return [cpp.sample_world(game, tracker, seed=derive_seed(seed, "world", w), deal=self.tracker_mode)
+                for w in range(start, start + count)]
+
+    # ------------------------------------------------------------ the proposer
+
+    def _proposal_moment(self, state: _Stream, game: cpp.Game, seat: int) -> bool:
+        return (self.propose and tradeable(game, seat) and sum(game.player(seat).resources) > 0
+                and state.offers_this_turn < self.offers)
+
+    def _propose(self, games, trackers, seeds, states) -> tuple[list[TradeDecision], int]:
+        """Every row's decision: one critic call for every row that reads a new front."""
+        seats = [game.current_player_index for game in games]
+        moments = []
+        read: set[int] = set()  # rows that read a new front this call (an empty menu reads nothing)
+        plans: dict[int, tuple[list[tuple[Trade, int, float]], int]] = {}
+        chunks: list[np.ndarray] = []
+        rows_so_far = 0
+        for i, (game, seat, state) in enumerate(zip(games, seats, states)):
+            self._sync_turn(state, game)
+            moments.append(self._proposal_moment(state, game, seat))
+            if not moments[i]:
+                continue
+            hand = tuple(int(c) for c in game.player(seat).resources)
+            stale = not state.evaluated if self.when == "first" else (state.front is None or state.front_hand != hand)
+            if not stale:
+                continue
+            candidates, rows = self._plan(game, seat, trackers[i] if trackers is not None else None, int(seeds[i]),
+                                          state.rejected_bundles)
+            state.evaluated, state.front_hand, state.front = True, hand, []
+            read.add(i)
+            if candidates:
+                plans[i] = (candidates, rows_so_far)
+                chunks.append(rows)
+                rows_so_far += len(rows)
+        if plans:
+            values = self.critic(np.concatenate(chunks))[1].astype(np.float64)
+            for i, (candidates, offset) in plans.items():
+                posts = values[offset + 1 : offset + 1 + len(candidates)]
+                states[i].front = self._front(candidates, values[offset], posts, seats[i], games[i].num_players)
+        decisions = []
+        for i, (game, seat, state) in enumerate(zip(games, seats, states)):
+            if not moments[i]:
+                decisions.append(TradeDecision("policy", seat))
+                continue
+            front = tuple(state.front) if i in read else None
+            hand = game.player(seat).resources
+            offer = next((c for c in state.front or () if c.trade not in state.rejected_bundles
+                          and can_pay(hand, c.trade.give)), None)
+            if offer is None:
+                decisions.append(TradeDecision("policy", seat, front=front))
+                continue
+            state.offers_this_turn += 1
+            state.rejected_bundles.add(offer.trade)
+            decisions.append(TradeDecision("offer", seat, offer.trade, offer.partner, offer.gain, offer.partner_gain,
+                                           front=front))
+        return decisions, rows_so_far
+
+    def _plan(self, game: cpp.Game, seat: int, tracker, seed: int, rejected: set[Trade]
+              ) -> tuple[list[tuple[Trade, int, float]], np.ndarray | None]:
+        """The candidates of a proposal read, ``(bundle, partner, feasibility)`` in menu then
+        slot order, and their rows: the seat's pre row first, then one post row per candidate
+        on a stand-in clone. Nothing of a partner's hand is read but its size: payability is
+        voted by worlds dealt from the seat's tracker."""
+        n = game.num_players
+        hand = game.player(seat).resources
+        partners = [(seat + k) % n for k in range(1, n)]
+        sizes = {q: sum(game.player(q).resources) for q in partners}
+        menu = [trade for trade in mover_menu(hand, max(sizes.values()), self.shapes) if trade not in rejected]
+        if not menu:
+            return [], None
+        worlds = self._worlds(game, tracker, seed, self.dets)
+        candidates = []
+        for trade in menu:
+            for q in partners:
+                if sum(trade.get) > sizes[q]:
+                    continue
+                feasibility = sum(can_pay(world.player(q).resources, trade.get) for world in worlds) / len(worlds)
+                if feasibility >= self.min_feasible:
+                    candidates.append((trade, q, feasibility))
+        rows = np.empty((1 + len(candidates), self.critic_encoder.size), dtype=np.float32)
+        self.critic_encoder.encode_into(game, seat, rows[0])
+        for j, (trade, q, _) in enumerate(candidates):
+            self.critic_encoder.encode_into(post_row_clone(game, seat, q, trade), seat, rows[1 + j])
+        return candidates, rows
+
+    def _front(self, candidates, pre: np.ndarray, posts: np.ndarray, seat: int, n: int) -> list[Candidate]:
+        """The ordered Pareto front: per bundle the partner whose row gains the proposer most
+        (ties: the lower slot, since partners come in slot order) among candidates gaining
+        both seats more than ``margin``; bundles another bundle weakly dominates dropped;
+        ordered by own gain, partner gain, fewer cards given, enumeration order."""
+        best: dict[Trade, Candidate] = {}
+        for (trade, q, feasibility), post in zip(candidates, posts):
+            k = (q - seat) % n
+            gain, partner_gain = float(post[0] - pre[0]), float(post[k] - pre[k])
+            if gain > self.margin and partner_gain > self.margin:
+                current = best.get(trade)
+                if current is None or gain > current.gain:
+                    best[trade] = Candidate(trade, q, gain, partner_gain, feasibility)
+        pool = list(best.values())  # insertion order = enumeration order
+        front = [c for c in pool if not any(
+            o.gain >= c.gain and o.partner_gain >= c.partner_gain and (o.gain > c.gain or o.partner_gain > c.partner_gain)
+            for o in pool)]
+        front.sort(key=lambda c: (-c.gain, -c.partner_gain, sum(c.trade.give)))
+        return front
+
+    # ------------------------------------------------------------ the responder and the confirmer
+
+    def _respond(self, games, trackers, seeds, states) -> tuple[list[TradeDecision], int]:
+        """Every trade prompt's decision: one critic call for every row that reads it."""
+        decisions: list[TradeDecision | None] = [None] * len(games)
+        plans: dict[int, tuple] = {}
+        chunks: list[np.ndarray] = []
+        rows_so_far = 0
+        size = self.critic_encoder.size
+        for i, (game, state) in enumerate(zip(games, states)):
+            self._sync_turn(state, game)
+            seat = game.current_player_index
+            if game.current_prompt == DECIDE_TRADE:
+                give, get, proposer = offer_of(game)
+                trade = Trade(give, get)
+                if proposer == seat:
+                    decisions[i] = TradeDecision("reject", seat, trade, proposer, note="own offer")
+                    continue
+                if not can_pay(game.player(seat).resources, get):  # the engine lists REJECT alone: never forwarded
+                    decisions[i] = TradeDecision("reject", seat, trade, proposer, note="cannot pay")
+                    continue
+                worlds = self._payable_worlds(game, trackers[i] if trackers is not None else None, int(seeds[i]),
+                                              proposer, give)
+                if not worlds:
+                    decisions[i] = TradeDecision("reject", seat, trade, proposer, note="no feasible world")
+                    continue
+                rows = np.empty((2 * len(worlds), size), dtype=np.float32)
+                for w, world in enumerate(worlds):
+                    self.critic_encoder.encode_into(rewind(world), proposer, rows[2 * w])
+                    self.critic_encoder.encode_into(respond_route(world, proposer, seat, trade), proposer, rows[2 * w + 1])
+                plans[i] = ("respond", trade, proposer, len(worlds), rows_so_far)
+            elif game.current_prompt == DECIDE_ACCEPTEES:
+                give, get, _ = offer_of(game)
+                trade = Trade(give, get)
+                acceptees = sorted(acceptees_of(game), key=lambda c: (c - seat) % game.num_players)
+                rows = np.empty((1 + len(acceptees), size), dtype=np.float32)
+                self.critic_encoder.encode_into(rewind(game), seat, rows[0])
+                for j, acceptee in enumerate(acceptees):
+                    post = game.copy()
+                    post.execute(confirm_action(game, acceptee))
+                    self.critic_encoder.encode_into(post, seat, rows[1 + j])
+                plans[i] = ("confirm", trade, acceptees, rows_so_far)
+            else:
+                raise ValueError(f"{game.current_prompt.name} is not a trade prompt")
+            chunks.append(rows)
+            rows_so_far += len(rows)
+        if plans:
+            values = self.critic(np.concatenate(chunks))[1].astype(np.float64)
+        for i, plan in plans.items():
+            game, state, seat = games[i], states[i], games[i].current_player_index
+            if plan[0] == "respond":
+                _, trade, proposer, count, offset = plan
+                k = (seat - proposer) % game.num_players
+                gains = [values[offset + 2 * w + 1, k] - values[offset + 2 * w, k] for w in range(count)]
+                gain = float(np.mean(gains))
+                kind = "accept" if gain > self.accept_margin else "reject"
+                decisions[i] = TradeDecision(kind, seat, trade, proposer, gain)
+            else:
+                _, trade, acceptees, offset = plan
+                best = None
+                for j, acceptee in enumerate(acceptees):  # slot order: a tie keeps the lower slot
+                    gain = float(values[offset + 1 + j, 0] - values[offset, 0])
+                    if gain > self.margin and (best is None or gain > best[1]):
+                        best = (acceptee, gain)
+                if best is None:
+                    state.rejected_bundles.add(trade)
+                    decisions[i] = TradeDecision("cancel", seat, trade)
+                else:
+                    state.rejected_bundles.discard(trade)  # a confirmed bundle may be right again on the new hand
+                    state.front = None
+                    decisions[i] = TradeDecision("confirm", seat, trade, best[0], best[1])
+        return decisions, rows_so_far
+
+    def _payable_worlds(self, game: cpp.Game, tracker, seed: int, proposer: int, give: Counts) -> list[cpp.Game]:
+        """Worlds in which the proposer can pay its offer (the offer says it can): ``dets``
+        kept out of at most ``4 * dets`` dealt."""
+        kept = []
+        budget = 1 if self.oracle else 4 * self.dets
+        for w in range(budget):
+            world = self._worlds(game, tracker, seed, 1, start=w)[0]
+            if can_pay(world.player(proposer).resources, give):
+                kept.append(world)
+                if len(kept) == self.dets:
+                    break
+        return kept

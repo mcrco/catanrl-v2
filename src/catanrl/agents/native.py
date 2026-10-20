@@ -13,6 +13,10 @@ agent spec (``catanrl.agents.spec.ResolvedAgent``) into one of:
 * :class:`PredictAgent` (``PREDICT``): a public/full policy on one row, the
   private row with the other seats' hidden features filled in by a private
   network's aux head (DESIGN 2.1);
+* :class:`catanrl.agents.trade.TradeAgent` (``TRADE``): a policy that also
+  proposes, answers and confirms domestic trades by a critic's per-seat
+  values, played through ``VecEnv.set_action`` since trades are outside the
+  action space;
 * :class:`BotAgent` (``F``, ``R``): marks a seat the harness plays with the
   engine's bots.
 
@@ -35,6 +39,11 @@ one seat of one game, e.g. ``env * max_players + seat``) and ``first``
 sequence of a seat's own decisions, zero at the first, so rows are the same
 whatever env slot a game plays in. MCTS and BELIEF refuse a recurrent
 network: a leaf or a sampled world has no decision history of its own.
+
+A trade prompt (a responder's DECIDE_TRADE, a proposer's DECIDE_ACCEPTEES:
+an acting row whose mask has no legal index) goes to ``respond_trade(games,
+seeds, ...)``, which returns one ``cpp.Action`` per game for the harness to
+play through ``VecEnv.set_action``; every agent but TRADE rejects or cancels.
 """
 
 from __future__ import annotations
@@ -152,6 +161,18 @@ class NativeAgent:
             trackers: Sequence[cpp.HandTracker | None] | None = None,
             streams: np.ndarray | None = None, first: np.ndarray | None = None) -> np.ndarray:
         raise NotImplementedError
+
+    def respond_trade(self, games: Sequence[cpp.Game], decision_seeds: np.ndarray, *,
+                      trackers: Sequence[cpp.HandTracker | None] | None = None,
+                      streams: np.ndarray | None = None, first: np.ndarray | None = None) -> list[cpp.Action]:
+        """The seat's answer at each game's trade prompt (one ``cpp.Action`` per game, played
+        through ``VecEnv.set_action``): REJECT at DECIDE_TRADE and CANCEL at DECIDE_ACCEPTEES,
+        what an agent without a trade judgement does. The row counts as a decision (the
+        seeds, streams and first flags are the harness's as for ``act``); only TRADE reads
+        them."""
+        from catanrl.agents.trade import default_trade_action  # trade.py builds on this module
+
+        return [default_trade_action(game) for game in games]
 
 
 def _choose(logits: np.ndarray, masks: np.ndarray, seeds: np.ndarray, *, sample: bool,
@@ -438,6 +459,13 @@ class BotAgent:
 AGENTS = {"POLICY": PolicyAgent, "MCTS": MctsAgent, "BELIEF": BeliefAgent, "PREDICT": PredictAgent}
 
 
+def _trade_agent():
+    """``AGENTS["TRADE"]``: the class lives in catanrl.agents.trade, which builds on this module."""
+    from catanrl.agents.trade import TradeAgent
+
+    return TradeAgent
+
+
 def _load_model(resolved: Any, part: str, ref: Any = None) -> CatanModel:
     from catanrl.checkpoint import Checkpoint
 
@@ -447,20 +475,25 @@ def _load_model(resolved: Any, part: str, ref: Any = None) -> CatanModel:
 
 
 def make_native_agent(resolved: Any, *, device: str, infer_rows: int, mode: str = "strict",
-                      model: CatanModel | None = None, predictor: CatanModel | None = None) -> NativeAgent | BotAgent:
+                      model: CatanModel | None = None, predictor: CatanModel | None = None,
+                      critic: CatanModel | None = None) -> NativeAgent | BotAgent:
     """The native backend of a resolved agent spec.
 
-    ``model`` (and, for PREDICT, ``predictor``) overrides loading the network from
-    ``resolved.checkpoint`` (``resolved.predictor``): tests and in-memory agents.
-    ``mode`` is the evaluator's determinism.
+    ``model`` (and, for PREDICT, ``predictor``, for TRADE, ``critic``) overrides loading the
+    network from ``resolved.checkpoint`` (``resolved.predictor``, ``resolved.critic``): tests
+    and in-memory agents. A TRADE whose critic is its policy's checkpoint loads that one
+    network with both heads, and one module serves both evaluators. ``mode`` is the
+    evaluator's determinism.
     """
     key = resolved.key
     if key in ("F", "R"):
         return BotAgent(key, resolved.params)
-    if key not in AGENTS:
+    if key not in AGENTS and key != "TRADE":
         raise ValueError(f"{key} has no native backend")
+    one_network = key == "MCTS" or (key == "TRADE" and (resolved.critic is None
+                                                         or resolved.critic == resolved.checkpoint))
     if model is None:
-        model = _load_model(resolved, "all" if key == "MCTS" else "actor")
+        model = _load_model(resolved, "all" if one_network else "actor")
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if key == "PREDICT":
@@ -468,4 +501,8 @@ def make_native_agent(resolved: Any, *, device: str, infer_rows: int, mode: str 
             predictor = _load_model(resolved, "aux", resolved.predictor)
         return PredictAgent(model, resolved.params, device=device, infer_rows=infer_rows, mode=mode,
                             predictor=predictor)
+    if key == "TRADE":
+        if critic is None and not one_network:
+            critic = _load_model(resolved, "critic", resolved.critic)
+        return _trade_agent()(model, resolved.params, device=device, infer_rows=infer_rows, mode=mode, critic=critic)
     return AGENTS[key](model, resolved.params, device=device, infer_rows=infer_rows, mode=mode)
