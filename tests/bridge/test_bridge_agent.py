@@ -1,37 +1,52 @@
 """ViewAgent: the same decisions as the native agent on the same positions
-and seeds (POLICY, MCTS dets=1 sims=8, BELIEF worlds=2); decisions that
-depend on the view alone (paired games whose views are identical but whose
-hidden cards differ); fairness and fallback rules."""
+and seeds (POLICY, MCTS dets=1 sims=8 with and without reuse, BELIEF
+worlds=2); decisions that depend on the view alone (paired games whose views
+are identical but whose hidden cards differ); a reusing MCTS agent's streams
+(one per game slot and seat, re-rooted along the seat's own moves, dropped
+with an evicted game, restarted after an error) and the choices without
+reuse pinned; fairness and fallback rules."""
 
 from __future__ import annotations
 
+import json
 import random
 
 import cppanatron as cpp
 import numpy as np
 import pytest
-from bridge_games import lockstep, tiny_agent
+from bridge_games import DATA, lockstep, tiny_agent
 from catanatron.models.enums import ActionRecord, ActionType
 from catanatron.serialization import action_from_json, action_to_json, client_view, state_to_json
 from cppanatron.catanatron import from_catanatron_action, to_catanatron_action
 
 from catanrl.agents.native import BotAgent
-from catanrl.bridge.agent import BridgeError, UnfairAgent, ViewAgent, action_key, default_choice
+from catanrl.bridge.agent import BridgeError, UnfairAgent, ViewAgent, action_key, default_choice, native_agent
 from catanrl.seeding import derive_seed
 
+#: case -> (level, params, the index of its games and seeds).
 CASES = {
-    "POLICY": ("private", {}),
-    "MCTS": ("full", {"sims": 8, "dets": 1}),
-    "BELIEF": ("full", {"worlds": 2}),
+    "POLICY": ("private", {}, 2),
+    "MCTS": ("full", {"sims": 8, "dets": 1}, 1),
+    "BELIEF": ("full", {"worlds": 2}, 0),
+    #: Keeps its search between a seat's decisions: the ViewAgent streams them.
+    "MCTS-reuse": ("full", {"sims": 8, "dets": 1, "reuse": True}, 4),
 }
 
 
-def _native_choice(native, game, seat, seed, tracker):
+def _agent(case: str, dims: dict):
+    level, params, _ = CASES[case]
+    return tiny_agent(case.split("-")[0], level, dims, **params)
+
+
+def _native_choice(native, game, seat, seed, tracker, first=None):
+    """The native agent's choice on the true game; ``first`` (a reusing
+    agent) puts the decision on the seat's stream, as the harness would."""
     row = native.encode(game, seat)
     size = native.action_space.size
+    memory = {} if first is None else {"streams": np.array([seat]), "first": np.array([first])}
     index = native.act(row[None], row[None, -size:], np.array([seed], dtype=np.uint64),
-                       games=[game] if native.needs_games else None,
-                       trackers=[tracker] if native.needs_trackers else None)[0]
+                       games=[game.copy()] if native.needs_games else None,  # the agent may keep it
+                       trackers=[tracker] if native.needs_trackers else None, **memory)[0]
     return action_to_json(to_catanatron_action(native.action_space.decode(game, int(index))))
 
 
@@ -42,21 +57,23 @@ def test_view_agent_decides_like_the_native_agent(key, name):
     true game and the seat's true tracker, the ViewAgent on the seat's views
     only (decide-only, as a TUI callback), with the same decision seeds.
     Under the friendly robber the agent is also asked about lone robber
-    moves, as a server asks (the options bound the others' points)."""
-    level, params = CASES[key]
-    index = sorted(CASES).index(key)
+    moves, as a server asks (the options bound the others' points). A
+    reusing agent reuses alike on both sides (the exact check on the true
+    game, the view check on the replayed one)."""
+    level, params, index = CASES[key]
     friendly = name.endswith("-friendly")
     ls = lockstep(name.removesuffix("-friendly"), 20 + index, friendly_robber=friendly or None)
     n = len(ls.colors)
-    native = tiny_agent(key, level, ls.dims, **params)
+    native = _agent(key, ls.dims)
 
     def seed(ply: int, seat: int) -> int:
         return derive_seed(index, "decide", seat, ply)
 
-    ours = ViewAgent(tiny_agent(key, level, ls.dims, **params), strict=True,
+    ours = ViewAgent(_agent(key, ls.dims), strict=True,
                      seed_fn=lambda view, seat: seed(len(view["action_records"]), seat))
     trackers = [cpp.HandTracker(ls.native, s) for s in range(n)]
-    compared, limit = 0, 30 if key == "MCTS" else 80
+    decided: set[int] = set()
+    compared, limit = 0, 30 if key.startswith("MCTS") else 80
     while compared < limit and not ls.over:
         seat = ls.current_seat
         playable = ls.playable_json()
@@ -67,7 +84,8 @@ def test_view_agent_decides_like_the_native_agent(key, name):
             mine = ours.decide(view, playable)
             assert any(mine is offered for offered in playable)  # the offered object itself
             theirs = _native_choice(native, ls.native, seat, seed(len(view["action_records"]), seat),
-                                    trackers[seat])
+                                    trackers[seat], first=seat not in decided if native.needs_memory else None)
+            decided.add(seat)
             assert action_key(mine) == action_key(theirs), (key, name, len(view["action_records"]))
             compared += 1
         action = ls.choose()
@@ -78,6 +96,8 @@ def test_view_agent_decides_like_the_native_agent(key, name):
     assert compared == limit
     assert ours.stats["decisions"] == compared
     assert not any(k.startswith("fallback") for k in ours.stats)
+    if native.needs_memory:
+        assert ours.native.counters == native.counters and ours.native.counters["decisions"] == compared
 
 
 # ---------------------------------------------------------------- views alone
@@ -145,12 +165,11 @@ class PairedGames:
 def test_decisions_depend_on_the_view_alone(key):
     """Paired games: the seat's views are identical, the other hands are not;
     two ViewAgents, each following its own game, decide alike throughout."""
-    level, params = CASES[key]
-    pairs = PairedGames("base-4p", 30 + sorted(CASES).index(key), seat=1)
+    pairs = PairedGames("base-4p", 30 + CASES[key][2], seat=1)
     dims = pairs.a.dims
-    agent_a = ViewAgent(tiny_agent(key, level, dims, **params), strict=True)
-    agent_b = ViewAgent(tiny_agent(key, level, dims, **params), strict=True)
-    decided, limit = 0, 15 if key == "MCTS" else 40
+    agent_a = ViewAgent(_agent(key, dims), strict=True)
+    agent_b = ViewAgent(_agent(key, dims), strict=True)
+    decided, limit = 0, 15 if key.startswith("MCTS") else 40
     for _ in range(3000):
         if pairs.a.over or decided >= limit:
             break
@@ -172,6 +191,140 @@ def test_decisions_depend_on_the_view_alone(key):
             break
     assert decided >= 10
     assert pairs.hidden_differed
+
+
+# ---------------------------------------------------------------- a reusing search
+
+
+def _own_game(agent: ViewAgent, ls, seat: int = 0, limit: int = 60, steps: int = 1000) -> int:
+    """``seat`` plays the ViewAgent's choices in a lockstep game, the other seats
+    random moves; the number of decisions (several options) made."""
+    decided = 0
+    for _ in range(steps):
+        if ls.over or decided >= limit:
+            break
+        if ls.current_seat == seat:
+            playable = ls.playable_json()
+            choice = agent.decide(ls.view(seat), playable)
+            assert any(choice is offered for offered in playable)
+            decided += len(playable) > 1
+            ls.step(action_from_json(choice))
+        else:
+            ls.step(ls.choose())
+    return decided
+
+
+def _reusing(dims: dict, **kwargs) -> ViewAgent:
+    return ViewAgent(tiny_agent("MCTS", "full", dims, sims=8, dets=1, reuse=True), **kwargs)
+
+
+def test_a_reusing_search_follows_the_seats_own_moves():
+    """A seat playing its own choices: the search is re-rooted at the action
+    played wherever the seat decides again right after it (an initial
+    settlement's road, a build or a trade before the next move, a discard
+    chain); a forced move the ViewAgent answers alone and every other seat's
+    move diverge it (a fresh search, counted); the counters add up and the
+    agent keeps copies, not the replay's game."""
+    ls = lockstep("base-2p", 50)
+    agent = _reusing(ls.dims, strict=True)
+    native = agent.native
+    assert agent.memory and native.reuse_check == "view"
+    decided = _own_game(agent, ls, seat=0, limit=60)
+    c = native.counters
+    assert decided >= 30 and c["decisions"] == decided == agent.stats["decisions"]
+    assert c["reused"] > 0 and c["reused"] + c["fresh"] == c["decisions"]
+    assert agent.stats["forced"] > 0 and c["refused_diverged"] > 0
+    assert c["reused"] + c["refused_diverged"] + c["refused_engine"] == c["decisions"] - 1
+    assert not any(k.startswith("fallback") or k == "inexact" for k in agent.stats)
+    assert len(native.pool) == 1 and set(native._live) == {0}  # slot 0, seat 0
+    assert all(entry[1] is not tracker.game for entry in native._live.values() for tracker in agent.seats.values())
+    assert agent.summary()["search"] == dict(c)
+
+
+def test_streams_are_per_game_and_an_evicted_game_frees_its_searches():
+    """Three games through one ViewAgent following two at a time: a game's
+    first decision starts a stream in its own slot (the other game's search
+    stays live); the third game takes the evicted first game's slot and
+    drops that game's search at its first decision."""
+    games = [lockstep("base-2p", 60 + i) for i in range(3)]
+    agent = _reusing(games[0].dims, strict=True, max_games=2)
+    native = agent.native
+
+    def decide(ls, seat=0):
+        while not (ls.current_seat == seat and len(ls.playable_json()) > 1):
+            ls.step(ls.choose())
+        ls.step(action_from_json(agent.decide(ls.view(seat), ls.playable_json())))
+
+    decide(games[0])
+    decide(games[0])
+    assert native.counters["fresh"] >= 1 and set(native._live) == {0} and len(native.pool) == 1
+    decide(games[1])  # slot 1: stream 1 * 2 + 0
+    assert set(native._live) == {0, 2} and len(native.pool) == 2 and native.counters["dropped_first"] == 0
+    decide(games[2])  # evicts game 0, takes slot 0 and drops game 0's search there
+    assert native.counters["dropped_first"] == 1 and set(native._live) == {0, 2} and len(native.pool) == 2
+    assert [info["env"] for info in agent._games.values()] == [1, 0]
+    assert list(agent._games) == [games[1].truth.id, games[2].truth.id]
+    decide(games[0])  # new again: evicts game 1 and takes its slot
+    assert native.counters["dropped_first"] == 2 and set(native._live) == {0, 2} and len(native.pool) == 2
+    assert list(agent._games) == [games[2].truth.id, games[0].truth.id]
+
+
+def test_an_error_in_the_agent_restarts_its_streams():
+    """An act that fails empties the agent's pool and forgets its streams: the
+    bridge counts the fallback, and the seat's next decision is a first
+    again (it decides; no stream error)."""
+    class Failing:
+        def __init__(self, inner):
+            self.obs_size, self.num_actions, self.num_players = inner.obs_size, inner.num_actions, inner.num_players
+
+        def __call__(self, rows):
+            raise MemoryError("evaluator failed")
+
+    ls = lockstep("base-2p", 70)
+    agent = _reusing(ls.dims)
+    native = agent.native
+    assert _own_game(agent, ls, seat=0, limit=3) == 3 and native._live
+    healthy = native.evaluator
+    native.evaluator = Failing(healthy)
+    assert _own_game(agent, ls, seat=0, limit=1) == 1
+    assert agent.stats["fallback:MemoryError"] == 1 and not native._live and len(native.pool) == 0
+    native.evaluator = healthy
+    assert _own_game(agent, ls, seat=0, limit=2) == 2
+    assert agent.stats["fallback:MemoryError"] == 1 and len(native.pool) == 1
+    assert native.counters["decisions"] == 5 and native.counters["dropped_first"] == 0
+
+
+def test_a_reusing_agent_needs_a_caller_that_streams():
+    """Only the ViewAgent hands an agent its seat's streams: another caller
+    (OpenHexSeat decides without them) is refused up front, not at every move."""
+    dims = lockstep("base-2p", 0).dims
+    reusing = tiny_agent("MCTS", "full", dims, sims=8, dets=1, reuse=True)
+    with pytest.raises(ValueError, match="streams"):
+        native_agent(reusing)
+    assert native_agent(reusing, memory=True)[0] is reusing
+    assert ViewAgent(reusing).memory and reusing.reuse_check == "view"
+    plain = tiny_agent("MCTS", "full", dims, sims=8, dets=1)
+    assert not ViewAgent(plain).memory and plain.reuse_check == "exact"
+
+
+PINNED = json.loads((DATA / "bridge_mcts_choices.json").read_text())
+
+
+@pytest.mark.parametrize("name", sorted(PINNED))
+def test_mcts_choices_without_reuse_are_pinned(name):
+    """The ViewAgent's MCTS choices (sims 8, dets 1, no reuse) on a fixed random
+    game, recorded before streams reached the bridge: the plain path is what it was."""
+    pinned = PINNED[name]
+    ls = lockstep(name, pinned["index"])
+    agent = ViewAgent(tiny_agent("MCTS", "full", ls.dims, sims=8, dets=1), strict=True,
+                      seed_fn=lambda view, seat: derive_seed(7, "decide", seat, len(view["action_records"])))
+    keys = []
+    while len(keys) < len(pinned["choices"]) and not ls.over:
+        playable = ls.playable_json()
+        if len(playable) > 1:
+            keys.append(action_key(agent.decide(ls.view(ls.current_seat), playable)))
+        ls.step(ls.choose())
+    assert keys == pinned["choices"]
 
 
 # ---------------------------------------------------------------- fairness and fallbacks

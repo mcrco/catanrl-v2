@@ -639,7 +639,8 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
 * **MCTS** takes engine units: `c_puct` 0.75 equals v1's 1.5. `dets ≥ 1`
   counts sampled worlds, and `oracle=true` searches the true state. There is
   no magic 0. `reuse=true` keeps a seat's search between its decisions
-  (1.6; native harness only, since the search is the seat's own history);
+  (1.6; the native harness and the server bridge, which stream a seat's
+  decisions; the Catanatron player decides one position at a time);
   `transpositions=true` turns on the engine's transposition table (one node
   for a position reached by reordered actions); `dedup` (execution-only,
   default true) evaluates byte-identical leaf rows once. `reuse` and
