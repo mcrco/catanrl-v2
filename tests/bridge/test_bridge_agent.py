@@ -3,8 +3,8 @@ and seeds (POLICY, MCTS dets=1 sims=8 with and without reuse, BELIEF
 worlds=2); decisions that depend on the view alone (paired games whose views
 are identical but whose hidden cards differ); a reusing MCTS agent's streams
 (one per game slot and seat, re-rooted along the seat's own moves, dropped
-with an evicted game, restarted after an error) and the choices without
-reuse pinned; fairness and fallback rules."""
+with a finished or an evicted game, restarted after an error) and the
+choices without reuse pinned; fairness and fallback rules."""
 
 from __future__ import annotations
 
@@ -59,7 +59,10 @@ def test_view_agent_decides_like_the_native_agent(key, name):
     Under the friendly robber the agent is also asked about lone robber
     moves, as a server asks (the options bound the others' points). A
     reusing agent reuses alike on both sides (the exact check on the true
-    game, the view check on the replayed one)."""
+    game, the view check on the replayed one); only the refusals' split
+    differs by construction (a replayed chance outcome the seat's view
+    agrees with: test_a_replayed_chance_outcome_splits_the_refusals_by_check
+    in test_mcts_reuse)."""
     level, params, index = CASES[key]
     friendly = name.endswith("-friendly")
     ls = lockstep(name.removesuffix("-friendly"), 20 + index, friendly_robber=friendly or None)
@@ -97,7 +100,12 @@ def test_view_agent_decides_like_the_native_agent(key, name):
     assert ours.stats["decisions"] == compared
     assert not any(k.startswith("fallback") for k in ours.stats)
     if native.needs_memory:
-        assert ours.native.counters == native.counters and ours.native.counters["decisions"] == compared
+        mine, theirs = ours.native.counters, native.counters
+        assert mine["decisions"] == compared
+        for counter in ("decisions", "fresh", "reused", "dropped_first", "dropped_over"):
+            assert mine[counter] == theirs[counter], counter
+        assert (mine["refused_diverged"] + mine["refused_engine"]
+                == theirs["refused_diverged"] + theirs["refused_engine"])
 
 
 # ---------------------------------------------------------------- views alone
@@ -218,6 +226,13 @@ def _reusing(dims: dict, **kwargs) -> ViewAgent:
     return ViewAgent(tiny_agent("MCTS", "full", dims, sims=8, dets=1, reuse=True), **kwargs)
 
 
+def _next_decision(agent: ViewAgent, ls, seat: int = 0) -> None:
+    """Play random moves up to ``seat``'s next decision with a choice, and its choice."""
+    while not (ls.current_seat == seat and len(ls.playable_json()) > 1):
+        ls.step(ls.choose())
+    ls.step(action_from_json(agent.decide(ls.view(seat), ls.playable_json())))
+
+
 def test_a_reusing_search_follows_the_seats_own_moves():
     """A seat playing its own choices: the search is re-rooted at the action
     played wherever the seat decides again right after it (an initial
@@ -249,24 +264,51 @@ def test_streams_are_per_game_and_an_evicted_game_frees_its_searches():
     games = [lockstep("base-2p", 60 + i) for i in range(3)]
     agent = _reusing(games[0].dims, strict=True, max_games=2)
     native = agent.native
-
-    def decide(ls, seat=0):
-        while not (ls.current_seat == seat and len(ls.playable_json()) > 1):
-            ls.step(ls.choose())
-        ls.step(action_from_json(agent.decide(ls.view(seat), ls.playable_json())))
-
-    decide(games[0])
-    decide(games[0])
+    _next_decision(agent, games[0])
+    _next_decision(agent, games[0])
     assert native.counters["fresh"] >= 1 and set(native._live) == {0} and len(native.pool) == 1
-    decide(games[1])  # slot 1: stream 1 * 2 + 0
+    _next_decision(agent, games[1])  # slot 1: stream 1 * 2 + 0
     assert set(native._live) == {0, 2} and len(native.pool) == 2 and native.counters["dropped_first"] == 0
-    decide(games[2])  # evicts game 0, takes slot 0 and drops game 0's search there
+    _next_decision(agent, games[2])  # evicts game 0, takes slot 0 and drops game 0's search there
     assert native.counters["dropped_first"] == 1 and set(native._live) == {0, 2} and len(native.pool) == 2
     assert [info["env"] for info in agent._games.values()] == [1, 0]
     assert list(agent._games) == [games[1].truth.id, games[2].truth.id]
-    decide(games[0])  # new again: evicts game 1 and takes its slot
+    _next_decision(agent, games[0])  # new again: evicts game 1 and takes its slot
     assert native.counters["dropped_first"] == 2 and set(native._live) == {0, 2} and len(native.pool) == 2
     assert list(agent._games) == [games[2].truth.id, games[0].truth.id]
+
+
+def test_a_finished_game_frees_its_searches_and_slot():
+    """A game's last message (``after``, or ``aborted`` with its id, through
+    ``observe``): at the next decision the agent drops the game's searches
+    and its slot is free, so the next new game takes it without evicting any
+    game and drops nothing at its first decision. The other seat's copy of
+    the message, one for a game never followed and a room voided before its
+    game (no id) do nothing."""
+    games = [lockstep("base-2p", 80 + i) for i in range(4)]
+    agent = _reusing(games[0].dims, strict=True, max_games=8)
+    native = agent.native
+    _next_decision(agent, games[0])
+    _next_decision(agent, games[1])
+    assert set(native._live) == {0, 2} and len(native.pool) == 2
+    over = {"type": "after", "game_id": games[0].truth.id, "index": 0, "state": {}}
+    agent.observe(over)
+    agent.observe(over)  # the other bot seat's copy
+    agent.observe({"type": "after", "game_id": "never followed", "index": 0, "state": {}})
+    agent.observe({"type": "aborted", "game_id": None, "reason": "nobody sat"})
+    assert set(native._live) == {0, 2}  # queued: the work happens at the next decision
+    _next_decision(agent, games[1])
+    assert set(native._live) == {2} and len(native.pool) == 1 and native.counters["dropped_over"] == 1
+    assert list(agent._games) == [games[1].truth.id] and agent._free_envs == [0]
+    _next_decision(agent, games[2])  # takes slot 0 without evicting game 1; nothing to drop there
+    assert set(native._live) == {0, 2} and len(native.pool) == 2 and native.counters["dropped_first"] == 0
+    assert [info["env"] for info in agent._games.values()] == [1, 0] and not agent._free_envs
+    agent.observe({"type": "aborted", "game_id": games[2].truth.id, "reason": "a seat left"})
+    _next_decision(agent, games[3])  # the aborted game's slot is freed at this decision, then taken
+    assert set(native._live) == {0, 2} and len(native.pool) == 2 and native.counters["dropped_over"] == 2
+    assert [info["env"] for info in agent._games.values()] == [1, 0] and not agent._free_envs
+    assert list(agent._games) == [games[1].truth.id, games[3].truth.id]
+    assert agent.summary()["search"]["dropped_over"] == 2 and native.counters["dropped_first"] == 0
 
 
 def test_an_error_in_the_agent_restarts_its_streams():

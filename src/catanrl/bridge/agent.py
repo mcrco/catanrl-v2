@@ -27,15 +27,18 @@ Per decision it
 
 An MCTS agent with ``reuse`` keeps a seat's search between its decisions.
 The ViewAgent hands it one stream per game slot and seat (``env *
-max_players + seat``, the slot a per-game integer that an evicted game's
-successor takes over, so its first decision drops the evicted game's
-searches as a new game in a harness env would) and ``first`` at the seat's
-first decision of a game, and sets the agent's ``reuse_check`` to ``"view"``:
+max_players + seat``, the slot a per-game integer) and ``first`` at the
+seat's first decision of a game, and sets the agent's ``reuse_check`` to
+``"view"``:
 the game it hands is replayed from views, so the agent compares what the
 seat sees (its private row, the legal actions, the mover, prompt and turn),
 not hands and RNG. A forced move (one offered action) is answered without
 the agent, so the search it kept is refused as diverged at the seat's next
-decision and a fresh one starts.
+decision and a fresh one starts. A game's last message (``after``, or
+``aborted`` once it had started; :meth:`ViewAgent.observe`) drops its
+searches and frees its slot at the next decision; a game whose end was never
+seen keeps them until it is evicted, when its slot's next game drops them at
+its first decision, as a new game in a harness env would.
 
 Decision seeds are ``catanrl.seeding.derive_seed(game_id, "decide", seat,
 index)``, ``index`` being the number of log entries before the decision: a
@@ -81,6 +84,8 @@ logger = logging.getLogger(__name__)
 #: ``default_action``): roll, else end the turn, else the first offered move.
 DEFAULT_PREFERENCE = ("ROLL", "END_TURN")
 GAME_MESSAGES = ("before", "decide", "step", "after")
+#: A game's end: played out, or voided after it started (``aborted`` carries its id then).
+END_MESSAGES = ("after", "aborted")
 
 
 class BridgeError(RuntimeError):
@@ -172,7 +177,8 @@ class ViewAgent:
     it. ``seed_fn(view, seat)`` replaces the decision seed. ``strict``
     raises :class:`BridgeError` where a fallback would be counted.
     ``max_games``: games (and seats) followed at once; a reusing MCTS agent
-    holds at most one live search per seat of each.
+    holds at most one live search per seat of each, and a game whose end
+    :meth:`observe` saw leaves at the next decision.
     """
 
     def __init__(self, agent: Any, *, device: str = "cpu", infer_rows: int = 1, mode: str = "strict",
@@ -200,7 +206,7 @@ class ViewAgent:
         #: (game id, color) -> the seat's tracker, most recent last.
         self.seats: OrderedDict[tuple[Any, str], SeatTracker] = OrderedDict()
         self._games: OrderedDict[Any, dict[str, Any]] = OrderedDict()
-        #: Game slots (the streams' env) evicted games gave up, for the next new game.
+        #: Game slots (the streams' env) finished and evicted games gave up, for the next new game.
         self._free_envs: list[int] = []
         self._inbox: deque[dict] = deque()
         self._lock = threading.Lock()
@@ -219,7 +225,7 @@ class ViewAgent:
             players = (body.get("config") or {}).get("num_players")
             if isinstance(players, int):
                 check_fair(self.native, players)
-        if body.get("type") in GAME_MESSAGES:
+        if body.get("type") in GAME_MESSAGES or body.get("type") in END_MESSAGES:
             self._inbox.append(dict(body))
 
     def _game(self, game_id: Any) -> dict[str, Any]:
@@ -227,9 +233,10 @@ class ViewAgent:
         if info is None:
             while len(self._games) >= self.max_games:
                 self._free_envs.append(self._games.popitem(last=False)[1]["env"])
-            # A new game takes an evicted game's slot: with a reusing agent, its first decision
-            # then drops the evicted game's live searches. "decided": the seats whose decisions
-            # reached the agent (its streams).
+            # A new game takes a freed slot: with a reusing agent, its first decision then
+            # drops the live searches an evicted game left there (a finished game's went
+            # with its last message). "decided": the seats whose decisions reached the agent
+            # (its streams).
             env = self._free_envs.pop() if self._free_envs else len(self._games)
             info = self._games[game_id] = {"supply": None, "sizes": {}, "env": env, "decided": set()}
         return info
@@ -237,6 +244,9 @@ class ViewAgent:
     def _drain(self) -> None:
         while self._inbox:
             body = self._inbox.popleft()
+            if body.get("type") in END_MESSAGES:
+                self._forget(body.get("game_id"))
+                continue
             info = self._game(body.get("game_id"))
             if body.get("type") == "before":
                 info["supply"] = (body.get("config") or {}).get("supply")
@@ -252,6 +262,19 @@ class ViewAgent:
             for (game_id, _color), tracker in self.seats.items():
                 if game_id == body.get("game_id"):
                     tracker.sizes[index] = sizes
+
+    def _forget(self, game_id: Any) -> None:
+        """The game is over: drop the agent's searches of it and free its slot now, not
+        when it is evicted ``max_games`` games later (a retained search is a full tree
+        with its games, 5-20 MB at 1024 sims). Nothing for a game not followed, one
+        evicted already, a second seat's copy of the message or a room voided before
+        its game (no id)."""
+        info = self._games.pop(game_id, None)
+        if info is None:
+            return
+        if self.memory:
+            self.native.forget(info["env"])
+        self._free_envs.append(info["env"])
 
     # ------------------------------------------------------------ deciding
 

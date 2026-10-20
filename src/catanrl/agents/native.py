@@ -390,12 +390,14 @@ class MctsAgent(NativeAgent):
     full search's retained subtree (about 12 MB at 1024 sims in 4p), so budget
     ``num_envs x MCTS seats x 12 MB``. An error in ``act`` and a ``bind`` to new dims
     empty the pool and restart every stream: each stream's next decision must be
-    marked ``first`` again. ``counters``: ``decisions``, ``fresh``,
-    ``reused``, ``dropped_first`` (live searches dropped at a first decision),
-    ``refused_diverged`` (the game is not the previous one plus the action played; a
-    search dropped by another seat's first decision counts here at its next decision,
-    since that move diverged it) and ``refused_engine`` (``advance`` returned false);
-    ``search_stats`` sums ``SearchStats`` over every search run.
+    marked ``first`` again. A caller that learns a game is over before a first decision
+    reaches its env (the server bridge, at the game's last message) drops the env's
+    searches with :meth:`forget`. ``counters``: ``decisions``, ``fresh``, ``reused``,
+    ``dropped_first`` (live searches dropped at a first decision), ``dropped_over``
+    (dropped by ``forget``), ``refused_diverged`` (the game is not the previous one plus
+    the action played; a search dropped by another seat's first decision counts here at
+    its next decision, since that move diverged it) and ``refused_engine`` (``advance``
+    returned false); ``search_stats`` sums ``SearchStats`` over every search run.
 
     ``reuse_check`` is how the game handed is matched against the previous game plus
     the action played: ``"exact"`` (``search_equivalent``) on the native harness, whose
@@ -565,13 +567,27 @@ class MctsAgent(NativeAgent):
             self._private = make_encoder(self.dims, "private")
         return bool(np.array_equal(self._private.encode(expected, seat), self._private.encode(game, seat)))
 
+    def forget(self, env: int) -> None:
+        """Drop ``env``'s live searches and restart its streams: its game is over. The
+        native harness says so only through the next game's first decision there, which
+        drops them alike; the server bridge sees the game's last message and calls this,
+        so a finished game's searches do not linger until a new game takes its slot."""
+        for stream in self._live_in(env):
+            self.pool.remove(self._live.pop(stream)[0])
+            self.counters["dropped_over"] += 1
+        players = int(self.dims["max_players"])
+        self._started -= {s for s in self._started if s // players == env}
+
     def _stale(self, stream: int) -> list[int]:
         """The live streams a first decision of ``stream`` outdates: every seat of its env
         (streams are ``env * max_players + seat``), whose previous game is over. A seat of
         the new game that decided already is among them, but this first decision is a move
         between its own, so its next decision would be refused as diverged anyway."""
+        return self._live_in(stream // int(self.dims["max_players"]))
+
+    def _live_in(self, env: int) -> list[int]:
         players = int(self.dims["max_players"])
-        return [s for s in self._live if s // players == stream // players]
+        return [s for s in self._live if s // players == env]
 
     def _record(self, stats: cpp.SearchStats) -> None:
         for name in ("nodes", "evaluations", "simulations", "coalesced_outcomes", "transpositions", "max_depth"):
