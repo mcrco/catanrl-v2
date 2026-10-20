@@ -7,6 +7,7 @@ params (a positional value is ``ckpt``)::
     MCTS:ckpt=arch-lineage/graph-s-s42.g1@e600:sims=256:dets=4
     BELIEF:ckpt=/anywhere/e000600.pt:worlds=16:tracker=exact
     PREDICT:ckpt=puffer-graph2/full@best:predictor=aux-hidden/main@best:round=false
+    TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:margin=1.0
     F    R    AB:2
 
 ``tracker`` (MCTS with dets, BELIEF) picks how the hand tracker deals the
@@ -23,6 +24,21 @@ rules' total; flags to 0/1); ``sample`` and ``temperature`` as POLICY's. It is
 fair (it reads the private row and a learned predictor), plays natively and
 as a Catanatron player, and is refused on the server harness (so by the bridge's
 ViewAgent, which ``catanrl play`` routes every model key through).
+
+``TRADE`` (``catanrl.agents.trade``) plays a policy (``ckpt``) as POLICY does and
+adds domestic trades, which stay outside the action space: a critic (``critic``,
+a second checkpoint ref pinned with part ``critic``; empty means ``ckpt``'s
+network, and the canonical form always names it) scores the mover's play-turn
+row after each candidate 1:1, 2:1 or 1:2 bundle (``shapes``), offers the ones
+that raise both seats' win probability by more than ``margin`` (points, ego
+view, Pareto-filtered, up to ``offers`` per own turn, at the first eligible row
+or ``when=every`` eligible row), accepts an offer when its own mean gain over
+``dets`` worlds dealt from its tracker exceeds ``accept_margin`` (a candidate
+needs a partner able to pay in a ``min_feasible`` fraction of those worlds), and
+confirms the acceptee that gains it most. ``propose=false`` is the responder-only
+seat; ``oracle=true`` reads the true hands instead of worlds (unfair). v1 refuses
+a recurrent critic, one with a separate critic block, a critic above ``private``,
+and every harness but the native one. ``audit`` and ``device`` are execution-only.
 
 ``LLM:model=…:strategy=…`` (``catanrl.agents.llm``) is a language model
 playing from the public state text; it exists only on the catanatron harness.
@@ -49,7 +65,7 @@ from catanatron.registry import REGISTRY, PlayerRegistry, SpecError, parse_spec
 
 from catanrl.checkpoint import Checkpoint, CheckpointRef
 
-MODEL_KEYS = ("POLICY", "MCTS", "BELIEF", "PREDICT")
+MODEL_KEYS = ("POLICY", "MCTS", "BELIEF", "PREDICT", "TRADE")
 LLM_KEY = "LLM"
 NATIVE_BOTS = ("F", "R")
 HARNESSES = ("native", "catanatron", "server")
@@ -102,6 +118,43 @@ class PredictParams:
     device: str = field(default="auto", metadata={"execution": True})
 
 
+#: The bundle shapes (cards given, cards received) a TRADE spec may enumerate, by the
+#: two-digit names ``shapes`` is written with (``-``-separated, since ``:`` splits params).
+TRADE_SHAPES = {"11": (1, 1), "21": (2, 1), "12": (1, 2)}
+
+
+@dataclass(frozen=True)
+class TradeParams:
+    ckpt: str
+    critic: str = ""  # empty: ckpt's network; resolution writes the pinned ref in
+    margin: float = 0.0
+    accept_margin: float = 0.0
+    dets: int = 8
+    min_feasible: float = 0.25
+    tracker: Literal["pool", "exact"] = "pool"
+    offers: int = 3
+    when: Literal["first", "every"] = "first"
+    shapes: str = "11-21-12"
+    propose: bool = True
+    oracle: bool = False
+    sample: bool = False
+    temperature: float = 1.0
+    allow_drift: bool = False
+    audit: bool = field(default=False, metadata={"execution": True})
+    device: str = field(default="auto", metadata={"execution": True})
+
+
+def trade_shapes(shapes: str) -> tuple[tuple[int, int], ...]:
+    """The (give, get) bundle shapes a TRADE spec's ``shapes`` names, in the order written:
+    a non-empty subset of :data:`TRADE_SHAPES`, each once. Raises ``SpecError``."""
+    names = shapes.split("-") if shapes else []
+    unknown = [n for n in names if n not in TRADE_SHAPES]
+    if not names or unknown or len(set(names)) != len(names):
+        raise SpecError(f"TRADE: shapes must name a non-empty subset of {'-'.join(TRADE_SHAPES)} once each "
+                        f"(give:get sizes, '-'-separated), not {shapes!r}")
+    return tuple(TRADE_SHAPES[n] for n in names)
+
+
 def _execution(params_cls: type) -> set[str]:
     return {f.name for f in dataclasses.fields(params_cls) if f.metadata.get("execution")}
 
@@ -128,27 +181,32 @@ class ResolvedAgent:
     details: dict = field(default_factory=dict, compare=False, repr=False)
     #: PREDICT's second checkpoint (the aux-head network), pinned like ``checkpoint``.
     predictor: CheckpointRef | None = None
+    #: TRADE's critic (``checkpoint`` itself when the spec names no other), pinned the same way.
+    critic: CheckpointRef | None = None
 
     def __str__(self) -> str:
         return self.canonical
 
     @property
     def checkpoints(self) -> tuple[CheckpointRef, ...]:
-        """Every checkpoint the agent runs: the policy's and, for PREDICT, the predictor's."""
-        return tuple(ref for ref in (self.checkpoint, self.predictor) if ref is not None)
+        """Every checkpoint the agent runs, each once: the policy's and, for PREDICT, the
+        predictor's, for TRADE the critic's."""
+        return tuple(dict.fromkeys(ref for ref in (self.checkpoint, self.predictor, self.critic) if ref is not None))
 
     def key_dict(self) -> dict:
         """What decides this agent's moves: no execution params, the model (both models for
-        PREDICT) and (for MCTS) the full engine SearchConfig."""
+        PREDICT and TRADE) and (for MCTS) the full engine SearchConfig."""
         out: dict[str, Any] = {"key": self.key, "harness": self.harness}
         if self.key in MODEL_KEYS:
-            skip = _execution(type(self.params)) | {"ckpt", "predictor"}
+            skip = _execution(type(self.params)) | {"ckpt", "predictor", "critic"}
             out["params"] = {k: v for k, v in dataclasses.asdict(self.params).items() if k not in skip}
             out["checkpoint"] = {"weights_sha256": self.checkpoint.weights_sha256, **self.details["model"]}
             if self.key == "MCTS":
                 out["search"] = self.details["search"]
             if self.key == "PREDICT":
                 out["predictor"] = {"weights_sha256": self.predictor.weights_sha256, **self.details["predictor"]}
+            if self.key == "TRADE":
+                out["critic"] = {"weights_sha256": self.critic.weights_sha256, **self.details["critic"]}
         elif self.key == LLM_KEY:
             out["params"] = dataclasses.asdict(self.params)
         else:
@@ -193,8 +251,14 @@ def check_spec_syntax(spec: str) -> None:
 
 
 def _ckpt_refs(params: Any) -> list[str]:
-    """The checkpoint refs of model params: ``ckpt`` and, for PREDICT, ``predictor``."""
-    return [params.ckpt] + ([params.predictor] if isinstance(params, PredictParams) else [])
+    """The checkpoint refs of model params: ``ckpt`` and, for PREDICT, ``predictor``, for
+    TRADE ``critic`` when the spec names one."""
+    refs = [params.ckpt]
+    if isinstance(params, PredictParams):
+        refs.append(params.predictor)
+    if isinstance(params, TradeParams) and params.critic:
+        refs.append(params.critic)
+    return refs
 
 
 def spec_ckpt(spec: str) -> str | None:
@@ -206,8 +270,8 @@ def spec_ckpt(spec: str) -> str | None:
 
 
 def spec_ckpts(spec: str) -> list[str]:
-    """Every checkpoint a model spec names, as written: ``[ckpt]``, or for PREDICT
-    ``[ckpt, predictor]``; empty for a bot."""
+    """Every checkpoint a model spec names, as written: ``[ckpt]``, for PREDICT
+    ``[ckpt, predictor]``, for TRADE ``[ckpt, critic]`` when it names a critic; empty for a bot."""
     key, args, named = parse_spec(spec)
     if key not in MODEL_KEYS:
         return []
@@ -235,6 +299,20 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
         raise SpecError("BELIEF: worlds must be positive")
     if key == "PREDICT" and not params.predictor:
         raise SpecError("PREDICT needs a predictor (a private checkpoint with an aux head, e.g. aux-hidden/main@best)")
+    if key == "TRADE":
+        if params.margin < 0 or params.accept_margin < 0:
+            raise SpecError("TRADE: margin and accept_margin are win-probability points a seat must gain (>= 0)")
+        if params.offers < 1:
+            raise SpecError("TRADE: offers caps the offers per own turn (>= 1)")
+        if params.oracle and params.dets > 1:
+            raise SpecError("TRADE: oracle=true reads the true hands and takes no dets")
+        if params.oracle and params.tracker != "pool":
+            raise SpecError("TRADE: oracle=true reads the true hands and takes no tracker")
+        if not params.oracle and params.dets < 1:
+            raise SpecError("TRADE: dets counts sampled worlds (>= 1); use oracle=true for the true hands")
+        if not 0 < params.min_feasible <= 1:
+            raise SpecError("TRADE: min_feasible is the fraction of worlds in which the partner can pay, in (0, 1]")
+        trade_shapes(params.shapes)
     return params
 
 
@@ -303,23 +381,30 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
             raise SpecError(f"{key}: {found.ref}: {error}") from None
         return tested, found.ref
 
-    ckpt, ref = pin(params.ckpt, "all" if key == "MCTS" else "actor")
+    # MCTS runs both heads of its network; so does TRADE when its critic is the policy's checkpoint.
+    one_network = key == "MCTS" or (key == "TRADE" and params.critic in ("", params.ckpt))
+    ckpt, ref = pin(params.ckpt, "all" if one_network else "actor")
     params = dataclasses.replace(params, ckpt=str(ref))
     levels, dims = ckpt.levels, ckpt.dims
     predictor, predictor_ref = None, None
+    critic, critic_ref = None, None
     if key == "PREDICT":
         predictor, predictor_ref = pin(params.predictor, "aux")  # the trunk and the aux head: what the agent runs
         params = dataclasses.replace(params, predictor=str(predictor_ref))
         _check_predict(ref, levels, predictor, predictor_ref)
+    if key == "TRADE":
+        critic, critic_ref = (ckpt, ref) if one_network else pin(params.critic, "critic")  # its values: what the agent reads
+        params = dataclasses.replace(params, critic=str(critic_ref))  # the canonical spec always names the critic
+        _check_trade(critic, critic_ref, harness)
     if ckpt.recurrent:
         # A recurrent network's memory is its seat's decision history: only the native
-        # POLICY agent keeps one (MCTS leaves and BELIEF worlds have none, and the Catanatron
-        # and server bridges do not replay a seat's decisions yet).
-        if key != "POLICY":
+        # POLICY agent, and TRADE's policy inside it, keep one (MCTS leaves and BELIEF worlds
+        # have none, and the Catanatron and server bridges do not replay a seat's decisions yet).
+        if key not in ("POLICY", "TRADE"):
             raise SpecError(f"{key}: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only POLICY "
-                            "keeps a seat's decision history")
+                            "(and TRADE's policy) keeps a seat's decision history")
         if harness != "native":
-            raise SpecError(f"POLICY: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only the "
+            raise SpecError(f"{key}: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only the "
                             "native harness keeps a seat's decision history")
     configs = [g if hasattr(g, "num_players") else load_game(g) for g in games]
     if configs and not ckpt.dims_agnostic and dims_for(configs) != dims:
@@ -327,10 +412,13 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
                         f"these games need {dims_for(configs)}")
     players = {g.num_players for g in configs} or {dims["max_players"]}
     level = levels["level"]
+    policy_fair = level == "private" or (level == "public" and players == {2})
     if key == "POLICY":
-        fair = level == "private" or (level == "public" and players == {2})
+        fair = policy_fair
     elif key == "MCTS":
         fair = not params.oracle
+    elif key == "TRADE":  # the critic reads private rows (_check_trade) of worlds dealt from the seat's tracker
+        fair = policy_fair and not params.oracle
     else:  # BELIEF samples worlds from what its seat saw; PREDICT reads the private row and a learned predictor
         fair = True
     if harness == "server" and key == "POLICY" and level != "private":
@@ -352,9 +440,14 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
         details["predictor"] = {"model": predictor.header["model"], "levels": predictor.levels,
                                 "dims": predictor.dims, "allow_drift": params.allow_drift}
         label += f"+{predictor_ref.run or predictor_ref.path.name}@e{predictor_ref.epoch}"
+    if critic is not None:
+        details["critic"] = {"model": critic.header["model"], "levels": critic.levels, "dims": critic.dims,
+                             "allow_drift": params.allow_drift}
+        if critic_ref != ref:
+            label += f"+critic {critic_ref.run or critic_ref.path.name}@e{critic_ref.epoch}"
     return ResolvedAgent(key=key, impl=f"catanrl.{key.lower()}", params=params, checkpoint=ref, fair=fair,
                          label=label, canonical=canonical, harness=harness, details=details,
-                         predictor=predictor_ref)
+                         predictor=predictor_ref, critic=critic_ref)
 
 
 def _check_predict(ref: CheckpointRef, levels: Mapping[str, str], predictor: Checkpoint,
@@ -374,6 +467,30 @@ def _check_predict(ref: CheckpointRef, levels: Mapping[str, str], predictor: Che
     if predictor.recurrent:
         raise SpecError(f"PREDICT: predictor {predictor_ref} is a recurrent network; PREDICT runs the head on "
                         "single positions, without the seat's decision history its predictions read")
+
+
+def _check_trade(critic: Checkpoint, critic_ref: CheckpointRef, harness: str) -> None:
+    """TRADE's critic, v1: a stateless ``private`` network with no separate critic block, read
+    on the native harness only. The agent scores one row per candidate (the mover's play-turn
+    row with a stand-in partner hand of the public size, which at ``private`` is the true row),
+    so a critic at another level would need world-averaged rows, a critic block a second row,
+    and a recurrent critic the seat's decision history the trade rows do not carry."""
+    from catanrl.envs.encoding import critic_level_of
+
+    if harness != "native":
+        raise SpecError(f"TRADE plays through the native harness, not {harness}: an offer is not an action the "
+                        "Catanatron mirror can return, and the server bridge cannot negotiate")
+    if critic.recurrent:
+        raise SpecError(f"TRADE: critic {critic_ref} is a recurrent ({critic.header['model']['class']}) network; "
+                        "its values read a seat's decision history, which the trade rows do not carry")
+    levels = critic.levels
+    separate = critic_level_of(levels["level"], levels["critic_level"])
+    if separate is not None:
+        raise SpecError(f"TRADE: critic {critic_ref} reads a separate {separate} critic block; the agent encodes one "
+                        "row per candidate, at the actor's level")
+    if levels["level"] != "private":
+        raise SpecError(f"TRADE: critic {critic_ref} reads {levels['level']} rows; v1 reads the critic on private "
+                        "rows (one row per candidate; a public or full critic needs a row per dealt world)")
 
 
 def _plain(value: Any) -> Any:
@@ -635,11 +752,24 @@ class PredictPlayer(CatanrlPlayer):
     Params = PredictParams
 
 
-_PLAYERS = {"POLICY": PolicyPlayer, "MCTS": MctsPlayer, "BELIEF": BeliefPlayer, "PREDICT": PredictPlayer}
+class TradePlayer(CatanrlPlayer):
+    """A catanrl policy that also offers, answers and confirms domestic trades by its critic.
+    It plays natively only: resolution refuses the other harnesses, so ``decide`` is never
+    reached (the mirror returns one action, and an offer starts a negotiation)."""
+
+    KEY = "TRADE"
+    Params = TradeParams
+
+    def decide(self, game, playable_actions):
+        raise RuntimeError("TRADE plays through the native harness only; resolve it with harness='native'")
+
+
+_PLAYERS = {"POLICY": PolicyPlayer, "MCTS": MctsPlayer, "BELIEF": BeliefPlayer, "PREDICT": PredictPlayer,
+            "TRADE": TradePlayer}
 
 
 def register(registry: PlayerRegistry = REGISTRY) -> None:
-    """Make POLICY, MCTS, BELIEF, PREDICT and LLM buildable by key. Idempotent."""
+    """Make POLICY, MCTS, BELIEF, PREDICT, TRADE and LLM buildable by key. Idempotent."""
     import catanatron.players  # noqa: F401  (registers the builtins first)
 
     from catanrl.agents.llm.player import LlmPlayer

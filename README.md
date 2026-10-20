@@ -93,11 +93,14 @@ rec = catanrl.evaluate(["POLICY:puffer-graph2/full@ref", "F"], "heldout-2p")
 ```
 
 One agent spec string (`POLICY:…`, `MCTS:…:sims=N:dets=K`, `BELIEF:…:worlds=K`,
-or any Catanatron registry bot) plays natively, as a Catanatron `Player`, as a
-TUI seat and as a server bot. Fair agents use only their seat's information:
+`TRADE:…:critic=…`, or any Catanatron registry bot) plays natively, as a
+Catanatron `Player`, as a TUI seat and as a server bot (`TRADE`, which offers,
+answers and confirms domestic trades by its critic's win probabilities, plays
+natively only). Fair agents use only their seat's information:
 `POLICY` at the `private` level (or `public` in two-player games, where every
-resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, and
-`BELIEF`. The worlds those two sample come from the seat's hand tracker:
+resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, `BELIEF`,
+and `TRADE` with a `private` critic unless `oracle=true` (true hands). The
+worlds those three sample come from the seat's hand tracker:
 `tracker=pool` (default) deals the unknown cards uniformly, `tracker=exact`
 draws from the exact posterior over hidden steals (DESIGN 1.5).
 

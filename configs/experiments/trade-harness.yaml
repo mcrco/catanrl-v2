@@ -1,0 +1,51 @@
+# Does a critic-driven domestic-trade seat win more? The TRADE harness agent plays
+# aux-hidden-4p/plain@best (the lambda critic the trade oracle measured; seat sum 1.00) as
+# policy and critic and offers, answers and confirms trades by that critic's win
+# probabilities (trades stay outside the action space); the three other seats are
+# responder-only copies (propose=false) judging offers by the same critic, since native F
+# never accepts an offer. Each row is paired with its control, the same table with a plain
+# POLICY in slot 0 (nobody offers, minutes to play): slots 1-3 are identical in both keys,
+# so results.paired gives the McNemar delta of slot 0's share against 25.
+# 1,000 boards x 4 rotations = 4,000 games per row: a 25% share resolves to +-1.3 pp
+# (Wilson); a 1 pp edge would need ~15,000 paired games. ~15-25 min per proposing row.
+#   M1  [T, N, N, N] at the owner's rule (margins 0, strict +EV in the ego view, Pareto
+#       front, 3 offers a turn) against M1c [POLICY, N, N, N]: does proposing pay
+#   M2  the 1 pp arm, responders at 1 pp too, against M2c: the same above the critic's
+#       1.0 pp median residual
+# The prior: the oracle rerun on this critic found a mutual trade at >= 2 pp in 2.5% of
+# positions [2.0, 3.2] with median gains 0.8/0.7 pp, the size of the critic's noise, so a
+# null is expected at 2 pp (an optional arm, not run here) and M2 is the row that can move;
+# the 0 pp row is the owner's rule, read next to the pilot's confirmed-trade counts.
+name: trade-harness
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 1000}   # M1
+      lineup:
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+    - suite: {name: heldout-4p, boards: 1000}   # M1c
+      lineup:
+        - "POLICY:ckpt=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+    - suite: {name: heldout-4p, boards: 1000}   # M2
+      lineup:
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:margin=1.0"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+    - suite: {name: heldout-4p, boards: 1000}   # M2c
+      lineup:
+        - "POLICY:ckpt=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}   # pinned at the pre-2026-10-19 defaults: a run made before the change still matches
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

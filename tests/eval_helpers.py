@@ -8,12 +8,20 @@ import dataclasses
 import torch
 
 from catanrl.agents.native import make_native_agent
-from catanrl.agents.spec import BeliefParams, MctsParams, PolicyParams, PredictParams, ResolvedAgent
+from catanrl.agents.spec import (
+    BeliefParams,
+    MctsParams,
+    PolicyParams,
+    PredictParams,
+    ResolvedAgent,
+    TradeParams,
+)
 from catanrl.envs.encoding import action_size, dims_for, row_layout
 from catanrl.eval.suites import Suite
 from catanrl.models import build_model
 
-PARAMS = {"POLICY": PolicyParams, "MCTS": MctsParams, "BELIEF": BeliefParams, "PREDICT": PredictParams}
+PARAMS = {"POLICY": PolicyParams, "MCTS": MctsParams, "BELIEF": BeliefParams, "PREDICT": PredictParams,
+          "TRADE": TradeParams}
 
 
 def make_suite(scenarios, turn_limit: int = 500) -> Suite:
@@ -33,13 +41,16 @@ def tiny_model(games=("base-2p",), level="private", seed=0, preset="graph-tiny")
                        num_actions=action_size(dims), layout=row_layout(dims, level))
 
 
-def agent(key: str, model=None, infer_rows: int = 16, device: str = "cpu", predictor=None, **params):
+def agent(key: str, model=None, infer_rows: int = 16, device: str = "cpu", predictor=None, critic=None, **params):
     """A native agent over in-memory networks: ``model`` (the policy) and, for PREDICT,
-    ``predictor`` (the private aux-head network)."""
+    ``predictor`` (the private aux-head network), for TRADE ``critic`` (a stateless private
+    network; None reads the critic head of ``model``)."""
     if key == "PREDICT":
         params = PredictParams(ckpt="<in memory>", predictor="<in memory>", **params)
     elif key in PARAMS:
         params = PARAMS[key](ckpt="<in memory>", **params)
     resolved = ResolvedAgent(key=key, impl="test", params=params, checkpoint=None, fair=False, label=key,
                              canonical=key)
-    return make_native_agent(resolved, device=device, infer_rows=infer_rows, model=model, predictor=predictor)
+    # ``critic`` is handed over only when given: the other keys' backends take no such network.
+    extra = {"critic": critic} if critic is not None else {}
+    return make_native_agent(resolved, device=device, infer_rows=infer_rows, model=model, predictor=predictor, **extra)

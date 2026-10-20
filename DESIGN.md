@@ -94,7 +94,8 @@ Map-agnostic and fixed-size for given maxima:
 
 Globals: roll, end turn, buy dev card, play knight, play road building,
 discard ×5, monopoly ×5, year of plenty ×15, maritime trade ×60 (give, get,
-ratio). Domestic trades are out of scope for now (as in v1). The graph
+ratio). Domestic trades stay outside the action space (as in v1): no network
+emits an offer; the `TRADE` harness agent (6.5) plays them by its critic. The graph
 network's policy head emits node, edge and tile logits from the matching
 embeddings and global logits from the pooled state, which is exactly this
 layout.

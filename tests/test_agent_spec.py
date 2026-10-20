@@ -10,12 +10,13 @@ import torch
 from catanatron.models.player import Color
 from catanatron.registry import REGISTRY, SpecError
 
-from catanrl.agents import MctsParams, resolve_agent
+from catanrl.agents import MctsParams, TradeParams, resolve_agent
+from catanrl.agents.spec import TradePlayer, check_spec_syntax, spec_ckpts, trade_shapes
 from catanrl.checkpoint import save
 from catanrl.config import Variant, config_hash, resolve
 from catanrl.envs.encoding import action_size, dims_for, row_layout
 from catanrl.models import build_model
-from catanrl.runs import RunWriter
+from catanrl.runs import RunWriter, spec_runs
 
 
 def tiny(level="private", games=("base-2p",), preset="graph-tiny", seed=0):
@@ -178,3 +179,100 @@ def test_the_mirror_follows_an_undo(ckpts):
     mirror = red._sync(snapshot, red._agent())
     native = {tuple(a) for a in mirror["game"].playable_actions}
     assert native == {tuple(from_catanatron_action(a)) for a in snapshot.playable_actions}
+
+
+# ---------------------------------------------------------------- TRADE
+
+
+@pytest.fixture
+def trade_ckpts(ckpts, tmp_path):
+    """``ckpts`` plus the critics v1 refuses: a recurrent (lstm-tiny) network and a graph
+    network with a separate full critic block."""
+    lstm = tiny(preset="lstm-tiny")
+    ckpts["lstm"] = save(tmp_path / "lstm.pt", lstm, run=None, epoch=0, agent_steps=0,
+                         config={"model": lstm.spec}, code={}).path
+    torch.manual_seed(2)
+    dims = dims_for(["base-2p"])
+    block = build_model({"preset": "graph-tiny"}, dims=dims, levels={"level": "private", "critic_level": "full"},
+                        num_actions=action_size(dims), layout=row_layout(dims, "private", "full"))
+    ckpts["block"] = save(tmp_path / "block.pt", block, run=None, epoch=0, agent_steps=0,
+                          config={"model": block.spec}, code={}).path
+    return ckpts
+
+
+def test_trade_canonical_names_the_critic_and_keys_both_networks(ckpts):
+    ref = ckpts["run"]
+    pinned = f"exp/v@e3#{ref.weights_sha256[:12]}"
+    one = resolve_agent("TRADE:ckpt=exp/v")
+    assert one.canonical == (f"TRADE:ckpt={pinned}:critic={pinned}:margin=0.0:accept_margin=0.0:dets=8"
+                             ":min_feasible=0.25:tracker=pool:offers=3:when=first:shapes=11-21-12:propose=true"
+                             ":oracle=false:sample=false:temperature=1.0:allow_drift=false")
+    assert resolve_agent(one.canonical).canonical == one.canonical
+    for same in ("TRADE:ckpt=exp/v:critic=exp/v", "TRADE:ckpt=exp/v@best:critic=exp/v@e3",
+                 "TRADE:ckpt=exp/v:audit=true:device=cpu"):
+        other = resolve_agent(same)
+        assert other.canonical == one.canonical and other.key_dict() == one.key_dict()
+    assert str(one.critic) == str(one.checkpoint) == str(ref) and one.checkpoints == (one.checkpoint,)
+    assert one.fair and one.label == "TRADE:exp/v@e3" and isinstance(one.params, TradeParams)
+    assert one.params.critic == pinned and one.params.audit is False
+    key = one.key_dict()
+    assert key["checkpoint"]["weights_sha256"] == ref.weights_sha256 == key["critic"]["weights_sha256"]
+    assert key["critic"]["levels"]["level"] == "private" and key["critic"]["model"]["class"] == "graph"
+    assert key["params"] == {"margin": 0.0, "accept_margin": 0.0, "dets": 8, "min_feasible": 0.25, "tracker": "pool",
+                             "offers": 3, "when": "first", "shapes": "11-21-12", "propose": True, "oracle": False,
+                             "sample": False, "temperature": 1.0, "allow_drift": False}
+    arm = resolve_agent("TRADE:ckpt=exp/v:margin=1")
+    assert arm.key_dict() != key and ":margin=1.0:" in arm.canonical and arm.key_dict()["params"]["margin"] == 1.0
+    two = resolve_agent("TRADE:ckpt=exp/v:critic=exp/v@e0:propose=false")
+    assert two.label == "TRADE:exp/v@e3+critic exp/v@e0" and two.critic.epoch == 0 and two.checkpoint.epoch == 3
+    assert two.checkpoints == (two.checkpoint, two.critic) and not two.key_dict()["params"]["propose"]
+    assert two.key_dict()["critic"]["weights_sha256"] != ref.weights_sha256
+    assert resolve_agent(two.canonical).canonical == two.canonical
+    assert spec_ckpts("TRADE:ckpt=exp/v@best:critic=exp/v@e0:margin=1") == ["exp/v@best", "exp/v@e0"]
+    assert spec_ckpts("TRADE:ckpt=exp/v") == ["exp/v"]
+    assert spec_runs("TRADE:ckpt=exp/v@best:critic=exp/w@e0") == ["exp/v", "exp/w"]
+    assert spec_runs(f"TRADE:ckpt=exp/v:critic={ckpts['private']}") == ["exp/v"]
+    check_spec_syntax("TRADE:ckpt=${run}@best:critic=exp/v@best:margin=1")
+    check_spec_syntax("TRADE:ckpt=exp/v@best:critic=${params.critic}")
+    assert trade_shapes("21") == ((2, 1),) and trade_shapes("11-21-12") == ((1, 1), (2, 1), (1, 2))
+
+
+def test_trade_fairness_and_refusals(trade_ckpts):
+    c = trade_ckpts
+    assert resolve_agent(f"TRADE:ckpt={c['private']}").fair
+    assert not resolve_agent(f"TRADE:ckpt={c['private']}:oracle=true:dets=1").fair
+    public = resolve_agent(f"TRADE:ckpt={c['public']}:critic={c['private']}")
+    assert public.fair and not resolve_agent(public.canonical, games=["base-4p"]).fair
+    assert resolve_agent(f"TRADE:ckpt={c['lstm']}:critic={c['private']}").fair  # a recurrent policy, natively
+    for spec, reason in (
+        (f"TRADE:ckpt={c['private']}:critic={c['lstm']}", "recurrent"),
+        (f"TRADE:ckpt={c['lstm']}", "recurrent"),  # one network: the critic is the policy's
+        (f"TRADE:ckpt={c['private']}:critic={c['block']}", "critic block"),
+        (f"TRADE:ckpt={c['private']}:critic={c['public']}", "private"),
+        (f"TRADE:ckpt={c['full']}", "private"),
+        ("TRADE:ckpt=exp/v:dets=0", "dets"),
+        ("TRADE:ckpt=exp/v:oracle=true", "dets"),
+        ("TRADE:ckpt=exp/v:oracle=true:dets=1:tracker=exact", "tracker"),
+        ("TRADE:ckpt=exp/v:shapes=22", "shapes"),
+        ("TRADE:ckpt=exp/v:shapes=11-11", "shapes"),
+        ("TRADE:ckpt=exp/v:shapes=", "shapes"),
+        ("TRADE:ckpt=exp/v:margin=-1", "margin"),
+        ("TRADE:ckpt=exp/v:accept_margin=-0.5", "margin"),
+        ("TRADE:ckpt=exp/v:offers=0", "offers"),
+        ("TRADE:ckpt=exp/v:min_feasible=0", "min_feasible"),
+        ("TRADE:ckpt=exp/v:min_feasible=1.5", "min_feasible"),
+        ("TRADE:ckpt=exp/v:when=never", "when"),
+        ("TRADE:ckpt=exp/v:critic=exp/nope", "nope"),
+        ("TRADE:ckpt=exp/v:worlds=2", "worlds"),
+        ("TRADE:critic=exp/v", "ckpt"),
+    ):
+        with pytest.raises(SpecError, match=reason):
+            resolve_agent(spec)
+    for harness in ("catanatron", "server"):
+        with pytest.raises(SpecError, match="native"):
+            resolve_agent("TRADE:ckpt=exp/v", harness=harness)
+    assert "TRADE" in REGISTRY
+    player = REGISTRY.build(f"TRADE:ckpt={c['private']}:margin=1", Color.RED)
+    assert isinstance(player, TradePlayer) and player.params.margin == 1.0 and player.params.offers == 3
+    with pytest.raises(RuntimeError, match="native"):
+        player.decide(None, [1, 2])

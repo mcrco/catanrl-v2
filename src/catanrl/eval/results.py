@@ -21,7 +21,10 @@ record ``valid: false``.
 (:mod:`catanrl.eval.catanatron`: the only harness for ``LLM`` agents); the
 harness is in the key, with Catanatron's code in ``code``. Rows of LLM seats
 carry an ``llm`` entry (per-game decisions, tokens, retries, fallbacks, wall
-time) that the summary totals per slot and ``verify`` ignores. A record with
+time) that the summary totals per slot and ``verify`` ignores. Rows of a game
+with a domestic trade (a ``TRADE`` seat at the table) carry ``trades`` (offers,
+accepts and confirms per seat), an outcome the summary totals per slot; other
+rows are as they always were. A record with
 a real language model (not a stub) in its lineup is :class:`Unreplayable`:
 ``verify`` refuses it unless forced, since the model never answers the same
 way twice and every replayed game is paid for.
@@ -224,10 +227,27 @@ def summarize(rows: Sequence[Mapping[str, Any]], labels: Sequence[str]) -> dict:
         llm = [r["llm"][slot] for r in mine if r.get("llm") and slot < len(r["llm"]) and r["llm"][slot]]
         if llm:
             info["llm"] = llm_totals(llm)
+        trading = [r for r in mine if r.get("trades")]  # written only by trading lineups, and only when non-zero
+        if trading:
+            info["trades"] = trade_totals(trading, slot, n)
         slots.append(info)
     return {"games": len(rows), "score_rate": slots[0]["score_rate"], "wilson": slots[0]["wilson"],
             "truncated": sum(1 for r in rows if r.get("truncated")),
             "forfeits": sum(sum(r.get("forfeits") or []) for r in rows), "slots": slots}
+
+
+def trade_totals(rows: Sequence[Mapping[str, Any]], slot: int, games: int) -> dict:
+    """One slot's domestic trades over its ``games``: offers it made, offers it accepted and
+    trades it confirmed at its seats (a row's ``trades`` holds each per seat; a game without
+    the field had none), with per-game means."""
+    keys = ("offers", "accepts", "confirms")
+    totals = {k: 0 for k in keys}
+    for r in rows:
+        for seat, s in enumerate(r["seats"]):
+            if s == slot:
+                for k in keys:
+                    totals[k] += int(r["trades"][k][seat])
+    return {**totals, "per_game": {k: totals[k] / games for k in keys}}
 
 
 def llm_totals(stats: Sequence[Mapping[str, Any]]) -> dict:
@@ -372,6 +392,8 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, harness="native", al
         "refs": [str(a.checkpoint) if a.checkpoint else None for a in agents],
         # PREDICT's second checkpoint per slot (None elsewhere): both are pinned in the key.
         "predictors": [str(a.predictor) if getattr(a, "predictor", None) else None for a in agents],
+        # TRADE's critic per slot (None elsewhere), pinned in the key the same way.
+        "critics": [str(a.critic) if getattr(a, "critic", None) else None for a in agents],
         "fair": [a.fair for a in agents], "labels": labels,
         "allow_drift": any(bool(getattr(a.params, "allow_drift", False)) for a in agents),
         "valid": summary["forfeits"] == 0, "mixed": len({canon.digest(s["execution"]) for s in segments}) > 1,
