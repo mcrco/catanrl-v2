@@ -1,0 +1,31 @@
+# Does accepting pay? The pilot (2026-10-20, 200 games a row) put a proposing TRADE seat at a
+# 46.5% share against three responder-only copies, so the design's optional M3 runs: the
+# responder-only seat (TRADE propose=false: plays the policy, accepts offers its critic likes)
+# against a seat that rejects every offer (plain POLICY) at a table of three proposers.
+#   M3  [N, T, T, T]   the acceptor's share with three proposers around it
+#   M3c [Q, T, T, T]   the same table with a seat that never trades (its control; results.paired)
+# T = TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best at the defaults
+# (margins 0, Pareto front, 3 offers a turn), N = T with propose=false, Q = POLICY on the same
+# checkpoint. 1,000 boards x 4 rotations = 4,000 games a row; three proposers make about three
+# times the critic reads of the one-proposer rows. Records land under aux-hidden-4p/plain.
+name: trade-harness-m3
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 1000}   # M3
+      lineup:
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best"
+    - suite: {name: heldout-4p, boards: 1000}   # M3c
+      lineup:
+        - "POLICY:ckpt=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
