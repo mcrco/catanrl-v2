@@ -18,9 +18,17 @@ on ``num_envs``, ``threads`` or the order games finish in:
 
 Games run on cppanatron's VecEnv in schedule mode (engine E1): bots and
 forced moves play inside the engine on its threads, each game's random bots
-draw from its own stream (E2), and with an MCTS (``dets``) or BELIEF agent in
-the lineup the VecEnv keeps a hand tracker per learner seat, fed every
+draw from its own stream (E2), and with an MCTS (``dets``), BELIEF or TRADE agent
+in the lineup the VecEnv keeps a hand tracker per learner seat, fed every
 transition (E6), which the agents read through ``tracker(env, seat)``.
+
+Domestic trades are outside the action space: a TRADE seat's offer comes back
+from ``act`` as a ``cpp.Action`` and a trade prompt (a responder's
+DECIDE_TRADE, the proposer's DECIDE_ACCEPTEES: an acting row whose mask has no
+legal index) goes to ``respond_trade``; both are played through
+``VecEnv.set_action`` and count as the seat's decisions like any other row.
+A row of a game with a trade carries ``trades`` (offers, accepts and confirms
+per seat); rows of lineups without one are as they always were.
 """
 
 from __future__ import annotations
@@ -36,6 +44,10 @@ from catanrl import games as game_configs
 from catanrl.agents.native import BotAgent, NativeAgent, make_native_agent
 from catanrl.envs.encoding import dims_for, encoder_dims, info_level
 from catanrl.seeding import derive_seed as _derive_seed
+
+#: The trade steps a row's ``trades`` counts, by the action a learner seat played.
+TRADE_COUNTS = {cpp.ActionType.OFFER_TRADE: "offers", cpp.ActionType.ACCEPT_TRADE: "accepts",
+                cpp.ActionType.CONFIRM_TRADE: "confirms"}
 
 # ---------------------------------------------------------------- schedule inputs
 
@@ -76,7 +88,7 @@ def _agents(lineup: Sequence[Any], fill: Any, *, device: str, infer_rows: int, m
 
 
 def _row(scheduled: Any, *, num_slots: int, winner_seat: int | None, turns: int, truncated: bool,
-         stuck: bool, decisions: Sequence[int]) -> dict[str, Any]:
+         stuck: bool, decisions: Sequence[int], trades: Mapping[str, Sequence[int]] | None = None) -> dict[str, Any]:
     seats = [int(s) for s in scheduled.seats]
     n = len(seats)
     scores = [0.0] * num_slots
@@ -85,7 +97,7 @@ def _row(scheduled: Any, *, num_slots: int, winner_seat: int | None, turns: int,
     elif truncated:
         for slot in seats:
             scores[slot] += 1.0 / n
-    return {
+    row = {
         "game_id": scheduled.game_id,
         "seats": seats,
         "winner": None if winner_seat is None else seats[winner_seat],
@@ -97,6 +109,15 @@ def _row(scheduled: Any, *, num_slots: int, winner_seat: int | None, turns: int,
         "forfeits": [0] * num_slots,
         "decisions": [int(d) for d in decisions],
     }
+    # An outcome field of games with a trade only, so every row of a lineup that cannot trade
+    # stays byte-identical to the records already written (verify/recompute replay them).
+    if trades is not None and any(any(counts) for counts in trades.values()):
+        row["trades"] = {kind: [int(c) for c in trades[kind]] for kind in TRADE_COUNTS.values()}
+    return row
+
+
+def _trade_counts(seats: int) -> dict[str, list[int]]:
+    return {kind: [0] * seats for kind in TRADE_COUNTS.values()}
 
 
 def settlement_capacity(catan_map: cpp.CatanMap) -> int:
@@ -187,7 +208,9 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
     queue = list(games)
     queue.reverse()
     idle = list(range(num_envs - 1, -1, -1))
-    running: dict[int, tuple[Any, list[int]]] = {}
+    # Per env: the scheduled game, the seats' decision counts (the harness's ply, equal to the
+    # engine's seat_decisions since every forwarded acting row is one decision) and its trades.
+    running: dict[int, tuple[Any, list[int], dict[str, list[int]]]] = {}
     num_slots = len(agents)
 
     def seat_kind(agent) -> str:
@@ -196,18 +219,27 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
     def collect() -> None:
         for done in vec.pop_finished():
             env = int(done["env"])
-            scheduled, _decisions = running.pop(env)
+            scheduled, _decisions, trades = running.pop(env)
             winner = int(done["winner"])
             on_game(_row(scheduled, num_slots=num_slots, winner_seat=None if winner < 0 else winner,
                          turns=int(done["turns"]), truncated=bool(done["truncated"]),
-                         stuck=bool(done["stuck"]), decisions=[int(d) for d in done["decisions"]]))
+                         stuck=bool(done["stuck"]), decisions=[int(d) for d in done["decisions"]], trades=trades))
             idle.append(env)
+
+    def inject(row: int, env: int, seat: int, action: cpp.Action) -> None:
+        """Play a trade step (outside the action space) for the row: the engine checks it
+        before any env moves and plays it as the seat's decision; the buffer entry is never read."""
+        vec.set_action(env, action)
+        buffers["actions"][row] = -1
+        kind = TRADE_COUNTS.get(action.action_type)
+        if kind is not None:
+            running[env][2][kind][seat] += 1
 
     while True:
         starts = []
         while queue and idle:
             env, scheduled = idle.pop(), queue.pop()
-            running[env] = (scheduled, [0] * len(scheduled.seats))
+            running[env] = (scheduled, [0] * len(scheduled.seats), _trade_counts(len(scheduled.seats)))
             starts.append({
                 "env": env, "scenario": int(scheduled.scenario),
                 "map": maps.get(scheduled.scenario, scheduled.map_seed),
@@ -237,23 +269,43 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
                 rows = np.stack([agent.encode(g, int(s)) for g, s in zip(games_list, seats)])
             else:
                 rows = buffers["observations"][rows_idx]
+            masks = rows[:, -size:]
             seeds, first = [], []
-            for e, s in zip(envs, seats):
-                scheduled, decisions = running[int(e)]
+            for e, s in zip(envs, seats):  # every forwarded row is one decision, a trade prompt too
+                scheduled, decisions, _ = running[int(e)]
                 seeds.append(_derive_seed(int(scheduled.game_seed), "decide", int(scheduled.rotation), int(s),
                                           decisions[int(s)]))
                 first.append(decisions[int(s)] == 0)
                 decisions[int(s)] += 1
+            seeds, first = np.array(seeds, dtype=np.uint64), np.array(first, dtype=bool)
             seat_trackers = ([vec.tracker(int(e), int(s)) for e, s in zip(envs, seats)]
                              if agent.needs_trackers else None)
             # A recurrent agent's memory stream is the row (env x seat): it is reset at the
             # seat's first decision, so which env a game plays in does not matter.
-            memory = ({"streams": rows_idx.astype(np.int64), "first": np.array(first, dtype=bool)}
-                      if getattr(agent, "needs_memory", False) else {})
-            choices = agent.act(rows, rows[:, -size:], np.array(seeds, dtype=np.uint64),
-                                games=games_list if agent.needs_games else None, trackers=seat_trackers,
-                                **memory)
-            buffers["actions"][rows_idx] = np.asarray(choices, dtype=np.int32)
+            streams = rows_idx.astype(np.int64)
+            remembers = bool(getattr(agent, "needs_memory", False))
+            # A trade prompt is the one acting row with no legal index (the mask block skips the
+            # trade actions and the no-op is a waiting row's): it is answered with a cpp.Action.
+            is_trade = ~masks.any(axis=1)
+            play, trade = np.flatnonzero(~is_trade), np.flatnonzero(is_trade)
+            if len(play):
+                memory = {"streams": streams[play], "first": first[play]} if remembers else {}
+                choices = agent.act(rows[play], masks[play], seeds[play],
+                                    games=[games_list[i] for i in play] if agent.needs_games else None,
+                                    trackers=[seat_trackers[i] for i in play] if seat_trackers is not None else None,
+                                    **memory)
+                for i, choice in zip(play, choices):
+                    if isinstance(choice, cpp.Action):  # an offer: outside the action space
+                        inject(int(rows_idx[i]), int(envs[i]), int(seats[i]), choice)
+                    else:
+                        buffers["actions"][rows_idx[i]] = int(choice)
+            if len(trade):
+                memory = {"streams": streams[trade], "first": first[trade]} if remembers else {}
+                answers = agent.respond_trade(
+                    [games_list[i] if games_list is not None else vec.game(int(envs[i])) for i in trade], seeds[trade],
+                    trackers=[seat_trackers[i] for i in trade] if seat_trackers is not None else None, **memory)
+                for i, action in zip(trade, answers):
+                    inject(int(rows_idx[i]), int(envs[i]), int(seats[i]), action)
         vec.step()
         collect()
 

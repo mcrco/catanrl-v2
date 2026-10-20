@@ -5,7 +5,11 @@ It plays F with the engine's ``value_action``, R with a bit-exact copy of the
 engine's bot stream (std::mt19937_64 seeded by the game's bot seed and
 cppanatron's ``random::below``, Lemire's bounded draw), forced moves without
 asking, and feeds hand trackers with ``HandTracker.observe`` on every
-transition. Tests check that ``play_schedule`` gives exactly its rows.
+transition. A learner's trade prompt (DECIDE_TRADE, DECIDE_ACCEPTEES) goes to
+``respond_trade`` and an offer comes back from ``act`` as a ``cpp.Action``;
+both are executed and counted as decisions, and a row tallies the trade steps
+its learner seats played as the harness does. Tests check that
+``play_schedule`` gives exactly its rows.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from catanrl.eval import harness
 from catanrl.seeding import derive_seed
 
 MASK64 = (1 << 64) - 1
+TRADE_PROMPTS = (cpp.ActionPrompt.DECIDE_TRADE, cpp.ActionPrompt.DECIDE_ACCEPTEES)
 
 
 class MT19937_64:
@@ -80,6 +85,7 @@ class _Table:
     index: int = 0
     trackers: dict[int, cpp.HandTracker] = field(default_factory=dict)
     decisions: list[int] = field(default_factory=list)
+    trades: dict[str, list[int]] = field(default_factory=dict)
     stuck: bool = False
 
     def execute(self, action) -> None:
@@ -87,6 +93,14 @@ class _Table:
         self.game.execute(action)
         for tracker in self.trackers.values():
             tracker.observe(before, action, self.game)
+
+    def decide(self, seat: int, action) -> None:
+        """A learner's decision: counted (a trade step in ``trades`` too), then executed."""
+        self.decisions[seat] += 1
+        kind = harness.TRADE_COUNTS.get(action.action_type)
+        if kind is not None:
+            self.trades[kind][seat] += 1
+        self.execute(action)
 
     def advance(self) -> bool:
         game = self.game
@@ -123,7 +137,20 @@ def play_reference(lineup, games, *, suite, fill=None) -> list[dict]:
         game = t.game
         winner = game.winning_player_index if game.winning_color is not None else None
         rows.append(harness._row(t.scheduled, num_slots=len(agents), winner_seat=winner, turns=game.num_turns,
-                                 truncated=winner is None, stuck=t.stuck, decisions=t.decisions))
+                                 truncated=winner is None, stuck=t.stuck, decisions=t.decisions, trades=t.trades))
+
+    def inputs(tables: list[_Table]) -> tuple[list[int], np.ndarray, list | None, dict]:
+        """The deciding seats, their decision seeds, trackers and memory streams (one per seat of a game)."""
+        agent = tables[0].agents[tables[0].game.current_player_index]
+        seats = [t.game.current_player_index for t in tables]
+        seeds = np.array([derive_seed(int(t.scheduled.game_seed), "decide", int(t.scheduled.rotation), s,
+                                      t.decisions[s]) for t, s in zip(tables, seats)], dtype=np.uint64)
+        trackers = [t.trackers[s] for t, s in zip(tables, seats)] if agent.needs_trackers else None
+        memory = {}
+        if getattr(agent, "needs_memory", False):
+            memory = {"streams": np.array([t.index * dims["max_players"] + s for t, s in zip(tables, seats)]),
+                      "first": np.array([t.decisions[s] == 0 for t, s in zip(tables, seats)])}
+        return seats, seeds, trackers, memory
 
     for index, scheduled in enumerate(games):
         scenario = table[scheduled.scenario]
@@ -131,7 +158,7 @@ def play_reference(lineup, games, *, suite, fill=None) -> list[dict]:
                         rules=scenario.game.cppanatron_rules(), seed=int(scheduled.game_seed))
         seat_agents = [agents[int(slot)] for slot in scheduled.seats]
         t = _Table(scheduled, scenario.turn_limit, game, seat_agents, MT19937_64(int(scheduled.bot_seed)),
-                   index=index, decisions=[0] * len(seat_agents))
+                   index=index, decisions=[0] * len(seat_agents), trades=harness._trade_counts(len(seat_agents)))
         for seat, agent in enumerate(seat_agents):
             if agent.needs_trackers:
                 t.trackers[seat] = cpp.HandTracker(game, seat, agent.tracker_mode)
@@ -143,21 +170,25 @@ def play_reference(lineup, games, *, suite, fill=None) -> list[dict]:
         still = []
         for tables in groups.values():
             agent = tables[0].agents[tables[0].game.current_player_index]
-            seats = [t.game.current_player_index for t in tables]
-            obs = np.stack([agent.encode(t.game, s) for t, s in zip(tables, seats)])
-            seeds = np.array([derive_seed(int(t.scheduled.game_seed), "decide", int(t.scheduled.rotation), s,
-                                          t.decisions[s]) for t, s in zip(tables, seats)], dtype=np.uint64)
-            memory = {}
-            if getattr(agent, "needs_memory", False):  # one stream per seat of a game
-                memory = {"streams": np.array([t.index * dims["max_players"] + s for t, s in zip(tables, seats)]),
-                          "first": np.array([t.decisions[s] == 0 for t, s in zip(tables, seats)])}
-            choices = agent.act(obs, obs[:, -agent.action_space.size:], seeds,
-                                games=[t.game for t in tables] if agent.needs_games else None,
-                                trackers=[t.trackers[s] for t, s in zip(tables, seats)]
-                                if agent.needs_trackers else None, **memory)
-            for t, seat, index in zip(tables, seats, choices):
-                t.decisions[seat] += 1
-                t.execute(agent.action_space.decode(t.game, int(index)))
+            # A trade prompt is routed by the game's prompt here (the harness goes by the row's
+            # empty mask); its answer, like an offer act returns, is a cpp.Action.
+            play = [t for t in tables if t.game.current_prompt not in TRADE_PROMPTS]
+            trade = [t for t in tables if t.game.current_prompt in TRADE_PROMPTS]
+            if play:
+                seats, seeds, trackers, memory = inputs(play)
+                obs = np.stack([agent.encode(t.game, s) for t, s in zip(play, seats)])
+                choices = agent.act(obs, obs[:, -agent.action_space.size:], seeds,
+                                    games=[t.game for t in play] if agent.needs_games else None,
+                                    trackers=trackers, **memory)
+                for t, seat, choice in zip(play, seats, choices):
+                    offered = isinstance(choice, cpp.Action)
+                    t.decide(seat, choice if offered else agent.action_space.decode(t.game, int(choice)))
+            if trade:
+                seats, seeds, trackers, memory = inputs(trade)
+                answers = agent.respond_trade([t.game for t in trade], seeds, trackers=trackers, **memory)
+                for t, seat, action in zip(trade, seats, answers):
+                    t.decide(seat, action)
+            for t in tables:
                 (still.append if t.advance() else finish)(t)
         active = still
     return sorted(rows, key=lambda row: row["game_id"])
