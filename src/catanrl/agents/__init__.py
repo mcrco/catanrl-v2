@@ -1,6 +1,6 @@
 """Agents: specs, resolution, native and Catanatron backends.
 
-Importing this package registers POLICY, MCTS, BELIEF, PREDICT and LLM in Catanatron's
+Importing this package registers POLICY, MCTS, BELIEF, PREDICT, TRADE and LLM in Catanatron's
 ``REGISTRY``, so ``REGISTRY.build("POLICY:ckpt=...", color)`` works.
 """
 
@@ -11,6 +11,7 @@ from catanrl.agents.spec import (
     PolicyParams,
     PredictParams,
     ResolvedAgent,
+    TradeParams,
     check_spec_syntax,
     player,
     register,
@@ -19,5 +20,5 @@ from catanrl.agents.spec import (
 
 register()
 
-__all__ = ["BeliefParams", "LlmParams", "MctsParams", "PolicyParams", "PredictParams", "ResolvedAgent",
+__all__ = ["BeliefParams", "LlmParams", "MctsParams", "PolicyParams", "PredictParams", "ResolvedAgent", "TradeParams",
            "check_spec_syntax", "player", "register", "resolve_agent"]

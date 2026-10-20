@@ -1,0 +1,53 @@
+# Pilots of the TRADE harness agent: a seat that plays aux-hidden-4p/plain@best (the lambda
+# critic the trade oracle measured; seat sum 1.00) and offers, answers and confirms domestic
+# trades by that critic's win probabilities, trades staying outside the action space. The
+# three other seats are responder-only copies (propose=false) judging offers by the same
+# critic: native F never accepts an offer, so every trading table is TRADE against TRADE.
+# 50 boards x 4 rotations = 200 games per row, ~2 min each on the GPU; records land under
+# aux-hidden-4p/plain/evals/heldout-4p.
+#   P1 the owner's rule (margins 0, strict +EV in the ego view, Pareto front, 3 offers a turn):
+#      offers, accepts, confirms and cancels per game and the cancel rate (the record's per-slot
+#      trades, printed by catanrl eval) and wall time (its segments); the bundles offered and
+#      confirmed, the gains the critic claimed for them and the critic rows per read come from
+#      tools/trade_pilot.py, which replays a row's lineup in process (--config/--row)
+#   P2 the 1 pp arm, responders at 1 pp too: how much less it fires above the critic's residual
+#   P3 when=every (re-evaluates after a build, up to the cap): what it adds in offers and wall
+#   P4 the true hands (oracle=true: the game is the one world, dets=1 in the canonical spec):
+#      the unfair ceiling, fair=false in the record and cited only with oracle_ok in the report
+# The prior: the oracle rerun on this critic found a mutual trade at >= 2 pp in 2.5% of
+# positions with median gains 0.8/0.7 pp, at the critic's 1.0 pp residual, so a null is
+# expected at 2 pp; the 0 pp row is the owner's rule, and its counts (did it fire, were the
+# bundles sensible, what gains were claimed on confirmed trades) are the first thing to read.
+name: trade-harness-pilot
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 50}   # P1
+      lineup:
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+    - suite: {name: heldout-4p, boards: 50}   # P2
+      lineup:
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:margin=1.0"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:accept_margin=1.0:propose=false"
+    - suite: {name: heldout-4p, boards: 50}   # P3
+      lineup:
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:when=every"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:propose=false"
+    - suite: {name: heldout-4p, boards: 50}   # P4
+      lineup:
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:oracle=true"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:oracle=true:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:oracle=true:propose=false"
+        - "TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:oracle=true:propose=false"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}   # pinned at the pre-2026-10-19 defaults: a run made before the change still matches
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

@@ -198,7 +198,7 @@ def _run_stored(args, argv) -> int:
 
 
 def _cmd_eval(args) -> int:
-    from catanrl.eval.results import evaluate
+    from catanrl.eval.results import TRADE_KEYS, evaluate
 
     if args.allow_stale_build:
         os.environ["CATANRL_ALLOW_STALE_BUILD"] = "1"
@@ -217,6 +217,11 @@ def _cmd_eval(args) -> int:
             print(f"{slot['label']:<40} per game: {llm['decisions']:.1f} decisions, {llm['prompt_tokens']:.0f} prompt + "
                   f"{llm['completion_tokens']:.0f} completion tokens{' (estimated)' if slot['llm']['estimated'] else ''}, "
                   f"{llm['fallbacks']:.2f} fallbacks, {llm['wall_s']:.1f} s")
+        if "trades" in slot:  # a loaded record's keys are canonical (sorted): print the steps in order
+            trades = slot["trades"]
+            print(f"{slot['label']:<40} per game: "
+                  + ", ".join(f"{trades['per_game'][k]:.2f} {k}" for k in TRADE_KEYS)
+                  + f"; cancel rate {trades['cancel_rate']:.2f}")
     flags = [f for f, on in (("INVALID", not record.data["valid"]), ("mixed", record.data["mixed"])) if on]
     print(f"{record.eval_id} {record.path}{'  ' + ' '.join(flags) if flags else ''}")
     return 0

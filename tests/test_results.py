@@ -15,8 +15,10 @@ SUITE = {"name": "fake", "purpose": "heldout", "seed": 5, "boards": 4, "scenario
 
 
 class FakeHarness:
-    def __init__(self, fail_after: int | None = None, forfeit: str | None = None, bias: int = 0):
+    def __init__(self, fail_after: int | None = None, forfeit: str | None = None, bias: int = 0,
+                 trades: bool = False):
         self.calls, self.played, self.fail_after, self.forfeit, self.bias = 0, [], fail_after, forfeit, bias
+        self.trades = trades
 
     def __call__(self, lineup, games, *, fill, device, num_envs, threads, infer_rows, on_game, suite):
         self.calls += 1
@@ -26,9 +28,14 @@ class FakeHarness:
             self.played.append(g.game_id)
             seat = (zlib.crc32(g.game_id.encode()) + self.bias) % g.num_players
             truncated = g.board == 3
-            on_game({"game_id": g.game_id, "seats": list(g.seats), "winner": None if truncated else g.seats[seat],
-                     "winner_seat": None if truncated else seat, "turns": 50, "truncated": truncated,
-                     "stuck": False, "forfeits": [int(g.game_id == self.forfeit), 0], "decisions": [1, 1]})
+            row = {"game_id": g.game_id, "seats": list(g.seats), "winner": None if truncated else g.seats[seat],
+                   "winner_seat": None if truncated else seat, "turns": 50, "truncated": truncated,
+                   "stuck": False, "forfeits": [int(g.game_id == self.forfeit), 0], "decisions": [1, 1]}
+            if self.trades and not truncated:  # as the harness: the field only on a game with a trade
+                row["trades"] = {"offers": [2 * int(s == 0) for s in g.seats], "accepts": [int(s != 0) for s in g.seats],
+                                 "confirms": [int(s == 0) for s in g.seats],
+                                 "cancels": [int(s == 0 and g.board % 2 == 0) for s in g.seats]}
+            on_game(row)
 
 
 @pytest.fixture(autouse=True)
@@ -197,3 +204,76 @@ def test_paired_joins_and_refuses_mismatches(monkeypatch):
     b.games_path.write_text("\n".join(rows[:-1]) + "\n")
     with pytest.raises(ValueError, match="game ids differ"):
         paired(a, b)
+
+
+def test_trade_rows_are_totalled_and_other_records_stay_as_they_were(monkeypatch):
+    """Rows of a trading lineup carry ``trades`` (an outcome: written, verified and summed per
+    slot); a record without the field is today's byte for byte (games digest and summary)."""
+    from catanrl import canon
+
+    use(monkeypatch, FakeHarness())
+    plain = evaluate(["R", "F"], SUITE)
+    assert plain.data["games_sha256"] == "aae9172f0d46f48968b17d3ee3e8bebcd3fb1858eec725923133cc82d302653b"
+    assert canon.digest(plain.summary) == "df56191dcb18dcb3" and plain.data["critics"] == [None, None]
+    assert all("trades" not in s for s in plain.summary["slots"])
+    use(monkeypatch, FakeHarness(trades=True))
+    record = evaluate(["R", "F"], {**SUITE, "name": "fake-trades"})
+    assert sum("trades" in r for r in record.games()) == 6
+    assert record.data["games_sha256"] != plain.data["games_sha256"]
+    slots = record.summary["slots"]
+    assert all(set(r["trades"]) == set(results.TRADE_KEYS) for r in record.games() if "trades" in r)
+    assert slots[0]["trades"] == {"offers": 12, "accepts": 0, "confirms": 6, "cancels": 4, "cancel_rate": 0.4,
+                                  "per_game": {"offers": 1.5, "accepts": 0.0, "confirms": 0.75, "cancels": 0.5}}
+    assert slots[1]["trades"] == {"offers": 0, "accepts": 6, "confirms": 0, "cancels": 0, "cancel_rate": 0.0,
+                                  "per_game": {"offers": 0.0, "accepts": 0.75, "confirms": 0.0, "cancels": 0.0}}
+    assert results.verify(record, games=None)["identical"] == 8
+    use(monkeypatch, FakeHarness())  # a replay that trades differently is not a replay
+    assert results.verify(record, games=None)["identical"] == 2  # the two truncated games: no field either way
+
+
+def test_paired_joins_a_trade_proposer_with_its_policy_control(monkeypatch, tmp_path):
+    """[TRADE, N x3] pairs with [POLICY, N x3] (the control, where nobody offers: slots 1-3
+    identical in both keys); a table whose other slots differ is refused."""
+    import torch
+
+    from catanrl.agents.spec import ResolvedAgent
+    from catanrl.checkpoint import save
+    from catanrl.envs.encoding import action_size, dims_for, row_layout
+    from catanrl.models import build_model
+
+    torch.manual_seed(0)
+    dims = dims_for(["base-2p"])
+    net = build_model({"preset": "graph-tiny"}, dims=dims, levels="private", num_actions=action_size(dims),
+                      layout=row_layout(dims, "private"))
+    pt = save(tmp_path / "net.pt", net, run=None, epoch=0, agent_steps=0, config={}, code={}).path
+    monkeypatch.setattr(ResolvedAgent, "native", lambda self, **kw: None)  # the fake harness runs no agent
+    suite = {**SUITE, "scenarios": [{"game": "base-4p"}], "boards": 2}
+    n = f"TRADE:ckpt={pt}:propose=false"
+    use(monkeypatch, FakeHarness(trades=True))
+    a = evaluate([f"TRADE:ckpt={pt}", n, n, n], suite)
+    assert a.data["critics"] == [a.data["refs"][0]] * 4 and a.data["fair"] == [True] * 4
+    assert a.summary["slots"][0]["trades"]["confirms"] == 8  # no board truncates: a trade in every game
+    use(monkeypatch, FakeHarness(bias=1))
+    b = evaluate([f"POLICY:ckpt={pt}", n, n, n], suite)
+    assert b.data["critics"][0] is None and b.data["critics"][1:] == a.data["critics"][1:]
+    result = paired(a, b)
+    assert result["games"] == 8 and result["only_a"] + result["only_b"] > 0
+    for other in ([f"POLICY:ckpt={pt}"] * 4, [f"TRADE:ckpt={pt}", n, n, f"{n}:accept_margin=1.0"]):
+        with pytest.raises(ValueError, match="opponents"):
+            paired(a, evaluate(other, suite))
+
+
+def test_catanrl_eval_prints_a_trading_slot_s_totals(monkeypatch, tmp_path, capsys):
+    """``catanrl eval`` prints the per-slot trade totals the summary holds (the pilot's
+    per-game counts and cancel rate), as it prints an LLM slot's per-game stats."""
+    import json
+
+    from catanrl.cli import main
+
+    use(monkeypatch, FakeHarness(trades=True))
+    path = tmp_path / "fake-cli.yaml"
+    path.write_text(json.dumps({k: v for k, v in SUITE.items() if k != "name"}))
+    assert main(["eval", "R", "F", "--suite", str(path), "--threads", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "per game: 1.50 offers, 0.00 accepts, 0.75 confirms, 0.50 cancels; cancel rate 0.40" in out
+    assert "per game: 0.00 offers, 0.75 accepts, 0.00 confirms, 0.00 cancels; cancel rate 0.00" in out

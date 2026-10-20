@@ -12,7 +12,8 @@ becomes ``report/data/results.json`` (rate, interval, n, p, eval id,
 canonical specs, ``run@eN#sha``, flags), which Typst reads with ``json()``.
 The same file pins every entry's specs, refs and eval ids: a ref or wildcard
 that now resolves differently is a diff that needs ``update``. Refused:
-non-heldout suites, unfair slots under test (unless ``oracle_ok``), invalid
+non-heldout suites, unfair slots under test (a ``full`` policy, ``MCTS`` or
+``TRADE`` with ``oracle=true``; cited only with ``oracle_ok``), invalid
 or drift-allowed records, and checkpoints with a training launch (in the run
 or any ``init_from`` ancestor) that predates a ``supersedes`` commit. Rows
 that cannot be rebuilt from commits (dirty or moved code at eval or training
@@ -64,7 +65,8 @@ def _descends(commit: str, head: str, repo: Path) -> bool:
 
 def _training(agent: Any, problems: list[str], name: str) -> tuple[list[str], list[str]]:
     """(superproject HEAD of every training launch over the lineage, training-side flags) of
-    every checkpoint the agent runs (PREDICT: the policy's and the predictor's)."""
+    every checkpoint the agent runs (PREDICT: the policy's and the predictor's; TRADE: the
+    policy's and the critic's)."""
     heads, flags = [], set()
     for ref in getattr(agent, "checkpoints", None) or (agent.checkpoint,):
         found, found_flags = _training_of(ref, problems, name)
