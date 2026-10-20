@@ -39,7 +39,7 @@ import cppanatron as cpp
 import numpy as np
 
 from catanrl.bridge.position import DEVELOPMENT_CARDS, RESOURCES
-from catanrl.bridge.replay import Replay
+from catanrl.bridge.replay import BankShort, Replay
 from catanrl.bridge.tracking import points_event, transition_events
 from catanrl.seeding import derive_seed
 
@@ -57,7 +57,9 @@ CARDS = {"knight": "KNIGHT", "yearOfPlenty": "YEAR_OF_PLENTY", "monopoly": "MONO
 #: OpenHex's starting supply (the base game's).
 BANK = (19, 19, 19, 19, 19)
 DECK = (14, 2, 2, 2, 5)
-#: Events whose effects the replay derives itself (checked, not replayed).
+#: Events whose effects the replay derives itself (a roll's production is
+#: the exception: the game pays in full past its bank, the engine would not,
+#: so the ``resourcesProduced`` after a roll is what the roll pays).
 DERIVED = frozenset({"setupResourcesGranted", "setupResourcesCollected", "resourcesProduced",
                      "longestRoadAwarded", "longestRoadClaimed", "largestArmyAwarded", "largestArmyClaimed",
                      "gameWon"})
@@ -189,12 +191,14 @@ class Board:
         return {"x": x, "y": y, "z": z}
 
 
-def openhex_rules(config: Mapping[str, Any]) -> cpp.GameRules:
+def openhex_rules(config: Mapping[str, Any], bank_margin: Sequence[int] = (0, 0, 0, 0, 0)) -> cpp.GameRules:
+    """The game's rules; ``bank_margin`` is added to the bank (OpenHex pays
+    rolls in full past its bank, which the engine's rule never does)."""
     return cpp.GameRules(
         vps_to_win=int(config.get("victoryPoints", 10)),
         discard_limit=int(config.get("discardLimit", 7)),
         friendly_robber=str(config.get("robberMode", "normal")).lower() == "friendly",
-        resource_bank=BANK, development_deck=DECK,
+        resource_bank=tuple(b + int(m) for b, m in zip(BANK, bank_margin)), development_deck=DECK,
         roads_per_player=int(config.get("maxRoads", 15)),
         settlements_per_player=int(config.get("maxSettlements", 5)),
         cities_per_player=int(config.get("maxCities", 4)))
@@ -218,15 +222,21 @@ class Entry:
     record: list
     #: A monopoly's take per seat (OpenHex's ``collected``).
     amounts: list[int] | None = None
+    #: A roll's payout per seat (OpenHex's ``production``); None lets the
+    #: engine's bank rule pay.
+    produced: list[list[int]] | None = None
 
 
 class EventLog:
     """OpenHex events in, Catanatron log entries out.
 
-    A robber move waits for the steal that may follow it (award events can
-    come between); a knight is its card plus the robber move it carries.
-    Discards are held until the next other event and come out in seat order,
-    one card each, as Catanatron's discard prompt takes them.
+    A roll waits for the ``resourcesProduced`` that follows it in the same
+    instant (nothing follows when nothing was produced, or on a 7), so the
+    replay pays what the game paid. A robber move waits for the steal that
+    may follow it (award events can come between); a knight is its card plus
+    the robber move it carries. Discards are held until the next other event
+    and come out in seat order, one card each, as Catanatron's discard prompt
+    takes them.
     """
 
     def __init__(self, board: Board, colors: Sequence[str]) -> None:
@@ -235,7 +245,7 @@ class EventLog:
         self.robber: tuple[str, tuple] | None = None
         self.discards: dict[str, list[str]] = {}
         self.won: str | None = None
-        self.produced: list[dict] = []
+        self.roll: Entry | None = None
 
     def feed(self, event: Mapping[str, Any]) -> list[Entry]:
         kind = event.get("type")
@@ -245,7 +255,12 @@ class EventLog:
             # whatever was pending never happens.
             self.won = color_of(event["player"])
             self.robber, self.discards = None, {}
-            return out
+            return self._flush_roll(None)
+        if self.roll is not None:
+            out += self._flush_roll(self._production(event) if kind == "resourcesProduced"
+                                    else [[0] * 5 for _ in self.colors])
+            if kind == "resourcesProduced":
+                return out
         if kind != "resourcesDiscarded":
             out += self._flush_discards()
         if self.robber is not None and kind != "resourceStolen" and kind not in AWARDS:
@@ -260,7 +275,7 @@ class EventLog:
             out.append(Entry([[color, "BUILD_ROAD", list(edge)], None]))
         elif kind == "diceRolled":
             dice = event.get("dice") or [event["die1"], event["die2"]]
-            out.append(Entry([[color, "ROLL", None], [int(dice[0]), int(dice[1])]]))
+            self.roll = Entry([[color, "ROLL", None], [int(dice[0]), int(dice[1])]])
         elif kind == "robberMoved":
             self.robber = (color, cube(field_of(event, "hex", "location")))
         elif kind == "knightPlayed":
@@ -297,10 +312,26 @@ class EventLog:
         elif kind == "turnEnded":
             out.append(Entry([[color, "END_TURN", None], None]))
         elif kind == "resourcesProduced":
-            self.produced.append(dict(event.get("production") or {}))
+            logger.warning("openhex: production after its roll was replayed (the events came apart); "
+                           "the engine's own payout stands")
         elif kind not in DERIVED:
             logger.warning("openhex: an event the bridge does not know: %s", json.dumps(event)[:200])
         return out
+
+    def _production(self, event: Mapping[str, Any]) -> list[list[int]]:
+        amounts = [[0] * 5 for _ in self.colors]
+        for color, got in (event.get("production") or {}).items():
+            seat = self.colors.index(color_of(color))
+            for resource, n in (got or {}).items():
+                amounts[seat][RESOURCES.index(RES[resource])] += int(n)
+        return amounts
+
+    def _flush_roll(self, produced: list[list[int]] | None) -> list[Entry]:
+        if self.roll is None:
+            return []
+        entry, self.roll = self.roll, None
+        entry.produced = produced
+        return [entry]
 
     def _flush_robber(self, victim: str | None, stolen: str | None) -> list[Entry]:
         color, coordinate = self.robber  # type: ignore[misc]
@@ -308,10 +339,11 @@ class EventLog:
         return [Entry([[color, "MOVE_ROBBER", [list(coordinate), victim]], stolen])]
 
     def settle(self, *, robber: bool = True, discards: bool = True) -> list[Entry]:
-        """What is held back, as it stands: a robber move that stole from
+        """What is held back, as it stands: a roll whose production has not
+        come (the engine's rule pays it), a robber move that stole from
         nobody, discards that are complete. (OpenHex's state says when: the
         events alone cannot, when the next event is ours to make.)"""
-        out: list[Entry] = []
+        out: list[Entry] = self._flush_roll(None)
         if discards:
             out += self._flush_discards()
         if robber and self.robber is not None:
@@ -370,9 +402,11 @@ class OpenHexSeat:
         self.board = Board(state["board"])
         self.colors = [color_of(c) for c in state["turnOrder"]]
         self.seat = self.colors.index(color_of(self.color))
-        self.rules = openhex_rules(state.get("config") or {})
-        self.replay = Replay({"colors": self.colors}, self.seat, self.rules, self.board.map)
-        self.tracker = cpp.HandTracker(self.replay.game, self.seat)
+        #: Added to the bank of the replayed game where OpenHex paid past it.
+        self.bank_margin = [0] * 5
+        #: The entries replayed so far (replayed again on a larger bank).
+        self.entries: list[Entry] = []
+        self._build()
         self.log = EventLog(self.board, self.colors)
         self.last_seq = -1
         self.victim: str | None = None
@@ -380,6 +414,18 @@ class OpenHexSeat:
         self.waited = 0
         self.decisions = 0
         self.fallbacks = 0
+
+    def _build(self) -> None:
+        """A fresh replay and tracker on the rules, with the bank margin."""
+        self.rules = openhex_rules(self.state.get("config") or {}, self.bank_margin)
+        self.replay = Replay({"colors": self.colors}, self.seat, self.rules, self.board.map)
+        self.tracker = cpp.HandTracker(self.replay.game, self.seat)
+
+    @property
+    def bank(self) -> list[int]:
+        """OpenHex's bank: the replay's less the margin (below zero where
+        OpenHex paid past it)."""
+        return [int(b) - m for b, m in zip(self.replay.game.resource_bank, self.bank_margin)]
 
     # ------------------------------------------------------------ following
 
@@ -393,6 +439,23 @@ class OpenHexSeat:
                 self._step(entry)
 
     def _step(self, entry: Entry) -> None:
+        try:
+            self._apply(entry)
+        except BankShort as short:
+            # OpenHex paid a roll its bank could not; the engine pays nobody
+            # then. The game replays on a bank that much larger: the hands
+            # and the tracker stay exact, the bank features scale by it.
+            self.bank_margin = [m + d for m, d in zip(self.bank_margin, short.deficit)]
+            self.stats["bank_short"] = self.stats.get("bank_short", 0) + 1
+            logger.info("game %s: the bank ran short by %s; replaying on a bank of %s", self.game_id,
+                        short.deficit, [b + m for b, m in zip(BANK, self.bank_margin)])
+            entries, self.entries = self.entries, []
+            self._build()
+            for past in entries:
+                self._apply(past)
+            self._apply(entry)
+
+    def _apply(self, entry: Entry) -> None:
         sizes = None
         if entry.amounts is not None:
             game = self.replay.game
@@ -400,12 +463,15 @@ class OpenHexSeat:
             total = sum(entry.amounts)
             sizes = [s + total if i == self.colors.index(entry.record[0][0]) else s - entry.amounts[i]
                      for i, s in enumerate(sizes)]
-        tr = self.replay.step(entry.record, sizes_after=sizes)
+        tr = self.replay.step(entry.record, sizes_after=sizes, produced=entry.produced)
+        if self.replay.repairs["production"]:
+            self.stats["production_mismatch"] = self.replay.repairs["production"]
         events = transition_events(tr, self.seat, amounts=entry.amounts)
         if self.replay.game.winning_color is None:
             events.append(points_event(tr))
         for event in events:
             self.tracker.apply(event)
+        self.entries.append(entry)
 
     @property
     def over(self) -> bool:
@@ -420,8 +486,8 @@ class OpenHexSeat:
             # road, Catanatron at the settlement: hands differ in between.
             return out
         bank = state.get("bank") or state.get("resourceBank")
-        if bank and tuple(game.resource_bank) != tuple(_counts(bank)):
-            out.append(f"bank {tuple(game.resource_bank)} vs {_counts(bank)}")
+        if bank and self.bank != _counts(bank):
+            out.append(f"bank {tuple(self.bank)} vs {_counts(bank)}")
         for p in state.get("players") or []:
             i = self.colors.index(color_of(p["color"]))
             ours = game.player(i)
@@ -441,6 +507,8 @@ class OpenHexSeat:
         """The actions to send now, or None when it is not our move."""
         if self.over:
             return None
+        for entry in self.log.settle(robber=False, discards=False):
+            self._step(entry)
         pending = state.get("pendingAction") or state.get("pending") or {}
         kind = str(pending.get("type", "")).lower() if isinstance(pending, Mapping) else str(pending or "").lower()
         mine = color_of(state.get("currentPlayer") or "") == self.colors[self.seat]
@@ -723,6 +791,13 @@ class OpenHexBot:
                 logger.warning("%s: %s; trying again in %.0f s", self.name, error, backoff)
                 time.sleep(backoff)
                 backoff = min(300.0, backoff * 2)
+            except Exception:  # noqa: BLE001 - a bot thread must outlive any one game
+                # (A replay that cannot follow a game, say.) The game is lost
+                # either way: OpenHex aborts it at the deadline, after which it
+                # is no longer active and the bot queues again.
+                logger.exception("%s: giving up on the current game; trying again in %.0f s", self.name, backoff)
+                time.sleep(backoff)
+                backoff = min(300.0, backoff * 2)
 
     def _join(self) -> None:
         try:
@@ -756,7 +831,7 @@ class OpenHexBot:
         logger.info("%s: game %s as %s against %s", self.name, game_id, reply["your_color"],
                     [p.get("name") for p in reply["game"].get("players", [])])
         refused = 0
-        lagging: tuple[list[str], int] = ([], 0)
+        lagging: tuple[list[str], int] = ([], 0)  # (kinds of difference, polls they have lasted)
         while True:
             seat.feed(self.client.events(game_id, seat.last_seq))
             reply = self.client.state(game_id)
@@ -774,8 +849,9 @@ class OpenHexBot:
                 continue
             problems = seat.mismatches(state)
             # OpenHex's state lags its events (and sometimes steps back): a
-            # difference counts once it has lasted three polls.
-            lagging = (problems, lagging[1] + 1 if problems == lagging[0] else 1)
+            # difference counts once its kind has lasted three polls.
+            kinds = [p.split(" ")[0] for p in problems]
+            lagging = (kinds, lagging[1] + 1 if kinds == lagging[0] else 1)
             if problems and lagging[1] == 3:
                 seat.stats["mismatches"] = seat.stats.get("mismatches", 0) + 1
                 logger.warning("%s: game %s: the replay differs from OpenHex: %s", self.name, game_id,

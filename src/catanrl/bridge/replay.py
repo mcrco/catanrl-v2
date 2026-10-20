@@ -24,6 +24,18 @@ development cards stay the deck plus their hands. No placeholder ever comes
 from hidden information, and none can make a seat win the replay that has
 not won the game.
 
+A roll pays by the engine's rule: nothing of a resource the bank cannot pay
+everyone. A game that pays otherwise (OpenHex pays in full unless one
+player's share alone exceeds the bank, and its bank goes negative) tells
+:meth:`Replay.step` the public payout (``produced``); where the engine paid
+nothing for want of bank, the step raises :class:`BankShort` with the cards
+short, and the caller replays the game on rules whose bank is that much
+larger (the hands and the tracker then stay exact; the engine's bank is the
+game's plus the margin). Any other difference (the engine paying where the
+game withheld, or a board the replay has wrong) is logged and counted in
+``repairs["production"]``; the engine's payout stands, since its bank cannot
+be set from here.
+
 Monopoly takes are public (every hand size is visible), but a log entry does
 not carry them: :meth:`Replay.step` takes the hand sizes after the entry when
 the caller has them (``sizes_after``, from the view after that step) and
@@ -34,6 +46,7 @@ to the sizes a later view shows.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -51,6 +64,8 @@ from catanrl.bridge.position import (
     transport,
     victory_point_room,
 )
+
+logger = logging.getLogger(__name__)
 
 COSTS = {
     "BUILD_ROAD": (1, 1, 0, 0, 0),
@@ -75,6 +90,15 @@ POINT_MOVES = frozenset({"BUILD_SETTLEMENT", "BUILD_CITY", "BUILD_ROAD", "PLAY_K
 class ReplayError(RuntimeError):
     """The log cannot be replayed (it does not belong to this game, or no
     placeholder deal makes a move playable)."""
+
+
+class BankShort(ReplayError):
+    """A roll the game paid in full that the engine's bank could not: the
+    replay needs rules with ``deficit`` more of each resource in the bank."""
+
+    def __init__(self, deficit: Sequence[int]) -> None:
+        super().__init__(f"the game paid a roll its bank could not cover by {list(deficit)}")
+        self.deficit = [int(d) for d in deficit]
 
 
 def _cards(kind_counts: Mapping[int, int]) -> list[int]:
@@ -171,9 +195,12 @@ class Replay:
 
     # ------------------------------------------------------------ stepping
 
-    def step(self, entry: Any, *, sizes_after: Sequence[int] | None = None) -> Transition:
+    def step(self, entry: Any, *, sizes_after: Sequence[int] | None = None,
+             produced: Sequence[Sequence[int]] | None = None) -> Transition:
         """Replay one log entry; ``sizes_after`` are the public hand sizes
-        after it (used, and checked, for monopolies)."""
+        after it (used, and checked, for monopolies); ``produced`` is what a
+        roll paid each seat (public), when the game's bank rule may differ
+        from the engine's."""
         index = len(self.entries)
         try:
             (color, kind, value), result = entry
@@ -241,6 +268,8 @@ class Replay:
             self.game.execute(action, **forced)
         except (ValueError, RuntimeError) as error:
             raise ReplayError(f"entry {index} {entry!r} is not playable in the replay: {error}") from None
+        if kind == "ROLL" and produced is not None:
+            self._check_production(index, before, produced)
         after = Counts.of(self.game)
         if sizes_after is not None and tuple(int(s) for s in sizes_after) != after.sizes:
             raise ReplayError(f"entry {index} {entry!r}: hand sizes {after.sizes}, the view shows "
@@ -274,6 +303,29 @@ class Replay:
                 self._ensure_resources(partner, [int(x) for x in value[5:10]])
         elif kind == "ACCEPT_TRADE":
             self._ensure_resources(player, [int(x) for x in value[5:10]])
+
+    def _check_production(self, index: int, before: Counts, produced: Sequence[Sequence[int]]) -> None:
+        """Compare what the roll paid in the replay with what it paid in the
+        game: :class:`BankShort` where the engine's bank rule paid nothing
+        the game paid; a warning for any other difference (a board or robber
+        the replay has wrong, which the caller's mismatch checks report)."""
+        n = len(self.colors)
+        engine = [[int(self.game.player(s).resources[k]) - int(before.resources[s][k]) for k in range(5)]
+                  for s in range(n)]
+        wanted = [[int(x) for x in produced[s]] for s in range(n)]
+        if engine == wanted:
+            return
+        deficit = [0] * 5
+        for k in range(5):
+            paid = sum(w[k] for w in wanted)
+            if all(e[k] == 0 for e in engine) and paid > int(before.bank[k]):
+                deficit[k] = paid - int(before.bank[k])
+        if any(deficit):
+            raise BankShort(deficit)
+        self.repairs["production"] += 1
+        logger.warning("entry %d: the roll paid %s in the game and %s in the replay (a bank the game "
+                       "withheld, or a board or robber the replay has wrong); the replay's payout stands",
+                       index, wanted, engine)
 
     def _prepare_monopoly(self, player: int, resource: int, sizes_after: Sequence[int] | None) -> bool:
         """Give every other seat exactly the cards of ``resource`` the hand
