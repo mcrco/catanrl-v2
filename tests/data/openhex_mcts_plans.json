@@ -1,0 +1,3337 @@
+{
+"blue": [
+{
+"seq": 0,
+"actions": [
+{
+"type": "placeInitialRoad",
+"vertices": [
+{
+"x": 0,
+"y": 2,
+"z": 0
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 5,
+"actions": [
+{
+"type": "placeInitialSettlement",
+"vertex": {
+"x": 2,
+"y": -1,
+"z": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 6,
+"actions": [
+{
+"type": "placeInitialSettlement",
+"vertex": {
+"x": 2,
+"y": -1,
+"z": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 7,
+"actions": [
+{
+"type": "placeInitialRoad",
+"vertices": [
+{
+"x": 1,
+"y": -1,
+"z": 1
+},
+{
+"x": 1,
+"y": -1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 8,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 9,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 11,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 15,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 17,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 21,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 22,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": 0,
+"y": -2,
+"z": 2
+}
+}
+],
+"victim": null
+},
+{
+"seq": 23,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 27,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 29,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 34,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 36,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 37,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 38,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 0,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 39,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 44,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 45,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": 0,
+"y": -2,
+"z": 2
+}
+}
+],
+"victim": null
+},
+{
+"seq": 46,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 50,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 51,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": 0,
+"y": -2,
+"z": 2
+}
+}
+],
+"victim": null
+},
+{
+"seq": 52,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 57,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 59,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 63,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 65,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 70,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 71,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": -1,
+"y": 2,
+"z": -1
+}
+}
+],
+"victim": "RED"
+},
+{
+"seq": 72,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 73,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"brick": 4
+},
+"requesting": {
+"wood": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 78,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 80,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 84,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 86,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 91,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 92,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 96,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 98,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 99,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 105,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 107,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 108,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 2,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 109,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 113,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 115,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 120,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 122,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 128,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 129,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": -1,
+"y": 0,
+"z": 1
+}
+}
+],
+"victim": "RED"
+},
+{
+"seq": 130,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 131,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 135,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 137,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 138,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": 0,
+"z": 0
+},
+{
+"x": 2,
+"y": 0,
+"z": -1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 139,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": 1,
+"z": -1
+},
+{
+"x": 2,
+"y": 0,
+"z": -1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 146,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 148,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 1,
+"y": -1,
+"z": 1
+},
+{
+"x": 1,
+"y": -1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 149,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 153,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 155,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 2,
+"y": 0,
+"z": -1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 156,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 161,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 163,
+"actions": [
+{
+"type": "discardResources",
+"resources": {
+"wood": 2,
+"ore": 3
+}
+}
+],
+"victim": null
+},
+{
+"seq": 164,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 165,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 171,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 173,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 174,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 180,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 181,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": -1,
+"y": 0,
+"z": 1
+}
+}
+],
+"victim": "RED"
+},
+{
+"seq": 182,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 183,
+"actions": [
+{
+"type": "buildCity",
+"vertex": {
+"x": -1,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 184,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 189,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 191,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 192,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 199,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 201,
+"actions": [
+{
+"type": "buildCity",
+"vertex": {
+"x": 1,
+"y": -1,
+"z": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 202,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 1,
+"y": -1,
+"z": 1
+},
+{
+"x": 1,
+"y": -1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 207,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 209,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 214,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 216,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 2,
+"z": 1
+},
+{
+"x": -1,
+"y": 2,
+"z": 0
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 222,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 224,
+"actions": [
+{
+"type": "buildCity",
+"vertex": {
+"x": 2,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 225,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 2,
+"y": -1,
+"z": 1
+},
+{
+"x": 2,
+"y": -2,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 226,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 232,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 234,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 235,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 236,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 242,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 0,
+"z": 1
+}
+}
+],
+"victim": "RED"
+},
+{
+"seq": 244,
+"actions": [
+{
+"type": "buildCity",
+"vertex": {
+"x": 2,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 245,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 246,
+"actions": [
+{
+"type": "buildCity",
+"vertex": {
+"x": 2,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 247,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 254,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 256,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 257,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 258,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 266,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 0,
+"z": 1
+}
+}
+],
+"victim": "RED"
+},
+{
+"seq": 267,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 268,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 269,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": -1,
+"y": 0,
+"z": 1
+}
+}
+],
+"victim": "RED"
+},
+{
+"seq": 270,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "red"
+}
+],
+"victim": null
+},
+{
+"seq": 271,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 277,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 278,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 284,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 286,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 2,
+"y": -2,
+"z": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 287,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 2,
+"y": -2,
+"z": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 288,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 2,
+"y": -2,
+"z": 1
+}
+}
+],
+"victim": null
+}
+],
+"red": [
+{
+"seq": 1,
+"actions": [
+{
+"type": "placeInitialSettlement",
+"vertex": {
+"x": 1,
+"y": 0,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 2,
+"actions": [
+{
+"type": "placeInitialRoad",
+"vertices": [
+{
+"x": 1,
+"y": 2,
+"z": -1
+},
+{
+"x": 0,
+"y": 2,
+"z": -1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 3,
+"actions": [
+{
+"type": "placeInitialSettlement",
+"vertex": {
+"x": -1,
+"y": 0,
+"z": 2
+}
+}
+],
+"victim": null
+},
+{
+"seq": 4,
+"actions": [
+{
+"type": "placeInitialRoad",
+"vertices": [
+{
+"x": 1,
+"y": 0,
+"z": 0
+},
+{
+"x": 1,
+"y": 0,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 12,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 14,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 1,
+"y": 0,
+"z": 1
+},
+{
+"x": 0,
+"y": 0,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 18,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 20,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 1,
+"y": 0,
+"z": 1
+},
+{
+"x": 0,
+"y": 0,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 24,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 25,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": 0,
+"y": -2,
+"z": 2
+}
+}
+],
+"victim": null
+},
+{
+"seq": 26,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 30,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 32,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 1,
+"y": 0,
+"z": 1
+},
+{
+"x": 0,
+"y": 0,
+"z": 1
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 33,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 1
+},
+{
+"x": 0,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 40,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 41,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 42,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 43,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 1
+},
+{
+"x": 0,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 47,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 49,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 1
+},
+{
+"x": 0,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 53,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 55,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 1
+},
+{
+"x": 0,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 56,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 60,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 62,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 66,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 68,
+"actions": [
+{
+"type": "buildCity",
+"vertex": {
+"x": 1,
+"y": 0,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 69,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 74,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 75,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 76,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 77,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 81,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 83,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 87,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 89,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 0,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 90,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 93,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 95,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 100,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 102,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 0,
+"y": 0,
+"z": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 103,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 0,
+"y": 0,
+"z": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 104,
+"actions": [
+{
+"type": "endTurn"
+}
+],
+"victim": null
+},
+{
+"seq": 110,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 112,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 116,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 118,
+"actions": [
+{
+"type": "buildCity",
+"vertex": {
+"x": 1,
+"y": 0,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 119,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 123,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 124,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 125,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 126,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 127,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 132,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 134,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 140,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 142,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 143,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 144,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": 1,
+"y": 1,
+"z": -1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 145,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 150,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 152,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 157,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 159,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 160,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 166,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 167,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 168,
+"actions": [
+{
+"type": "rollDice"
+}
+],
+"victim": null
+},
+{
+"seq": 170,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 175,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 177,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 178,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 179,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 185,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 187,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 188,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 193,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 195,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 196,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 197,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": -1,
+"y": 0,
+"z": 2
+},
+{
+"x": -1,
+"y": 1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 198,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 203,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 205,
+"actions": [
+{
+"type": "buildCity",
+"vertex": {
+"x": 1,
+"y": 0,
+"z": 0
+}
+}
+],
+"victim": null
+},
+{
+"seq": 206,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 210,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 211,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": -1,
+"y": 1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 212,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 213,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 217,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 219,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 220,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 221,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 227,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 229,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 230,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 231,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 237,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 239,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 240,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 241,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 2,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 248,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 249,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 250,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 251,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 252,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 253,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 259,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 260,
+"actions": [
+{
+"type": "moveRobber",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 261,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 262,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 263,
+"actions": [
+{
+"type": "placeFreeRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": 0,
+"y": -1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 264,
+"actions": [
+{
+"type": "placeFreeRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": 0,
+"y": -1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 265,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 272,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 274,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": 1,
+"y": -1,
+"z": 0
+}
+}
+],
+"victim": "BLUE"
+},
+{
+"seq": 275,
+"actions": [
+{
+"type": "stealFromPlayer",
+"target": "blue"
+}
+],
+"victim": null
+},
+{
+"seq": 276,
+"actions": [
+{
+"type": "tradeWithBank",
+"offering": {
+"wood": 4
+},
+"requesting": {
+"brick": 1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 279,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 0,
+"z": 2
+}
+}
+],
+"victim": null
+},
+{
+"seq": 281,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": 0,
+"y": -1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 282,
+"actions": [
+{
+"type": "buildSettlement",
+"vertex": {
+"x": -1,
+"y": 3,
+"z": -1
+}
+}
+],
+"victim": null
+},
+{
+"seq": 283,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": 0,
+"y": -1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+},
+{
+"seq": 289,
+"actions": [
+{
+"type": "playKnight",
+"location": {
+"x": -2,
+"y": 0,
+"z": 2
+}
+}
+],
+"victim": null
+},
+{
+"seq": 291,
+"actions": [
+{
+"type": "buildRoad",
+"vertices": [
+{
+"x": 0,
+"y": 0,
+"z": 2
+},
+{
+"x": 0,
+"y": -1,
+"z": 2
+}
+]
+}
+],
+"victim": null
+}
+]
+}

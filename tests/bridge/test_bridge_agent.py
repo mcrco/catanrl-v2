@@ -337,8 +337,9 @@ def test_an_error_in_the_agent_restarts_its_streams():
 
 
 def test_a_reusing_agent_needs_a_caller_that_streams():
-    """Only the ViewAgent hands an agent its seat's streams: another caller
-    (OpenHexSeat decides without them) is refused up front, not at every move."""
+    """Only a caller that hands an agent its seat's streams (the ViewAgent,
+    OpenHexSeat) may take a reusing one: another is refused up front, not at
+    every move."""
     dims = lockstep("base-2p", 0).dims
     reusing = tiny_agent("MCTS", "full", dims, sims=8, dets=1, reuse=True)
     with pytest.raises(ValueError, match="streams"):

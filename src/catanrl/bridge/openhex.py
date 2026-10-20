@@ -14,8 +14,8 @@ own action). This module puts an OpenHex game into the bridge's terms:
   for what it cannot see) while :func:`~catanrl.bridge.tracking.transition_events`
   feeds the seat's hand tracker, exactly as for a Catanatron view;
 * :class:`OpenHexSeat`: one game for one of our seats, which decides with a
-  native agent (POLICY, BELIEF, MCTS) on the replayed game and answers with
-  OpenHex actions;
+  native agent (POLICY, BELIEF, MCTS, a reusing MCTS on the seat's own
+  stream) on the replayed game and answers with OpenHex actions;
 * :class:`OpenHexBot`: the API client, which joins the queue, plays every
   game it is matched into, and joins again.
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -360,13 +361,50 @@ class EventLog:
 
 
 def native_for(spec: Any, *, device: str = "cpu") -> tuple[Any, str]:
+    """The native agent of ``spec`` on a seat's view: fair (DESIGN 6.5) and
+    not recurrent (the replay keeps no decision history). One that keeps a
+    seat's search between its decisions (MCTS with ``reuse``) is handed the
+    seat's stream by :class:`OpenHexSeat`, and compares the game it is
+    handed as the seat sees it (``reuse_check = "view"``, as the ViewAgent
+    sets it: the replay's placeholders and RNG are its own)."""
     from catanrl.bridge.agent import check_fair, native_agent
 
-    native, fair, label = native_agent(spec, device=device)
+    native, fair, label = native_agent(spec, device=device, memory=True)
     if fair is False:
         raise ValueError(f"{label} is not fair on a seat's view")
     check_fair(native)
+    if getattr(native, "recurrent", False):
+        raise ValueError(f"{label}: a recurrent network needs its seat's decision history, which the replay "
+                         "does not keep")
+    if getattr(native, "needs_memory", False):
+        native.reuse_check = "view"
     return native, label
+
+
+class _Slots:
+    """Game slots for a reusing agent's streams (``env * max_players + seat``,
+    as the harness numbers them, the slot being the env): one per live seat,
+    process-wide, a freed one taken again first (as the ViewAgent recycles
+    its slots), so the ids do not grow with the games played."""
+
+    def __init__(self) -> None:
+        self._free: list[int] = []
+        self._taken = 0
+        self._lock = threading.Lock()
+
+    def take(self) -> int:
+        with self._lock:
+            if self._free:
+                return self._free.pop()
+            self._taken += 1
+            return self._taken - 1
+
+    def give(self, env: int) -> None:
+        with self._lock:
+            self._free.append(env)
+
+
+SLOTS = _Slots()
 
 
 def default_of(legal: Sequence[cpp.Action]) -> cpp.Action:
@@ -389,7 +427,19 @@ class Plan:
 
 @dataclass
 class OpenHexSeat:
-    """One of our seats in one OpenHex game."""
+    """One of our seats in one OpenHex game.
+
+    A reusing agent (MCTS with ``reuse``) keeps the seat's search between its
+    decisions: the seat hands it one stream (a slot of :data:`SLOTS` as the
+    env) with ``first`` at its first decision, as the ViewAgent does, and a
+    copy of the game, since the replay moves its own on in place. A plan
+    decided ahead on a copy (the robber after a knight, a discard chain)
+    re-roots the search through the agent's view check like any own move.
+    The game replayed again on a larger bank (:class:`BankShort`) leaves the
+    remembered game stale, so the stream restarts there, as it does after an
+    error in the agent (which emptied its pool); :meth:`close` at the game's
+    end drops the searches and frees the slot.
+    """
 
     native: Any
     game_id: str
@@ -402,6 +452,14 @@ class OpenHexSeat:
         self.board = Board(state["board"])
         self.colors = [color_of(c) for c in state["turnOrder"]]
         self.seat = self.colors.index(color_of(self.color))
+        #: The agent keeps a seat's search between its decisions: it is handed
+        #: this seat's stream and ``first`` (see the class doc).
+        self.memory = bool(getattr(self.native, "needs_memory", False))
+        self.env = SLOTS.take() if self.memory else None
+        #: Whether a decision reached the agent (its stream started).
+        self.decided = False
+        #: The agent's search counters at the start: this game's share is the difference.
+        self._counters = dict(getattr(self.native, "counters", {}))
         #: Added to the bank of the replayed game where OpenHex paid past it.
         self.bank_margin = [0] * 5
         #: The entries replayed so far (replayed again on a larger bank).
@@ -451,6 +509,7 @@ class OpenHexSeat:
                         short.deficit, [b + m for b, m in zip(BANK, self.bank_margin)])
             entries, self.entries = self.entries, []
             self._build()
+            self._restart_stream()  # the agent's remembered game is the old bank's
             for past in entries:
                 self._apply(past)
             self._apply(entry)
@@ -476,6 +535,31 @@ class OpenHexSeat:
     @property
     def over(self) -> bool:
         return self.log.won is not None or self.replay.game.winning_color is not None
+
+    @property
+    def search(self) -> dict[str, int]:
+        """The agent's search counters over this game (MCTS: searches fresh
+        and reused, refusals; empty for an agent that keeps none)."""
+        counters = getattr(self.native, "counters", None)
+        if counters is None:
+            return {}
+        return {k: int(v) - self._counters.get(k, 0) for k, v in counters.items()}
+
+    def close(self) -> None:
+        """The game is over (or given up): drop the agent's searches of it and
+        free its slot, so they do not linger while the bot plays on."""
+        if self.env is not None:
+            self.native.forget(self.env)
+            SLOTS.give(self.env)
+            self.env = None
+
+    def _restart_stream(self) -> None:
+        """The agent's search of this game is stale (the game replayed again
+        on a larger bank) or gone (a bind to new dims): drop it, and the
+        seat's next decision is a first again."""
+        if self.env is not None:
+            self.native.forget(self.env)
+        self.decided = False
 
     def mismatches(self, state: Mapping[str, Any]) -> list[str]:
         """What the replayed game shows differently from OpenHex's state."""
@@ -576,10 +660,7 @@ class OpenHexSeat:
         if tracker is None:
             tracker = cpp.HandTracker(game, self.seat)
         try:
-            index = int(native.act(row[None], mask[None], np.array([seed], dtype=np.uint64),
-                                   games=[game] if getattr(native, "needs_games", False) else None,
-                                   trackers=[tracker] if getattr(native, "needs_trackers", False) else None)[0])
-            chosen = space.decode(game, index)
+            chosen = space.decode(game, self._act(row, mask, seed, game, tracker))
         except (ValueError, RuntimeError) as error:
             # (The last moves of a game whose winner's victory point cards
             # are hidden: the sampler sees a position nobody could be in.)
@@ -592,6 +673,27 @@ class OpenHexSeat:
             return default_of(legal)
         return chosen
 
+    def _act(self, row: np.ndarray, mask: np.ndarray, seed: int, game: cpp.Game, tracker: cpp.HandTracker) -> int:
+        """The agent's index for ``game``; a reusing agent decides on the seat's stream."""
+        native = self.native
+        seeds = np.array([seed], dtype=np.uint64)
+        trackers = [tracker] if getattr(native, "needs_trackers", False) else None
+        if not self.memory:
+            games = [game] if getattr(native, "needs_games", False) else None
+            return int(native.act(row[None], mask[None], seeds, games=games, trackers=trackers)[0])
+        streams = np.array([self.env * int(native.dims["max_players"]) + self.seat], dtype=np.int64)
+        first = np.array([not self.decided], dtype=bool)
+        try:
+            # The agent keeps the game it is handed until the seat's next decision: the
+            # replay moves its game on in place, and a plan decided ahead moves its copy.
+            index = native.act(row[None], mask[None], seeds, games=[game.copy()], trackers=trackers,
+                               streams=streams, first=first)[0]
+        except BaseException:
+            self.decided = False  # the agent emptied its pool and forgot its streams
+            raise
+        self.decided = True
+        return int(index)
+
     def _bind(self, game: cpp.Game) -> None:
         from catanrl.envs.encoding import covering_dims
 
@@ -602,6 +704,7 @@ class OpenHexSeat:
         if not getattr(self.native, "dims_agnostic", False):
             raise OpenHexError(f"the agent plays at dims {have}; this game needs {need}")
         self.native.bind({k: max(need[k], have[k]) for k in need})
+        self._restart_stream()
 
     def _decide(self, game: cpp.Game) -> Plan:
         action = self._choose(game, self.tracker)
@@ -832,47 +935,50 @@ class OpenHexBot:
                     [p.get("name") for p in reply["game"].get("players", [])])
         refused = 0
         lagging: tuple[list[str], int] = ([], 0)  # (kinds of difference, polls they have lasted)
-        while True:
-            seat.feed(self.client.events(game_id, seat.last_seq))
-            reply = self.client.state(game_id)
-            info, state = reply["game"], reply["state"]
-            if info.get("status") != "active":
-                return self._record(game_id, seat, info)
-            try:
-                plan = seat.plan(state)
-            except (OpenHexError, ValueError, RuntimeError) as error:
-                logger.warning("%s: game %s: no plan (%s); playing the default move", self.name, game_id,
-                               str(error)[:160])
-                plan = Plan(seat.fallback(state))
-            if plan is None:
-                time.sleep(self.poll_s)
-                continue
-            problems = seat.mismatches(state)
-            # OpenHex's state lags its events (and sometimes steps back): a
-            # difference counts once its kind has lasted three polls.
-            kinds = [p.split(" ")[0] for p in problems]
-            lagging = (kinds, lagging[1] + 1 if kinds == lagging[0] else 1)
-            if problems and lagging[1] == 3:
-                seat.stats["mismatches"] = seat.stats.get("mismatches", 0) + 1
-                logger.warning("%s: game %s: the replay differs from OpenHex: %s", self.name, game_id,
-                               "; ".join(problems[:3]))
-            started = time.monotonic()
-            for action in plan.actions:
+        try:
+            while True:
+                seat.feed(self.client.events(game_id, seat.last_seq))
+                reply = self.client.state(game_id)
+                info, state = reply["game"], reply["state"]
+                if info.get("status") != "active":
+                    return self._record(game_id, seat, info)
                 try:
-                    self.client.act(game_id, action, int(1000 * (time.monotonic() - started)))
-                    refused = 0
-                except OpenHexHTTPError as error:
-                    if error.status >= 500:
-                        raise
-                    refused += 1
-                    logger.warning("%s: game %s: %s refused (%s)", self.name, game_id, action, error.detail[:200])
-                    for fallback in seat.fallback(state) if refused <= 3 else []:
-                        try:
-                            self.client.act(game_id, fallback, 0)
-                        except OpenHexHTTPError as again:
-                            logger.warning("%s: fallback %s refused too (%s)", self.name, fallback, again.detail[:200])
+                    plan = seat.plan(state)
+                except (OpenHexError, ValueError, RuntimeError) as error:
+                    logger.warning("%s: game %s: no plan (%s); playing the default move", self.name, game_id,
+                                   str(error)[:160])
+                    plan = Plan(seat.fallback(state))
+                if plan is None:
                     time.sleep(self.poll_s)
-                    break
+                    continue
+                problems = seat.mismatches(state)
+                # OpenHex's state lags its events (and sometimes steps back): a
+                # difference counts once its kind has lasted three polls.
+                kinds = [p.split(" ")[0] for p in problems]
+                lagging = (kinds, lagging[1] + 1 if kinds == lagging[0] else 1)
+                if problems and lagging[1] == 3:
+                    seat.stats["mismatches"] = seat.stats.get("mismatches", 0) + 1
+                    logger.warning("%s: game %s: the replay differs from OpenHex: %s", self.name, game_id,
+                                   "; ".join(problems[:3]))
+                started = time.monotonic()
+                for action in plan.actions:
+                    try:
+                        self.client.act(game_id, action, int(1000 * (time.monotonic() - started)))
+                        refused = 0
+                    except OpenHexHTTPError as error:
+                        if error.status >= 500:
+                            raise
+                        refused += 1
+                        logger.warning("%s: game %s: %s refused (%s)", self.name, game_id, action, error.detail[:200])
+                        for fallback in seat.fallback(state) if refused <= 3 else []:
+                            try:
+                                self.client.act(game_id, fallback, 0)
+                            except OpenHexHTTPError as again:
+                                logger.warning("%s: fallback %s refused too (%s)", self.name, fallback, again.detail[:200])
+                        time.sleep(self.poll_s)
+                        break
+        finally:
+            seat.close()  # however the game ended: a reusing agent's searches of it go now
 
     def _record(self, game_id: str, seat: OpenHexSeat, info: Mapping[str, Any]) -> dict:
         (self.state_dir / "boards" / f"{game_id}.json").unlink(missing_ok=True)
@@ -880,6 +986,8 @@ class OpenHexBot:
                 "status": info.get("status"), "winner": info.get("winner"),
                 "players": [p.get("name") for p in info.get("players", [])],
                 "decisions": seat.decisions, "fallbacks": seat.fallbacks, **seat.stats}
+        if seat.search:
+            line["search"] = seat.search
         logger.info("%s: %s", self.name, json.dumps(line))
         with open(self.state_dir / "games.jsonl", "a") as file:
             file.write(json.dumps(line) + "\n")
