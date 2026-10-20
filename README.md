@@ -104,7 +104,7 @@ worlds those three sample come from the seat's hand tracker:
 `tracker=pool` (default) deals the unknown cards uniformly, `tracker=exact`
 draws from the exact posterior over hidden steals (DESIGN 1.5). `MCTS` also
 takes `reuse=true` (a seat's search is re-rooted at the action it played
-when the game followed exactly, native harness only), `transpositions=true`
+when the game followed exactly; on the native harness and the server bridge), `transpositions=true`
 (the engine's transposition table) and `dedup=false`
 (execution-only: byte-identical leaf rows are otherwise evaluated once);
 `reuse` and `transpositions` enter the record key only when set.

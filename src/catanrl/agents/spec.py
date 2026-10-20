@@ -450,10 +450,12 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
         if harness != "native":
             raise SpecError(f"{key}: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only the "
                             "native harness keeps a seat's decision history")
-    if key == "MCTS" and params.reuse and harness != "native":
-        # A reused search is the seat's own history too: the bridges decide one position at a time.
-        raise SpecError("MCTS: reuse=true keeps a seat's search between its decisions, which only the native "
-                        "harness streams")
+    if key == "MCTS" and params.reuse and harness == "catanatron":
+        # A reused search is the seat's own history too: the native harness and the server
+        # bridge (ViewAgent) stream a seat's decisions; the Catanatron player decides one
+        # position at a time.
+        raise SpecError("MCTS: reuse=true keeps a seat's search between its decisions, which the catanatron "
+                        "harness does not stream (the native and server harnesses do)")
     configs = [g if hasattr(g, "num_players") else load_game(g) for g in games]
     if configs and not ckpt.dims_agnostic and dims_for(configs) != dims:
         raise SpecError(f"{key}: {ref} is a {ckpt.header['model']['class']} network at dims {dims}; "

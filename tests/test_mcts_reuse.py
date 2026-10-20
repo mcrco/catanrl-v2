@@ -1,7 +1,9 @@
 """Test 32: MCTS tree reuse (``reuse=true``): a seat's search is re-rooted at the action
 it played when the game handed is exactly the previous one plus that action, dropped at
-a stream's first decision, refused by the agent (before the engine) when the game
-diverged and by the engine after a chance action, and the counters add up; with
+a stream's first decision or by ``forget`` (a caller that saw the game end), refused by
+the agent (before the engine) when the game diverged and by the engine after a chance
+action (under the view check even a replayed outcome the seat's view agrees with, which
+the exact check refuses as diverged), and the counters add up; with
 ``transpositions`` the re-rooted search keeps its linked nodes. Rows with reuse are
 invariant to num_envs, threads and worker splits in test_eval_invariance."""
 
@@ -117,6 +119,29 @@ def test_a_first_decision_drops_the_live_search():
     assert len(first.pool) == 3 and set(first._live) == {4, 5, 9}
 
 
+def test_forget_drops_an_envs_searches_and_restarts_its_streams():
+    """``forget(env)`` (the server bridge, at a game's last message): the env's live
+    searches go, counted as ``dropped_over``, its streams must be marked first again,
+    and another env's search stays."""
+    first = mcts(reuse=True, oracle=True)
+    assert first.dims["max_players"] == 3
+    games = [position(7), position(8), position(9)]
+    decide(first, games, streams=[3, 4, 9], first=[True, True, True])  # env 1 twice, env 3
+    first.forget(1)
+    assert first.counters["dropped_over"] == 2 and set(first._live) == {9} and len(first.pool) == 1
+    first.forget(1)  # nothing there: nothing happens
+    first.forget(2)
+    assert first.counters["dropped_over"] == 2 and set(first._live) == {9}
+    decide(first, games[:1], streams=[3], first=[True])
+    assert set(first._live) == {3, 9} and first.counters["dropped_first"] == 0 and first.counters["fresh"] == 4
+    first.forget(1)
+    assert first.counters["dropped_over"] == 3 and set(first._live) == {9}
+    # A decision on a forgotten stream not marked first is the caller's error (and, as any
+    # error in act, empties the pool).
+    with pytest.raises(ValueError, match="no live search"):
+        decide(first, games[:1], streams=[3], first=[False])
+
+
 def test_a_first_decision_drops_the_envs_stale_searches_and_loses_no_reuse(monkeypatch):
     """A fill MCTS agent holds two seats of every 3p game. A seat's first decision drops
     the env's searches from its previous game, so the agent holds at most its seats per
@@ -201,6 +226,44 @@ def test_a_chance_action_is_refused_by_the_engine_and_the_fresh_search_is_the_pl
     run_searches(pool, first.evaluator, batch_rows=first.config.max_pending)
     assert pool.visits(sid).tolist() == first.pool.visits(first._live[1][0]).tolist()
     assert int(pool.select(sid, 0.0)) == choice
+
+
+def test_a_replayed_chance_outcome_splits_the_refusals_by_check():
+    """The seat's roll played with the dice the agent's own replay drew (a server
+    replays recorded outcomes): under the exact check it is refused as diverged, since
+    a replayed roll draws nothing from the RNG and ``search_equivalent`` compares it;
+    under the view check the seat's private row, options and turn state agree, and the
+    engine refuses the chance child. Fresh, reused and the refusals' sum agree between
+    the checks, their split does not: the bridge comparison asserts just that."""
+    exact, view = mcts(reuse=True, dets=1), mcts(reuse=True, dets=1)
+    view.reuse_check = "view"
+    for seed in range(20, 40):
+        game = position(seed, want_roll=True)
+        chosen = [int(decide(a, [game], streams=[0], first=[True])[0]) for a in (exact, view)]
+        assert chosen[0] == chosen[1]
+        roll = exact.action_space.decode(game, chosen[0])
+        assert roll.action_type == cpp.ActionType.ROLL
+        expected = game.copy()
+        expected.execute(roll)
+        if expected.current_player_index == game.current_player_index and len(expected.playable_actions) >= 2:
+            break
+    else:
+        pytest.fail("no roll kept the turn with a choice to make")
+    # The real game, rolled with the dice the replay drew: the same from the seat's view.
+    for dice in ((a, b) for a in range(1, 7) for b in range(1, 7)):
+        rolled = game.copy()
+        rolled.execute(roll, dice=dice)
+        if view._same_view(game, expected, rolled):
+            break
+    else:
+        pytest.fail("no dice reproduce the replay's roll")
+    assert not expected.search_equivalent(rolled)
+    for checker in (exact, view):
+        decide(checker, [rolled], streams=[0], first=[False])
+    for name in ("decisions", "fresh", "reused", "dropped_first"):
+        assert exact.counters[name] == view.counters[name]
+    assert exact.counters["refused_diverged"] == 1 and exact.counters["refused_engine"] == 0
+    assert view.counters["refused_diverged"] == 0 and view.counters["refused_engine"] == 1
 
 
 def test_reuse_advances_a_search_with_transpositions():

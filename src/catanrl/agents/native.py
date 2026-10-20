@@ -409,12 +409,22 @@ class MctsAgent(NativeAgent):
     move between its own and its next decision would diverge anyway. Live searches are
     therefore at most one per seat the agent holds in an env's current game, each a
     full search's retained subtree (about 12 MB at 1024 sims in 4p), so budget
-    ``num_envs x MCTS seats x 12 MB``. ``counters``: ``decisions``, ``fresh``,
-    ``reused``, ``dropped_first`` (live searches dropped at a first decision),
-    ``refused_diverged`` (the game is not the previous one plus the action played; a
-    search dropped by another seat's first decision counts here at its next decision,
-    since that move diverged it) and ``refused_engine`` (``advance`` returned false);
-    ``search_stats`` sums ``SearchStats`` over every search run.
+    ``num_envs x MCTS seats x 12 MB``. An error in ``act`` and a ``bind`` to new dims
+    empty the pool and restart every stream: each stream's next decision must be
+    marked ``first`` again. A caller that learns a game is over before a first decision
+    reaches its env (the server bridge, at the game's last message) drops the env's
+    searches with :meth:`forget`. ``counters``: ``decisions``, ``fresh``, ``reused``,
+    ``dropped_first`` (live searches dropped at a first decision), ``dropped_over``
+    (dropped by ``forget``), ``refused_diverged`` (the game is not the previous one plus
+    the action played; a search dropped by another seat's first decision counts here at
+    its next decision, since that move diverged it) and ``refused_engine`` (``advance``
+    returned false); ``search_stats`` sums ``SearchStats`` over every search run.
+
+    ``reuse_check`` is how the game handed is matched against the previous game plus
+    the action played: ``"exact"`` (``search_equivalent``) on the native harness, whose
+    games are the real ones; ``"view"`` (:meth:`_same_view`) on the server bridge, whose
+    games are replayed from a seat's views with placeholder hidden cards and an RNG of
+    their own, so only what the seat sees can be compared.
 
     ``dedup`` (execution-only, on by default) evaluates byte-identical leaf rows once
     (:class:`~catanrl.search.dedup.DedupEvaluator`, bitwise neutral).
@@ -433,6 +443,8 @@ class MctsAgent(NativeAgent):
         self.needs_trackers = self.config.determinizations > 0
         self.tracker_mode = tracker_mode_of(params)
         self.temperature = float(_param(params, "temperature", 0.0))
+        #: "exact" or "view" (see the class doc); the server bridge sets "view".
+        self.reuse_check = "exact"
         self.counters: Counter[str] = Counter()
         self.search_stats: Counter[str] = Counter()
         self._make_pool()
@@ -451,6 +463,8 @@ class MctsAgent(NativeAgent):
         self._live: dict[int, tuple[int, cpp.Game, int]] = {}
         #: Streams that had a first decision: a later decision of any other stream is a harness error.
         self._started: set[int] = set()
+        #: Private rows for the view check, built at first use (the native harness never needs them).
+        self._private: cpp.GraphEncoder | None = None
 
     def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
         if games is None:
@@ -525,9 +539,14 @@ class MctsAgent(NativeAgent):
             sid, prev, chosen = entry
             expected = prev.copy()
             expected.execute(self.action_space.decode(prev, chosen))
-            # The real game evolved by exactly the action played (hands, RNG and options
-            # included); whether the sampled worlds survive it is the engine's own refusal.
-            same = expected.search_equivalent(game)
+            # The game evolved by exactly the action played (for a real game: hands, RNG and
+            # options included); whether the sampled worlds survive it is the engine's own refusal.
+            if self.reuse_check == "exact":
+                same = expected.search_equivalent(game)
+            elif self.reuse_check == "view":
+                same = self._same_view(prev, expected, game)
+            else:
+                raise ValueError(f"reuse_check must be exact or view, not {self.reuse_check!r}")
             if same and self.pool.advance(sid, chosen):
                 ids[i] = sid
                 self.counters["reused"] += 1
@@ -535,13 +554,61 @@ class MctsAgent(NativeAgent):
                 self.counters["refused_engine" if same else "refused_diverged"] += 1
                 self.pool.remove(sid)
 
+    def _same_view(self, prev: cpp.Game, expected: cpp.Game, game: cpp.Game) -> bool:
+        """Whether ``game`` is ``expected`` (``prev`` plus the action played) as far as
+        the seat that played it can see: the same mover, turn owner, prompt, turn count
+        and phase flags, the same legal actions, and the same private row for that seat
+        (its hand and cards, every public count, piece and award, the bank, the deck
+        size, the robber, the mask). The games the server bridge hands hold placeholders
+        for the other hands and an RNG of their own, so ``search_equivalent`` never holds
+        there, and this is everything the seat knows.
+
+        Why the retained tree is fair on a view (DESIGN 6.5): its worlds were dealt from
+        the seat's hand tracker at the previous decision, so they hold nothing the seat
+        could not know of then; this check establishes that the game moved by exactly
+        the seat's own deterministic action, which changes no other hand; and with
+        ``dets >= 1`` (``oracle`` is refused on views) ``SearchPool.advance`` refuses
+        every child that could depend on hidden cards: a drawn outcome (a roll, a
+        purchase, a steal, even the only possible one), another player's decision, a
+        monopoly, the friendly-robber prompt, and worlds that disagree on the new root's
+        public state or options. Every world kept is thus a fair world plus the seat's
+        own move, and nothing hidden reaches the next decision through the tree.
+        """
+        seat = prev.current_player_index
+
+        def turn_state(g: cpp.Game) -> tuple:
+            return (g.current_player_index, g.current_turn_index, g.current_prompt, g.num_turns,
+                    g.is_initial_build_phase, g.is_discarding, g.is_road_building, g.free_roads_available)
+
+        if expected.current_player_index != seat or turn_state(expected) != turn_state(game):
+            return False
+        if sorted(map(repr, expected.playable_actions)) != sorted(map(repr, game.playable_actions)):
+            return False
+        if self._private is None:
+            self._private = make_encoder(self.dims, "private")
+        return bool(np.array_equal(self._private.encode(expected, seat), self._private.encode(game, seat)))
+
+    def forget(self, env: int) -> None:
+        """Drop ``env``'s live searches and restart its streams: its game is over. The
+        native harness says so only through the next game's first decision there, which
+        drops them alike; the server bridge sees the game's last message and calls this,
+        so a finished game's searches do not linger until a new game takes its slot."""
+        for stream in self._live_in(env):
+            self.pool.remove(self._live.pop(stream)[0])
+            self.counters["dropped_over"] += 1
+        players = int(self.dims["max_players"])
+        self._started -= {s for s in self._started if s // players == env}
+
     def _stale(self, stream: int) -> list[int]:
         """The live streams a first decision of ``stream`` outdates: every seat of its env
         (streams are ``env * max_players + seat``), whose previous game is over. A seat of
         the new game that decided already is among them, but this first decision is a move
         between its own, so its next decision would be refused as diverged anyway."""
+        return self._live_in(stream // int(self.dims["max_players"]))
+
+    def _live_in(self, env: int) -> list[int]:
         players = int(self.dims["max_players"])
-        return [s for s in self._live if s // players == stream // players]
+        return [s for s in self._live if s // players == env]
 
     def _record(self, stats: cpp.SearchStats) -> None:
         for name in ("nodes", "evaluations", "simulations", "coalesced_outcomes", "transpositions", "max_depth"):

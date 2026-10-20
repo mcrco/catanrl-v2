@@ -130,9 +130,10 @@ def test_reuse_transpositions_and_dedup_are_keyed_only_when_set(ckpts):
     assert reuse.key_dict()["params"] == {**base.key_dict()["params"], "reuse": True}
     assert reuse.key_dict()["search"] == base.key_dict()["search"]
     assert reuse.native(device="cpu").reuse and reuse.native(device="cpu").needs_memory
-    for harness in ("catanatron", "server"):
-        with pytest.raises(SpecError, match="reuse"):
-            resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true", harness=harness)
+    # The server bridge streams a seat's decisions (ViewAgent); the Catanatron player does not.
+    assert resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true", harness="server").canonical == reuse.canonical
+    with pytest.raises(SpecError, match="reuse"):
+        resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true", harness="catanatron")
     nodedup = resolve_agent("MCTS:ckpt=exp/v:sims=8:dedup=false")
     assert nodedup.canonical == base.canonical and nodedup.key_dict() == base.key_dict()
     assert not nodedup.native(device="cpu").dedup and base.native(device="cpu").dedup

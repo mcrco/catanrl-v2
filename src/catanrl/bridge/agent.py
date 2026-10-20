@@ -25,6 +25,21 @@ Per decision it
 4. decodes the chosen index, converts it to Catanatron and returns the
    offered action it equals (the object from ``playable_actions``).
 
+An MCTS agent with ``reuse`` keeps a seat's search between its decisions.
+The ViewAgent hands it one stream per game slot and seat (``env *
+max_players + seat``, the slot a per-game integer) and ``first`` at the
+seat's first decision of a game, and sets the agent's ``reuse_check`` to
+``"view"``:
+the game it hands is replayed from views, so the agent compares what the
+seat sees (its private row, the legal actions, the mover, prompt and turn),
+not hands and RNG. A forced move (one offered action) is answered without
+the agent, so the search it kept is refused as diverged at the seat's next
+decision and a fresh one starts. A game's last message (``after``, or
+``aborted`` once it had started; :meth:`ViewAgent.observe`) drops its
+searches and frees its slot at the next decision; a game whose end was never
+seen keeps them until it is evicted, when its slot's next game drops them at
+its first decision, as a new game in a harness env would.
+
 Decision seeds are ``catanrl.seeding.derive_seed(game_id, "decide", seat,
 index)``, ``index`` being the number of log entries before the decision: a
 pure function of the view, so a transcript fixes every decision's seed. (The
@@ -69,6 +84,8 @@ logger = logging.getLogger(__name__)
 #: ``default_action``): roll, else end the turn, else the first offered move.
 DEFAULT_PREFERENCE = ("ROLL", "END_TURN")
 GAME_MESSAGES = ("before", "decide", "step", "after")
+#: A game's end: played out, or voided after it started (``aborted`` carries its id then).
+END_MESSAGES = ("after", "aborted")
 
 
 class BridgeError(RuntimeError):
@@ -80,9 +97,12 @@ class UnfairAgent(ValueError):
 
 
 def native_agent(agent: Any, *, device: str = "cpu", infer_rows: int = 1,
-                 mode: str = "strict") -> tuple[Any, bool | None, str]:
+                 mode: str = "strict", memory: bool = False) -> tuple[Any, bool | None, str]:
     """(native agent, resolved ``fair`` if known, label) for an agent spec
-    (resolved with ``harness="server"``), a resolved agent or a native agent."""
+    (resolved with ``harness="server"``), a resolved agent or a native agent.
+    ``memory``: the caller hands ``act`` the seat's ``streams`` and ``first``
+    (as :class:`ViewAgent` does); an agent that needs them (MCTS with
+    ``reuse``) is refused otherwise, since it could not decide at all."""
     from catanrl.agents.native import BotAgent, NativeAgent
 
     if isinstance(agent, str):
@@ -90,16 +110,21 @@ def native_agent(agent: Any, *, device: str = "cpu", infer_rows: int = 1,
 
         agent = resolve_agent(agent, harness="server")
     if isinstance(agent, (NativeAgent, BotAgent)):
-        return agent, None, str(getattr(agent, "key", "agent"))
-    if callable(getattr(agent, "native", None)):
+        native, fair, label = agent, None, str(getattr(agent, "key", "agent"))
+    elif callable(getattr(agent, "native", None)):
         native = agent.native(device=device, infer_rows=infer_rows, mode=mode)
-        return native, getattr(agent, "fair", None), str(getattr(agent, "label", agent))
-    if hasattr(agent, "key") and hasattr(agent, "params"):
+        fair, label = getattr(agent, "fair", None), str(getattr(agent, "label", agent))
+    elif hasattr(agent, "key") and hasattr(agent, "params"):
         from catanrl.agents.native import make_native_agent
 
         native = make_native_agent(agent, device=device, infer_rows=infer_rows, mode=mode)
-        return native, getattr(agent, "fair", None), str(agent.key)
-    raise TypeError(f"cannot make a native agent of {agent!r}")
+        fair, label = getattr(agent, "fair", None), str(agent.key)
+    else:
+        raise TypeError(f"cannot make a native agent of {agent!r}")
+    if getattr(native, "needs_memory", False) and not memory:
+        raise ValueError(f"{label} keeps a seat's search between its decisions and needs the seat's streams, "
+                         "which this caller does not hand it (ViewAgent does)")
+    return native, fair, label
 
 
 def check_fair(native: Any, num_players: int | None = None) -> None:
@@ -151,18 +176,28 @@ class ViewAgent:
     can be inferred) nor a server ``before`` message (:meth:`observe`) gives
     it. ``seed_fn(view, seat)`` replaces the decision seed. ``strict``
     raises :class:`BridgeError` where a fallback would be counted.
+    ``max_games``: games (and seats) followed at once; a reusing MCTS agent
+    holds at most one live search per seat of each, and a game whose end
+    :meth:`observe` saw leaves at the next decision.
     """
 
     def __init__(self, agent: Any, *, device: str = "cpu", infer_rows: int = 1, mode: str = "strict",
                  supply: Any = None, strict: bool = False,
                  seed_fn: Callable[[Mapping[str, Any], int], int] | None = None, max_games: int = 8) -> None:
-        self.native, fair, self.label = native_agent(agent, device=device, infer_rows=infer_rows, mode=mode)
+        self.native, fair, self.label = native_agent(agent, device=device, infer_rows=infer_rows, mode=mode,
+                                                     memory=True)
         if fair is False:
             raise UnfairAgent(f"{self.label} is not fair on views (DESIGN 6.5)")
         check_fair(self.native)
         if getattr(self.native, "recurrent", False):
             raise BridgeError(f"{self.label}: a recurrent network needs its seat's decision history, which the "
                               "server bridge does not replay")
+        #: The agent keeps a seat's search between its decisions (MCTS with ``reuse``): it
+        #: is handed the seat's stream and ``first``, and matches the game it is handed as
+        #: the seat sees it (the replay's placeholders and RNG are its own).
+        self.memory = bool(getattr(self.native, "needs_memory", False))
+        if self.memory:
+            self.native.reuse_check = "view"
         self.supply = supply
         self.strict = strict
         self.seed_fn = seed_fn
@@ -171,6 +206,8 @@ class ViewAgent:
         #: (game id, color) -> the seat's tracker, most recent last.
         self.seats: OrderedDict[tuple[Any, str], SeatTracker] = OrderedDict()
         self._games: OrderedDict[Any, dict[str, Any]] = OrderedDict()
+        #: Game slots (the streams' env) finished and evicted games gave up, for the next new game.
+        self._free_envs: list[int] = []
         self._inbox: deque[dict] = deque()
         self._lock = threading.Lock()
 
@@ -188,20 +225,28 @@ class ViewAgent:
             players = (body.get("config") or {}).get("num_players")
             if isinstance(players, int):
                 check_fair(self.native, players)
-        if body.get("type") in GAME_MESSAGES:
+        if body.get("type") in GAME_MESSAGES or body.get("type") in END_MESSAGES:
             self._inbox.append(dict(body))
 
     def _game(self, game_id: Any) -> dict[str, Any]:
         info = self._games.get(game_id)
         if info is None:
-            info = self._games[game_id] = {"supply": None, "sizes": {}}
-            while len(self._games) > self.max_games:
-                self._games.popitem(last=False)
+            while len(self._games) >= self.max_games:
+                self._free_envs.append(self._games.popitem(last=False)[1]["env"])
+            # A new game takes a freed slot: with a reusing agent, its first decision then
+            # drops the live searches an evicted game left there (a finished game's went
+            # with its last message). "decided": the seats whose decisions reached the agent
+            # (its streams).
+            env = self._free_envs.pop() if self._free_envs else len(self._games)
+            info = self._games[game_id] = {"supply": None, "sizes": {}, "env": env, "decided": set()}
         return info
 
     def _drain(self) -> None:
         while self._inbox:
             body = self._inbox.popleft()
+            if body.get("type") in END_MESSAGES:
+                self._forget(body.get("game_id"))
+                continue
             info = self._game(body.get("game_id"))
             if body.get("type") == "before":
                 info["supply"] = (body.get("config") or {}).get("supply")
@@ -217,6 +262,19 @@ class ViewAgent:
             for (game_id, _color), tracker in self.seats.items():
                 if game_id == body.get("game_id"):
                     tracker.sizes[index] = sizes
+
+    def _forget(self, game_id: Any) -> None:
+        """The game is over: drop the agent's searches of it and free its slot now, not
+        when it is evicted ``max_games`` games later (a retained search is a full tree
+        with its games, 5-20 MB at 1024 sims). Nothing for a game not followed, one
+        evicted already, a second seat's copy of the message or a room voided before
+        its game (no id)."""
+        info = self._games.pop(game_id, None)
+        if info is None:
+            return
+        if self.memory:
+            self.native.forget(info["env"])
+        self._free_envs.append(info["env"])
 
     # ------------------------------------------------------------ deciding
 
@@ -307,17 +365,45 @@ class ViewAgent:
                 raise BridgeError("the game's legal actions differ from the offered ones")
             row = row.copy()
             row[-mask.size:] = mask
-        seed = self._seed(view, seat)
-        index = int(self.native.act(
-            row[None], mask[None], np.array([seed], dtype=np.uint64),
-            games=[game] if getattr(self.native, "needs_games", False) else None,
-            trackers=[tracker.tracker] if getattr(self.native, "needs_trackers", False) else None)[0])
+        index = self._act(row, mask, self._seed(view, seat), game, tracker)
         chosen = space.decode(game, index)
         key = action_key(action_to_json(to_catanatron_action(chosen)))
         for action in playable_actions:
             if action_key(list(action)) == key:
                 return action
         return self._fallback("not_offered", playable_actions, f"{chosen} was not offered")
+
+    def _act(self, row: np.ndarray, mask: np.ndarray, seed: int, game: cpp.Game, tracker: SeatTracker) -> int:
+        """The agent's index for the seat's ``game``; a reusing agent decides on the seat's stream."""
+        native = self.native
+        seeds = np.array([seed], dtype=np.uint64)
+        trackers = [tracker.tracker] if getattr(native, "needs_trackers", False) else None
+        if not self.memory:
+            games = [game] if getattr(native, "needs_games", False) else None
+            return int(native.act(row[None], mask[None], seeds, games=games, trackers=trackers)[0])
+        info = self._game(tracker.game_id)
+        seat = tracker.seat
+        # The stream is numbered as the harness numbers them (env * max_players + seat), with
+        # the game's slot as the env; first at the seat's first decision of the game to reach
+        # the agent (a decision that failed does not count: the agent restarted its streams).
+        streams = np.array([info["env"] * int(native.dims["max_players"]) + seat], dtype=np.int64)
+        first = np.array([seat not in info["decided"]], dtype=bool)
+        try:
+            # The agent keeps the game it is handed until the seat's next decision; the
+            # replay moves this one on.
+            index = native.act(row[None], mask[None], seeds, games=[game.copy()], trackers=trackers,
+                               streams=streams, first=first)[0]
+        except BaseException:
+            self._restart_streams()
+            raise
+        info["decided"].add(seat)
+        return int(index)
+
+    def _restart_streams(self) -> None:
+        """The agent dropped every live search and forgot its streams (an error in ``act``,
+        a bind to new dims): each seat's next decision is a first again."""
+        for info in self._games.values():
+            info["decided"].clear()
 
     def _seed(self, view: Mapping[str, Any], seat: int) -> int:
         if self.seed_fn is not None:
@@ -337,6 +423,7 @@ class ViewAgent:
             if not getattr(self.native, "dims_agnostic", False):
                 raise ViewError(f"{self.label} plays at dims {have}; this game needs {need}")
             self.native.bind({k: max(need[k], have[k]) for k in need})
+            self._restart_streams()
         try:
             self.native.check_maps([game.board.map])
         except ValueError as error:
@@ -352,5 +439,9 @@ class ViewAgent:
         for tracker in self.seats.values():
             repairs.update(tracker.replay.repairs)
             tracking.update(tracker.stats)
-        return {"agent": self.label, "decisions": dict(self.stats), "replay_repairs": dict(repairs),
-                "tracking": dict(tracking)}
+        out = {"agent": self.label, "decisions": dict(self.stats), "replay_repairs": dict(repairs),
+               "tracking": dict(tracking)}
+        counters = getattr(self.native, "counters", None)
+        if counters is not None:  # MCTS: fresh and reused searches, refusals
+            out["search"] = dict(counters)
+        return out
