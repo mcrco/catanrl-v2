@@ -971,7 +971,8 @@ class OpenHexBot:
     """One registered bot: keep it queued, play every game it gets."""
 
     def __init__(self, spec: Any, api_key: str, mode: str, *, base: str = API, device: str = "cpu",
-                 state_dir: str | Path = "openhex", poll_s: float = 1.0, name: str | None = None) -> None:
+                 state_dir: str | Path = "openhex", poll_s: float = 1.0, name: str | None = None,
+                 stop: threading.Event | None = None) -> None:
         self.native, self.label = native_for(spec, device=device)
         self.client = OpenHexClient(api_key, base)
         self.mode = mode
@@ -979,6 +980,15 @@ class OpenHexBot:
         self.name = name or self.label
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        #: Set to drain: the bot plays out the games it is in, queues for no
+        #: more, and :meth:`run` returns (the caller leaves the queue).
+        self.stop = stop if stop is not None else threading.Event()
+
+    def leave(self) -> None:
+        """Leave the queue (a bot that stops while queued gets matched and
+        forfeits at the deadline)."""
+        self.client.leave(self.mode)
+        logger.info("%s: left the %s queue", self.name, self.mode)
 
     def run(self) -> None:
         backoff = 5.0
@@ -990,10 +1000,16 @@ class OpenHexBot:
                         self.play(str(game.get("id") or game.get("game_id")))
                     backoff = 5.0
                     continue
+                if self.stop.is_set():
+                    logger.info("%s: no game in play; stopped", self.name)
+                    return
                 self._join()
                 time.sleep(3.0)
                 backoff = 5.0
             except (OpenHexError, OSError, ValueError) as error:
+                if self.stop.is_set():
+                    logger.warning("%s: %s; stopped", self.name, error)
+                    return
                 logger.warning("%s: %s; trying again in %.0f s", self.name, error, backoff)
                 time.sleep(backoff)
                 backoff = min(300.0, backoff * 2)
@@ -1001,6 +1017,9 @@ class OpenHexBot:
                 # (A replay that cannot follow a game, say.) The game is lost
                 # either way: OpenHex aborts it at the deadline, after which it
                 # is no longer active and the bot queues again.
+                if self.stop.is_set():
+                    logger.exception("%s: giving up on the current game; stopped", self.name)
+                    return
                 logger.exception("%s: giving up on the current game; trying again in %.0f s", self.name, backoff)
                 time.sleep(backoff)
                 backoff = min(300.0, backoff * 2)

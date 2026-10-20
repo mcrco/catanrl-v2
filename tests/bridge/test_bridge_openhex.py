@@ -448,3 +448,60 @@ def test_native_for_streams_a_reusing_agent_and_refuses_a_recurrent_one():
     assert recurrent.needs_memory
     with pytest.raises(ValueError, match="recurrent"):
         native_for(recurrent)
+class _QueueClient:
+    """An API with no game for us: counts joins and leaves."""
+
+    def __init__(self):
+        self.joined = []
+        self.left = []
+
+    def active_games(self):
+        return []
+
+    def join(self, mode):
+        self.joined.append(mode)
+        return {}
+
+    def leave(self, mode):
+        self.left.append(mode)
+        return {}
+
+
+def _idle_bot(stop=None):
+    import threading
+
+    from catanrl.bridge.openhex import OpenHexBot
+
+    bot = OpenHexBot.__new__(OpenHexBot)
+    bot.client = _QueueClient()
+    bot.mode = "1v1"
+    bot.name = "test"
+    bot.poll_s = 0.0
+    bot.stop = stop if stop is not None else threading.Event()
+    return bot
+
+
+def test_a_draining_bot_with_no_game_in_play_stops_without_queueing(monkeypatch):
+    """SIGUSR1 sets the stop event: a bot between games returns from run()
+    before joining again; one that is not draining keeps queueing."""
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    bot = _idle_bot(stop)
+    bot.run()
+    assert bot.client.joined == []
+
+    sleeps = []
+
+    def stop_after_one_join(seconds):
+        sleeps.append(seconds)
+        stop.set()
+
+    stop.clear()
+    bot = _idle_bot(stop)
+    monkeypatch.setattr("catanrl.bridge.openhex.time.sleep", stop_after_one_join)
+    bot.run()
+    assert bot.client.joined == ["1v1"] and len(sleeps) == 1
+    bot.leave()
+    assert bot.client.left == ["1v1"]

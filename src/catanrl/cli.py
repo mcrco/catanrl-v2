@@ -146,6 +146,8 @@ def _parser() -> argparse.ArgumentParser:
     oh.add_argument("--state", default="openhex", help="games.jsonl goes here")
     oh.add_argument("--device", default="cpu")
     oh.add_argument("--only", help="run just this bot (by name)")
+    oh.add_argument("--leave", action="store_true",
+                    help="leave the queue for each bot and exit (on stop, so OpenHex does not match a dead bot)")
 
     play = sub.add_parser("play", help="a local TUI game against our agents and Catanatron bots")
     play.add_argument("--seats", required=True, help="comma-separated: human, Catanatron specs, POLICY/MCTS/BELIEF specs")
@@ -285,15 +287,23 @@ def _cmd_house(args) -> int:
 
 
 def _cmd_openhex(args) -> int:
+    """Keep the bots queued until told to stop. Two ways to stop: SIGUSR1
+    drains (the bots leave their queues, play out the games they are in, and
+    the process exits); SIGINT/SIGTERM (Ctrl-C) leaves the queues and exits
+    now, forfeiting any game in play. ``--leave`` only leaves the queues."""
     import logging
+    import signal
     import threading
 
     import yaml
 
-    from catanrl.bridge.openhex import API, OpenHexBot
+    from catanrl.bridge.openhex import API, OpenHexBot, OpenHexClient
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    log = logging.getLogger("catanrl.openhex")
     settings = yaml.safe_load(Path(args.config).read_text())
+    base = settings.get("api", API)
+    stop = threading.Event()
     bots = []
     for entry in settings["bots"]:
         if args.only and entry["name"] != args.only:
@@ -301,15 +311,48 @@ def _cmd_openhex(args) -> int:
         key = os.environ.get(entry["key_env"], "").strip()
         if not key:
             raise SystemExit(f"error: {entry['key_env']} (the API key of {entry['name']}) is not set")
-        bots.append(OpenHexBot(entry["spec"], key, entry["mode"], base=settings.get("api", API), device=args.device,
-                               state_dir=Path(args.state) / entry["name"], name=entry["name"]))
+        if args.leave:
+            try:
+                OpenHexClient(key, base).leave(entry["mode"])
+                log.info("%s: left the %s queue", entry["name"], entry["mode"])
+            except Exception as error:  # noqa: BLE001 - leave the others anyway
+                log.warning("%s: could not leave the %s queue: %s", entry["name"], entry["mode"], error)
+            continue
+        bots.append(OpenHexBot(entry["spec"], key, entry["mode"], base=base, device=args.device,
+                               state_dir=Path(args.state) / entry["name"], name=entry["name"], stop=stop))
+    if args.leave:
+        return 0
     if not bots:
         raise SystemExit("error: no bots to run")
+
+    def leave_all() -> None:
+        for bot in bots:
+            try:
+                bot.leave()
+            except Exception as error:  # noqa: BLE001 - leave the others anyway
+                log.warning("%s: could not leave the %s queue: %s", bot.name, bot.mode, error)
+
+    signal.signal(signal.SIGUSR1, lambda signum, frame: stop.set())
+    log.info("pid %d: SIGUSR1 (kill -USR1) drains, Ctrl-C/SIGTERM stops now", os.getpid())
     threads = [threading.Thread(target=bot.run, name=bot.name, daemon=True) for bot in bots]
     for thread in threads:
         thread.start()
-    for thread in threads:
-        thread.join()
+    left = False
+    try:
+        while any(thread.is_alive() for thread in threads):
+            if stop.is_set() and not left:
+                log.info("draining: leaving the queues, finishing the games in play")
+                leave_all()
+                left = True
+            for thread in threads:
+                thread.join(timeout=1.0)
+        log.info("every bot stopped")
+    except KeyboardInterrupt:
+        log.info("stopping now")
+        stop.set()
+    finally:
+        if not left:
+            leave_all()
     return 0
 
 
