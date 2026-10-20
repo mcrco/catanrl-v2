@@ -1,0 +1,21 @@
+# Tree reuse plus the transposition table at 4p: search-4p's row (MCTS 1024 sims, one world,
+# against three copies of the same network's raw policy; stored record 90a1f06c: 400 games,
+# 27.0 [22.9, 31.6]) with `reuse=true:transpositions=true`. 50 boards x 4 rotations = 200
+# games, the first 200 of 90a1f06c's schedule (`tools/search_probe.py --pair` on the shared
+# game ids; the cross-code pair is a reading aid, not results.paired). Expected: flat wall
+# time, a deeper tree; the discard chain after a 7 becomes a bounded lattice.
+name: mcts-reuse-4p-both
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 50}
+      lineup:
+        - "MCTS:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100:sims=1024:dets=1:reuse=true:transpositions=true"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

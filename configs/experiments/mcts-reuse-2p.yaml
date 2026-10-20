@@ -1,0 +1,24 @@
+# Tree reuse and the transposition table at 2p: puffer-graph2/public's search row (MCTS 1024
+# sims, one world from the hand tracker, against the same network's raw policy, as the stored
+# record 72819d1a: 1000 games, 54.9 [51.8, 58.0]) with `reuse=true` (the seat's search is
+# re-rooted at its next decision when the game advanced by exactly its own action; a fresh
+# sims budget on top of the retained visits) and `transpositions=true` (positions reached by
+# different action orders share one node). 100 boards x 2 rotations = 200 games, the first
+# 200 of 72819d1a's schedule: `tools/search_probe.py --pair` reads the shared game ids (the
+# eval code moved with the engine, so results.paired refuses the cross-code pair). Neither
+# option changes the number of network rounds (one leaf per search per round, a fresh budget
+# after a re-root), so wall time is expected flat and the reading is "no regression, deeper
+# search": 200 games resolve about +-7 pp.
+name: mcts-reuse-2p
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p, boards: 100}
+      lineup:
+        - "MCTS:ckpt=puffer-graph2/public@e3600:sims=1024:dets=1:reuse=true:transpositions=true"
+        - "POLICY:ckpt=puffer-graph2/public@e3600"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

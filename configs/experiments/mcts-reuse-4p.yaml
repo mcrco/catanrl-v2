@@ -1,0 +1,21 @@
+# Tree reuse alone at 4p: search-4p's row (MCTS 1024 sims, one world, against three copies of
+# the same network's raw policy; stored record 90a1f06c: 400 games, 27.0 [22.9, 31.6]) with
+# `reuse=true`. The same 100 boards x 4 rotations = 400 games, so the comparison with
+# 90a1f06c is on every game id (`tools/search_probe.py --pair`; the eval code moved with the
+# engine, so results.paired refuses the cross-code pair). About a third of a seat's decisions
+# re-root (CPU probe at sims 16: 34%; chance and other seats' moves end a turn's chain).
+name: mcts-reuse-4p
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 100}
+      lineup:
+        - "MCTS:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100:sims=1024:dets=1:reuse=true"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+        - "POLICY:ckpt=ppo-4p-critic-fix/lambda-critic-g1@e100"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
