@@ -13,6 +13,7 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import cppanatron as cpp
 import pytest
 
 pytest.importorskip("catanatron")
@@ -231,10 +232,11 @@ def test_a_reusing_search_follows_the_seats_own_moves(color):
     the record played the seat's own choice next and along a plan decided
     ahead on a copy: each discard of a chain after the first, and the robber
     after a knight, where the view check passes and the engine refuses (the
-    friendly robber's options depend on hidden points). The plans fall at the
-    same points as without reuse, every choice is legal (a fallback only
-    where the agent raised, as the plain agent does at the game's last
-    moves), and the counters add up."""
+    friendly robber's options depend on hidden points). A discard chain's
+    search ends with it (``dropped_over``), so the decision after it is a
+    first. The plans fall at the same points as without reuse, every choice
+    is legal (a fallback only where the agent raised, as the plain agent does
+    at the game's last moves), and the counters add up."""
     game = _game()
     native = _mcts(reuse=True)
     assert native.needs_memory and native.reuse_check == "view"
@@ -248,9 +250,13 @@ def test_a_reusing_search_follows_the_seats_own_moves(color):
     raised = sum(a["raised"] for a in log)
     assert len(log) == seat.decisions and seat.fallbacks == raised
     assert c["reused"] > 0 and c["fresh"] + c["reused"] == len(log) and c["decisions"] == len(log) - raised
-    assert c["dropped_first"] == 0 and c["dropped_over"] == 0
-    # First at the game's first decision and after each decision the agent raised on, never else.
-    assert [a["first"] for a in log] == [True] + [log[i - 1]["raised"] for i in range(1, len(log))]
+    chains = [acts for _seq, plan, acts in plans if plan.actions[0]["type"] == "discardResources"]
+    assert c["dropped_first"] == 0 and c["dropped_over"] == len(chains)
+    # First at the game's first decision and after each decision the agent raised on
+    # or that ended a discard chain, never else.
+    ends = {id(acts[-1]) for acts in chains}
+    assert [a["first"] for a in log] == \
+        [True] + [log[i - 1]["raised"] or id(log[i - 1]) in ends for i in range(1, len(log))]
     assert c["reused"] + c["refused_diverged"] + c["refused_engine"] == sum(not a["first"] for a in log)
     knights = discards = 0
     for _seq, plan, acts in plans:
@@ -267,6 +273,47 @@ def test_a_reusing_search_follows_the_seats_own_moves(color):
     assert len(native.pool) == 1 and set(native._live) == {seat.env * 2 + seat.seat}
     assert all(entry[1] is not seat.replay.game for entry in native._live.values())
     assert seat.search == dict(c)
+    seat.close()
+
+
+def test_the_robber_after_our_discard_chain_is_searched_from_the_seats_tracker():
+    """Blue rolls a seven at seq 162 and alone discards; OpenHex applies exactly the
+    plan and asks Blue for the robber (the normal robber, where the engine keeps a
+    tree there). The chain was decided on a copy, its worlds dealt from a tracker of
+    the copy, which knows nothing of Red's hand, while the seat's tracker knows Red's
+    cards: the robber decision is a fresh search dealt from the seat's tracker, not
+    the chain's search re-rooted (before, it was, and the robber's hex and victim were
+    picked in worlds that contradict what the seat knows: on 4p, where the copy's
+    tracker does not pin the other hands)."""
+    game = _game()
+    game = {**game, "config": {**game["config"], "robberMode": "normal"}}
+    native = _mcts(reuse=True)
+    log = _logged(native)
+    seat = OpenHexSeat(native, "fixture", game, "blue")
+    for item in _redacted(game["events"], "blue"):
+        if item["seq"] > 162:
+            break
+        seat.feed([item])
+
+    def state(pending):
+        return {"pendingAction": {"type": pending}, "players": [], "board": {}, "currentPlayer": "blue"}
+
+    [discard] = seat.plan(state("discard")).actions
+    assert discard["type"] == "discardResources" and sum(discard["resources"].values()) >= 2
+    assert len(log) >= 2 and all(a["prompt"] == "DISCARD" for a in log)
+    assert log[0]["first"] and all(a.get("reused") == 1 for a in log[1:])
+    assert native.counters["dropped_over"] == 1 and not native._live and not seat.decided
+    seat.feed([{"seq": 163, "event": {"type": "resourcesDiscarded", "player": "blue",
+                                      "resources": discard["resources"]}}])
+    red = seat.colors.index(color_of("red"))
+    known = list(seat.tracker.known_resources(red))
+    assert sum(known) > 0 and sum(cpp.HandTracker(seat.replay.game, seat.seat).known_resources(red)) == 0
+    chain = len(log)
+    plan = seat.plan(state("moveRobber"))
+    assert plan.actions[0]["type"] == "moveRobber"
+    [robber] = log[chain:]
+    assert robber["prompt"] == "MOVE_ROBBER" and robber["first"] and robber.get("fresh") == 1
+    assert not robber.get("reused") and not robber["raised"]
     seat.close()
 
 
@@ -294,7 +341,8 @@ def test_a_bank_short_re_replay_restarts_the_stream(color):
     """The game replayed again on a larger bank (seq 374's roll, fed with its
     production): the agent's remembered game is the old bank's, so the seat
     drops its search (``dropped_over``) and its next decision is a first
-    again (nothing to drop there, no stream error); the game goes on."""
+    again (nothing to drop there, no stream error); the game goes on. (Blue's
+    discard chains before it end their searches alike.)"""
     game = json.loads(OVERPAID.read_text())
     checkpoint = game["checkpoints"][0]
     native = _mcts(reuse=True)
@@ -305,10 +353,13 @@ def test_a_bank_short_re_replay_restarts_the_stream(color):
     assert seat.stats["bank_short"] == 1 and seat.bank_margin == [2, 0, 0, 0, 0]
     assert seat.fallbacks == 0 and not any(a["raised"] for a in log)
     c = native.counters
-    assert c["dropped_over"] == 1 and c["dropped_first"] == 0
+    chains = [acts for _seq, plan, acts in plans if plan.actions[0]["type"] == "discardResources" and acts]
+    assert len(chains) == (2 if color == "blue" else 0)
+    assert c["dropped_over"] == 1 + len(chains) and c["dropped_first"] == 0
     assert c["fresh"] + c["reused"] == c["decisions"] == len(log) and c["reused"] > 0
     firsts = [seq for seq, _plan, acts in plans if any(a["first"] for a in acts)]
-    assert len(firsts) == 2 and firsts[0] == plans[0][0] and 374 <= firsts[1] <= checkpoint["seq"]
+    assert len(firsts) == 2 + len(chains) and firsts[0] == plans[0][0]
+    assert 374 <= firsts[-1] <= checkpoint["seq"]
     assert seat.decided and len(native.pool) == 1 and set(native._live) == {seat.env * 2 + seat.seat}
     _assert_state(seat, checkpoint["bank"], checkpoint["players"])
     seat.close()
@@ -316,22 +367,22 @@ def test_a_bank_short_re_replay_restarts_the_stream(color):
 
 def test_a_finished_game_frees_its_searches_and_slot():
     """``close`` (the bot's, however the game ended): the agent drops the
-    seat's live search (``dropped_over``) and the slot is free for the next
-    game, whose first decision then has nothing to drop; closing again does
-    nothing."""
+    seat's live search (``dropped_over``, as Blue's discard chain did before)
+    and the slot is free for the next game, whose first decision then has
+    nothing to drop; closing again does nothing."""
     game = _game()
     native = _mcts(reuse=True)
     seat = OpenHexSeat(native, "fixture", game, "blue")
     env = seat.env
-    for _ in _record(seat, game):
-        pass
+    chains = sum(plan.actions[0]["type"] == "discardResources" for _seq, plan, _acts in _record(seat, game))
+    assert chains == native.counters["dropped_over"] == 1
     stream = env * 2 + seat.seat
     assert len(native.pool) == 1 and set(native._live) == {stream} and stream in native._started
     seat.close()
     assert seat.env is None and len(native.pool) == 0 and not native._live and not native._started
-    assert native.counters["dropped_over"] == 1
+    assert native.counters["dropped_over"] == 2
     seat.close()
-    assert native.counters["dropped_over"] == 1
+    assert native.counters["dropped_over"] == 2
     again = OpenHexSeat(native, "again", game, "red")
     assert again.env == env
     plans = _record(again, game)
@@ -339,7 +390,7 @@ def test_a_finished_game_frees_its_searches_and_slot():
         next(plans)
     assert native.counters["dropped_first"] == 0 and len(native.pool) == 1 and set(native._live) == {env * 2 + 1}
     again.close()
-    assert len(native.pool) == 0 and native.counters["dropped_over"] == 2
+    assert len(native.pool) == 0 and native.counters["dropped_over"] == 3
 
 
 def test_an_error_in_the_agent_restarts_the_stream():
