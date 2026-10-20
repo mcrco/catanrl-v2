@@ -54,7 +54,6 @@ with a network trained on that game.
 from __future__ import annotations
 
 import argparse
-import itertools
 import json
 import sys
 import time
@@ -67,113 +66,20 @@ import cppanatron as cpp
 import numpy as np
 import torch
 
+from catanrl.agents.trade import (
+    SHAPE_NAMES,
+    Trade,
+    apply_trade,
+    enumerate_trades,
+    trade_by_hands,  # noqa: F401  (the reference route tests/test_trade_oracle.py reads from here)
+)
+from catanrl.agents.trade import tradeable as _tradeable
+
 ROOT = Path(__file__).resolve().parents[1]
-#: Resource kinds in the engine's hand order.
-RESOURCES = ("wood", "brick", "sheep", "wheat", "ore")
-#: (cards given, cards received) of the trades enumerated.
-SHAPES = ((1, 1), (2, 1), (1, 2))
-SHAPE_NAMES = tuple(f"{give}:{get}" for give, get in SHAPES)
 #: Gains, in percentage points of win probability, at which a trade counts as beneficial.
 MARGINS = (0.5, 1.0, 2.0, 5.0)
 #: The margin the shape and resource breakdowns use.
 SHAPE_MARGIN = 1.0
-Counts = tuple[int, int, int, int, int]
-
-
-# ---------------------------------------------------------------- trades
-
-
-@dataclass(frozen=True)
-class Trade:
-    """What the mover gives and gets, as counts per resource kind."""
-
-    give: Counts
-    get: Counts
-
-    @property
-    def shape(self) -> str:
-        return f"{sum(self.give)}:{sum(self.get)}"
-
-    @property
-    def label(self) -> str:
-        return f"{_side(self.give)}>{_side(self.get)}"
-
-
-def _side(counts: Sequence[int]) -> str:
-    return "+".join(f"{count if count > 1 else ''}{name}" for name, count in zip(RESOURCES, counts) if count)
-
-
-def _bundles(size: int) -> list[Counts]:
-    """Every multiset of ``size`` cards, as counts (5 singles, 15 pairs)."""
-    out = []
-    for combo in itertools.combinations_with_replacement(range(len(RESOURCES)), size):
-        counts = [0] * len(RESOURCES)
-        for kind in combo:
-            counts[kind] += 1
-        out.append(tuple(counts))
-    return out
-
-
-def _can_pay(hand: Sequence[int], counts: Sequence[int]) -> bool:
-    return all(have >= need for have, need in zip(hand, counts))
-
-
-def enumerate_trades(mover_hand: Sequence[int], partner_hand: Sequence[int]) -> list[Trade]:
-    """Every 1:1, 2:1 and 1:2 trade both hands can pay, give and get disjoint in kind
-    (giving wood and brick for wood is a gift of brick, not a trade): at most 120."""
-    out = []
-    for give_size, get_size in SHAPES:
-        for give in _bundles(give_size):
-            if not _can_pay(mover_hand, give):
-                continue
-            for get in _bundles(get_size):
-                if _can_pay(partner_hand, get) and not any(a and b for a, b in zip(give, get)):
-                    out.append(Trade(give, get))
-    return out
-
-
-def _tradeable(game: cpp.Game, seat: int) -> bool:
-    """The moments a domestic trade could be proposed: the seat's own PLAY_TURN
-    decisions after the roll (not while placing a road building card's roads)."""
-    return (game.current_player_index == seat and game.current_turn_index == seat
-            and game.current_prompt == cpp.ActionPrompt.PLAY_TURN and game.player(seat).has_rolled
-            and game.free_roads_available == 0 and game.winning_color is None)
-
-
-def apply_trade(game: cpp.Game, mover: int, partner: int, trade: Trade) -> cpp.Game:
-    """A copy of ``game`` after ``trade``, through the engine's own actions: the mover
-    offers, the partner accepts, every other seat rejects, the mover confirms the
-    partner. The engine checks an offer's form, not the offerer's hand, and a
-    confirmation debits blindly, so both hands are checked here."""
-    if not _tradeable(game, mover):
-        raise ValueError("a trade is proposed by the seat to move, during its turn, after the roll")
-    if mover == partner:
-        raise ValueError("a seat cannot trade with itself")
-    if not _can_pay(game.players[mover].resources, trade.give):
-        raise ValueError(f"the mover cannot pay {trade.label}")
-    if not _can_pay(game.players[partner].resources, trade.get):
-        raise ValueError(f"the partner cannot pay {trade.label}")
-    post = game.copy()
-    colors = list(post.colors)
-    post.execute(cpp.Action(colors[mover], cpp.ActionType.OFFER_TRADE, (*trade.give, *trade.get)))
-    while post.current_prompt == cpp.ActionPrompt.DECIDE_TRADE:
-        kind = cpp.ActionType.ACCEPT_TRADE if post.current_player_index == partner else cpp.ActionType.REJECT_TRADE
-        post.execute(next(a for a in post.playable_actions if a.action_type == kind))
-    confirms = [a for a in post.playable_actions if a.action_type == cpp.ActionType.CONFIRM_TRADE]
-    if len(confirms) != 1 or confirms[0].value[-1] != colors[partner]:
-        raise RuntimeError(f"the engine did not offer to confirm {trade.label} with seat {partner}")
-    post.execute(confirms[0])
-    return post
-
-
-def trade_by_hands(game: cpp.Game, mover: int, partner: int, trade: Trade) -> cpp.Game:
-    """The reference: the same trade as two hand overwrites (``Game.set_resources``
-    leaves the bank alone, as a domestic trade does). Tests compare the routes."""
-    post = game.copy()
-    for seat, out, inn in ((mover, trade.give, trade.get), (partner, trade.get, trade.give)):
-        hand = [have - gone + got for have, gone, got in zip(post.players[seat].resources, out, inn)]
-        post.set_resources(seat, hand)
-    return post
 
 
 # ---------------------------------------------------------------- positions
