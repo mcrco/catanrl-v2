@@ -433,8 +433,12 @@ class OpenHexSeat:
     decisions: the seat hands it one stream (a slot of :data:`SLOTS` as the
     env) with ``first`` at its first decision, as the ViewAgent does, and a
     copy of the game, since the replay moves its own on in place. A plan
-    decided ahead on a copy (the robber after a knight, a discard chain)
-    re-roots the search through the agent's view check like any own move.
+    decided ahead on a copy (the robber after a knight, each discard of a
+    chain after the first) re-roots the search through the agent's view check
+    like any own move. A discard chain deals its worlds from a tracker of its
+    copy, which knows nothing of the other hands, so its search must not reach
+    the decision after it (the robber, when we rolled the seven): the stream
+    restarts after the chain, and that decision deals from the seat's tracker.
     The game replayed again on a larger bank (:class:`BankShort`) leaves the
     remembered game stale, so the stream restarts there, as it does after an
     error in the agent (which emptied its pool); :meth:`close` at the game's
@@ -555,8 +559,9 @@ class OpenHexSeat:
 
     def _restart_stream(self) -> None:
         """The agent's search of this game is stale (the game replayed again
-        on a larger bank) or gone (a bind to new dims): drop it, and the
-        seat's next decision is a first again."""
+        on a larger bank), dealt from a tracker that knows less than the
+        seat's (a discard chain's) or gone (a bind to new dims): drop it, and
+        the seat's next decision is a first again."""
         if self.env is not None:
             self.native.forget(self.env)
         self.decided = False
@@ -771,9 +776,12 @@ class OpenHexSeat:
     def _discard(self) -> Plan:
         """Every card this seat must discard, in one batch: decided one at a
         time on a copy, where seats before ours (Catanatron's order) discard
-        placeholder cards first."""
+        placeholder cards first. Each decision deals from a tracker of the
+        copy (the seat's own knows nothing of the placeholders), so a reusing
+        agent's search of the chain ends with it (see the class doc)."""
         ahead = self.replay.game.copy()
         cards = [0] * 5
+        asked = self.decisions
         for _ in range(64):
             if not ahead.is_discarding or ahead.remaining_discards(self.seat) == 0:
                 break
@@ -783,6 +791,8 @@ class OpenHexSeat:
             action = self._choose(ahead, None)
             ahead.execute(action)
             cards[RESOURCES.index(action.value.name if hasattr(action.value, "name") else str(action.value))] += 1
+        if self.memory and self.decisions > asked:
+            self._restart_stream()
         self.discarded_at = len(self.replay.entries)
         return Plan([{"type": "discardResources",
                       "resources": {RES_NAME[r]: n for r, n in zip(RESOURCES, cards) if n}}])
