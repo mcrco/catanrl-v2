@@ -9,3 +9,7 @@ bots:
     mode: 4p
     spec: POLICY:ckpt=ppo-4p/main@best
     key_env: OPENHEX_KEY_4P
+  - name: catanrl-1v1-search
+    mode: 1v1
+    spec: MCTS:ckpt=puffer-graph2/full@best:sims=1024:dets=1
+    key_env: OPENHEX_KEY_1V1_SEARCH

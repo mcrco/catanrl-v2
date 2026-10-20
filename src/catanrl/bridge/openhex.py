@@ -723,6 +723,13 @@ class OpenHexBot:
                 logger.warning("%s: %s; trying again in %.0f s", self.name, error, backoff)
                 time.sleep(backoff)
                 backoff = min(300.0, backoff * 2)
+            except Exception:  # noqa: BLE001 - a bot thread must outlive any one game
+                # (A replay that cannot follow a game, say.) The game is lost
+                # either way: OpenHex aborts it at the deadline, after which it
+                # is no longer active and the bot queues again.
+                logger.exception("%s: giving up on the current game; trying again in %.0f s", self.name, backoff)
+                time.sleep(backoff)
+                backoff = min(300.0, backoff * 2)
 
     def _join(self) -> None:
         try:
