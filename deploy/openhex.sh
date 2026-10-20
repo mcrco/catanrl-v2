@@ -22,7 +22,7 @@ DEVICE=${OPENHEX_DEVICE:-cuda}
 CONFIG=deploy/openhex.yaml
 MATCH="catanrl openhex $CONFIG"
 
-bot_pid() { pgrep -f "^$ROOT/.venv/bin/python .*$MATCH" | head -1; }
+bot_pid() { pgrep -f "^$ROOT/.venv/bin/python3? .*$MATCH" | head -1; }
 load_env() {
     [ -r "$ENV_FILE" ] || { echo "no key file at $ENV_FILE" >&2; exit 1; }
     set -a; . "$ENV_FILE"; set +a
