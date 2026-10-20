@@ -678,8 +678,8 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
 
 Its `key_dict()` drops execution params (device, threads). It adds the model
 args and, for MCTS, the full engine `SearchConfig` read back from the
-binding, less the options keyed only when set (`reuse`, `transpositions`)
-at their defaults.
+binding, less `transpositions` at its default; `reuse` and `transpositions`
+appear in `params` only when set.
 
 | Backend | Entry point |
 |---|---|

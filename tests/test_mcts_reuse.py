@@ -13,6 +13,7 @@ import pytest
 from eval_helpers import agent, make_suite, schedule, tiny_model
 
 from catanrl import games as game_configs
+from catanrl.agents.native import MctsAgent
 from catanrl.eval.harness import play_schedule
 from catanrl.search import make_pool, run_searches
 
@@ -75,8 +76,9 @@ def test_reuse_happens_and_the_counters_add_up(params):
                                  if slot == 0)
     # Every decision after a stream's first pops its live search: reused or refused.
     assert c["reused"] + c["refused_diverged"] + c["refused_engine"] == c["decisions"] - len(seated)
-    # One live search per stream at the end, none beyond the envs' seats.
-    assert len(first.pool) == len(first._live) <= 4 * 3
+    # At most one live search per env at the end: the slot holds one seat per game, and a
+    # seat's first decision drops the env's searches from its previous game.
+    assert len(first.pool) == len(first._live) <= 4
     assert first.search_stats["simulations"] >= 6 * c["decisions"]
     # Reuse is keyed because it changes the rows.
     assert rows != play(mcts(**params), num_envs=4)
@@ -102,6 +104,42 @@ def test_a_first_decision_drops_the_live_search():
     decide(first, games[:1], streams=[5], first=[True])
     assert first.counters["dropped_first"] == 1 and first.counters["fresh"] == 3
     assert len(first.pool) == 2 and set(first._live) == {5, 9}
+    # Another seat of stream 5's env starting a game (streams are env * max_players + seat)
+    # drops the env's search too: its previous game is over. Stream 9 is another env.
+    assert first.dims["max_players"] == 3
+    decide(first, games[1:], streams=[4], first=[True])
+    assert first.counters["dropped_first"] == 2 and first.counters["fresh"] == 4
+    assert len(first.pool) == 2 and set(first._live) == {4, 9}
+    # Stream 5 started once, so its next decision is not a harness error: a fresh search,
+    # refused as diverged (stream 4's move came between its decisions).
+    decide(first, games[:1], streams=[5], first=[False])
+    assert first.counters["refused_diverged"] == 1 and first.counters["fresh"] == 5
+    assert len(first.pool) == 3 and set(first._live) == {4, 5, 9}
+
+
+def test_a_first_decision_drops_the_envs_stale_searches_and_loses_no_reuse(monkeypatch):
+    """A fill MCTS agent holds two seats of every 3p game. A seat's first decision drops
+    the env's searches from its previous game, so the agent holds at most its seats per
+    env (not every seat it ever sat at); the other seat of the same game, if it decided
+    already, loses nothing, since that first decision is a move between its own and its
+    next decision would diverge anyway: rows and reuse counts equal a run dropping only
+    the stream's own search."""
+    games = schedule(SUITE, 1, boards=2)  # slot 0 at one seat, the fill at the others
+    assert any(g.seats.count(1) == 2 for g in games)
+
+    def run(num_envs):
+        fill = mcts(reuse=True, oracle=True)
+        rows = []
+        play_schedule([agent("F")], games, fill=fill, suite=SUITE, on_game=rows.append, num_envs=num_envs)
+        return {row["game_id"]: row for row in rows}, fill
+
+    rows, fill = run(num_envs=1)
+    assert fill.counters["reused"] > 0 and len(fill._live) == 2  # the last 3p game's two seats
+    assert run(num_envs=5)[0] == rows
+    monkeypatch.setattr(MctsAgent, "_stale", lambda self, stream: [stream] if stream in self._live else [])
+    own_rows, own = run(num_envs=1)
+    assert own_rows == rows and own.counters["reused"] == fill.counters["reused"]
+    assert len(own._live) == 3  # without the env drop every seat the fill ever held lingers
 
 
 def test_the_next_position_reuses_and_a_diverged_one_is_refused_before_the_engine():

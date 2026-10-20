@@ -30,8 +30,9 @@ per batch of decisions, returning indices into the
 agents with ``needs_games`` also get copies of the games, and those with
 ``needs_trackers`` the deciding seats' hand trackers. A recurrent POLICY
 (``needs_memory``) also gets ``streams`` (an id per row that is stable for
-one seat of one game, e.g. ``env * max_players + seat``) and ``first``
-(whether this is that seat's first decision of the game): its memory is the
+one seat of one game, ``env * max_players + seat``, which MCTS with ``reuse``
+reads as the env) and ``first`` (whether this is that seat's first decision
+of the game): its memory is the
 sequence of a seat's own decisions, zero at the first, so rows are the same
 whatever env slot a game plays in. MCTS and BELIEF refuse a recurrent
 network: a leaf or a sampled world has no decision history of its own.
@@ -380,13 +381,19 @@ class MctsAgent(NativeAgent):
     action (``search_equivalent``: a chance action, another seat's move or a forced move
     in between diverge) and the engine keeps the worlds; otherwise a fresh search starts.
     Rows then depend on the stream's history, so ``reuse`` is keyed and the agent
-    ``needs_memory`` (``streams`` and ``first``); a stream's first decision drops its
-    live search. Live searches: one per stream (env x seat), each a full search's
-    retained subtree (about 12 MB at 1024 sims in 4p), so budget ``num_envs x MCTS
-    seats x 12 MB``. ``counters``: ``decisions``, ``fresh``, ``reused``,
-    ``dropped_first``, ``refused_diverged`` (the game is not the previous one plus the
-    action played) and ``refused_engine`` (``advance`` returned false); ``search_stats``
-    sums ``SearchStats`` over every search run.
+    ``needs_memory`` (``streams`` and ``first``, with ``streams = env * max_players +
+    seat`` as the harness hands them). A seat's first decision of a game means its
+    env's previous game is over, so it drops every live search of that env; a seat of
+    the new game that decided already loses nothing, since that first decision is a
+    move between its own and its next decision would diverge anyway. Live searches are
+    therefore at most one per seat the agent holds in an env's current game, each a
+    full search's retained subtree (about 12 MB at 1024 sims in 4p), so budget
+    ``num_envs x MCTS seats x 12 MB``. ``counters``: ``decisions``, ``fresh``,
+    ``reused``, ``dropped_first`` (live searches dropped at a first decision),
+    ``refused_diverged`` (the game is not the previous one plus the action played; a
+    search dropped by another seat's first decision counts here at its next decision,
+    since that move diverged it) and ``refused_engine`` (``advance`` returned false);
+    ``search_stats`` sums ``SearchStats`` over every search run.
 
     ``dedup`` (execution-only, on by default) evaluates byte-identical leaf rows once
     (:class:`~catanrl.search.dedup.DedupEvaluator`, bitwise neutral).
@@ -421,6 +428,8 @@ class MctsAgent(NativeAgent):
         self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"])
         #: stream -> (search id, the game handed, the index played): a new pool drops them all.
         self._live: dict[int, tuple[int, cpp.Game, int]] = {}
+        #: Streams that had a first decision: a later decision of any other stream is a harness error.
+        self._started: set[int] = set()
 
     def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
         if games is None:
@@ -460,6 +469,7 @@ class MctsAgent(NativeAgent):
             for sid in list(self.pool.ids):
                 self.pool.remove(sid)
             self._live.clear()
+            self._started.clear()
             raise
 
     @staticmethod
@@ -478,14 +488,19 @@ class MctsAgent(NativeAgent):
         """Re-root each stream's live search at the action it played, when the game handed is
         that search's root plus the action and the engine keeps the worlds; drop it otherwise."""
         for i, (game, stream, fresh) in enumerate(zip(games, streams, first)):
-            entry = self._live.pop(stream, None)
             if fresh:
-                if entry is not None:
-                    self.pool.remove(entry[0])
+                for stale in self._stale(stream):
+                    self.pool.remove(self._live.pop(stale)[0])
                     self.counters["dropped_first"] += 1
+                self._started.add(stream)
                 continue
-            if entry is None:
+            if stream not in self._started:
                 raise ValueError(f"stream {stream} has no live search: its first decision was not marked first")
+            entry = self._live.pop(stream, None)
+            if entry is None:
+                # Dropped by another seat's first decision in this env: that move diverged it.
+                self.counters["refused_diverged"] += 1
+                continue
             sid, prev, chosen = entry
             expected = prev.copy()
             expected.execute(self.action_space.decode(prev, chosen))
@@ -498,6 +513,14 @@ class MctsAgent(NativeAgent):
             else:
                 self.counters["refused_engine" if same else "refused_diverged"] += 1
                 self.pool.remove(sid)
+
+    def _stale(self, stream: int) -> list[int]:
+        """The live streams a first decision of ``stream`` outdates: every seat of its env
+        (streams are ``env * max_players + seat``), whose previous game is over. A seat of
+        the new game that decided already is among them, but this first decision is a move
+        between its own, so its next decision would be refused as diverged anyway."""
+        players = int(self.dims["max_players"])
+        return [s for s in self._live if s // players == stream // players]
 
     def _record(self, stats: cpp.SearchStats) -> None:
         for name in ("nodes", "evaluations", "simulations", "coalesced_outcomes", "transpositions", "max_depth"):
