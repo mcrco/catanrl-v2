@@ -1,0 +1,74 @@
+# The generalist on blob maps too (report: "train the generalist on blob maps too, with fewer
+# games in flight to fit the 6316-float rows"): ppo-mixed's recipe and decision budget with
+# random-4p (blob islands of 15-30 tiles) as a seventh scenario of equal weight. The test is
+# heldout-random-4p against ppo-mixed's zero-shot 73.9; the BASE rows (heldout-2p/4p/mixed vs F)
+# say what the blobs cost the 19-tile settings. Changes from ppo-mixed, all forced or defaults:
+# - the dims cover the blobs (30 tiles, 122 nodes, 151 edges, 611 actions against 19/54/72/352),
+#   so every row is padded to the blob size: twice the floats and about twice the graph work;
+# - 512 training games in flight instead of 1024 to fit the 8 GB card (the todo's own plan),
+#   with the same agent-step budget: 7600 epochs of 131,072 agent steps (3800 x 262,144), and
+#   max_minibatch_size 2048 so a minibatch's activations fit too;
+# - the critic takes the 2026-10-19 defaults (lambda targets, undiscounted), which put the seat
+#   sum on the realized sum; ppo-mixed pinned the older V-trace critic to keep its stored hash;
+# - selection every 100 epochs (76 select evals, as ppo-mixed's every 50 of 3800).
+name: ppo-mixed-blob
+seed: 42
+env:
+  scenarios:
+    - {game: base-2p, turn_limit: 1000, maps: 2048}
+    - {game: base-3p, turn_limit: 1000, maps: 2048}
+    - {game: base-4p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-2p, num_players: 2, map: {type: hexagon, radius: 2}, victory_points_to_win: 15, discard_limit: 9},
+       turn_limit: 1000, maps: 2048}
+    - {game: hexagon-3p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-4p, num_players: 4, map: {type: hexagon, radius: 2}}, turn_limit: 1000, maps: 2048}
+    - {game: random-4p, turn_limit: 1000, maps: 2048}
+  num_envs: 512
+obs: {level: private}           # the only fair level past two players
+model: {preset: graph-s, args: {shared: true}}
+train:
+  algo: ppo
+  total_timesteps: 996_147_200    # agent steps over 4 row slots: 7600 epochs x 131,072, ppo-mixed's budget
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95
+  adam_beta2: 0.999
+  adam_eps: 1.0e-12
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2
+  ent_coef: 0.005
+  max_grad_norm: 4.0
+  bptt_horizon: 64
+  minibatch_size: 32768
+  max_minibatch_size: 2048
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+eval:
+  # slot 0's score rate against F in every seat of 2p, 3p and 4p BASE games (a win 1, a
+  # truncation 1/N); parity is 0.5 / 0.33 / 0.25 by player count, so the number is only
+  # comparable with itself across checkpoints
+  select: {suite: select-mixed, lineup: ["POLICY:ckpt=${self}", F], fill: F, every: 100, metric: score_rate}
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+    - {suite: heldout-4p, lineup: ["POLICY:ckpt=${run}@best", F, F, F]}
+    - {suite: heldout-mixed, lineup: ["POLICY:ckpt=${run}@best", F], fill: F}
+    # the test: blob-shaped boards, now in training (ppo-mixed zero-shot: 73.9)
+    - {suite: heldout-random-4p, lineup: ["POLICY:ckpt=${run}@best", F, F, F]}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  recipe: ppo-4p
+  notes: |
+    Report idea: the generalist trained on blob maps too (ppo-mixed + random-4p).
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
