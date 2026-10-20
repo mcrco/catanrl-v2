@@ -1,0 +1,30 @@
+# The design's M4, run because M1 was positive (+20.5 pp): does the trading edge hold with the
+# strongest 4p policy? The proposer and the three responder-only seats play ppo-4p/main@best
+# (the 4p specialist, @e3650) and judge trades with the calibrated critic of
+# aux-hidden-4p/plain@best (the oracle's and M1's critic; ppo-4p's own V-trace critic does not
+# sum to one). Same table shape as M1 and its control:
+#   M4  [T', N', N', N']   T' = TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best
+#   M4c [Q', N', N', N']   Q' = POLICY:ckpt=ppo-4p/main@best (never trades)
+# N' = T' with propose=false. 1,000 boards x 4 rotations = 4,000 games a row; records land under
+# ppo-4p/main. Read: slot 0's share against 25 and the paired delta against M4c.
+name: trade-harness-m4
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 1000}   # M4
+      lineup:
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best:propose=false"
+    - suite: {name: heldout-4p, boards: 1000}   # M4c
+      lineup:
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best:propose=false"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best:propose=false"
+# an eval config's hash carries the ppo train defaults (nothing reads them)
+train: {critic_targets: vtrace, critic_gamma: null}
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
