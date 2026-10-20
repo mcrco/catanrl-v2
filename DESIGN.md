@@ -156,6 +156,14 @@ backs up. N-player: nodes back up a value per seat (max^n: each node picks by
 the value of its own player to move); chance nodes are exact (dice, dev
 draws, steals). Root options: PUCT with Dirichlet noise, or Gumbel root
 (sequential halving) for low budgets; determinized roots from the tracker.
+`advance()` re-roots a search at a deterministic root action's child, keeping
+the subtree: the MCTS agent's `reuse` option (6.5) carries a seat's search
+from one decision to the next when the real game evolved by exactly the
+action played (most of the gain is the discard chain after a 7 and the bank
+trades before a build). Byte-identical leaf rows of a batch (a determinized
+search's worlds at `private` level, one position reached by two action
+orders) are evaluated once by `DedupEvaluator`, bitwise the plain evaluation
+under the strict contract.
 
 The **AlphaZero / expert-iteration loop** (`catanrl.train.alphazero`) is:
 self-play games through `SearchPool` with a network (fresh, or a PPO
@@ -630,7 +638,13 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   mistyped params raise.
 * **MCTS** takes engine units: `c_puct` 0.75 equals v1's 1.5. `dets ≥ 1`
   counts sampled worlds, and `oracle=true` searches the true state. There is
-  no magic 0.
+  no magic 0. `reuse=true` keeps a seat's search between its decisions
+  (1.6; native harness only, since the search is the seat's own history);
+  `transpositions=true` turns on the engine's transposition table (refused
+  on an engine build without it); `dedup` (execution-only, default true)
+  evaluates byte-identical leaf rows once. `reuse` and `transpositions` are
+  in the canonical spec and `key_dict()` only when set, so adding them
+  moved no stored record's key.
 * **`tracker`** (MCTS with dets, BELIEF): `pool` (default) or `exact`, the
   hand tracker mode the worlds are dealt from (1.5). It is in the canonical
   spec and `key_dict()`, so eval records tell the two apart. The native
@@ -664,7 +678,8 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
 
 Its `key_dict()` drops execution params (device, threads). It adds the model
 args and, for MCTS, the full engine `SearchConfig` read back from the
-binding.
+binding, less the options keyed only when set (`reuse`, `transpositions`)
+at their defaults.
 
 | Backend | Entry point |
 |---|---|

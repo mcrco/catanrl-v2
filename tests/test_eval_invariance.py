@@ -30,6 +30,8 @@ CASES = {
     "sampled": ("POLICY", {"sample": True}),
     "mcts-oracle": ("MCTS", {"sims": 6, "oracle": True}),
     "mcts-dets": ("MCTS", {"sims": 6, "dets": 2}),
+    "mcts-reuse": ("MCTS", {"sims": 6, "oracle": True, "reuse": True}),
+    "mcts-reuse-dets": ("MCTS", {"sims": 6, "dets": 2, "reuse": True}),
     "belief": ("BELIEF", {"worlds": 3}),
 }
 

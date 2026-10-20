@@ -99,7 +99,12 @@ TUI seat and as a server bot. Fair agents use only their seat's information:
 resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, and
 `BELIEF`. The worlds those two sample come from the seat's hand tracker:
 `tracker=pool` (default) deals the unknown cards uniformly, `tracker=exact`
-draws from the exact posterior over hidden steals (DESIGN 1.5).
+draws from the exact posterior over hidden steals (DESIGN 1.5). `MCTS` also
+takes `reuse=true` (a seat's search is re-rooted at the action it played
+when the game followed exactly, native harness only), `transpositions=true`
+(the engine's transposition table, on builds that have it) and `dedup=false`
+(execution-only: byte-identical leaf rows are otherwise evaluated once);
+`reuse` and `transpositions` enter the record key only when set.
 
 ## Configs
 

@@ -39,6 +39,7 @@ network: a leaf or a sampled world has no decision history of its own.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
@@ -58,6 +59,7 @@ from catanrl.envs.encoding import (
 )
 from catanrl.models import CatanModel, build_model
 from catanrl.models.rows import feature_names
+from catanrl.search.dedup import DedupEvaluator
 from catanrl.search.evaluator import BatchEvaluator
 from catanrl.search.pool import make_pool, run_searches, search_config
 from catanrl.seeding import derive_seed as _derive_seed
@@ -370,46 +372,137 @@ class PredictAgent(NativeAgent):
 
 
 class MctsAgent(NativeAgent):
+    """``MCTS``: one SearchPool search per decision.
+
+    With ``reuse`` a seat's search outlives its decision: at the stream's next decision
+    it is re-rooted at the action played (``SearchPool.advance``, keeping the subtree and
+    starting a fresh budget) when the game handed is exactly the previous game plus that
+    action (``search_equivalent``: a chance action, another seat's move or a forced move
+    in between diverge) and the engine keeps the worlds; otherwise a fresh search starts.
+    Rows then depend on the stream's history, so ``reuse`` is keyed and the agent
+    ``needs_memory`` (``streams`` and ``first``); a stream's first decision drops its
+    live search. Live searches: one per stream (env x seat), each a full search's
+    retained subtree (about 12 MB at 1024 sims in 4p), so budget ``num_envs x MCTS
+    seats x 12 MB``. ``counters``: ``decisions``, ``fresh``, ``reused``,
+    ``dropped_first``, ``refused_diverged`` (the game is not the previous one plus the
+    action played) and ``refused_engine`` (``advance`` returned false); ``search_stats``
+    sums ``SearchStats`` over every search run.
+
+    ``dedup`` (execution-only, on by default) evaluates byte-identical leaf rows once
+    (:class:`~catanrl.search.dedup.DedupEvaluator`, bitwise neutral).
+    """
+
     key = "MCTS"
     needs_games = True
 
     def __init__(self, model, params, *, device, infer_rows, mode="strict") -> None:
+        self.reuse = bool(_param(params, "reuse", False))
+        self.dedup = bool(_param(params, "dedup", True))
         super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="both")
+        # After super().__init__, which refuses a recurrent network while needs_memory is off.
+        self.needs_memory = self.reuse
         self.config = search_config(params, max_players=model.num_players)
         self.needs_trackers = self.config.determinizations > 0
         self.tracker_mode = tracker_mode_of(params)
         self.temperature = float(_param(params, "temperature", 0.0))
+        self.counters: Counter[str] = Counter()
+        self.search_stats: Counter[str] = Counter()
         self._make_pool()
 
     def _set_model(self, model) -> None:
         super()._set_model(model)
+        if self.dedup:
+            self.evaluator = DedupEvaluator(self.evaluator)
         if hasattr(self, "config"):
             self._make_pool()
 
     def _make_pool(self) -> None:
         self.config.max_players = int(self.dims["max_players"])
         self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"])
+        #: stream -> (search id, the game handed, the index played): a new pool drops them all.
+        self._live: dict[int, tuple[int, cpp.Game, int]] = {}
 
     def act(self, rows, masks, decision_seeds, *, games=None, trackers=None, streams=None, first=None):
         if games is None:
             raise ValueError("MCTS searches from games")
         if self.needs_trackers and trackers is None:
             raise ValueError("MCTS with dets searches worlds sampled from hand trackers")
-        ids = []
+        if self.reuse:
+            streams, first = self._streams(len(games), streams, first)
+        ids: list[int | None] = [None] * len(games)
         try:
+            if self.reuse:
+                # Advance before adding: add() balances lanes by the live searches.
+                self._reroot(ids, games, streams, first)
             for i, (game, seed) in enumerate(zip(games, decision_seeds)):
-                tracker = trackers[i] if self.needs_trackers else None
-                ids.append(self.pool.add(game, seed=int(seed), tracker=tracker,
-                                         deal=self.tracker_mode if tracker is not None else None))
+                if ids[i] is None:
+                    tracker = trackers[i] if self.needs_trackers else None
+                    ids[i] = self.pool.add(game, seed=int(seed), tracker=tracker,
+                                           deal=self.tracker_mode if tracker is not None else None)
+                    self.counters["fresh"] += 1
             run_searches(self.pool, self.evaluator, batch_rows=len(ids) * self.config.max_pending)
-            return np.array([self.pool.select(i, self.temperature) for i in ids], dtype=np.int64)
-        finally:
-            # Leave the pool empty whatever failed, so the agent keeps working.
+            choices = [int(self.pool.select(sid, self.temperature)) for sid in ids]
+            self.counters["decisions"] += len(ids)
+            for sid in ids:
+                self._record(self.pool.stats(sid))
+            if self.reuse:
+                for i, stream in enumerate(streams):
+                    self._live[stream] = (ids[i], games[i], choices[i])
+            else:
+                for sid in ids:
+                    self.pool.remove(sid)
+            return np.array(choices, dtype=np.int64)
+        except BaseException:
+            # Leave the pool empty whatever failed (the live searches too: their streams are
+            # out of step with the pool), so the error is the real one and the agent keeps working.
             if self.pool.pending:
                 self.pool.cancel()
-            for i in ids:
-                if i in self.pool:
-                    self.pool.remove(i)
+            for sid in list(self.pool.ids):
+                self.pool.remove(sid)
+            self._live.clear()
+            raise
+
+    @staticmethod
+    def _streams(n: int, streams, first) -> tuple[list[int], list[bool]]:
+        if streams is None or first is None:
+            raise ValueError("MCTS with reuse=true decides from streams and first (its searches' streams)")
+        streams = np.asarray(streams, dtype=np.int64).reshape(-1)
+        first = np.asarray(first, dtype=bool).reshape(-1)
+        if len(streams) != n or len(first) != n:
+            raise ValueError("streams and first need one entry per row")
+        if len(set(streams.tolist())) != len(streams):
+            raise ValueError("a stream decides once per batch")
+        return streams.tolist(), first.tolist()
+
+    def _reroot(self, ids: list, games: Sequence[cpp.Game], streams: list[int], first: list[bool]) -> None:
+        """Re-root each stream's live search at the action it played, when the game handed is
+        that search's root plus the action and the engine keeps the worlds; drop it otherwise."""
+        for i, (game, stream, fresh) in enumerate(zip(games, streams, first)):
+            entry = self._live.pop(stream, None)
+            if fresh:
+                if entry is not None:
+                    self.pool.remove(entry[0])
+                    self.counters["dropped_first"] += 1
+                continue
+            if entry is None:
+                raise ValueError(f"stream {stream} has no live search: its first decision was not marked first")
+            sid, prev, chosen = entry
+            expected = prev.copy()
+            expected.execute(self.action_space.decode(prev, chosen))
+            # The real game evolved by exactly the action played (hands, RNG and options
+            # included); whether the sampled worlds survive it is the engine's own refusal.
+            same = expected.search_equivalent(game)
+            if same and self.pool.advance(sid, chosen):
+                ids[i] = sid
+                self.counters["reused"] += 1
+            else:
+                self.counters["refused_engine" if same else "refused_diverged"] += 1
+                self.pool.remove(sid)
+
+    def _record(self, stats: cpp.SearchStats) -> None:
+        for name in ("nodes", "evaluations", "simulations", "coalesced_outcomes", "max_depth"):
+            self.search_stats[name] += int(getattr(stats, name))
+        self.search_stats["transpositions"] += int(getattr(stats, "transpositions", 0))
 
 
 class BotAgent:

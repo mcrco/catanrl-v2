@@ -58,8 +58,12 @@ def visits(params, *, pool_size, batch_rows, threads, infer_rows=8):
     {"sims": 24, "oracle": True},
     {"sims": 24, "dets": 3},
     {"sims": 16, "oracle": True, "root": "gumbel", "gumbel_m": 4},
+    {"sims": 24, "oracle": True, "transpositions": True},
+    {"sims": 24, "dets": 3, "transpositions": True},
 ])
 def test_visits_are_invariant(params):
+    if params.get("transpositions") and not hasattr(cpp.SearchConfig, "transpositions"):
+        pytest.skip("this engine build has no transposition table")
     reference = visits(params, pool_size=len(POSITIONS), batch_rows=64, threads=1)
     assert all(sum(v) > 0 for v in reference)
     for pool_size, batch_rows, threads in ((1, 1, 1), (4, 3, 4), (len(POSITIONS), 5, 2)):

@@ -77,6 +77,11 @@ class MctsParams:
     noise: bool = False
     allow_drift: bool = False
     tracker: Literal["pool", "exact"] = "pool"
+    #: ``key_if_set``: in the canonical spec and the key only when set, so an option added
+    #: after records were stored leaves their keys and canonical specs as they were.
+    reuse: bool = field(default=False, metadata={"key_if_set": True})
+    transpositions: bool = field(default=False, metadata={"key_if_set": True})
+    dedup: bool = field(default=True, metadata={"execution": True})
     device: str = field(default="auto", metadata={"execution": True})
     threads: int = field(default=0, metadata={"execution": True})
 
@@ -104,6 +109,38 @@ class PredictParams:
 
 def _execution(params_cls: type) -> set[str]:
     return {f.name for f in dataclasses.fields(params_cls) if f.metadata.get("execution")}
+
+
+def _key_if_set(params_cls: type) -> set[str]:
+    return {f.name for f in dataclasses.fields(params_cls) if f.metadata.get("key_if_set")}
+
+
+def keyed_fields(params: Any) -> list[str]:
+    """The fields that decide an agent's moves, in dataclass order: no execution field, and a
+    ``key_if_set`` field only at a non-default value."""
+    cls = type(params)
+    skip, if_set = _execution(cls), _key_if_set(cls)
+    return [f.name for f in dataclasses.fields(cls)
+            if f.name not in skip and not (f.name in if_set and getattr(params, f.name) == f.default)]
+
+
+def key_params(params: Any) -> dict:
+    """``key_dict()["params"]`` of model params: the keyed fields but the checkpoint refs."""
+    return {name: getattr(params, name) for name in keyed_fields(params) if name not in ("ckpt", "predictor")}
+
+
+#: ``SearchConfig`` attributes in ``key_dict()["search"]`` only at a non-default value: engine
+#: options added after records were stored (an older engine build has no such attribute).
+SEARCH_KEY_IF_SET = ("transpositions", "canonical_discards")
+
+
+def search_details(config: Any) -> dict:
+    """``key_dict()["search"]``: every public ``SearchConfig`` attribute but ``threads``, the
+    :data:`SEARCH_KEY_IF_SET` options only when set."""
+    default = type(config)()
+    return {name: _plain(getattr(config, name)) for name in dir(config)
+            if not name.startswith("_") and name != "threads"
+            and not (name in SEARCH_KEY_IF_SET and getattr(config, name) == getattr(default, name))}
 
 
 def _fmt(value: Any) -> str:
@@ -139,11 +176,11 @@ class ResolvedAgent:
 
     def key_dict(self) -> dict:
         """What decides this agent's moves: no execution params, the model (both models for
-        PREDICT) and (for MCTS) the full engine SearchConfig."""
+        PREDICT) and (for MCTS) the engine SearchConfig; options keyed only when set
+        (``key_if_set``, :data:`SEARCH_KEY_IF_SET`) are left out at their defaults."""
         out: dict[str, Any] = {"key": self.key, "harness": self.harness}
         if self.key in MODEL_KEYS:
-            skip = _execution(type(self.params)) | {"ckpt", "predictor"}
-            out["params"] = {k: v for k, v in dataclasses.asdict(self.params).items() if k not in skip}
+            out["params"] = key_params(self.params)
             out["checkpoint"] = {"weights_sha256": self.checkpoint.weights_sha256, **self.details["model"]}
             if self.key == "MCTS":
                 out["search"] = self.details["search"]
@@ -321,6 +358,10 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
         if harness != "native":
             raise SpecError(f"POLICY: {ref} is a recurrent ({ckpt.header['model']['class']}) network; only the "
                             "native harness keeps a seat's decision history")
+    if key == "MCTS" and params.reuse and harness != "native":
+        # A reused search is the seat's own history too: the bridges decide one position at a time.
+        raise SpecError("MCTS: reuse=true keeps a seat's search between its decisions, which only the native "
+                        "harness streams")
     configs = [g if hasattr(g, "num_players") else load_game(g) for g in games]
     if configs and not ckpt.dims_agnostic and dims_for(configs) != dims:
         raise SpecError(f"{key}: {ref} is a {ckpt.header['model']['class']} network at dims {dims}; "
@@ -338,15 +379,15 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
     if harness == "server" and key == "PREDICT":
         raise SpecError("PREDICT is not played on the server harness yet (the bridge plays POLICY, MCTS and "
                         "BELIEF from views); on the server use BELIEF")
-    skip = _execution(type(params))
-    fields = [f.name for f in dataclasses.fields(params) if f.name not in skip]
-    canonical = f"{key}:" + ":".join(f"{name}={_fmt(getattr(params, name))}" for name in fields)
+    canonical = f"{key}:" + ":".join(f"{name}={_fmt(getattr(params, name))}" for name in keyed_fields(params))
     details: dict[str, Any] = {"model": {"model": ckpt.header["model"], "levels": levels, "dims": dims,
                                          "allow_drift": params.allow_drift}}
     if key == "MCTS":
-        config = search_config(params, max_players=dims["max_players"], threads=0)
-        details["search"] = {name: _plain(getattr(config, name)) for name in dir(config)
-                             if not name.startswith("_") and name != "threads"}
+        try:
+            config = search_config(params, max_players=dims["max_players"], threads=0)
+        except ValueError as error:  # an option this engine build lacks (transpositions)
+            raise SpecError(f"MCTS: {error}") from None
+        details["search"] = search_details(config)
     label = f"{key}:{ref.run or ref.path.name}@e{ref.epoch}"
     if predictor is not None:
         details["predictor"] = {"model": predictor.header["model"], "levels": predictor.levels,

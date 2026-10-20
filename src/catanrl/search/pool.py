@@ -44,6 +44,13 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
         raise ValueError(f"root must be puct or gumbel, not {root!r}")
     noise = bool(get("noise", False))
     threads = int(get("threads", 0) if threads is None else threads)
+    options = {}
+    if bool(get("transpositions", False)):
+        # The engine's transposition table (one node for a position reached by reordered
+        # actions): passed through only when set, and only to an engine build that has it.
+        if not hasattr(cpp.SearchConfig, "transpositions"):
+            raise ValueError("this engine build has no SearchConfig.transpositions")
+        options["transpositions"] = True
     return cpp.SearchConfig(
         c_puct=float(get("c_puct", 0.75)),
         simulations=int(get("sims", 256)),
@@ -55,6 +62,7 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
         determinizations=0 if oracle else dets,
         max_players=int(max_players),
         threads=threads,
+        **options,
     )
 
 

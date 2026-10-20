@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import cppanatron as cpp
@@ -11,11 +13,17 @@ from catanatron.models.player import Color
 from catanatron.registry import REGISTRY, SpecError
 
 from catanrl.agents import MctsParams, resolve_agent
+from catanrl.agents.spec import key_params, keyed_fields, search_details
 from catanrl.checkpoint import save
 from catanrl.config import Variant, config_hash, resolve
 from catanrl.envs.encoding import action_size, dims_for, row_layout
 from catanrl.models import build_model
 from catanrl.runs import RunWriter
+from catanrl.search.pool import search_config
+
+#: MCTS lineup entries (``params``, ``search``, the canonical ``spec``) of stored eval records
+#: whose keys must rebuild unchanged whatever options MctsParams and SearchConfig gain.
+STORED_MCTS_KEYS = Path(__file__).with_name("data") / "stored_mcts_keys.json"
 
 
 def tiny(level="private", games=("base-2p",), preset="graph-tiny", seed=0):
@@ -100,6 +108,68 @@ def test_key_dict(ckpts):
     assert resolve_agent("MCTS:ckpt=exp/v:sims=9").key_dict() != resolve_agent("MCTS:ckpt=exp/v:sims=8").key_dict()
     assert resolve_agent("POLICY:exp/v@e0").key_dict()["checkpoint"]["weights_sha256"] != \
         resolve_agent("POLICY:exp/v@e3").key_dict()["checkpoint"]["weights_sha256"]
+
+
+def test_reuse_transpositions_and_dedup_are_keyed_only_when_set(ckpts):
+    base = resolve_agent("MCTS:ckpt=exp/v:sims=8")
+    assert base.canonical.endswith(":allow_drift=false:tracker=pool")
+    assert base.canonical == resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=false:transpositions=false:dedup=false").canonical
+    assert not {"reuse", "transpositions", "dedup"} & set(base.key_dict()["params"])
+    assert "transpositions" not in base.key_dict()["search"]
+    reuse = resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true")
+    assert reuse.canonical == base.canonical + ":reuse=true" and reuse.fair
+    assert resolve_agent(reuse.canonical).canonical == reuse.canonical
+    assert reuse.key_dict()["params"] == {**base.key_dict()["params"], "reuse": True}
+    assert reuse.key_dict()["search"] == base.key_dict()["search"]
+    assert reuse.native(device="cpu").reuse and reuse.native(device="cpu").needs_memory
+    for harness in ("catanatron", "server"):
+        with pytest.raises(SpecError, match="reuse"):
+            resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true", harness=harness)
+    nodedup = resolve_agent("MCTS:ckpt=exp/v:sims=8:dedup=false")
+    assert nodedup.canonical == base.canonical and nodedup.key_dict() == base.key_dict()
+    assert not nodedup.native(device="cpu").dedup and base.native(device="cpu").dedup
+    if hasattr(cpp.SearchConfig, "transpositions"):
+        table = resolve_agent("MCTS:ckpt=exp/v:sims=8:transpositions=true")
+        assert table.canonical == base.canonical + ":transpositions=true"
+        assert resolve_agent(table.canonical).canonical == table.canonical
+        assert table.key_dict()["params"] == {**base.key_dict()["params"], "transpositions": True}
+        assert table.key_dict()["search"] == {**base.key_dict()["search"], "transpositions": True}
+        assert table.native(device="cpu").config.transpositions
+    else:
+        with pytest.raises(SpecError, match="transpositions"):
+            resolve_agent("MCTS:ckpt=exp/v:sims=8:transpositions=true")
+
+
+def _rebuilds_unchanged(entry: dict) -> None:
+    params = MctsParams(ckpt="x", **entry["params"])
+    assert key_params(params) == entry["params"]
+    config = search_config(params, max_players=entry["search"]["max_players"], threads=0)
+    assert search_details(config) == entry["search"]
+    assert [part.split("=", 1)[0] for part in entry["spec"].split(":")[1:]] == keyed_fields(params)
+
+
+def test_stored_mcts_keys_rebuild_unchanged():
+    entries = json.loads(STORED_MCTS_KEYS.read_text())
+    assert len(entries) >= 9
+    for entry in entries:
+        _rebuilds_unchanged(entry)
+
+
+@pytest.mark.runs
+def test_the_real_stored_mcts_records_rebuild_unchanged():
+    from catanrl.eval.results import all_records
+
+    entries = []
+    for path in all_records():
+        data = json.loads(path.read_text())
+        for slot, entry in enumerate(data["key"]["lineup"]):
+            # Records from before ``tracker`` was keyed rebuild with it added: already apart.
+            if entry.get("key") == "MCTS" and "tracker" in entry["params"]:
+                entries.append({**entry, "spec": data["specs"][slot]})
+    if not entries:
+        pytest.skip("no stored MCTS record in the runs directory")
+    for entry in entries:
+        _rebuilds_unchanged(entry)
 
 
 def test_fairness_and_harness_gates(ckpts):
