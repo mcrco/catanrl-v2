@@ -15,8 +15,13 @@ pytest.importorskip("catanatron")
 from bridge_games import tiny_agent
 
 from catanrl.bridge.openhex import Board, EventLog, OpenHexSeat, color_of, native_for
+from catanrl.bridge.replay import ReplayError
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "openhex" / "game-004a8250.json"
+#: A ladder game (aborted at turn 95) whose turn 89 produced 7 wood with 5 in
+#: the bank: OpenHex paid in full, the engine's rule would pay nobody.
+OVERPAID = Path(__file__).parent.parent / "fixtures" / "openhex" / "game-881a71bc.json"
+RESOURCE_NAMES = ("wood", "brick", "sheep", "wheat", "ore")
 DIMS = {"max_players": 2, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
 
 
@@ -76,6 +81,51 @@ def test_a_recorded_game_replays_to_its_final_state(color):
         if i == seat.seat:
             assert tuple(cpp_game.player(i).resources) == hand
             assert tuple(seat.tracker.known_resources(i)) == hand
+
+
+def _hand(player):
+    return tuple(player["hand"].get(r, 0) for r in RESOURCE_NAMES)
+
+
+def _assert_state(seat, bank, players):
+    assert seat.bank == [bank[r] for r in RESOURCE_NAMES]
+    for player in players:
+        i = seat.colors.index(color_of(player["color"]))
+        assert sum(seat.replay.game.player(i).resources) == sum(_hand(player))
+        if i == seat.seat:
+            assert tuple(seat.replay.game.player(i).resources) == _hand(player)
+            assert tuple(seat.tracker.known_resources(i)) == _hand(player)
+
+
+@pytest.mark.parametrize("color", ["blue", "red"])
+def test_a_roll_the_bank_cannot_cover_pays_what_the_game_paid(color):
+    # Turn 89 (seq 374): 7 wood produced with 5 in the bank. OpenHex paid in
+    # full; the engine's rule pays nobody. The replay starts over on a bank
+    # two cards larger and follows the game exactly (the checkpoint is the
+    # public record's state after seq 379).
+    game = json.loads(OVERPAID.read_text())
+    checkpoint = game["checkpoints"][0]
+    seat = OpenHexSeat(_Never(), "fixture", game, color)
+    seat.feed(_redacted([e for e in game["events"] if e["seq"] <= checkpoint["seq"]], color))
+    assert seat.bank_margin == [2, 0, 0, 0, 0] and seat.stats["bank_short"] == 1
+    assert tuple(seat.rules.resource_bank) == (21, 19, 19, 19, 19)
+    assert "production_mismatch" not in seat.stats
+    _assert_state(seat, checkpoint["bank"], checkpoint["players"])
+
+
+@pytest.mark.parametrize("color", ["blue", "red"])
+def test_a_roll_the_game_withheld_is_the_replays_known_limit(color):
+    # Seq 380, five rolls later: OpenHex withheld blue's 3 wood (its bank
+    # held 2, less than blue's share) where the engine, two cards richer,
+    # pays. The engine's bank cannot be set from Python, so the replay keeps
+    # the payout, counts the difference, and goes wrong at the next 7: blue,
+    # three phantom cards over the limit, is asked to discard before red.
+    game = json.loads(OVERPAID.read_text())
+    seat = OpenHexSeat(_Never(), "fixture", game, color)
+    with pytest.raises(ReplayError, match="DISCARD_RESOURCE"):
+        seat.feed(_redacted(game["events"], color))
+    assert seat.stats["bank_short"] == 1 and seat.stats["production_mismatch"] == 1
+    assert seat.replay.applied == 320
 
 
 def test_the_agent_plans_an_openhex_action_wherever_the_seat_moves():
