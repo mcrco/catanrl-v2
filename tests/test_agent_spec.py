@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import cppanatron as cpp
@@ -240,7 +241,12 @@ def test_trade_canonical_names_the_critic_and_keys_both_networks(ckpts):
 def test_trade_fairness_and_refusals(trade_ckpts):
     c = trade_ckpts
     assert resolve_agent(f"TRADE:ckpt={c['private']}").fair
-    assert not resolve_agent(f"TRADE:ckpt={c['private']}:oracle=true:dets=1").fair
+    # The design's notation: oracle=true alone (the true game is the one world: dets pinned to 1).
+    oracle = resolve_agent(f"TRADE:ckpt={c['private']}:oracle=true")
+    assert not oracle.fair and oracle.params.dets == 1 and ":dets=1:" in oracle.canonical
+    assert oracle.canonical == resolve_agent(f"TRADE:ckpt={c['private']}:dets=1:oracle=true").canonical
+    assert resolve_agent(oracle.canonical).canonical == oracle.canonical
+    check_spec_syntax("TRADE:ckpt=exp/v:oracle=true")
     public = resolve_agent(f"TRADE:ckpt={c['public']}:critic={c['private']}")
     assert public.fair and not resolve_agent(public.canonical, games=["base-4p"]).fair
     assert resolve_agent(f"TRADE:ckpt={c['lstm']}:critic={c['private']}").fair  # a recurrent policy, natively
@@ -251,7 +257,7 @@ def test_trade_fairness_and_refusals(trade_ckpts):
         (f"TRADE:ckpt={c['private']}:critic={c['public']}", "private"),
         (f"TRADE:ckpt={c['full']}", "private"),
         ("TRADE:ckpt=exp/v:dets=0", "dets"),
-        ("TRADE:ckpt=exp/v:oracle=true", "dets"),
+        ("TRADE:ckpt=exp/v:oracle=true:dets=4", "dets"),  # a written contradiction, as MCTS refuses it
         ("TRADE:ckpt=exp/v:oracle=true:dets=1:tracker=exact", "tracker"),
         ("TRADE:ckpt=exp/v:shapes=22", "shapes"),
         ("TRADE:ckpt=exp/v:shapes=11-11", "shapes"),
@@ -276,3 +282,18 @@ def test_trade_fairness_and_refusals(trade_ckpts):
     assert isinstance(player, TradePlayer) and player.params.margin == 1.0 and player.params.offers == 3
     with pytest.raises(RuntimeError, match="native"):
         player.decide(None, [1, 2])
+
+
+def test_design_6_5_names_every_model_key():
+    """DESIGN.md 6.5 (the section the spec docs point at) keeps up with MODEL_KEYS: the KEY
+    grammar, an example and the fairness table name every key."""
+    from catanrl.agents.spec import MODEL_KEYS
+
+    text = (Path(__file__).resolve().parents[1] / "DESIGN.md").read_text()
+    section = text[text.index("### 6.5 "):text.index("### 6.6 ")]
+    grammar = next(line for line in section.splitlines() if line.startswith("KEY  :="))
+    fairness = section[section.index("| Agent | Fair when |"):]
+    for key in MODEL_KEYS:
+        assert f" {key} " in grammar, key
+        assert f"`{key}:" in section, key  # an example spec
+        assert f"| {key} |" in fairness, key  # a fairness row

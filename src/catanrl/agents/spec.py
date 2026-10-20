@@ -36,7 +36,8 @@ or ``when=every`` eligible row), accepts an offer when its own mean gain over
 ``dets`` worlds dealt from its tracker exceeds ``accept_margin`` (a candidate
 needs a partner able to pay in a ``min_feasible`` fraction of those worlds), and
 confirms the acceptee that gains it most. ``propose=false`` is the responder-only
-seat; ``oracle=true`` reads the true hands instead of worlds (unfair). v1 refuses
+seat; ``oracle=true`` reads the true hands instead of worlds (unfair; the game is
+the one world, so ``dets`` is pinned to 1 and a written larger one refused). v1 refuses
 a recurrent critic, one with a separate critic block, a critic above ``private``,
 and every harness but the native one. ``audit`` and ``device`` are execution-only.
 
@@ -304,11 +305,16 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
             raise SpecError("TRADE: margin and accept_margin are win-probability points a seat must gain (>= 0)")
         if params.offers < 1:
             raise SpecError("TRADE: offers caps the offers per own turn (>= 1)")
-        if params.oracle and params.dets > 1:
-            raise SpecError("TRADE: oracle=true reads the true hands and takes no dets")
-        if params.oracle and params.tracker != "pool":
-            raise SpecError("TRADE: oracle=true reads the true hands and takes no tracker")
-        if not params.oracle and params.dets < 1:
+        if params.oracle:
+            # The true game is the one world: a written dets > 1 contradicts it (MCTS refuses the
+            # same), while the default (8; MCTS's is 1) is pinned to 1, so `oracle=true` alone
+            # resolves and every oracle lineup has one canonical key.
+            if "dets" in named and params.dets > 1:
+                raise SpecError(f"TRADE: oracle=true reads the true hands, not dets={params.dets} worlds")
+            if params.tracker != "pool":
+                raise SpecError("TRADE: oracle=true reads the true hands and takes no tracker")
+            params = dataclasses.replace(params, dets=1)
+        if params.dets < 1:
             raise SpecError("TRADE: dets counts sampled worlds (>= 1); use oracle=true for the true hands")
         if not 0 < params.min_feasible <= 1:
             raise SpecError("TRADE: min_feasible is the fraction of worlds in which the partner can pay, in (0, 1]")

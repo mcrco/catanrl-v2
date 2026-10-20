@@ -616,7 +616,7 @@ on `,`, so neither character appears in a value. This replaces §3's
 
 ```
 spec := KEY (":" param)*         param := value | name "=" value   (a positional value is ckpt)
-KEY  := POLICY | MCTS | BELIEF | PREDICT | F | R | any Catanatron registry key
+KEY  := POLICY | MCTS | BELIEF | PREDICT | TRADE | F | R | any Catanatron registry key
 ckpt := run ["@" which] ["#" sha] | path ending in ".pt"
 run  := experiment ["/" variant]  which := best | latest | init | <alias> | N | eN   (epoch; default best)
 ```
@@ -625,7 +625,9 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
 `MCTS:ckpt=…@best:sims=256:dets=4`, `MCTS:ckpt=…:oracle=true`,
 `BELIEF:ckpt=…@1500:worlds=16`,
 `PREDICT:ckpt=puffer-graph2/full@best:predictor=aux-hidden/main@best:round=true`
-(`predictor` is a second `ckpt`, resolved and pinned the same way), `AB:2`.
+(`predictor` is a second `ckpt`, resolved and pinned the same way),
+`TRADE:ckpt=aux-hidden-4p/plain@best:critic=aux-hidden-4p/plain@best:margin=1.0`
+(`critic` likewise), `AB:2`.
 
 * **Params** are frozen dataclasses on the registered players. Unknown or
   mistyped params raise.
@@ -644,6 +646,19 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   `temperature`. Both refs are pinned (`@best`, `#sha`) and both are in
   `key_dict()` and the record; a final naming either in another experiment
   waits for that run like any foreign ref (6.2).
+* **TRADE** (`catanrl.agents.trade`) plays `ckpt` as POLICY does and adds the
+  domestic trades the action space leaves out (1.4), judged by `critic` (a
+  second `ckpt`, pinned with part `critic`; empty means `ckpt`'s own network,
+  and the canonical spec always names it; v1 takes a stateless `private`
+  critic with no separate critic block): it offers the bundles whose
+  critic-read gain for both seats clears `margin` (points; strict), up to
+  `offers` per own turn, accepts when its own mean gain over `dets` worlds
+  dealt from its tracker clears `accept_margin`, and confirms by its own gain.
+  `propose=false` is the responder-only seat; `oracle=true` reads the true
+  hands (the one world: `dets` is pinned to 1). It plays natively only: the
+  Catanatron mirror returns one action and the server bridge cannot negotiate,
+  so both harnesses refuse it. A game with a trade writes `trades` (offers,
+  accepts, confirms, cancels per seat) on its row; other rows are unchanged.
 
 `resolve_agent(spec)` does four things:
 
@@ -657,6 +672,7 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
    | MCTS | not `oracle` |
    | BELIEF | always |
    | PREDICT | always: it reads the private row and a learned predictor |
+   | TRADE | its policy by POLICY's rule, and not `oracle` (the critic reads private rows of worlds dealt from its tracker) |
    | built-in bots | never |
    | LLM | always: it reads only the public state text |
 

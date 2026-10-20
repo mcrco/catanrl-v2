@@ -23,8 +23,9 @@ harness is in the key, with Catanatron's code in ``code``. Rows of LLM seats
 carry an ``llm`` entry (per-game decisions, tokens, retries, fallbacks, wall
 time) that the summary totals per slot and ``verify`` ignores. Rows of a game
 with a domestic trade (a ``TRADE`` seat at the table) carry ``trades`` (offers,
-accepts and confirms per seat), an outcome the summary totals per slot; other
-rows are as they always were. A record with
+accepts, confirms and cancels per seat: :data:`TRADE_KEYS`), an outcome the
+summary totals per slot with the cancel rate; other rows are as they always
+were. A record with
 a real language model (not a stub) in its lineup is :class:`Unreplayable`:
 ``verify`` refuses it unless forced, since the model never answers the same
 way twice and every replayed game is paid for.
@@ -55,6 +56,9 @@ class ExecutionMismatch(RuntimeError):
 HARNESSES = ("native", "catanatron")
 #: Row keys that are not outcomes (dropped from games_sha256 and from verify's comparison).
 NOT_OUTCOME = ("segment", "llm")
+#: The per-seat counts a trading row's ``trades`` holds, in order: the trade steps a learner
+#: seat played (the harness's ``TRADE_COUNTS`` maps the engine's action types to them).
+TRADE_KEYS = ("offers", "accepts", "confirms", "cancels")
 
 
 class Unreplayable(RuntimeError):
@@ -237,17 +241,20 @@ def summarize(rows: Sequence[Mapping[str, Any]], labels: Sequence[str]) -> dict:
 
 
 def trade_totals(rows: Sequence[Mapping[str, Any]], slot: int, games: int) -> dict:
-    """One slot's domestic trades over its ``games``: offers it made, offers it accepted and
-    trades it confirmed at its seats (a row's ``trades`` holds each per seat; a game without
-    the field had none), with per-game means."""
-    keys = ("offers", "accepts", "confirms")
-    totals = {k: 0 for k in keys}
+    """One slot's domestic trades over its ``games``: offers it made, offers it accepted,
+    trades it confirmed and accepted offers it cancelled at its seats (a row's ``trades``
+    holds each per seat; a game without the field had none), with per-game means and the
+    cancel rate (cancels over the offers somebody accepted: a broadcast bundle taken by a
+    seat the proposer's read did not favour)."""
+    totals = {k: 0 for k in TRADE_KEYS}
     for r in rows:
         for seat, s in enumerate(r["seats"]):
             if s == slot:
-                for k in keys:
+                for k in TRADE_KEYS:
                     totals[k] += int(r["trades"][k][seat])
-    return {**totals, "per_game": {k: totals[k] / games for k in keys}}
+    answered = totals["confirms"] + totals["cancels"]
+    return {**totals, "per_game": {k: totals[k] / games for k in TRADE_KEYS},
+            "cancel_rate": totals["cancels"] / answered if answered else 0.0}
 
 
 def llm_totals(stats: Sequence[Mapping[str, Any]]) -> dict:

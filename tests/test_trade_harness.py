@@ -83,11 +83,11 @@ def test_trade_lineups_play_to_completion_with_trades(case):
             continue
         assert list(row["trades"]) == list(TRADE_COUNTS.values())
         for seat, slot in enumerate(row["seats"]):
-            offers, accepts, confirms = (row["trades"][k][seat] for k in TRADE_COUNTS.values())
+            offers, accepts, confirms, cancels = (row["trades"][k][seat] for k in TRADE_COUNTS.values())
             assert offers == 0 or slot == 0  # the only proposer
             assert accepts == 0 or (case == "trade-vs-trade" and slot == 1)  # the only accepting responder
-            assert confirms <= offers and (case == "trade-vs-trade" or confirms == 0)
-            assert row["decisions"][seat] >= offers + accepts + confirms
+            assert confirms + cancels <= offers and (case == "trade-vs-trade" or confirms == cancels == 0)
+            assert row["decisions"][seat] >= offers + accepts + confirms + cancels
         assert any(any(v) for v in row["trades"].values())
     assert sum(r["trades"]["offers"][s] for r in traded for s in range(len(r["seats"]))) > 0
     if case == "trade-vs-trade":
@@ -107,6 +107,29 @@ def test_plain_agents_default_at_every_trade_prompt():
     offers = sum(r["trades"]["offers"][s] for r in rows.values() if "trades" in r for s in range(len(r["seats"])))
     assert players[0].stats["offers"] == offers > 0 and players[0].stats["accepts"] == 0
     assert players[0].stats["confirms"] == players[0].stats["cancels"] == 0  # nobody accepted
+
+
+def test_trade_rows_count_what_the_agents_did():
+    """A row's per-seat counts are the agents' own counters summed over their seats: the
+    proposer's offers, confirms and cancels (every DECIDE_ACCEPTEES answer, so a record's
+    cancel rate is the pilot's) and the TRADE responder's accepts; R's accepts happen inside
+    the engine and are not a learner's decision."""
+    lineup, games, fill = CASES["trade-vs-trade"]
+    players = lineup()
+    rows = play(players, games, fill, num_envs=4, threads=2)
+    assert rows == reference("trade-vs-trade")
+
+    def total(slot: int, kind: str) -> int:
+        return sum(r["trades"][kind][seat] for r in rows.values() if "trades" in r
+                   for seat, s in enumerate(r["seats"]) if s == slot)
+
+    proposer, responder = players[0], players[1]
+    assert total(0, "offers") == proposer.stats["offers"] > 0
+    assert total(0, "confirms") == proposer.stats["confirms"] > 0
+    assert total(0, "cancels") == proposer.stats["cancels"] > 0
+    assert total(1, "accepts") == responder.stats["accepts"] > 0
+    assert total(0, "accepts") == proposer.stats["accepts"] == 0  # prompted on its own offers only: REJECT
+    assert all(total(slot, kind) == 0 for slot in (1, 2) for kind in ("offers", "confirms", "cancels"))
 
 
 @pytest.mark.parametrize("case", sorted(CASES))
@@ -166,7 +189,7 @@ def test_trade_against_f_reproduces_policy_against_f():
         extra += other["decisions"][seat] - row["decisions"][seat]
         assert [d for s, d in enumerate(other["decisions"]) if s != seat] == [0] * 3
         if "trades" in other:
-            assert other["trades"]["accepts"] == [0] * 4 and other["trades"]["confirms"] == [0] * 4
+            assert all(other["trades"][k] == [0] * 4 for k in ("accepts", "confirms", "cancels"))
     stats = proposer.stats
     assert stats["offers"] > 0 and stats["accepts"] == stats["confirms"] == stats["cancels"] == 0
     assert extra == stats["offers"] + stats["rejects"]  # F never offers: every reject is of its own offer

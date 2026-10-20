@@ -27,8 +27,9 @@ from ``act`` as a ``cpp.Action`` and a trade prompt (a responder's
 DECIDE_TRADE, the proposer's DECIDE_ACCEPTEES: an acting row whose mask has no
 legal index) goes to ``respond_trade``; both are played through
 ``VecEnv.set_action`` and count as the seat's decisions like any other row.
-A row of a game with a trade carries ``trades`` (offers, accepts and confirms
-per seat); rows of lineups without one are as they always were.
+A row of a game with a trade carries ``trades`` (offers, accepts, confirms and
+cancels per seat: ``results.TRADE_KEYS``); rows of lineups without one are as
+they always were.
 """
 
 from __future__ import annotations
@@ -43,11 +44,13 @@ import numpy as np
 from catanrl import games as game_configs
 from catanrl.agents.native import BotAgent, NativeAgent, make_native_agent
 from catanrl.envs.encoding import dims_for, encoder_dims, info_level
+from catanrl.eval.results import TRADE_KEYS
 from catanrl.seeding import derive_seed as _derive_seed
 
-#: The trade steps a row's ``trades`` counts, by the action a learner seat played.
-TRADE_COUNTS = {cpp.ActionType.OFFER_TRADE: "offers", cpp.ActionType.ACCEPT_TRADE: "accepts",
-                cpp.ActionType.CONFIRM_TRADE: "confirms"}
+#: The trade steps a row's ``trades`` counts, by the action a learner seat played (a REJECT is
+#: the default answer, and a forced lone one never reaches the harness: not counted).
+TRADE_COUNTS = dict(zip((cpp.ActionType.OFFER_TRADE, cpp.ActionType.ACCEPT_TRADE, cpp.ActionType.CONFIRM_TRADE,
+                         cpp.ActionType.CANCEL_TRADE), TRADE_KEYS))
 
 # ---------------------------------------------------------------- schedule inputs
 

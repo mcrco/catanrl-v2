@@ -33,7 +33,8 @@ class FakeHarness:
                    "stuck": False, "forfeits": [int(g.game_id == self.forfeit), 0], "decisions": [1, 1]}
             if self.trades and not truncated:  # as the harness: the field only on a game with a trade
                 row["trades"] = {"offers": [2 * int(s == 0) for s in g.seats], "accepts": [int(s != 0) for s in g.seats],
-                                 "confirms": [int(s == 0) for s in g.seats]}
+                                 "confirms": [int(s == 0) for s in g.seats],
+                                 "cancels": [int(s == 0 and g.board % 2 == 0) for s in g.seats]}
             on_game(row)
 
 
@@ -220,10 +221,11 @@ def test_trade_rows_are_totalled_and_other_records_stay_as_they_were(monkeypatch
     assert sum("trades" in r for r in record.games()) == 6
     assert record.data["games_sha256"] != plain.data["games_sha256"]
     slots = record.summary["slots"]
-    assert slots[0]["trades"] == {"offers": 12, "accepts": 0, "confirms": 6,
-                                  "per_game": {"offers": 1.5, "accepts": 0.0, "confirms": 0.75}}
-    assert slots[1]["trades"] == {"offers": 0, "accepts": 6, "confirms": 0,
-                                  "per_game": {"offers": 0.0, "accepts": 0.75, "confirms": 0.0}}
+    assert all(set(r["trades"]) == set(results.TRADE_KEYS) for r in record.games() if "trades" in r)
+    assert slots[0]["trades"] == {"offers": 12, "accepts": 0, "confirms": 6, "cancels": 4, "cancel_rate": 0.4,
+                                  "per_game": {"offers": 1.5, "accepts": 0.0, "confirms": 0.75, "cancels": 0.5}}
+    assert slots[1]["trades"] == {"offers": 0, "accepts": 6, "confirms": 0, "cancels": 0, "cancel_rate": 0.0,
+                                  "per_game": {"offers": 0.0, "accepts": 0.75, "confirms": 0.0, "cancels": 0.0}}
     assert results.verify(record, games=None)["identical"] == 8
     use(monkeypatch, FakeHarness())  # a replay that trades differently is not a replay
     assert results.verify(record, games=None)["identical"] == 2  # the two truncated games: no field either way
@@ -259,3 +261,19 @@ def test_paired_joins_a_trade_proposer_with_its_policy_control(monkeypatch, tmp_
     for other in ([f"POLICY:ckpt={pt}"] * 4, [f"TRADE:ckpt={pt}", n, n, f"{n}:accept_margin=1.0"]):
         with pytest.raises(ValueError, match="opponents"):
             paired(a, evaluate(other, suite))
+
+
+def test_catanrl_eval_prints_a_trading_slot_s_totals(monkeypatch, tmp_path, capsys):
+    """``catanrl eval`` prints the per-slot trade totals the summary holds (the pilot's
+    per-game counts and cancel rate), as it prints an LLM slot's per-game stats."""
+    import json
+
+    from catanrl.cli import main
+
+    use(monkeypatch, FakeHarness(trades=True))
+    path = tmp_path / "fake-cli.yaml"
+    path.write_text(json.dumps({k: v for k, v in SUITE.items() if k != "name"}))
+    assert main(["eval", "R", "F", "--suite", str(path), "--threads", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "per game: 1.50 offers, 0.00 accepts, 0.75 confirms, 0.50 cancels; cancel rate 0.40" in out
+    assert "per game: 0.00 offers, 0.75 accepts, 0.00 confirms, 0.00 cancels; cancel rate 0.00" in out
