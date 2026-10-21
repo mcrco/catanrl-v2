@@ -36,6 +36,10 @@
 Checkpoints, select evals and ``best`` follow ``train_ppo`` (one epoch = one
 iteration). A resume restores the weights, optimizer, replay buffer, counters
 and RNG; games in flight restart.
+
+Every iteration also logs :class:`Monitors` (``oos/*``, ``search/overrule``
+and friends, ``drift/*``): logging-only health checks that read the network,
+the searched rows and replay and feed nothing back.
 """
 
 from __future__ import annotations
@@ -53,7 +57,7 @@ import torch.nn.functional as F
 
 from catanrl.envs.encoding import critic_level_of, encoder_dims, info_level
 from catanrl.envs.puffer import plan_env
-from catanrl.models import CatanModel
+from catanrl.models import CatanModel, feature_names
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
 from catanrl.seeding import derive_seed, determinism, rng_state, seed_everything, set_rng_state
 from catanrl.train.puffer import build_policy_model, check_bindable, resolve_device
@@ -203,6 +207,15 @@ class ReplayBuffer:
 # ---------------------------------------------------------------- self-play
 
 
+def make_vec(plan: Any, levels: Mapping[str, Any], *, num_envs: int, seed: int, threads: int,
+             trackers: bool = False) -> cpp.VecEnv:
+    """A VecEnv of ``plan``'s scenarios writing the rows of a network at ``levels``."""
+    critic = critic_level_of(levels["level"], levels["critic_level"])
+    return cpp.VecEnv(plan.scenarios, num_envs=num_envs, dims=encoder_dims(plan.dims),
+                      level=info_level(levels["level"]), seed=seed, num_threads=threads,
+                      critic_level=None if critic is None else info_level(critic), trackers=trackers)
+
+
 @dataclass
 class _Pending:
     obs: np.ndarray
@@ -220,11 +233,8 @@ class SelfPlay:
         self.seed = int(seed)
         self.dims = dict(plan.dims)
         levels = model.levels
-        critic = critic_level_of(levels["level"], levels["critic_level"])
         self.dets = int(train["dets"])
-        self.vec = cpp.VecEnv(plan.scenarios, num_envs=num_envs, dims=encoder_dims(plan.dims),
-                              level=info_level(levels["level"]), seed=self.seed, num_threads=threads,
-                              critic_level=None if critic is None else info_level(critic), trackers=self.dets > 0)
+        self.vec = make_vec(plan, levels, num_envs=num_envs, seed=self.seed, threads=threads, trackers=self.dets > 0)
         self.buffers = self.vec.allocate()
         self.vec.reset(self.seed)
         self.players = int(self.vec.max_players)
@@ -242,6 +252,8 @@ class SelfPlay:
         self.ply = np.zeros(num_envs, dtype=np.int64)
         self.decisions = 0
         self.games = 0
+        #: Sees each step's full-budget searches (rows and targets); logging only.
+        self.monitor: Monitors | None = None
 
     def step(self, iteration: int, step: int, rng: np.random.Generator, replay: ReplayBuffer,
              stats: dict[str, float]) -> None:
@@ -250,6 +262,7 @@ class SelfPlay:
         acting = np.flatnonzero(b["acting"])
         full = rng.random(len(acting)) < float(self.train["full_search_prob"])
         searches = []
+        targets = []  # the full searches' policy targets, in acting order, for the monitor
         try:
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
@@ -265,6 +278,7 @@ class SelfPlay:
                 policy = None
                 if full[i]:
                     policy = pool.policy_target(sid).astype(np.float16)
+                    targets.append(policy)
                     search = pool.stats(sid)
                     stats["depth"] += search.mean_depth
                     stats["max_depth"] += search.max_depth
@@ -281,6 +295,8 @@ class SelfPlay:
         stats["leaves"] += leaves
         stats["full"] += int(full.sum())
         self.decisions += len(acting)
+        if self.monitor is not None and targets:
+            self.monitor.searched(b["observations"][acting[full]], np.stack(targets))  # before step() rewrites rows
         self.vec.step()
         self._finish(replay)
 
@@ -311,6 +327,18 @@ class SelfPlay:
 # ---------------------------------------------------------------- learning
 
 
+def policy_stats(target: torch.Tensor, net_logp: torch.Tensor, net_probs: torch.Tensor
+                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per row: the target's entropy, the network's entropy over its legal actions and
+    KL(target || net). learn()'s train/target_entropy, net_entropy and kl_target_net are their
+    minibatch means. ``net_logp`` is the masked log-policy (illegal actions below -1e8) and
+    ``net_probs`` its exp."""
+    legal = net_logp > -1e8
+    safe = torch.where(legal, net_logp, torch.zeros_like(net_logp))
+    target_log = target.clamp_min(1e-12).log()
+    return -(target * target_log).sum(1), -(net_probs * safe).sum(1), (target * (target_log - safe)).sum(1)
+
+
 def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuffer, train: Mapping[str, Any],
           device: str, rng: np.random.Generator) -> dict[str, float]:
     """``updates_per_iteration`` gradient steps on uniform minibatches; their mean statistics."""
@@ -338,14 +366,9 @@ def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuf
         with torch.no_grad():
             probs = logp.exp()
             if bool(has.any()):
-                net_logp = logp[has]
-                legal = net_logp > -1e8
-                target_entropy = -(target * target.clamp_min(1e-12).log()).sum(1).mean()
-                net_entropy = -(probs[has] * torch.where(legal, net_logp, torch.zeros_like(net_logp))).sum(1).mean()
-                kl = (target * (target.clamp_min(1e-12).log() - torch.where(legal, net_logp, torch.zeros_like(net_logp)))
-                      ).sum(1).mean()
-                for key, value in (("target_entropy", target_entropy), ("net_entropy", net_entropy), ("kl_target_net", kl)):
-                    sums[key] = sums.get(key, 0.0) + float(value) / updates
+                for key, value in zip(("target_entropy", "net_entropy", "kl_target_net"),
+                                      policy_stats(target, logp[has], probs[has])):
+                    sums[key] = sums.get(key, 0.0) + float(value.mean()) / updates
             for key, value in (("policy_loss", policy_loss), ("value_loss", value_loss)):
                 sums[key] = sums.get(key, 0.0) + float(value) / updates
             predicted = (torch.sigmoid(value_logits.float()) * present).sum(1)
@@ -361,19 +384,227 @@ def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuf
     return sums
 
 
+# ---------------------------------------------------------------- monitors
+
+#: Positions in the drift probe, and the probe games that supply them (each env's first game).
+PROBE_ROWS = 4096
+PROBE_ENVS = 64
+PROBE_MAX_STEPS = 4000
+#: The probe's phases (they overlap): initial placements, discards and robber moves (the row's
+#: prompt flags), a development card playable, and a build option on a normal turn (not a free road).
+PHASES = ("setup", "discard", "robber", "dev", "build")
+
+
+def phases_of(model: CatanModel, rows: np.ndarray) -> dict[str, np.ndarray]:
+    """Which of :data:`PHASES` each row [n, obs] is in, from its global flags and action mask
+    (a phase whose flag or actions the rows lack is all False)."""
+    names = feature_names(model.dims, model.levels["level"])["global"]
+    offset = int(model.layout["global"][0])
+    none = np.zeros(len(rows), dtype=bool)
+
+    def flag(name: str) -> np.ndarray:
+        return rows[:, offset + names.index(name)] > 0 if name in names else none
+
+    actions = cpp.GraphActionSpace(encoder_dims(model.dims)).names()
+    legal = rows[:, model.mask_offset : model.mask_offset + model.num_actions] > 0
+
+    def playable(prefixes: tuple[str, ...]) -> np.ndarray:
+        if len(actions) != legal.shape[1]:
+            return none
+        return legal[:, [i for i, name in enumerate(actions) if name.startswith(prefixes)]].any(1)
+
+    return {
+        "setup": flag("prompt_build_initial_settlement") | flag("prompt_build_initial_road"),
+        "discard": flag("prompt_discard"),
+        "robber": flag("prompt_move_robber"),
+        "dev": playable(("PLAY_", "MONOPOLY_", "YEAR_OF_PLENTY_")),
+        "build": flag("prompt_play_turn") & ~flag("road_building") & playable(("SETTLEMENT@", "CITY@", "ROAD@")),
+    }
+
+
+class Monitors:
+    """Logging-only health checks of a run (forwards of the network in chunks of ``rows``).
+
+    * ``oos/*`` (before learn()): the value head out of sample, on the positions of the games
+      that finished during the iteration (in replay but not yet trained on): ``value_bce``
+      (per seated slot, train/value_loss's normalization) and ``value_brier`` against the outcome
+      targets the trainer uses; per player count n the mean seat-sums ``value_sum_{n}p`` and
+      ``target_sum_{n}p`` and their gap ``sum_gap_{n}p``; ``rows``.
+    * ``search/*`` (self-play): among the iteration's full-budget searches at non-forced
+      decisions, ``overrule``, the fraction whose target's argmax is not the network's masked
+      argmax at that root; ``target_entropy``, ``net_entropy`` and ``kl_target_net`` on those
+      rows (:func:`policy_stats`, learn()'s train/* definitions, here out of sample);
+      ``overrule_rows``.
+    * ``drift/*`` (after learn(), so epoch e is checkpoint e's network): ``kl_init``, the mean
+      KL(init || net), and ``agree_init``, the argmax agreement, on a fixed probe set, overall
+      and per phase (``_{phase}`` of :data:`PHASES`, with ``rows_{phase}``). The probe is up to
+      :data:`PROBE_ROWS` non-forced decisions drawn uniformly from :data:`PROBE_ENVS` games that
+      the starting network plays with its raw policy (sampled), in their own VecEnv and RNG, with
+      the starting network's masked log-policy on them. It is drawn once when a run starts and
+      kept in the trainer state; a state without one (an older run) logs no drift.
+
+    Nothing reads them back: the RNG streams, VecEnv, searches, targets, replay and updates are
+    the same with or without them (test_monitors_are_logging_only).
+    """
+
+    def __init__(self, model: CatanModel, *, device: str, rows: int) -> None:
+        self.model, self.device, self.rows = model, device, max(1, int(rows))
+        self.mask = slice(model.mask_offset, model.mask_offset + model.num_actions)
+        self.probe: dict[str, torch.Tensor] | None = None
+        self.phases: dict[str, torch.Tensor] = {}
+        self.begin()
+
+    def begin(self) -> None:
+        """Clear the iteration's sums and time."""
+        self.searches = np.zeros(5)  # rows, overruled, target entropy, net entropy, KL(target || net)
+        self.seconds = 0.0
+
+    def _forward(self, obs: np.ndarray, head: str) -> torch.Tensor:
+        """Masked policy logits or value logits of rows (float16 or float32): float32 on the CPU."""
+        out = []
+        with torch.inference_mode():
+            for start in range(0, len(obs), self.rows):
+                chunk = torch.from_numpy(np.ascontiguousarray(obs[start : start + self.rows], dtype=np.float32))
+                chunk = chunk.to(self.device)
+                result = self.model.policy_logits(chunk) if head == "policy" else self.model.value_logits(chunk)[0]
+                out.append(result.float().cpu())
+        return torch.cat(out)
+
+    # ------------------------------------------------------------ self-play
+
+    def searched(self, obs: np.ndarray, targets: np.ndarray) -> None:
+        """One self-play step's full-budget searches: their roots' rows and float16 targets."""
+        start = time.time()
+        keep = (obs[:, self.mask] > 0).sum(1) > 1  # VecEnv plays forced moves itself: normally every row
+        if keep.any():
+            logp = F.log_softmax(self._forward(obs[keep], "policy"), dim=1)
+            target = torch.from_numpy(targets[keep].astype(np.float32))
+            target = target / target.sum(1, keepdim=True).clamp_min(1e-8)
+            entropies = policy_stats(target, logp, logp.exp())
+            overruled = (target.argmax(1) != logp.argmax(1)).sum()
+            self.searches += [int(keep.sum()), float(overruled), *(float(value.sum()) for value in entropies)]
+        self.seconds += time.time() - start
+
+    # ------------------------------------------------------------ before and after learn()
+
+    def before_learn(self, replay: ReplayBuffer, count: int) -> dict[str, float]:
+        """``search/*`` of the iteration and ``oos/*`` of the newest ``count`` replay rows
+        (the positions of the games that finished during the iteration)."""
+        start = time.time()
+        logs: dict[str, float] = {}
+        rows, overruled, target_entropy, net_entropy, kl = self.searches
+        if rows:
+            logs.update({"search/overrule": float(overruled / rows), "search/overrule_rows": int(rows),
+                         "search/target_entropy": float(target_entropy / rows),
+                         "search/net_entropy": float(net_entropy / rows), "search/kl_target_net": float(kl / rows)})
+        count = min(int(count), replay.size)
+        if count:
+            index = (replay.next - count + np.arange(count)) % replay.capacity
+            players = replay.shapes[2]
+            by_n = np.zeros((players + 1, 3))  # rows, predicted seat-sum, target seat-sum
+            bce = brier = seats = 0.0
+            for first in range(0, count, self.rows):
+                chunk = index[first : first + self.rows]
+                logits = self._forward(replay.obs[chunk], "value")
+                target, present = torch.from_numpy(replay.value[chunk]), torch.from_numpy(replay.present[chunk])
+                predicted = torch.sigmoid(logits)
+                bce += float((F.binary_cross_entropy_with_logits(logits, target, reduction="none") * present).sum())
+                brier += float(((predicted - target) ** 2 * present).sum())
+                seats += float(present.sum())
+                n = present.sum(1).long().numpy()
+                np.add.at(by_n, (n, 0), 1.0)
+                np.add.at(by_n, (n, 1), (predicted * present).sum(1).numpy())
+                np.add.at(by_n, (n, 2), (target * present).sum(1).numpy())
+            logs.update({"oos/rows": count, "oos/value_bce": bce / max(seats, 1.0),
+                         "oos/value_brier": brier / max(seats, 1.0)})
+            for n in range(2, players + 1):
+                if by_n[n, 0]:
+                    value, target_sum = by_n[n, 1] / by_n[n, 0], by_n[n, 2] / by_n[n, 0]
+                    logs.update({f"oos/value_sum_{n}p": float(value), f"oos/target_sum_{n}p": float(target_sum),
+                                 f"oos/sum_gap_{n}p": float(abs(value - target_sum))})
+        self.seconds += time.time() - start
+        return logs
+
+    def drift(self) -> dict[str, float]:
+        """``drift/*``: the network against the starting network on the probe."""
+        if self.probe is None:
+            return {}
+        start = time.time()
+        logp = F.log_softmax(self._forward(self.probe["obs"].numpy(), "policy"), dim=1)
+        init = self.probe["init_logp"]
+        kl = (init.exp() * torch.where(init > -1e8, init - logp, torch.zeros_like(init))).sum(1)
+        agree = (init.argmax(1) == logp.argmax(1)).float()
+        logs: dict[str, float] = {"drift/rows": len(kl), "drift/kl_init": float(kl.mean()),
+                                  "drift/agree_init": float(agree.mean())}
+        for name, rows in self.phases.items():
+            if bool(rows.any()):
+                logs.update({f"drift/kl_init_{name}": float(kl[rows].mean()),
+                             f"drift/agree_init_{name}": float(agree[rows].mean()),
+                             f"drift/rows_{name}": int(rows.sum())})
+        self.seconds += time.time() - start
+        return logs
+
+    # ------------------------------------------------------------ the probe
+
+    def capture(self, plan: Any, *, seed: int, threads: int) -> None:
+        """Draw the probe with the network as it is now (the run's start); see the class doc."""
+        vec = make_vec(plan, self.model.levels, num_envs=PROBE_ENVS, seed=derive_seed(seed, "env"), threads=threads)
+        b = vec.allocate()
+        vec.reset(derive_seed(seed, "env"))
+        rng = np.random.default_rng(derive_seed(seed, "moves"))
+        players = int(vec.max_players)
+        done = np.zeros(PROBE_ENVS, dtype=bool)
+        kept = []
+        for _ in range(PROBE_MAX_STEPS):
+            acting = np.flatnonzero(b["acting"])
+            if not len(acting):
+                break
+            obs = b["observations"][acting]
+            logits = self._forward(obs, "policy").numpy()
+            b["actions"][acting] = np.argmax(logits + rng.gumbel(size=logits.shape), axis=1)  # a softmax sample
+            kept.append(obs[~done[b["env_index"][acting]]].astype(np.float16))
+            vec.step()
+            done |= b["terminals"].reshape(-1, players)[:, 0] > 0
+            if done.all():
+                break
+        rows = np.concatenate(kept) if kept else np.zeros((0, int(vec.observation_size)), dtype=np.float16)
+        rows = rows[(rows[:, self.mask] > 0).sum(1) > 1]
+        if len(rows) > PROBE_ROWS:
+            rows = rows[np.sort(rng.choice(len(rows), PROBE_ROWS, replace=False))]
+        if len(rows):
+            self.restore({"probe_obs": torch.from_numpy(rows),
+                          "probe_init_logp": F.log_softmax(self._forward(rows, "policy"), dim=1)})
+
+    def state(self) -> dict[str, torch.Tensor]:
+        """The probe for the trainer state (``weights_only``-loadable)."""
+        if self.probe is None:
+            return {}
+        return {"probe_obs": self.probe["obs"], "probe_init_logp": self.probe["init_logp"]}
+
+    def restore(self, state: Mapping[str, Any]) -> None:
+        if state.get("probe_obs") is None:
+            self.probe, self.phases = None, {}
+            return
+        self.probe = {"obs": state["probe_obs"], "init_logp": state["probe_init_logp"]}
+        self.phases = {name: torch.from_numpy(rows)
+                       for name, rows in phases_of(self.model, self.probe["obs"].numpy()).items()}
+
+
 # ---------------------------------------------------------------- the loop
 
 
-def train_alphazero(variant: Any, writer: Any) -> None:
-    """AlphaZero on ``variant`` (a :class:`catanrl.config.Variant`) into ``writer``'s run."""
+def train_alphazero(variant: Any, writer: Any, *, monitors: bool = True) -> None:
+    """AlphaZero on ``variant`` (a :class:`catanrl.config.Variant`) into ``writer``'s run.
+    ``monitors=False`` (tests) leaves out :class:`Monitors`, which change nothing else."""
     cfg = variant.config
     runtime = dict(cfg.get("runtime") or {})
     strict = runtime.get("determinism", "fast") == "strict"
     with determinism("strict" if strict else "fast"):
-        _train(cfg, writer, check_train(cfg["train"]), runtime, strict)
+        _train(cfg, writer, check_train(cfg["train"]), runtime, strict, monitors)
 
 
-def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: Mapping[str, Any], strict: bool) -> None:
+def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: Mapping[str, Any], strict: bool,
+           monitoring: bool = True) -> None:
     seed = int(cfg["seed"])
     launch = int(writer.launch)
     env_cfg = cfg["env"]
@@ -397,6 +628,8 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
                         device=device, mode="strict" if strict else "fast")
     replay = ReplayBuffer(int(train["replay_capacity"]), selfplay.vec.observation_size, selfplay.vec.action_size,
                           selfplay.players)
+    monitors = Monitors(model, device=device, rows=int(train["search_rows"])) if monitoring else None
+    selfplay.monitor = monitors
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
     selector = Selector((cfg.get("eval") or {}).get("select"), writer, eval_runtime)
     iteration = 0
@@ -407,7 +640,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             "epoch": iteration, "decisions": selfplay.decisions, "games": selfplay.games,
             "model": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
             "optimizer": copy.deepcopy(optimizer.state_dict()), "replay": replay.state(), "rng": rng_state(),
-            "map_pool": plan.pool["hash"],
+            "map_pool": plan.pool["hash"], **({"monitors": monitors.state()} if monitors is not None else {}),
         })
         if selector.due(iteration):
             selector.run(ref, model)
@@ -422,8 +655,12 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         iteration = int(state["epoch"])
         selfplay.decisions, selfplay.games = int(state["decisions"]), int(state["games"])
         set_rng_state(state["rng"])
+        if monitors is not None:
+            monitors.restore(state.get("monitors") or {})
         selector.restore()
     else:
+        if monitors is not None:
+            monitors.capture(plan, seed=derive_seed(seed, "probe"), threads=int(runtime.get("threads", 1)))
         save()
     for ref in writer.pending_selects():
         selector.run(ref, model)
@@ -437,14 +674,21 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         rng = np.random.default_rng(derive_seed(seed, "selfplay", iteration))
         decisions, games = selfplay.decisions, selfplay.games
         stats = {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+        added = replay.added
         model.eval()
+        if monitors is not None:
+            monitors.begin()
         for step in range(int(train["steps_per_iteration"])):
             selfplay.step(iteration, step, rng, replay, stats)
         played = time.time() - start
+        health = monitors.before_learn(replay, replay.added - added) if monitors is not None else {}
         learned = {}
         if replay.size >= int(train["min_replay"]):
             learned = learn(model, optimizer, replay, train, device,
                             np.random.default_rng(derive_seed(seed, "replay", iteration)))
+        if monitors is not None:
+            health.update(monitors.drift())
+            health["throughput/monitor_s"] = monitors.seconds
         iteration += 1
         new = selfplay.decisions - decisions
         episodes = selfplay.vec.pop_stats()
@@ -459,7 +703,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             "environment/episodes": episodes["episodes"], "environment/truncated": episodes["truncated"],
             "environment/length": episodes["length"], "environment/learner_win": episodes["learner_win"],
             "throughput/selfplay_s": played, "throughput/iteration_s": time.time() - start,
-            **{f"train/{k}": v for k, v in learned.items()}, "map_pool": plan.pool["hash"],
+            **{f"train/{k}": v for k, v in learned.items()}, **health, "map_pool": plan.pool["hash"],
         }
         writer.log(logs, selfplay.decisions)
         if iteration % int(train["checkpoint_interval"]) == 0:

@@ -4,16 +4,21 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import cppanatron as cpp
 import numpy as np
 import pytest
 import torch
+import torch.nn.functional as F
 
 from catanrl import canon
 from catanrl.config import Variant, config_hash, resolve
+from catanrl.envs.encoding import encoder_dims
 from catanrl.envs.puffer import plan_env
 from catanrl.runs import RunWriter, load_experiment
 from catanrl.train.alphazero import (
     ALPHAZERO_KEYS,
+    PROBE_ROWS,
+    Monitors,
     ReplayBuffer,
     SelfPlay,
     _Pending,
@@ -124,9 +129,9 @@ def test_replay_buffer_is_a_fifo_and_round_trips():
     assert sorted(small.obs[:, 0].tolist()) == [6, 7, 8]
 
 
-def run(v: Variant) -> RunWriter:
+def run(v: Variant, **kwargs) -> RunWriter:
     with RunWriter.open(v, argv=["test"]) as writer:
-        train_alphazero(writer.variant_for_training, writer)
+        train_alphazero(writer.variant_for_training, writer, **kwargs)
     return writer
 
 
@@ -232,3 +237,151 @@ def test_self_play_and_learning_are_deterministic():
     assert shas[0] == shas[1]
     run(variant("c", seed=4))
     assert load_experiment("az/c").checkpoints()[-1].weights_sha256 != shas[0][-1]
+
+
+# ---------------------------------------------------------------- monitors
+
+
+def test_monitors_are_logging_only():
+    """With and without the monitors: the same replay rows and targets, weights, optimizer,
+    RNG and logged training values, bit for bit."""
+    run(variant("on"))
+    run(variant("off"), monitors=False)
+    on, off = load_experiment("az/on"), load_experiment("az/off")
+    a = torch.load(on.path / "trainer_state.pt", weights_only=False)
+    b = torch.load(off.path / "trainer_state.pt", weights_only=False)
+    assert "monitors" in a and "monitors" not in b
+    assert a["replay"]["size"] > 0 and a["replay"]["added"] == b["replay"]["added"]
+    for key in ("obs", "policy", "has_policy", "value", "present"):
+        assert torch.equal(a["replay"][key], b["replay"][key])
+    assert all(torch.equal(value, b["model"][key]) for key, value in a["model"].items())
+    for param, state in a["optimizer"]["state"].items():
+        assert all(torch.equal(torch.as_tensor(v), torch.as_tensor(b["optimizer"]["state"][param][k]))
+                   for k, v in state.items())
+    assert torch.equal(a["rng"]["torch"], b["rng"]["torch"]) and a["rng"]["python"] == b["rng"]["python"]
+    assert [c.weights_sha256 for c in on.checkpoints()] == [c.weights_sha256 for c in off.checkpoints()]
+    added = ("oos/", "search/overrule", "search/target_entropy", "search/net_entropy", "search/kl_target_net",
+             "drift/", "throughput/", "selfplay/decisions_per_s", "selfplay/leaves_per_s", "selfplay/games_per_hour")
+    for x, y in zip(on.metrics(), off.metrics(), strict=True):
+        assert "train/policy_loss" in x and "drift/kl_init" in x and "search/overrule" in x
+        assert {k: v for k, v in x.items() if not k.startswith(added)} == {
+            k: v for k, v in y.items() if not k.startswith(added)}
+
+
+def test_the_value_health_reads_only_the_newest_rows_out_of_sample():
+    play, filled, model = selfplay()
+    rng = np.random.default_rng(0)
+    stats = {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+    for step in range(40):
+        play.step(0, step, rng, filled, stats)
+    assert filled.size >= 30
+    replay = ReplayBuffer(25, play.vec.observation_size, play.vec.action_size, play.players)
+    obs = filled.obs[:30]
+    present = np.ones((30, 2), np.float32)
+    old = np.ones((18, 2), np.float32)                     # seat-sums of 2: wrong if read
+    new = np.eye(2, dtype=np.float32)[np.arange(12) % 2]   # winners alternate
+    replay.add(obs[:18], np.zeros((18, replay.shapes[1])), np.zeros(18, bool), old, present[:18])
+    replay.add(obs[18:], np.zeros((12, replay.shapes[1])), np.zeros(12, bool), new, present[18:])  # wraps around
+    monitors = Monitors(model, device="cpu", rows=5)
+    logs = monitors.before_learn(replay, 12)
+    with torch.no_grad():
+        logits = model.value_logits(torch.from_numpy(obs[18:].astype(np.float32)))[0]
+    target = torch.from_numpy(new)
+    p = torch.sigmoid(logits)
+    assert logs["oos/rows"] == 12 and logs["oos/target_sum_2p"] == 1.0
+    assert logs["oos/value_bce"] == pytest.approx(float(F.binary_cross_entropy_with_logits(logits, target)), rel=1e-5)
+    assert logs["oos/value_brier"] == pytest.approx(float(((p - target) ** 2).mean()), rel=1e-5)
+    assert logs["oos/value_sum_2p"] == pytest.approx(float(p.sum(1).mean()), rel=1e-5)
+    assert logs["oos/sum_gap_2p"] == pytest.approx(abs(float(p.sum(1).mean()) - 1.0), rel=1e-4, abs=1e-6)
+    assert not any(k.startswith("search/") for k in logs)  # no searches seen
+    assert monitors.before_learn(replay, 0) == {}
+
+
+def test_the_overrule_rate_compares_targets_with_the_raw_argmax():
+    play, _, model = selfplay()
+    b = play.buffers
+    rows = b["observations"][np.flatnonzero(b["acting"])]
+    rows = np.concatenate([rows, rows])
+    n, mask = len(rows), slice(model.mask_offset, model.mask_offset + model.num_actions)
+    with torch.no_grad():
+        logp = F.log_softmax(model.policy_logits(torch.from_numpy(rows)).float(), dim=1)
+    best = logp.argmax(1).numpy()
+    second = logp.clone()
+    second[torch.arange(n), best] = -1e30
+    other = second.argmax(1).numpy()
+    assert all(rows[i, mask][other[i]] > 0 for i in range(n))  # a legal alternative
+    chosen = np.where(np.arange(n) < n // 2, best, other)  # the second half is overruled
+    targets = np.zeros((n, model.num_actions), np.float16)
+    targets[np.arange(n), chosen] = 1.0
+    forced = rows[:1].copy()
+    forced[0, mask] = 0
+    forced[0, model.mask_offset + int(best[0])] = 1.0  # one legal action: left out
+    forced_target = np.zeros((1, model.num_actions), np.float16)
+    forced_target[0, int(other[0])] = 1.0
+    monitors = Monitors(model, device="cpu", rows=3)
+    monitors.searched(rows[: n // 2], targets[: n // 2])  # two steps
+    monitors.searched(np.concatenate([rows[n // 2 :], forced]), np.concatenate([targets[n // 2 :], forced_target]))
+    logs = monitors.before_learn(ReplayBuffer(5, rows.shape[1], model.num_actions, 2), 0)
+    legal = logp > -1e8
+    net_entropy = -(logp.exp() * torch.where(legal, logp, torch.zeros_like(logp))).sum(1).mean()
+    assert logs["search/overrule_rows"] == n and logs["search/overrule"] == 0.5
+    assert logs["search/target_entropy"] == pytest.approx(0.0, abs=1e-6)
+    assert logs["search/net_entropy"] == pytest.approx(float(net_entropy), rel=1e-5)
+    assert logs["search/kl_target_net"] == pytest.approx(float(-logp[torch.arange(n), chosen].mean()), rel=1e-5)
+    monitors.begin()
+    assert monitors.before_learn(ReplayBuffer(5, rows.shape[1], model.num_actions, 2), 0) == {}
+
+
+def test_an_unchanged_network_has_not_drifted_and_the_probe_phases_read_the_rows():
+    run(variant(min_replay=10**9))  # no update ever
+    metrics = load_experiment("az/t").metrics()
+    assert [m["drift/kl_init"] for m in metrics] == [0.0, 0.0]
+    assert [m["drift/agree_init"] for m in metrics] == [1.0, 1.0]
+    assert all(m["search/overrule_rows"] > 0 and 0.0 <= m["search/overrule"] <= 1.0 for m in metrics)
+    assert any(m.get("oos/rows", 0) > 0 for m in metrics) and "train/policy_loss" not in metrics[-1]
+    assert all(m["throughput/monitor_s"] > 0 for m in metrics)
+    state = torch.load(load_experiment("az/t").path / "trainer_state.pt", weights_only=True)["monitors"]
+    rows, init = state["probe_obs"].numpy().astype(np.float32), state["probe_init_logp"]
+    assert 0 < len(rows) <= PROBE_ROWS and init.shape == (len(rows), 314) and metrics[0]["drift/rows"] == len(rows)
+    plan = plan_env(ENV, pool_seed=1)
+    names = np.array(cpp.GraphActionSpace(encoder_dims(plan.dims)).names())
+    model = build_policy_model({"model": {"preset": "graph-tiny"}, "obs": {"level": "private"}}, plan.dims)
+    legal = rows[:, model.mask_offset : model.mask_offset + model.num_actions] > 0
+    assert np.all(legal.sum(1) > 1)  # non-forced decisions only
+    phases = Monitors(model, device="cpu", rows=8)
+    phases.restore(state)
+    allowed = {"robber": ("ROBBER@",), "discard": ("DISCARD_",), "setup": ("SETTLEMENT@", "ROAD@"),
+               "build": ("SETTLEMENT@", "CITY@", "ROAD@", "END_TURN", "BUY_", "PLAY_", "MARITIME_", "MONOPOLY_",
+                         "YEAR_OF_PLENTY_")}
+    for phase, prefixes in allowed.items():
+        for row in np.flatnonzero(phases.phases[phase].numpy()):
+            assert all(name.startswith(prefixes) for name in names[legal[row]]), (phase, names[legal[row]])
+    assert phases.phases["setup"].any() and phases.phases["robber"].any() and phases.phases["build"].any()
+    assert metrics[0]["drift/rows_setup"] == int(phases.phases["setup"].sum())
+
+
+def test_the_drift_probe_is_fixed_for_the_run_and_survives_a_resume(monkeypatch):
+    v = variant()
+    real = RunWriter.should_stop
+
+    def stop_after_one(self):
+        if self.launch == 0 and len(canon.read_jsonl(self.path / "metrics.jsonl")) >= 1:
+            self.stop_reason = "interrupted"
+            return True
+        return real(self)
+
+    monkeypatch.setattr(RunWriter, "should_stop", stop_after_one)
+    assert run(v).status == "interrupted"
+    path = load_experiment("az/t").path
+    saved = torch.load(path / "trainer_state.pt", weights_only=True)["monitors"]
+    captures = []
+    monkeypatch.setattr(Monitors, "capture", lambda self, *a, **k: captures.append(1))
+    assert run(v).status == "finished" and not captures  # the resume restores, never redraws
+    final = torch.load(path / "trainer_state.pt", weights_only=True)
+    assert final["epoch"] == 2
+    for key in ("probe_obs", "probe_init_logp"):
+        assert torch.equal(final["monitors"][key], saved[key])
+    metrics = load_experiment("az/t").metrics()
+    assert [m["launch"] for m in metrics] == [0, 1]
+    assert metrics[1]["drift/rows"] == metrics[0]["drift/rows"] == len(saved["probe_obs"])
+    assert metrics[1]["drift/kl_init"] > 0.0  # against the start, not the resumed weights
