@@ -658,6 +658,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         if monitors is not None:
             monitors.restore(state.get("monitors") or {})
         selector.restore()
+        state = None  # restored: free the loaded copy (its replay is as large as the buffer) for the launch
     else:
         if monitors is not None:
             monitors.capture(plan, seed=derive_seed(seed, "probe"), threads=int(runtime.get("threads", 1)))
