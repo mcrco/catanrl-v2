@@ -11,5 +11,5 @@ bots:
     key_env: OPENHEX_KEY_4P
   - name: catanrl-1v1-search
     mode: 1v1
-    spec: MCTS:ckpt=puffer-graph2/full@best:sims=65536:dets=1:pending=64   # ~8 s a move on yang's GTX 1080 (OpenHex allows 60 s)
+    spec: MCTS:ckpt=puffer-graph2/full@best:sims=65536:dets=1:pending=64:reuse=true:transpositions=true   # ~8 s a move on yang's GTX 1080 (OpenHex allows 60 s)
     key_env: OPENHEX_KEY_1V1_SEARCH
