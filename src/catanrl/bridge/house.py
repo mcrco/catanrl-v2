@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -37,6 +38,9 @@ from catanrl.bridge.agent import ViewAgent
 from catanrl.bridge.server_bot import room_url
 
 logger = logging.getLogger(__name__)
+
+#: Boards of a table's ``map`` generator the server must accept at startup (about 5-15 ms each).
+MAP_CHECK_SEEDS = 16
 
 
 @dataclass
@@ -54,6 +58,19 @@ class Table:
     bots: int | None = None
     #: A display name for the bots' seats (default: the table's name).
     label: str | None = None
+    #: A ``catanrl.maps`` generator (e.g. ``{"type": "blob", "land_tiles": [15, 30]}``): every
+    #: room gets a fresh board from it, sent as the room config's explicit ``map``. None: the
+    #: room config's own ``map`` or ``map_type``.
+    map: Mapping[str, Any] | None = None
+
+    def room_config(self, seed: int) -> dict:
+        """The config of the next room: ``room.config``, with a board drawn by ``seed``."""
+        config = dict(self.room.get("config") or {})
+        if self.map is not None:
+            from catanrl import maps
+
+            config["map"] = maps.generate(self.map, seed)
+        return config
 
     @property
     def num_players(self) -> int:
@@ -94,6 +111,15 @@ class House:
             t = state.table
             if not 1 <= t.bot_seats < t.num_players:
                 raise ValueError(f"table {t.name}: {t.bot_seats} bot seats of {t.num_players}")
+            if t.map is not None:  # a generator the server would refuse fails here, not per room
+                from catanatron.server.config import GameConfig
+
+                for seed in range(MAP_CHECK_SEEDS):  # several boards: a land_tiles range has many sizes
+                    try:
+                        GameConfig.from_json(t.room_config(seed))
+                    except (KeyError, TypeError, ValueError) as error:
+                        message = f"table {t.name}: map {dict(t.map)}, seed {seed}: {error}"
+                        raise ValueError(message) from error
             # One network per table, loaded once, shared by every seat.
             state.agent = t.spec if isinstance(t.spec, ViewAgent) else ViewAgent(
                 t.spec, device=self.device, max_games=8 * t.max_games * t.bot_seats)
@@ -132,7 +158,8 @@ class House:
         table = state.table
         assert state.agent is not None
         agent = state.agent
-        room = await create_room(self.url, dict(table.room.get("config") or {}), [None] * table.num_players,
+        config = table.room_config(secrets.randbits(63))  # a fresh board per room, given a map
+        room = await create_room(self.url, config, [None] * table.num_players,
                                  name=str(table.room.get("name", table.name)), house_token=self.house_token)
         state.stats["opened"] += 1
         url = room_url(self.url, room["id"])
@@ -218,7 +245,7 @@ def _error_of(task: asyncio.Task) -> str:
 def load_tables(path: str | os.PathLike) -> tuple[dict, list[Table]]:
     """(settings, tables) from a YAML file: ``server``, ``server_key``,
     ``think_s`` and a list of ``tables`` (``name``, ``spec``, ``room``,
-    ``max_games``, optional ``bots`` and ``label``)."""
+    ``max_games``, optional ``bots``, ``label`` and ``map``)."""
     import yaml
 
     data = yaml.safe_load(Path(path).read_text())
