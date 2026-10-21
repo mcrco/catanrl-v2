@@ -1,0 +1,27 @@
+# az-2p-2048's search finals, kept out of its run: play them only if that run's raw head
+# to head against its start (heldout-2p, 5000 games) is positive. Both rows search as the
+# run trained (Gumbel root, 2048 simulations, m 16, c_puct 0.75, one world from the hand
+# tracker) against the start's raw policy, on the same 500 heldout-2p boards x 2 seats =
+# 1000 games each (+-3.1 pp), paired by board:
+#   1. MCTS at the run's best;
+#   2. MCTS at the run's e0 (the start's exact weights): what training added to the search.
+# Each row searches ~82k decisions x 2049 leaves, about 3 h of GPU at the eval harness's
+# ~15k leaves/s. The records land under az-2p-2048/main/evals (slot 0's run). The refs to
+# az-2p-2048/main are pinned when this variant is created if that run is finished (or
+# time_limit) by then; otherwise the rows are deferred and a later
+# `catanrl run az-2p-2048-search` pins and plays them.
+name: az-2p-2048-search
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p, boards: 500}
+      lineup:
+        - "MCTS:ckpt=az-2p-2048/main@best:sims=2048:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16"
+        - "POLICY:ckpt=puffer-graph2/public@e3600"
+    - suite: {name: heldout-2p, boards: 500}
+      lineup:
+        - "MCTS:ckpt=az-2p-2048/main@init:sims=2048:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16"
+        - "POLICY:ckpt=puffer-graph2/public@e3600"
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

@@ -1,0 +1,95 @@
+# AlphaZero on 2p BASE from the 2p specialist, at 2048-simulation targets (the owner's
+# decisions of 2026-10-21 on the AZ design note and its critique):
+#   1. start: puffer-graph2/public@e3600 (#3cd78e6dafac, its best: public rows, one shared
+#      graph-s trunk), actor and critic;
+#   2. straight to the online self-play loop (no offline frozen-teacher gate first);
+#   3. 2048-simulation Gumbel targets on every move (full_search_prob 1.0: in today's
+#      lockstep loop every step lasts sims + 1 network rounds whatever the playout cap, so
+#      p < 1 buys fewer targets for nearly the same wall time). 2048 x 30 iterations costs
+#      about what the design's 1024 x 60 did;
+#   4. today's trainer and engine (no reuse, transpositions, eval cache or continuous
+#      batching; those come only after a positive result).
+# Fair search (dets 1: one world from the deciding seat's hand tracker, the trainer's
+# VecEnv(trackers=True)) rather than the oracle: the same search the MCTS evals and the
+# deployed bot run, at no measured cost here; the oracle would make the self-play
+# distribution omniscient (the opponent holds a hidden VP card at ~46% of base-2p
+# self-play decisions).
+#
+# Budget (one RTX 2070 SUPER): 30 x 32 steps x 512 games = 491,520 searched decisions,
+# each a policy target, x 2049 rounds = 1.01B leaf evaluations: 6-12 h at the critique's
+# 24-47k leaves/s, 17.5 h at the eval harness's 16k/s. Learning starts once replay holds
+# min_replay positions; rows enter replay at game end (~150-165 decisions), so around
+# iteration 5, leaving ~25 learn() calls (~1,600 AdamW steps of 512).
+#
+# Evals:
+#   select, every checkpoint (checkpoint_interval 2 -> e0, e2, ..., e30): raw POLICY of
+#     the checkpoint vs raw POLICY of the start on 2000 boards x 2 seats = 4000 games
+#     (95% CI about +-1.55 pp). Inline because a named suite can only shrink; select-2p's
+#     seed and purpose, so its first 200 boards are select-2p's.
+#   finals (raw rows only, about 15 min of GPU), all on heldout-2p's 2500 boards x 2 seats:
+#     - best vs the start, head to head (5000 games, +-1.4 pp; the decision row);
+#     - best vs F (secondary: near its ceiling);
+#     - a non-lineage anchor, paired by board: best and the start (this run's e0, which
+#       holds the start's exact weights) each vs puffer-graph2/full@e3350 as BELIEF over 16
+#       worlds (the report's 2p belief reference, its best: 95.1 vs F). A gain over the
+#       start that is real should show here too, not only against the start.
+#   The search finals (MCTS at the training search, best and e0, vs the raw start) are a
+#   separate eval experiment, az-2p-2048-search, to play only if the raw head to head is
+#   positive (~3 h of GPU per row).
+#
+# time_limit_hours: the trainer checks it between iterations; at the limit it saves a
+# checkpoint (selected) and stops with status time_limit, and the finals do NOT run.
+# Either relaunch (`catanrl run az-2p-2048` resumes the remaining iterations, then plays
+# the finals) or end it there: `catanrl finish az-2p-2048/main && catanrl run az-2p-2048`
+# plays the finals on the best so far.
+name: az-2p-2048
+seed: 42
+env:
+  # puffer-graph2's scenario and seed: the start's own 4096-board training pool
+  scenarios: [{game: base-2p, turn_limit: 1000, maps: 4096}]
+  num_envs: 512
+obs: {level: public}
+model: {preset: graph-s, args: {shared: true}}   # puffer-graph2's network (graph-s alone is unshared)
+# e3600 is #3cd78e6dafac: the run pins it at creation (config.json resolved.init_from), and the e0
+# checkpoint holds exactly those weights. No #sha here: --smoke turns epoch refs into @latest.
+init_from: {ckpt: "puffer-graph2/public@e3600", parts: [actor, critic]}
+train:
+  algo: alphazero
+  iterations: 30
+  steps_per_iteration: 32       # x 512 games = 16,384 searched decisions (targets) per iteration
+  root: gumbel
+  sims: 2048
+  fast_sims: 64                 # unused at full_search_prob 1.0
+  full_search_prob: 1.0
+  dets: 1                       # fair: one tracker world per search (the evals' search)
+  c_puct: 0.75
+  gumbel_m: 16
+  dirichlet_noise: false        # PUCT roots only; a Gumbel root ignores it either way
+  temperature_start: 1.0
+  temperature_end: 0.0
+  temperature_moves: 30
+  truncation_value: share
+  replay_capacity: 400_000      # ~24 iterations of positions; ~2.3 GB of RAM (and of trainer state on disk)
+  min_replay: 20_000            # about half the first games (iteration ~5), not only the shortest ones
+  updates_per_iteration: 64     # x 512 = 32,768 samples per 16,384 new positions
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  value_coef: 1.0
+  max_grad_norm: 1.0
+  search_rows: 512
+  checkpoint_interval: 2
+eval:
+  select:
+    suite: {name: select-2p-2k, purpose: select, seed: 123, boards: 2000, scenarios: [base-2p], turn_limit: 500}
+    lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${init}"]
+    every: 1                    # every checkpoint
+    metric: score_rate
+  final:
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${init}"]}
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", F]}
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "BELIEF:ckpt=puffer-graph2/full@e3350:worlds=16"]}
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@init", "BELIEF:ckpt=puffer-graph2/full@e3350:worlds=16"]}
+runtime: {device: cuda, threads: 12, compile: true, time_limit_hours: 22}   # compile is read by ppo only
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

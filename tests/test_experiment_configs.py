@@ -135,3 +135,43 @@ def test_ppo_4p_critic_fix_is_ppo_4p_but_the_critic():
         "lambda-g1": {"gamma": 1.0, "critic_gamma": None, "muon_exclude": []},
         "lambda-adamw": {"gamma": 0.999, "critic_gamma": None, "muon_exclude": ["value_head.mlp.4.weight"]},
     }
+
+
+def test_az_2p_2048_starts_from_puffer_graph2_public():
+    """The owner's az-2p-2048 (2026-10-21): puffer-graph2/public's network, rows, rules and
+    training pool, so init_from loads e3600 whole (graph-s alone is unshared); fair Gumbel
+    targets at 2048 simulations on every move; a select whose first 200 boards are
+    select-2p's; raw finals only, the BELIEF anchor paired on heldout-2p; and the search
+    finals (az-2p-2048-search) at exactly the training search."""
+    from catanrl.eval.suites import load_suite
+
+    ref = load_plan("puffer-graph2").variant("public").config
+    (v,) = load_plan("az-2p-2048").variants
+    cfg = v.config
+    assert {k: cfg[k] for k in ("seed", "obs", "model")} == {k: ref[k] for k in ("seed", "obs", "model")}
+    assert cfg["model"]["args"]["shared"] and cfg["obs"]["level"] == "public"
+    assert cfg["env"]["scenarios"] == ref["env"]["scenarios"] and cfg["env"]["map_pool"] == ref["env"]["map_pool"]
+    assert cfg["init_from"] == {"ckpt": "puffer-graph2/public@e3600", "parts": ["actor", "critic"]}
+    train = cfg["train"]
+    assert {k: train[k] for k in ("root", "sims", "full_search_prob", "dets", "gumbel_m", "dirichlet_noise",
+                                  "iterations", "checkpoint_interval")} == {
+        "root": "gumbel", "sims": 2048, "full_search_prob": 1.0, "dets": 1, "gumbel_m": 16, "dirichlet_noise": False,
+        "iterations": 30, "checkpoint_interval": 2}
+
+    select = cfg["eval"]["select"]
+    assert select["lineup"] == ["POLICY:ckpt=${self}", "POLICY:ckpt=${init}"] and select["every"] == 1
+    suite, small = load_suite(select["suite"]), load_suite("select-2p")
+    assert (suite.purpose, suite.boards) == ("select", 2000)
+    assert type(suite)(**{**suite.__dict__, "boards": small.boards}).schedule_hash(2) == small.schedule_hash(2)
+
+    finals = [(f["suite"], f["lineup"]) for f in cfg["eval"]["final"]]
+    best, anchor = f"POLICY:ckpt={v.ref}@best", "BELIEF:ckpt=puffer-graph2/full@e3350:worlds=16"
+    assert finals == [("heldout-2p", [best, "POLICY:ckpt=${init}"]), ("heldout-2p", [best, "F"]),
+                      ("heldout-2p", [best, anchor]), ("heldout-2p", [f"POLICY:ckpt={v.ref}@init", anchor])]
+
+    search = (f"sims={train['sims']}:dets=1:root={train['root']}:c_puct={train['c_puct']}"
+              f":gumbel_m={train['gumbel_m']}")
+    (s,) = load_plan("az-2p-2048-search").variants
+    assert s.kind == "eval" and [(f["suite"], f["lineup"]) for f in s.config["eval"]["final"]] == [
+        ({"name": "heldout-2p", "boards": 500}, [f"MCTS:ckpt={v.ref}@{which}:{search}", "POLICY:ckpt=puffer-graph2/public@e3600"])
+        for which in ("best", "init")]
