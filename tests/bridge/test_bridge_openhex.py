@@ -448,6 +448,8 @@ def test_native_for_streams_a_reusing_agent_and_refuses_a_recurrent_one():
     assert recurrent.needs_memory
     with pytest.raises(ValueError, match="recurrent"):
         native_for(recurrent)
+
+
 class _QueueClient:
     """An API with no game for us: counts joins and leaves."""
 
