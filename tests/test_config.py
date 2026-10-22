@@ -60,6 +60,23 @@ def test_vtrace_critic_targets_take_a_null_critic_gamma(tmp_path):
     assert (train["critic_targets"], train["critic_gamma"]) == ("lambda", 1.0)  # the defaults since 2026-10-19
 
 
+def test_alphazero_policy_targets_are_refused_at_resolution(tmp_path):
+    """The AlphaZero trainer's check_train refuses these too, but only after the run dir exists
+    (whose failed folder then holds the variant), so validate and launch refuse them first."""
+    az = {"algo": "alphazero"}
+    soft = {**az, "policy_target": "gumbel", "target_c_scale": 0.15, "target_prior_temperature": 10}
+    assert load_plan(write(tmp_path, train=soft)).variants[0].config["train"]["target_prior_temperature"] == 10.0
+    for bad, match in (({"root": "mcts"}, "puct or gumbel"),
+                       ({"policy_target": "visits"}, "engine or gumbel"),
+                       ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root"),
+                       ({"policy_target": "gumbel", "target_c_visit": -1}, "non-negative"),
+                       ({"policy_target": "gumbel", "target_prior_temperature": 0}, "positive"),
+                       ({"target_c_scale": 0.01}, "set policy_target: gumbel"),  # silently unused otherwise
+                       ({"target_rescale": False}, "set policy_target: gumbel")):
+        with pytest.raises(ConfigError, match=match):
+            load_plan(write(tmp_path, train={**az, **bad}))
+
+
 def test_no_default_architecture(tmp_path):
     path = write(tmp_path)
     data = yaml.safe_load(path.read_text())

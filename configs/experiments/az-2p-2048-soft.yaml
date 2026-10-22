@@ -1,9 +1,17 @@
-# az-2p-2048 again with one change, the policy target the network learns from (the owner's call
-# of 2026-10-22: keep the search, rebuild a softer training target from its root statistics, pick
-# it on CPU against a deeper search, rerun from the same start and judge it in the search harness).
-# Everything else is az-2p-2048's: start, rules, map pool, 512 games, 2048-sim fair Gumbel searches
-# (m 16, c_puct 0.75, dets 1) on every move, which still choose the move played and run Sequential
-# Halving with the engine's own sigma, lr, replay, updates, 30 iterations and the time limit.
+# az-2p-2048 again with its policy target changed: the target the network learns from is rebuilt
+# from each search's root statistics, softer; the search is untouched. Everything else is
+# az-2p-2048's: start, rules, map pool, 512 games, 2048-sim fair Gumbel searches (m 16, c_puct 0.75,
+# dets 1) on every move, which still choose the move played and run Sequential Halving with the
+# engine's own sigma, lr, replay, updates, 30 iterations and the time limit.
+#
+# NOT APPROVED TO LAUNCH. The owner's call of 2026-10-22 was: keep the search, rebuild a softer
+# training target from its root statistics with a gentler sigma, pick it on CPU against an 8192-sim
+# search, rerun from the same start and judge it in the search harness. The prior temperature here
+# (target_prior_temperature: 10) is NOT part of that: it is this probe's proposal, waiting for his OK.
+# Without it the probe finds no setting that differs from the engine target (best sigma-only,
+# rescaled c_scale 0.05: -0.10 [-0.24, 0.03] in the score below), so a sigma-only rerun would be
+# expected to repeat az-2p-2048 and is not worth its ~19 h. The decision rule and the matched-epoch
+# row under Evals are proposals too.
 #
 # Why: az-2p-2048's targets were one-hot. The engine's target is softmax(log prior + sigma), sigma =
 # (50 + the most visits) * 0.1 * completed Q min-max rescaled over the root's moves, so at 2048 sims
@@ -16,47 +24,86 @@
 # policy rebuilt in float64 from the same search's visits and Q and the network's own outputs at its
 # root (at the engine's constants it is the engine's target to ~3e-8), here softmax(logits / 10 +
 # (50 + max visits) * 0.15 * completed Q), completed Q clamped to [0, 1] rather than rescaled.
-# Picked on CPU from e3600's own base-2p self-play (600 positions weighted to the self-play mix, two
-# 2048-sim searches each, scored against one 8192-sim search's move; gsoft/sweep.py): mean
-# -log t(8192 move) 0.660 against the engine target's 1.784 (paired -1.12 [-1.39, -0.86]; better
-# on every tag: two-legal 1.87 -> 0.44, knight|roll 1.69 -> 0.49, discard 4.75 -> 1.01, setup,
-# robber, wide); argmax agreement with the 8192 move 80.5% (engine 81.4%), 8192 move under 1e-6 in
-# 0.2% of searches (engine 8.6%), entropy 0.64 nats (engine 0.05), >= 0.99 on one move in 21.9%
-# (engine 87.3%), regret 0.24 win points (engine 0.19). No sigma-only setting differs from the engine
-# target (best, rescaled c_scale 0.05: -0.10 [-0.24, 0.03]): e3600's prior puts < 1e-6 on the 8192
-# move in ~9% of searches and only tempering the prior term fixes that. The optimum is flat (T 8-12,
-# c_scale 0.1-0.3 unrescaled); one 8192 search against another scores 0.565 with this target, about
-# what the 2048 target scores (0.517 on those positions). Trained on, the logits' fixed point is
-# ~1.11 sigma (T / (T - 1)) rather than growth by sigma every generation (the formula; not measured).
+#
+# The probe (CPU; gsoft/sweep.py, gsoft/calib.py): 600 positions of e3600's RAW-POLICY base-2p
+# self-play (moves sampled from the network's own policy at the AZ temperature schedule, no search;
+# each env's first game, random boards, decisions with >= 2 legal moves), weighted 1/rate to that
+# policy's decision mix, which is not this run's: here the 2048-sim search picks the moves, and in
+# az-2p-2048 its target overruled the prior's argmax on 15-19% of decisions before any learning.
+# Two 2048-sim searches each, scored against one 8192-sim search's T=0 move a*. What it found is
+# the same first choice, with far better-calibrated tails against a noisy deep pick (paired T10 -
+# engine target, 95% bootstrap CIs):
+#   - first choice: argmax == a* 80.5% vs 81.4% (-0.8 pp [-3.2, +1.5]); regret of the argmax under
+#     the 8192 search's Q 0.16 vs 0.19 win points (-0.03 [-0.07, +0.00]); expected regret under the
+#     target worse, 0.24 vs 0.19 (+0.05 [+0.01, +0.08]), the mass it spreads onto worse moves;
+#   - tails: mean -log t(a*) 0.660 vs 1.784 (-1.12 [-1.39, -0.86]); 1.19 of the engine target's
+#     1.784 is its 8.6% of searches with t(a*) under the score's 1e-6 floor (0.03 of 0.660 here, at
+#     0.2%), the rest 0.60 vs 0.63; at a 1e-3 floor -0.45 [-0.59, -0.31]; Brier -0.04 [-0.08, -0.00];
+#     entropy 0.64 nats (engine 0.05); >= 0.99 on one move in 21.9% of searches (engine 87.3%);
+#   - the reference is noisy, and more search does not raise the score: on the 128 positions with a
+#     second 8192 search the two 8192 moves agree 85.9% (80.9% without knight|roll) where the two
+#     2048 moves agree 91.4% (91.0%); this target scores 0.517 against ref's move (the pick it was
+#     chosen on), 0.608 against ref2's, 0.562 on their mean, and one 8192 target against the other
+#     8192's move 0.565 (engine 1.652, 1.879, 1.766, 1.789).
+# So it hedges where the deep search disagrees with itself rather than picking better moves; whether
+# a network trained on that searches better is what this run tests. Only tempering the prior term
+# moves the score (e3600's prior puts < 1e-6 on the 8192 move in ~9% of searches); the optimum is
+# flat (T 8-12, c_scale 0.1-0.3 unrescaled).
+#
+# Trained on, the logits' fixed point is T / (T - 1) * sigma ~ 1.11 sigma (the formula; not
+# measured): the prior's own information fades by 1/T per generation. Every action the search did
+# not visit gets the same completed Q (v_mix), so their logits converge together and the prior's
+# ordering among them, which Gumbel's top-16 root sample draws on at wide turns, fades with it
+# (the engine target, T = 1, keeps it). It starts small: 25% of the probe's weighted decisions have
+# > 16 legal moves, and there the target puts 0.4% of its mass on unvisited actions (max 9.9%).
+# Watch drift/agree_init_build and drift/kl_init_build (the build turns) for it.
+#
+# Monitors: search/overrule, search/target_entropy and search/kl_target_net read the search's own
+# target (pool.policy_target), as az-2p-2048's did, so those series compare across the two runs;
+# target/overrule, target/entropy and target/kl_net read the rebuilt targets trained on (as does
+# train/target_entropy, on replay minibatches).
 #
 # Evals, all in the search harness (the network inside the search against the raw start):
-#   select, every checkpoint (checkpoint_interval 5: e0, e5, ..., e30; learning starts in the 5th
-#     iteration, as in az-2p-2048, so e5 has one learn()): the checkpoint in this search at 512
-#     sims vs the start's raw policy on the first 500 boards of az-2p-2048's select suite x 2 seats
-#     = 1000 games, the same games at every checkpoint, so each pairs by game id with e0's (the
-#     start's exact weights in the same search, played, not assumed). best is e0 first and moves
-#     only to a checkpoint scoring above every earlier one (score_rate, slot 0).
+#   checkpoints: every iteration (checkpoint_interval 1: e0, e1, ..., e30, 2.3 MB each; the trainer
+#     state is rewritten each time), so az-2p-2048's e8, its only search-harness row, has a match;
+#   select, every 5th checkpoint (e0, e5, ..., e30; learning starts in the 5th iteration, as in
+#     az-2p-2048, so e5 has one learn()): the checkpoint in this search at 512 sims vs the start's
+#     raw policy on the first 500 boards of az-2p-2048's select suite x 2 seats = 1000 games, the
+#     same games at every checkpoint, so each pairs by game id with e0's (the start's exact weights
+#     in the same search, played, not assumed). best is e0 first and moves only to a checkpoint
+#     scoring above every earlier one (score_rate, slot 0). best is a noisy pick: 512 sims rather
+#     than the finals' 2048 (a softer prior matters relatively more at low sims), a paired SD of
+#     about 1.6 pp per difference from e0 (c4ea7b52 and 831eea84 disagree on 254 of 1000 games),
+#     and with no real gain best still leaves e0 about 6 times in 7; MCTS(latest) is the hedge;
 #   finals, on heldout-2p's first 500 boards x 2 seats with exactly gumbel-edge-2p's search spec, so
 #     each pairs by game id with 831eea84 (the start's weights in this search, 62.4) through
 #     tools/search_probe.py --pair (records under this run's folder, so name them by path):
-#     - MCTS(best) vs the raw start: the decision row (if best is e0, it replays 831eea84);
+#     - MCTS(best) vs the raw start (if best is e0, it replays 831eea84);
 #     - MCTS(latest) vs the raw start: the last checkpoint, which no select chose (a cache hit, so
 #       free, when latest holds best's weights; else another 3.9 h);
 #     - raw best and raw latest vs the raw start on all 2500 boards (secondary, about a minute each).
+#   Decision (proposed): the two MCTS rows, each against 831eea84 by paired McNemar, Holm at 0.05
+#     over the pair (the smaller p against 0.025, the other against 0.05); a row whose checkpoint is
+#     e0 is 831eea84 itself and drops out, leaving the other against 0.05.
+#   Matched epoch (proposed, not in this run): soft@e8 in gumbel-edge-2p's spec vs the raw start,
+#     its own eval experiment like gumbel-edge-2p-e8 (~3.9 h), pairs by game id with c4ea7b52
+#     (az-2p-2048's e8, 61.8): the one-hot against the soft target at equal training. Best or e30
+#     against az-2p-2048's e8 is not that comparison.
 #
 # Time (one RTX 2070 SUPER; time_limit_hours counts self-play, learning and selects, not finals):
 #   self-play + learning: az-2p-2048's 8 iterations took 1388-1423 s, mean 1408 (the rebuilt target
-#     adds ~1.4 s of CPU per iteration): 30 x 1408 s = 11.7 h;
+#     adds ~1.4 s of CPU per iteration): 30 x 1408 s = 11.7 h, plus a trainer-state write (up to
+#     ~2.3 GB) per iteration, seconds each;
 #   selects: gumbel-edge-2p took 3.90 h for 1000 games at 2048 sims with 256 games in flight; the
 #     engine scales ~linearly in sims, so 1000 games at 512 sims ~ 3.9 x 512 / 2048 = 0.98 h (1.1 h
 #     allowing for costs that do not shrink with sims), x 7 selects (e0, e5, ..., e30) = 6.8-7.7 h;
-#   total 18.6-19.4 h against the 22 h limit: 2.6-3.4 h of margin (a stop at the limit would
-#     itself add one select);
+#   total 18.6-19.5 h against the 22 h limit: about 2.5-3.4 h of margin;
 #   finals afterwards: 3.9 h per 2048-sim row (best; latest unless a cache hit), raw rows ~minutes.
 #
-# time_limit_hours: at the limit the trainer saves a checkpoint (selected) and stops with status
-# time_limit, and the finals do NOT run: relaunch (`catanrl run az-2p-2048-soft` resumes, then plays
-# the finals) or `catanrl finish az-2p-2048-soft/main && catanrl run az-2p-2048-soft`.
+# time_limit_hours: the trainer checks it between iterations; at the limit it stops with status
+# time_limit after the last iteration's checkpoint (every iteration is one; selects only at
+# multiples of 5), and the finals do NOT run: relaunch (`catanrl run az-2p-2048-soft` resumes, then
+# plays the finals) or `catanrl finish az-2p-2048-soft/main && catanrl run az-2p-2048-soft`.
 name: az-2p-2048-soft
 seed: 42
 env:
@@ -84,12 +131,12 @@ train:
   temperature_end: 0.0
   temperature_moves: 30
   truncation_value: share
-  # the one change: the target rebuilt from each search (the search itself is untouched)
+  # the change: the target rebuilt from each search (the search itself is untouched)
   policy_target: gumbel
   target_c_visit: 50.0          # the engine's
   target_c_scale: 0.15          # the engine's 0.1, on unrescaled Q
   target_rescale: false         # completed Q clamped to [0, 1], not min-max rescaled over the moves
-  target_prior_temperature: 10.0
+  target_prior_temperature: 10.0  # the probe's proposal, NOT yet approved (see the header)
   replay_capacity: 400_000      # ~24 iterations of positions; ~2.3 GB of RAM (and of trainer state on disk)
   min_replay: 20_000            # about half the first games (iteration ~5), not only the shortest ones
   updates_per_iteration: 64     # x 512 = 32,768 samples per 16,384 new positions
@@ -99,13 +146,13 @@ train:
   value_coef: 1.0
   max_grad_norm: 1.0
   search_rows: 512
-  checkpoint_interval: 5        # e0, e5, ..., e30: 7 search selects of ~1 h (az-2p-2048: 2, raw selects of ~1 min)
+  checkpoint_interval: 1        # every iteration's weights (az-2p-2048's e8 has a match); selects every 5th
 eval:
   select:
     # select-2p-2k's seed and purpose (az-2p-2048's select boards): its first 500 boards
     suite: {name: select-2p-500, purpose: select, seed: 123, boards: 500, scenarios: [base-2p], turn_limit: 500}
     lineup: ["MCTS:ckpt=${self}:sims=512:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16", "POLICY:ckpt=${init}"]
-    every: 1                    # every checkpoint
+    every: 5                    # e0, e5, ..., e30: 7 search selects of ~1 h
     metric: score_rate
   final:
     - suite: {name: heldout-2p, boards: 500}

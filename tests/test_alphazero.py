@@ -247,11 +247,13 @@ def test_self_play_and_learning_are_deterministic():
 # ---------------------------------------------------------------- monitors
 
 
-def test_monitors_are_logging_only():
+@pytest.mark.parametrize("target", [{}, {"policy_target": "gumbel", "target_c_scale": 0.01}], ids=["engine", "gumbel"])
+def test_monitors_are_logging_only(target):
     """With and without the monitors: the same replay rows and targets, weights, optimizer,
-    RNG and logged training values, bit for bit."""
-    run(variant("on"))
-    run(variant("off"), monitors=False)
+    RNG and logged training values, bit for bit; with a rebuilt target too, whose monitors also
+    read the searches' own targets."""
+    run(variant("on", **target))
+    run(variant("off", **target), monitors=False)
     on, off = load_experiment("az/on"), load_experiment("az/off")
     a = torch.load(on.path / "trainer_state.pt", weights_only=False)
     b = torch.load(off.path / "trainer_state.pt", weights_only=False)
@@ -266,9 +268,11 @@ def test_monitors_are_logging_only():
     assert torch.equal(a["rng"]["torch"], b["rng"]["torch"]) and a["rng"]["python"] == b["rng"]["python"]
     assert [c.weights_sha256 for c in on.checkpoints()] == [c.weights_sha256 for c in off.checkpoints()]
     added = ("oos/", "search/overrule", "search/target_entropy", "search/net_entropy", "search/kl_target_net",
-             "drift/", "throughput/", "selfplay/decisions_per_s", "selfplay/leaves_per_s", "selfplay/games_per_hour")
+             "target/", "drift/", "throughput/", "selfplay/decisions_per_s", "selfplay/leaves_per_s",
+             "selfplay/games_per_hour")
     for x, y in zip(on.metrics(), off.metrics(), strict=True):
         assert "train/policy_loss" in x and "drift/kl_init" in x and "search/overrule" in x
+        assert ("target/entropy" in x) == bool(target)
         assert {k: v for k, v in x.items() if not k.startswith(added)} == {
             k: v for k, v in y.items() if not k.startswith(added)}
 
@@ -333,8 +337,21 @@ def test_the_overrule_rate_compares_targets_with_the_raw_argmax():
     assert logs["search/target_entropy"] == pytest.approx(0.0, abs=1e-6)
     assert logs["search/net_entropy"] == pytest.approx(float(net_entropy), rel=1e-5)
     assert logs["search/kl_target_net"] == pytest.approx(float(-logp[torch.arange(n), chosen].mean()), rel=1e-5)
+    assert not any(k.startswith("target/") for k in logs)
+    # policy_target: gumbel hands the rebuilt targets too: target/* reads them, search/* still the searches'.
+    rebuilt = np.zeros((n, model.num_actions), np.float16)
+    rebuilt[np.arange(n), other] = 1.0
+    both = Monitors(model, device="cpu", rows=3)
+    both.searched(np.concatenate([rows, forced]), np.concatenate([targets, forced_target]),
+                  np.concatenate([rebuilt, forced_target]))
+    logged = both.before_learn(ReplayBuffer(5, rows.shape[1], model.num_actions, 2), 0)
+    assert {k: v for k, v in logged.items() if k.startswith("search/")} == pytest.approx(logs, rel=1e-6)
+    assert logged["target/overrule"] == 1.0 and logged["target/entropy"] == pytest.approx(0.0, abs=1e-6)
+    assert logged["target/kl_net"] == pytest.approx(float(-logp[torch.arange(n), other].mean()), rel=1e-5)
     monitors.begin()
     assert monitors.before_learn(ReplayBuffer(5, rows.shape[1], model.num_actions, 2), 0) == {}
+    both.begin()
+    assert both.before_learn(ReplayBuffer(5, rows.shape[1], model.num_actions, 2), 0) == {}
 
 
 def test_an_unchanged_network_has_not_drifted_and_the_probe_phases_read_the_rows():
@@ -518,7 +535,8 @@ def test_a_rebuilt_target_changes_the_targets_and_nothing_else():
     """policy_target: gumbel leaves the searches and their moves as the engine target's run has them,
     so (no updates here, which read the targets) every replay row, value target and game: at the
     engine's constants its targets are the engine's (to float16), and with a gentler sigma they are
-    softer distributions over the same legal actions, which search/target_entropy reads."""
+    softer distributions over the same legal actions, which target/entropy reads while
+    search/target_entropy keeps reading the searches' own targets."""
     common = {"dets": 1, "full_search_prob": 1.0, "min_replay": 10**9, "iterations": 1}
     names = {"engine": {}, "same": {"policy_target": "gumbel"},
              "soft": {"policy_target": "gumbel", "target_c_scale": 0.01}}
@@ -539,9 +557,13 @@ def test_a_rebuilt_target_changes_the_targets_and_nothing_else():
     legal = engine["replay"]["obs"][has][:, model.mask_offset : model.mask_offset + model.num_actions] > 0
     assert bool((targets["soft"][~legal] == 0).all()) and bool((targets["soft"][legal] > 0).any())
     assert torch.allclose(targets["soft"].sum(1), torch.ones(len(legal)), atol=2e-3)
-    logged = {name: [m["search/target_entropy"] for m in load_experiment(f"az/{name}").metrics()] for name in names}
-    assert logged["same"] == pytest.approx(logged["engine"], abs=1e-3)
-    assert all(s > e for s, e in zip(logged["soft"], logged["engine"]))
+    metrics = {name: load_experiment(f"az/{name}").metrics() for name in names}
+    searched = {name: [m["search/target_entropy"] for m in rows] for name, rows in metrics.items()}
+    assert searched["same"] == searched["engine"] and searched["soft"] == searched["engine"]
+    assert not any("target/entropy" in m for m in metrics["engine"])
+    rebuilt = {name: [m["target/entropy"] for m in metrics[name]] for name in ("same", "soft")}
+    assert rebuilt["same"] == pytest.approx(searched["engine"], abs=1e-3)
+    assert all(s > e for s, e in zip(rebuilt["soft"], searched["engine"], strict=True))
 
 
 @pytest.mark.runs

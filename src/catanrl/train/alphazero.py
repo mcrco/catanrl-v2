@@ -47,8 +47,9 @@ iteration). A resume restores the weights, optimizer, replay buffer, counters
 and RNG; games in flight restart.
 
 Every iteration also logs :class:`Monitors` (``oos/*``, ``search/overrule``
-and friends, ``drift/*``): logging-only health checks that read the network,
-the searched rows and replay and feed nothing back.
+and friends, ``target/*`` with ``policy_target: gumbel``, ``drift/*``):
+logging-only health checks that read the network, the searched rows and
+replay and feed nothing back.
 """
 
 from __future__ import annotations
@@ -415,7 +416,8 @@ class SelfPlay:
         acting = np.flatnonzero(b["acting"])
         full = rng.random(len(acting)) < float(self.train["full_search_prob"])
         searches = []
-        targets = []  # the full searches' policy targets, in acting order, for the monitor
+        targets = []  # the full searches' own policy targets (pool.policy_target), in acting order, for the monitor
+        rebuilt = []  # policy_target: gumbel's targets of the same searches (the ones trained on), for the monitor
         roots = RootOutputs(self.full_pool, self.mask) if self.sigma is not None else None
         try:
             for i, row in enumerate(acting):
@@ -434,13 +436,15 @@ class SelfPlay:
                 policy = None
                 if full[i]:
                     if roots is None:
-                        policy = pool.policy_target(sid)
+                        policy = pool.policy_target(sid).astype(np.float16)
+                        targets.append(policy)
                     else:  # the root's actions: the real game's (the row's mask) that every world offers
                         legal, logits, value = roots.root(sid)
                         policy = gumbel_target(logits, legal & (b["observations"][row, self.mask] > 0),
-                                               pool.visits(sid), pool.q(sid), value, **self.sigma)
-                    policy = policy.astype(np.float16)
-                    targets.append(policy)
+                                               pool.visits(sid), pool.q(sid), value, **self.sigma).astype(np.float16)
+                        rebuilt.append(policy)
+                        if self.monitor is not None:  # search/* keep reading the search's own target
+                            targets.append(pool.policy_target(sid).astype(np.float16))
                     search = pool.stats(sid)
                     stats["depth"] += search.mean_depth
                     stats["max_depth"] += search.max_depth
@@ -457,8 +461,9 @@ class SelfPlay:
         stats["leaves"] += leaves
         stats["full"] += int(full.sum())
         self.decisions += len(acting)
-        if self.monitor is not None and targets:
-            self.monitor.searched(b["observations"][acting[full]], np.stack(targets))  # before step() rewrites rows
+        if self.monitor is not None and targets:  # before step() rewrites rows
+            self.monitor.searched(b["observations"][acting[full]], np.stack(targets),
+                                  np.stack(rebuilt) if rebuilt else None)
         self.vec.step()
         self._finish(replay)
 
@@ -596,7 +601,10 @@ class Monitors:
       decisions, ``overrule``, the fraction whose target's argmax is not the network's masked
       argmax at that root; ``target_entropy``, ``net_entropy`` and ``kl_target_net`` on those
       rows (:func:`policy_stats`, learn()'s train/* definitions, here out of sample);
-      ``overrule_rows``.
+      ``overrule_rows``. The target is the search's own (``pool.policy_target``) under either
+      ``policy_target``, so these series compare across runs.
+    * ``target/*`` (self-play, ``policy_target: gumbel`` only): ``overrule``, ``entropy`` and
+      ``kl_net``, the same three on the same rows for the rebuilt targets the network trains on.
     * ``drift/*`` (after learn(), so epoch e is checkpoint e's network): ``kl_init``, the mean
       KL(init || net), and ``agree_init``, the argmax agreement, on a fixed probe set, overall
       and per phase (``_{phase}`` of :data:`PHASES`, with ``rows_{phase}``). The probe is up to
@@ -619,6 +627,7 @@ class Monitors:
     def begin(self) -> None:
         """Clear the iteration's sums and time."""
         self.searches = np.zeros(5)  # rows, overruled, target entropy, net entropy, KL(target || net)
+        self.rebuilt = np.zeros(5)  # the same for policy_target: gumbel's targets
         self.seconds = 0.0
 
     def _forward(self, obs: np.ndarray, head: str) -> torch.Tensor:
@@ -634,24 +643,28 @@ class Monitors:
 
     # ------------------------------------------------------------ self-play
 
-    def searched(self, obs: np.ndarray, targets: np.ndarray) -> None:
-        """One self-play step's full-budget searches: their roots' rows and float16 targets."""
+    def searched(self, obs: np.ndarray, targets: np.ndarray, rebuilt: np.ndarray | None = None) -> None:
+        """One self-play step's full-budget searches: their roots' rows, the searches' own float16
+        targets and (``policy_target: gumbel``) the rebuilt ones."""
         start = time.time()
         keep = (obs[:, self.mask] > 0).sum(1) > 1  # VecEnv plays forced moves itself: normally every row
         if keep.any():
             logp = F.log_softmax(self._forward(obs[keep], "policy"), dim=1)
-            target = torch.from_numpy(targets[keep].astype(np.float32))
-            target = target / target.sum(1, keepdim=True).clamp_min(1e-8)
-            entropies = policy_stats(target, logp, logp.exp())
-            overruled = (target.argmax(1) != logp.argmax(1)).sum()
-            self.searches += [int(keep.sum()), float(overruled), *(float(value.sum()) for value in entropies)]
+            for sums, chosen in ((self.searches, targets), (self.rebuilt, rebuilt)):
+                if chosen is None:
+                    continue
+                target = torch.from_numpy(chosen[keep].astype(np.float32))
+                target = target / target.sum(1, keepdim=True).clamp_min(1e-8)
+                entropies = policy_stats(target, logp, logp.exp())
+                overruled = (target.argmax(1) != logp.argmax(1)).sum()
+                sums += [int(keep.sum()), float(overruled), *(float(value.sum()) for value in entropies)]
         self.seconds += time.time() - start
 
     # ------------------------------------------------------------ before and after learn()
 
     def before_learn(self, replay: ReplayBuffer, count: int) -> dict[str, float]:
-        """``search/*`` of the iteration and ``oos/*`` of the newest ``count`` replay rows
-        (the positions of the games that finished during the iteration)."""
+        """``search/*`` and ``target/*`` of the iteration and ``oos/*`` of the newest ``count``
+        replay rows (the positions of the games that finished during the iteration)."""
         start = time.time()
         logs: dict[str, float] = {}
         rows, overruled, target_entropy, net_entropy, kl = self.searches
@@ -659,6 +672,10 @@ class Monitors:
             logs.update({"search/overrule": float(overruled / rows), "search/overrule_rows": int(rows),
                          "search/target_entropy": float(target_entropy / rows),
                          "search/net_entropy": float(net_entropy / rows), "search/kl_target_net": float(kl / rows)})
+        rows, overruled, target_entropy, _, kl = self.rebuilt
+        if rows:
+            logs.update({"target/overrule": float(overruled / rows), "target/entropy": float(target_entropy / rows),
+                         "target/kl_net": float(kl / rows)})
         count = min(int(count), replay.size)
         if count:
             index = (replay.next - count + np.arange(count)) % replay.capacity
