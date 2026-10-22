@@ -18,3 +18,15 @@ tables:
       name: 4p vs ppo-4p
       config: {num_players: 4, decision_timeout_ms: 120000}
     max_games: 4
+  # The generalist ppo-mixed on a fresh random island per room (15-30 land tiles, Table.map).
+  # It never trained on blobs: a graph network, it plays each island at dims covering it
+  # (ViewAgent rebinds), and on heldout-random-4p it beats the blob-trained ppo-mixed-blob
+  # (73.9 [72.5, 75.3] vs 67.4 [65.9, 68.8]).
+  - name: blob-4p
+    label: ppo-mixed
+    spec: "POLICY:ckpt=ppo-mixed/main@best#1183427bf0cf"
+    map: {type: blob, land_tiles: [15, 30]}
+    room:
+      name: 4p island vs ppo-mixed
+      config: {num_players: 4, decision_timeout_ms: 120000}
+    max_games: 4
