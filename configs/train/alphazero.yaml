@@ -18,6 +18,11 @@ temperature_start: 1.0         # move sampling temperature at a game's first dec
 temperature_end: 0.0           # ... decaying linearly to this ...
 temperature_moves: 30          # ... over this many decisions of the game
 truncation_value: share        # a truncated game's value target: share (1/n per seat, the eval convention) | zero
+policy_target: engine          # engine: the search's own target | gumbel: Gumbel's improved policy rebuilt from the
+                               # same search (Gumbel roots) with the sigma below; the search keeps the engine's sigma
+target_c_visit: 50.0           # gumbel's sigma = (c_visit + the most visits of an action) * c_scale * completed Q,
+target_c_scale: 0.1            # at the engine's constants (50, 0.1, true) the engine's own target
+target_rescale: true           # completed Q min-max rescaled over the legal actions (false: clamped to [0, 1])
 replay_capacity: 200_000       # positions; ~5.8 KB each on 2p BASE graph-s rows (float16), saved in the trainer state
 min_replay: 5_000              # positions before learning starts
 updates_per_iteration: 64      # gradient steps per iteration

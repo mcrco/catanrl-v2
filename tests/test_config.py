@@ -235,8 +235,10 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: PPO's aux_coef (schema 2's hashes: graph-tiny-s42.ppo 9de4ad123b1571e1, graph-tiny-s42.g1
 #: 8f20d8bd5eb0864c, mlp-s43.ppo 0afc662b53b55599, mlp-s43.g1 2b8b04b954ec769d, s16-oracle
 #: 57fd361629823202, s64-d4 3b565fffa56c89eb); schema 4 added the lstm class's aux default,
-#: which moves no fixture here (none is an lstm: the stored lstm hashes are pinned below).
-#: Stored schema-1, schema-2 and schema-3 runs migrate to the hashes below.
+#: which moves no fixture here (none is an lstm: the stored lstm hashes are pinned below);
+#: schema 5 added AlphaZero's policy_target and target_* keys, which move none either (none is
+#: AlphaZero: the stored az-2p-2048 hash is pinned below).
+#: Stored schema-1 to schema-4 runs migrate to the hashes below.
 GOLDEN = {
     "fx-lineage": {
         "graph-tiny-s42.ppo": "d1bd50a558dcb0d1", "graph-tiny-s42.g1": "700cfba93f2a4e09",
@@ -306,6 +308,21 @@ def test_schema_3_lstm_configs_migrate_to_schema_4_hashes():
     graph = load_plan("aux-hidden-4p").variant("plain").config
     stored = json.loads(json.dumps(graph))
     assert config_hash(migrate(stored, from_schema=3)) == config_hash(graph)
+
+
+def test_schema_4_alphazero_configs_migrate_to_schema_5_hashes():
+    """A run stored under schema 4 (no policy target keys: az-2p-2048/main, the October 2026 run)
+    hashed as schema 4 did and migrates to the current resolution's hash, so it still resumes;
+    another algo's config keeps its hash."""
+    new = load_plan("az-2p-2048").variant("main")
+    stored = json.loads(json.dumps(new.config))
+    assert stored["train"]["policy_target"] == "engine"
+    for key in ("policy_target", "target_c_visit", "target_c_scale", "target_rescale"):
+        del stored["train"][key]
+    assert config_hash(stored) == "7e569a674327d715"
+    assert config_hash(migrate(stored, from_schema=4)) == new.config_hash
+    ppo = load_plan("aux-hidden-4p").variant("plain").config
+    assert config_hash(migrate(json.loads(json.dumps(ppo)), from_schema=4)) == config_hash(ppo)
 
 
 def _keyed(key: str, algo: str | None) -> str:
