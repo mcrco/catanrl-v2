@@ -1,0 +1,17 @@
+# Marco's harness comparison for az-2p-2048: the trained network in the search it was trained
+# for, against the same raw starting policy as gumbel-edge-2p's row (the start's weights in that
+# search), on the same 500 heldout-2p boards x 2 seats, so the two records pair game id by game
+# id (McNemar over the shared ids: tools/search_probe.py --pair <gumbel-edge-2p's id> <this id>).
+# The checkpoint is az-2p-2048/main's e8 by file, pinned by its weights hash: that run stopped
+# at e8 (interrupted, resumable), and a ref to it by name would wait for it to be finished.
+name: gumbel-edge-2p-e8
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p, boards: 500}
+      lineup:
+        - "MCTS:ckpt=/home/marco/dev/catanrl-v2/runs/az-2p-2048/main/checkpoints/e000008.pt#df9eb0155a7b:sims=2048:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16"
+        - "POLICY:ckpt=puffer-graph2/public@e3600"
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
