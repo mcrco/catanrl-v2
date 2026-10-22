@@ -1,0 +1,18 @@
+# Is the 2048-sim Gumbel search that made az-2p-2048's targets better than the raw policy it
+# searches with? az-2p-2048-search's row 2 (MCTS at the run's e0, i.e. the start's exact
+# weights), run on its own because az-2p-2048 stopped at e8 on the review's rule (selects
+# 0.480 and 0.482 against the start) and its best stayed e0. The search as the run trained:
+# Gumbel root, 2048 simulations, m 16, c_puct 0.75, one world from the hand tracker; against
+# the same network's raw policy on 500 heldout-2p boards x 2 seats = 1000 games (+-3.1 pp).
+# The PUCT 1024-sim row over the same raw policy is 54.9 [51.8, 58.0] (72819d1a).
+name: gumbel-edge-2p
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p, boards: 500}
+      lineup:
+        - "MCTS:ckpt=puffer-graph2/public@e3600:sims=2048:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16"
+        - "POLICY:ckpt=puffer-graph2/public@e3600"
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
