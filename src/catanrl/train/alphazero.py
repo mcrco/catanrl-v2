@@ -16,10 +16,19 @@
    moves get ``sims`` simulations and become policy targets, the rest get
    ``fast_sims`` and serve as value targets only.
 2. **Targets.** Policy: the search's ``policy_target`` (the visit
-   distribution, or Gumbel's improved policy), over legal actions. Value:
-   each seat's outcome, seat-relative like the value head (slot k = the seat
-   k places after the row's), 1 to the winner and 0 to the others; a
-   truncated game gives every seat 1/n (the eval convention) or 0
+   distribution, or Gumbel's improved policy), over legal actions; or, with
+   ``policy_target: gumbel`` (Gumbel roots), Gumbel's improved policy rebuilt
+   from the same search's root statistics and the network's outputs at its
+   root with the target's own sigma constants (:func:`gumbel_target`), e.g.
+   gentler than the engine's, which at 2048 simulations puts the best-valued
+   action about 100 logits up whatever its lead in Q, and optionally a
+   temperature on its prior term (``target_prior_temperature``: a sharp prior
+   otherwise keeps a move the deeper search plays near zero). The search
+   itself (Sequential Halving, the move played) keeps the engine's sigma and
+   priors either way.
+   Value: each seat's outcome, seat-relative like the value head (slot k =
+   the seat k places after the row's), 1 to the winner and 0 to the others;
+   a truncated game gives every seat 1/n (the eval convention) or 0
    (``truncation_value: zero``).
 3. **Replay.** A FIFO of ``replay_capacity`` positions sampled uniformly:
    float16 rows (exact for the integer topology blocks, about 1e-3 relative
@@ -38,8 +47,9 @@ iteration). A resume restores the weights, optimizer, replay buffer, counters
 and RNG; games in flight restart.
 
 Every iteration also logs :class:`Monitors` (``oos/*``, ``search/overrule``
-and friends, ``drift/*``): logging-only health checks that read the network,
-the searched rows and replay and feed nothing back.
+and friends, ``target/*`` with ``policy_target: gumbel``, ``drift/*``):
+logging-only health checks that read the network, the searched rows and
+replay and feed nothing back.
 """
 
 from __future__ import annotations
@@ -80,6 +90,11 @@ ALPHAZERO_KEYS: dict[str, Any] = {
     "temperature_end": 0.0,
     "temperature_moves": 30,
     "truncation_value": "share",
+    "policy_target": "engine",
+    "target_c_visit": 50.0,
+    "target_c_scale": 0.1,
+    "target_rescale": True,
+    "target_prior_temperature": 1.0,
     "replay_capacity": 200_000,
     "min_replay": 5_000,
     "updates_per_iteration": 64,
@@ -107,6 +122,19 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("train.full_search_prob must be in (0, 1]")
     if int(train["sims"]) < 1 or int(train["fast_sims"]) < 1 or int(train["dets"]) < 0:
         raise ValueError("train.sims and train.fast_sims must be positive and train.dets non-negative")
+    if train["policy_target"] not in ("engine", "gumbel"):
+        raise ValueError(f"train.policy_target must be engine or gumbel, not {train['policy_target']!r}")
+    if train["policy_target"] == "gumbel" and train["root"] != "gumbel":
+        raise ValueError("train.policy_target: gumbel rebuilds a Gumbel root's improved policy; a PUCT root's "
+                         "target is its visits (policy_target: engine)")
+    if not (float(train["target_c_visit"]) >= 0.0 and float(train["target_c_scale"]) >= 0.0):
+        raise ValueError("train.target_c_visit and train.target_c_scale must be non-negative")
+    if not float(train["target_prior_temperature"]) > 0.0:
+        raise ValueError("train.target_prior_temperature must be positive")
+    constants = ("target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature")
+    if train["policy_target"] == "engine" and any(train[k] != ALPHAZERO_KEYS[k] for k in constants):
+        raise ValueError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
+                         "has the search's own sigma (set policy_target: gumbel)")
     return train
 
 
@@ -136,6 +164,71 @@ def value_targets(winner: int | None, seat: int, num_players: int, max_players: 
     else:
         targets[(winner - seat) % num_players] = 1.0
     return targets, present
+
+
+#: The engine's floor on a Gumbel root's log-prior (kMinLogPrior, search_pool.cpp).
+MIN_LOG_PRIOR = -69.0
+
+
+def _log_softmax(scores: np.ndarray) -> np.ndarray:
+    top = scores.max(-1, keepdims=True)
+    return scores - top - np.log(np.exp(scores - top).sum(-1, keepdims=True))
+
+
+def gumbel_target(logits: np.ndarray, legal: np.ndarray, visits: np.ndarray, q: np.ndarray, root_value: float,
+                  *, c_visit: float = 50.0, c_scale: float = 0.1, rescale: bool = True,
+                  prior_temperature: float = 1.0) -> np.ndarray:
+    """Gumbel's improved policy at a searched root, softmax(log prior + sigma(completed Q)),
+    over the codec's index space (float64 [A], zero off ``legal``), built as the engine's
+    ``policy_target`` builds it (search_pool.cpp: expand, prepare_root, gumbel_sigma) but
+    with these sigma constants. At the defaults, the engine's (``SearchConfig``'s
+    gumbel_c_visit, gumbel_c_scale and gumbel_rescale_values, which the trainer's searches
+    keep, and no temperature), it is the engine's target up to the engine's float32 priors
+    and output.
+
+    * ``logits``: the network's policy logits at the root, [A] or one row per root world
+      [W, A]. Each world's prior is a softmax over ``legal`` (non-finite logits get none; a
+      world without a finite one is uniform), its log floored at :data:`MIN_LOG_PRIOR`, and
+      the root's log-prior is the worlds' mean. ``prior_temperature`` T divides the logits
+      first, so the prior is softmax(logits / T) (and weights v_mix as such); T = 1 is exact.
+    * ``legal``: the root's actions (bool [A]); ``visits`` and ``q``: the pool's
+      ``visits(id)`` and ``q(id)`` (NaN where unvisited, never read there).
+    * ``root_value``: the network's value of the root for its player (each world's clamped
+      to [0, 1], then averaged), which completes an unvisited action's Q as v_mix: the root
+      value and the prior-weighted mean Q of the visited actions, weighted 1 and their total
+      visits.
+
+    Completed Q is min-max rescaled over ``legal`` (``rescale``; else clamped to [0, 1]),
+    and sigma = (``c_visit`` + the most visits of an action) * ``c_scale`` * that. The
+    arithmetic is float64, the softmaxes in log space.
+    """
+    legal = np.asarray(legal, dtype=bool)
+    target = np.zeros(legal.shape, dtype=np.float64)
+    edges = np.flatnonzero(legal)
+    if not len(edges):
+        return target
+    z = np.atleast_2d(np.asarray(logits, dtype=np.float64))[:, edges] / float(prior_temperature)
+    finite = np.isfinite(z)
+    with np.errstate(invalid="ignore"):  # a world without a finite logit: -inf - -inf, replaced below
+        log_prior = _log_softmax(np.where(finite, z, -np.inf))
+    log_prior[~finite.any(1)] = -np.log(len(edges))
+    log_prior = np.maximum(log_prior, MIN_LOG_PRIOR).mean(0)
+    n = np.asarray(visits, dtype=np.float64)[edges]
+    seen = n > 0
+    completed = np.full(len(edges), float(root_value))
+    if seen.any():
+        weight = np.maximum(np.exp(_log_softmax(log_prior))[seen], np.finfo(np.float64).tiny)
+        values = np.asarray(q, dtype=np.float64)[edges][seen]
+        total = n.sum()
+        completed[:] = (float(root_value) + total * (weight * values).sum() / weight.sum()) / (total + 1.0)
+        completed[seen] = values
+    if rescale:
+        low = completed.min()
+        completed = (completed - low) / max(completed.max() - low, 1e-8)
+    else:
+        completed = np.clip(completed, 0.0, 1.0)
+    target[edges] = np.exp(_log_softmax(log_prior + (c_visit + n.max()) * c_scale * completed))
+    return target
 
 
 # ---------------------------------------------------------------- replay
@@ -216,6 +309,62 @@ def make_vec(plan: Any, levels: Mapping[str, Any], *, num_envs: int, seed: int, 
                       critic_level=None if critic is None else info_level(critic), trackers=trackers)
 
 
+class RootOutputs:
+    """A SearchPool for :func:`run_pools` that keeps the network's outputs at its searches' roots.
+
+    A search's root worlds are its first leaves (``collect``: roots first, and no other leaf
+    before every root is expanded), so the first ``worlds`` rows collected for a search
+    registered with :meth:`expect` are its roots: this keeps their legal masks (the rows'
+    ``mask`` block), logits and values, the very outputs (rows, batches, evaluator) the search
+    expanded its root with. Everything else passes through to the pool.
+    """
+
+    def __init__(self, pool: cpp.SearchPool, mask: slice) -> None:
+        self.pool, self.mask = pool, mask
+        self.worlds: dict[int, int] = {}
+        self.roots: dict[int, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
+        self.outstanding = 0  # root rows not collected yet: none after the first round or so
+        self.batch: list[tuple[int, int, np.ndarray]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.pool, name)
+
+    def expect(self, sid: int) -> None:
+        """Keep the root outputs of search ``sid``, just added (its worlds are drawn)."""
+        self.worlds[sid] = int(self.pool.stats(sid).worlds)
+        self.roots[sid] = []
+        self.outstanding += self.worlds[sid]
+
+    def collect(self, observations: np.ndarray, ids: np.ndarray) -> int:
+        n = self.pool.collect(observations, ids)
+        self.batch = []
+        if self.outstanding:
+            issued: dict[int, int] = {}
+            for k, sid in enumerate(ids[:n].tolist()):
+                if sid in self.worlds and len(self.roots[sid]) + issued.get(sid, 0) < self.worlds[sid]:
+                    issued[sid] = issued.get(sid, 0) + 1
+                    self.batch.append((k, sid, observations[k, self.mask] > 0))
+            self.outstanding -= len(self.batch)
+        return n
+
+    def apply(self, logits: np.ndarray, values: np.ndarray) -> None:
+        self.pool.apply(logits, values)
+        for k, sid, legal in self.batch:
+            self.roots[sid].append((legal, logits[k].copy(), values[k].copy()))
+        self.batch = []
+
+    def root(self, sid: int) -> tuple[np.ndarray, np.ndarray, float]:
+        """(legal actions, logits per world [W, A], value) of search ``sid``'s root, as the engine
+        keeps them: the actions every world offers, and each world's value for the root's player
+        (slot 0) clamped to [0, 1], averaged."""
+        rows = self.roots[sid]
+        if len(rows) != self.worlds[sid]:
+            raise RuntimeError(f"search {sid}: {len(rows)} root evaluations for {self.worlds[sid]} worlds")
+        legal = np.logical_and.reduce([legal for legal, _, _ in rows])
+        value = float(np.mean([min(max(float(values[0]), 0.0), 1.0) for _, _, values in rows]))
+        return legal, np.stack([logits for _, logits, _ in rows]), value
+
+
 @dataclass
 class _Pending:
     obs: np.ndarray
@@ -248,6 +397,11 @@ class SelfPlay:
             return make_pool(self.dims, levels["level"], config, critic_level=levels["critic_level"])
 
         self.full_pool, self.fast_pool = pool(int(train["sims"])), pool(int(train["fast_sims"]))
+        #: policy_target: gumbel's sigma constants (None: the engine's target).
+        self.sigma = None if train["policy_target"] == "engine" else {
+            "c_visit": float(train["target_c_visit"]), "c_scale": float(train["target_c_scale"]),
+            "rescale": bool(train["target_rescale"]), "prior_temperature": float(train["target_prior_temperature"])}
+        self.mask = slice(model.mask_offset, model.mask_offset + model.num_actions)
         self.pending: list[list[_Pending]] = [[] for _ in range(num_envs)]
         self.ply = np.zeros(num_envs, dtype=np.int64)
         self.decisions = 0
@@ -262,7 +416,9 @@ class SelfPlay:
         acting = np.flatnonzero(b["acting"])
         full = rng.random(len(acting)) < float(self.train["full_search_prob"])
         searches = []
-        targets = []  # the full searches' policy targets, in acting order, for the monitor
+        targets = []  # the full searches' own policy targets (pool.policy_target), in acting order, for the monitor
+        rebuilt = []  # policy_target: gumbel's targets of the same searches (the ones trained on), for the monitor
+        roots = RootOutputs(self.full_pool, self.mask) if self.sigma is not None else None
         try:
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
@@ -270,15 +426,25 @@ class SelfPlay:
                 tracker = self.vec.tracker(env, seat) if self.dets else None
                 seed = derive_seed(self.seed, "selfplay", iteration, step, env)
                 searches.append((pool, pool.add(self.vec.game(env), seed=seed, tracker=tracker)))
-            leaves = run_pools([self.full_pool, self.fast_pool], self.evaluator,
+                if roots is not None and full[i]:
+                    roots.expect(searches[-1][1])
+            leaves = run_pools([self.full_pool if roots is None else roots, self.fast_pool], self.evaluator,
                                batch_rows=[int(full.sum()), int((~full).sum())])
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
                 pool, sid = searches[i]
                 policy = None
                 if full[i]:
-                    policy = pool.policy_target(sid).astype(np.float16)
-                    targets.append(policy)
+                    if roots is None:
+                        policy = pool.policy_target(sid).astype(np.float16)
+                        targets.append(policy)
+                    else:  # the root's actions: the real game's (the row's mask) that every world offers
+                        legal, logits, value = roots.root(sid)
+                        policy = gumbel_target(logits, legal & (b["observations"][row, self.mask] > 0),
+                                               pool.visits(sid), pool.q(sid), value, **self.sigma).astype(np.float16)
+                        rebuilt.append(policy)
+                        if self.monitor is not None:  # search/* keep reading the search's own target
+                            targets.append(pool.policy_target(sid).astype(np.float16))
                     search = pool.stats(sid)
                     stats["depth"] += search.mean_depth
                     stats["max_depth"] += search.max_depth
@@ -295,8 +461,9 @@ class SelfPlay:
         stats["leaves"] += leaves
         stats["full"] += int(full.sum())
         self.decisions += len(acting)
-        if self.monitor is not None and targets:
-            self.monitor.searched(b["observations"][acting[full]], np.stack(targets))  # before step() rewrites rows
+        if self.monitor is not None and targets:  # before step() rewrites rows
+            self.monitor.searched(b["observations"][acting[full]], np.stack(targets),
+                                  np.stack(rebuilt) if rebuilt else None)
         self.vec.step()
         self._finish(replay)
 
@@ -434,7 +601,10 @@ class Monitors:
       decisions, ``overrule``, the fraction whose target's argmax is not the network's masked
       argmax at that root; ``target_entropy``, ``net_entropy`` and ``kl_target_net`` on those
       rows (:func:`policy_stats`, learn()'s train/* definitions, here out of sample);
-      ``overrule_rows``.
+      ``overrule_rows``. The target is the search's own (``pool.policy_target``) under either
+      ``policy_target``, so these series compare across runs.
+    * ``target/*`` (self-play, ``policy_target: gumbel`` only): ``overrule``, ``entropy`` and
+      ``kl_net``, the same three on the same rows for the rebuilt targets the network trains on.
     * ``drift/*`` (after learn(), so epoch e is checkpoint e's network): ``kl_init``, the mean
       KL(init || net), and ``agree_init``, the argmax agreement, on a fixed probe set, overall
       and per phase (``_{phase}`` of :data:`PHASES`, with ``rows_{phase}``). The probe is up to
@@ -457,6 +627,7 @@ class Monitors:
     def begin(self) -> None:
         """Clear the iteration's sums and time."""
         self.searches = np.zeros(5)  # rows, overruled, target entropy, net entropy, KL(target || net)
+        self.rebuilt = np.zeros(5)  # the same for policy_target: gumbel's targets
         self.seconds = 0.0
 
     def _forward(self, obs: np.ndarray, head: str) -> torch.Tensor:
@@ -472,24 +643,28 @@ class Monitors:
 
     # ------------------------------------------------------------ self-play
 
-    def searched(self, obs: np.ndarray, targets: np.ndarray) -> None:
-        """One self-play step's full-budget searches: their roots' rows and float16 targets."""
+    def searched(self, obs: np.ndarray, targets: np.ndarray, rebuilt: np.ndarray | None = None) -> None:
+        """One self-play step's full-budget searches: their roots' rows, the searches' own float16
+        targets and (``policy_target: gumbel``) the rebuilt ones."""
         start = time.time()
         keep = (obs[:, self.mask] > 0).sum(1) > 1  # VecEnv plays forced moves itself: normally every row
         if keep.any():
             logp = F.log_softmax(self._forward(obs[keep], "policy"), dim=1)
-            target = torch.from_numpy(targets[keep].astype(np.float32))
-            target = target / target.sum(1, keepdim=True).clamp_min(1e-8)
-            entropies = policy_stats(target, logp, logp.exp())
-            overruled = (target.argmax(1) != logp.argmax(1)).sum()
-            self.searches += [int(keep.sum()), float(overruled), *(float(value.sum()) for value in entropies)]
+            for sums, chosen in ((self.searches, targets), (self.rebuilt, rebuilt)):
+                if chosen is None:
+                    continue
+                target = torch.from_numpy(chosen[keep].astype(np.float32))
+                target = target / target.sum(1, keepdim=True).clamp_min(1e-8)
+                entropies = policy_stats(target, logp, logp.exp())
+                overruled = (target.argmax(1) != logp.argmax(1)).sum()
+                sums += [int(keep.sum()), float(overruled), *(float(value.sum()) for value in entropies)]
         self.seconds += time.time() - start
 
     # ------------------------------------------------------------ before and after learn()
 
     def before_learn(self, replay: ReplayBuffer, count: int) -> dict[str, float]:
-        """``search/*`` of the iteration and ``oos/*`` of the newest ``count`` replay rows
-        (the positions of the games that finished during the iteration)."""
+        """``search/*`` and ``target/*`` of the iteration and ``oos/*`` of the newest ``count``
+        replay rows (the positions of the games that finished during the iteration)."""
         start = time.time()
         logs: dict[str, float] = {}
         rows, overruled, target_entropy, net_entropy, kl = self.searches
@@ -497,6 +672,10 @@ class Monitors:
             logs.update({"search/overrule": float(overruled / rows), "search/overrule_rows": int(rows),
                          "search/target_entropy": float(target_entropy / rows),
                          "search/net_entropy": float(net_entropy / rows), "search/kl_target_net": float(kl / rows)})
+        rows, overruled, target_entropy, _, kl = self.rebuilt
+        if rows:
+            logs.update({"target/overrule": float(overruled / rows), "target/entropy": float(target_entropy / rows),
+                         "target/kl_net": float(kl / rows)})
         count = min(int(count), replay.size)
         if count:
             index = (replay.next - count + np.arange(count)) % replay.capacity

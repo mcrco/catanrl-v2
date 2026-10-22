@@ -60,6 +60,23 @@ def test_vtrace_critic_targets_take_a_null_critic_gamma(tmp_path):
     assert (train["critic_targets"], train["critic_gamma"]) == ("lambda", 1.0)  # the defaults since 2026-10-19
 
 
+def test_alphazero_policy_targets_are_refused_at_resolution(tmp_path):
+    """The AlphaZero trainer's check_train refuses these too, but only after the run dir exists
+    (whose failed folder then holds the variant), so validate and launch refuse them first."""
+    az = {"algo": "alphazero"}
+    soft = {**az, "policy_target": "gumbel", "target_c_scale": 0.15, "target_prior_temperature": 10}
+    assert load_plan(write(tmp_path, train=soft)).variants[0].config["train"]["target_prior_temperature"] == 10.0
+    for bad, match in (({"root": "mcts"}, "puct or gumbel"),
+                       ({"policy_target": "visits"}, "engine or gumbel"),
+                       ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root"),
+                       ({"policy_target": "gumbel", "target_c_visit": -1}, "non-negative"),
+                       ({"policy_target": "gumbel", "target_prior_temperature": 0}, "positive"),
+                       ({"target_c_scale": 0.01}, "set policy_target: gumbel"),  # silently unused otherwise
+                       ({"target_rescale": False}, "set policy_target: gumbel")):
+        with pytest.raises(ConfigError, match=match):
+            load_plan(write(tmp_path, train={**az, **bad}))
+
+
 def test_no_default_architecture(tmp_path):
     path = write(tmp_path)
     data = yaml.safe_load(path.read_text())
@@ -235,8 +252,10 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: PPO's aux_coef (schema 2's hashes: graph-tiny-s42.ppo 9de4ad123b1571e1, graph-tiny-s42.g1
 #: 8f20d8bd5eb0864c, mlp-s43.ppo 0afc662b53b55599, mlp-s43.g1 2b8b04b954ec769d, s16-oracle
 #: 57fd361629823202, s64-d4 3b565fffa56c89eb); schema 4 added the lstm class's aux default,
-#: which moves no fixture here (none is an lstm: the stored lstm hashes are pinned below).
-#: Stored schema-1, schema-2 and schema-3 runs migrate to the hashes below.
+#: which moves no fixture here (none is an lstm: the stored lstm hashes are pinned below);
+#: schema 5 added AlphaZero's policy_target and target_* keys, which move none either (none is
+#: AlphaZero: the stored az-2p-2048 hash is pinned below).
+#: Stored schema-1 to schema-4 runs migrate to the hashes below.
 GOLDEN = {
     "fx-lineage": {
         "graph-tiny-s42.ppo": "d1bd50a558dcb0d1", "graph-tiny-s42.g1": "700cfba93f2a4e09",
@@ -306,6 +325,21 @@ def test_schema_3_lstm_configs_migrate_to_schema_4_hashes():
     graph = load_plan("aux-hidden-4p").variant("plain").config
     stored = json.loads(json.dumps(graph))
     assert config_hash(migrate(stored, from_schema=3)) == config_hash(graph)
+
+
+def test_schema_4_alphazero_configs_migrate_to_schema_5_hashes():
+    """A run stored under schema 4 (no policy target keys: az-2p-2048/main, the October 2026 run)
+    hashed as schema 4 did and migrates to the current resolution's hash, so it still resumes;
+    another algo's config keeps its hash."""
+    new = load_plan("az-2p-2048").variant("main")
+    stored = json.loads(json.dumps(new.config))
+    assert stored["train"]["policy_target"] == "engine"
+    for key in ("policy_target", "target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature"):
+        del stored["train"][key]
+    assert config_hash(stored) == "7e569a674327d715"
+    assert config_hash(migrate(stored, from_schema=4)) == new.config_hash
+    ppo = load_plan("aux-hidden-4p").variant("plain").config
+    assert config_hash(migrate(json.loads(json.dumps(ppo)), from_schema=4)) == config_hash(ppo)
 
 
 def _keyed(key: str, algo: str | None) -> str:

@@ -49,7 +49,7 @@ from catanrl.canon import digest
 from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
-SCHEMA = 4
+SCHEMA = 5
 #: (schema that added it, dotted key, the value configs written before it meant, and its
 #: scope: for a ``train.*`` key the algo it belongs to, for a ``model.args.*`` key (a class
 #: default, which resolution fills in) the model class, or None for every algo / class).
@@ -61,6 +61,11 @@ MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
     (3, "train.aux_coef", 0.0, "ppo"),
     (3, "model.args.aux", False, "graph"),
     (4, "model.args.aux", False, "lstm"),
+    (5, "train.policy_target", "engine", "alphazero"),
+    (5, "train.target_c_visit", 50.0, "alphazero"),
+    (5, "train.target_c_scale", 0.1, "alphazero"),
+    (5, "train.target_rescale", True, "alphazero"),
+    (5, "train.target_prior_temperature", 1.0, "alphazero"),
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
@@ -338,7 +343,29 @@ def _check_train(train: Any) -> dict:
         # defaults critic_gamma to 1.0, so a YAML pinning critic_targets: vtrace alone lands here
         raise ConfigError(f"train.critic_gamma is the discount of critic_targets: lambda; critic_targets: "
                           f"{out['critic_targets']} takes critic_gamma: null (set both)")
+    if algo == "alphazero":
+        _check_alphazero_targets(out, base)
     return out
+
+
+def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) -> None:
+    """The AlphaZero trainer's root and policy-target refusals (alphazero.check_train), at resolution:
+    the trainer's come only after the run dir exists, and its failed folder then holds the variant."""
+    if train["root"] not in ("puct", "gumbel"):
+        raise ConfigError(f"train.root must be puct or gumbel, not {train['root']!r}")
+    if train["policy_target"] not in ("engine", "gumbel"):
+        raise ConfigError(f"train.policy_target must be engine or gumbel, not {train['policy_target']!r}")
+    if train["policy_target"] == "gumbel" and train["root"] != "gumbel":
+        raise ConfigError("train.policy_target: gumbel rebuilds a Gumbel root's improved policy; a PUCT root's "
+                          "target is its visits (policy_target: engine)")
+    if not (train["target_c_visit"] >= 0.0 and train["target_c_scale"] >= 0.0):
+        raise ConfigError("train.target_c_visit and train.target_c_scale must be non-negative")
+    if not train["target_prior_temperature"] > 0.0:
+        raise ConfigError("train.target_prior_temperature must be positive")
+    constants = ("target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature")
+    if train["policy_target"] == "engine" and any(train[k] != base[k] for k in constants):
+        raise ConfigError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
+                          "has the search's own sigma (set policy_target: gumbel)")
 
 
 def _check_model(model: Any) -> dict:
