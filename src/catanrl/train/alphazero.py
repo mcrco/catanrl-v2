@@ -21,8 +21,11 @@
    from the same search's root statistics and the network's outputs at its
    root with the target's own sigma constants (:func:`gumbel_target`), e.g.
    gentler than the engine's, which at 2048 simulations puts the best-valued
-   action about 100 logits up whatever its lead in Q. The search itself
-   (Sequential Halving, the move played) keeps the engine's sigma either way.
+   action about 100 logits up whatever its lead in Q, and optionally a
+   temperature on its prior term (``target_prior_temperature``: a sharp prior
+   otherwise keeps a move the deeper search plays near zero). The search
+   itself (Sequential Halving, the move played) keeps the engine's sigma and
+   priors either way.
    Value: each seat's outcome, seat-relative like the value head (slot k =
    the seat k places after the row's), 1 to the winner and 0 to the others;
    a truncated game gives every seat 1/n (the eval convention) or 0
@@ -90,6 +93,7 @@ ALPHAZERO_KEYS: dict[str, Any] = {
     "target_c_visit": 50.0,
     "target_c_scale": 0.1,
     "target_rescale": True,
+    "target_prior_temperature": 1.0,
     "replay_capacity": 200_000,
     "min_replay": 5_000,
     "updates_per_iteration": 64,
@@ -124,7 +128,9 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
                          "target is its visits (policy_target: engine)")
     if not (float(train["target_c_visit"]) >= 0.0 and float(train["target_c_scale"]) >= 0.0):
         raise ValueError("train.target_c_visit and train.target_c_scale must be non-negative")
-    constants = ("target_c_visit", "target_c_scale", "target_rescale")
+    if not float(train["target_prior_temperature"]) > 0.0:
+        raise ValueError("train.target_prior_temperature must be positive")
+    constants = ("target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature")
     if train["policy_target"] == "engine" and any(train[k] != ALPHAZERO_KEYS[k] for k in constants):
         raise ValueError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
                          "has the search's own sigma (set policy_target: gumbel)")
@@ -169,18 +175,21 @@ def _log_softmax(scores: np.ndarray) -> np.ndarray:
 
 
 def gumbel_target(logits: np.ndarray, legal: np.ndarray, visits: np.ndarray, q: np.ndarray, root_value: float,
-                  *, c_visit: float = 50.0, c_scale: float = 0.1, rescale: bool = True) -> np.ndarray:
+                  *, c_visit: float = 50.0, c_scale: float = 0.1, rescale: bool = True,
+                  prior_temperature: float = 1.0) -> np.ndarray:
     """Gumbel's improved policy at a searched root, softmax(log prior + sigma(completed Q)),
     over the codec's index space (float64 [A], zero off ``legal``), built as the engine's
     ``policy_target`` builds it (search_pool.cpp: expand, prepare_root, gumbel_sigma) but
     with these sigma constants. At the defaults, the engine's (``SearchConfig``'s
     gumbel_c_visit, gumbel_c_scale and gumbel_rescale_values, which the trainer's searches
-    keep), it is the engine's target up to the engine's float32 priors and output.
+    keep, and no temperature), it is the engine's target up to the engine's float32 priors
+    and output.
 
     * ``logits``: the network's policy logits at the root, [A] or one row per root world
       [W, A]. Each world's prior is a softmax over ``legal`` (non-finite logits get none; a
       world without a finite one is uniform), its log floored at :data:`MIN_LOG_PRIOR`, and
-      the root's log-prior is the worlds' mean.
+      the root's log-prior is the worlds' mean. ``prior_temperature`` T divides the logits
+      first, so the prior is softmax(logits / T) (and weights v_mix as such); T = 1 is exact.
     * ``legal``: the root's actions (bool [A]); ``visits`` and ``q``: the pool's
       ``visits(id)`` and ``q(id)`` (NaN where unvisited, never read there).
     * ``root_value``: the network's value of the root for its player (each world's clamped
@@ -197,7 +206,7 @@ def gumbel_target(logits: np.ndarray, legal: np.ndarray, visits: np.ndarray, q: 
     edges = np.flatnonzero(legal)
     if not len(edges):
         return target
-    z = np.atleast_2d(np.asarray(logits, dtype=np.float64))[:, edges]
+    z = np.atleast_2d(np.asarray(logits, dtype=np.float64))[:, edges] / float(prior_temperature)
     finite = np.isfinite(z)
     with np.errstate(invalid="ignore"):  # a world without a finite logit: -inf - -inf, replaced below
         log_prior = _log_softmax(np.where(finite, z, -np.inf))
@@ -390,7 +399,7 @@ class SelfPlay:
         #: policy_target: gumbel's sigma constants (None: the engine's target).
         self.sigma = None if train["policy_target"] == "engine" else {
             "c_visit": float(train["target_c_visit"]), "c_scale": float(train["target_c_scale"]),
-            "rescale": bool(train["target_rescale"])}
+            "rescale": bool(train["target_rescale"]), "prior_temperature": float(train["target_prior_temperature"])}
         self.mask = slice(model.mask_offset, model.mask_offset + model.num_actions)
         self.pending: list[list[_Pending]] = [[] for _ in range(num_envs)]
         self.ply = np.zeros(num_envs, dtype=np.int64)

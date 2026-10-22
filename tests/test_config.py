@@ -317,7 +317,7 @@ def test_schema_4_alphazero_configs_migrate_to_schema_5_hashes():
     new = load_plan("az-2p-2048").variant("main")
     stored = json.loads(json.dumps(new.config))
     assert stored["train"]["policy_target"] == "engine"
-    for key in ("policy_target", "target_c_visit", "target_c_scale", "target_rescale"):
+    for key in ("policy_target", "target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature"):
         del stored["train"][key]
     assert config_hash(stored) == "7e569a674327d715"
     assert config_hash(migrate(stored, from_schema=4)) == new.config_hash

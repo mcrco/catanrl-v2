@@ -23,6 +23,7 @@ policy_target: engine          # engine: the search's own target | gumbel: Gumbe
 target_c_visit: 50.0           # gumbel's sigma = (c_visit + the most visits of an action) * c_scale * completed Q,
 target_c_scale: 0.1            # at the engine's constants (50, 0.1, true) the engine's own target
 target_rescale: true           # completed Q min-max rescaled over the legal actions (false: clamped to [0, 1])
+target_prior_temperature: 1.0  # gumbel's prior term: softmax(logits / T) (the search's own priors are untempered)
 replay_capacity: 200_000       # positions; ~5.8 KB each on 2p BASE graph-s rows (float16), saved in the trainer state
 min_replay: 5_000              # positions before learning starts
 updates_per_iteration: 64      # gradient steps per iteration

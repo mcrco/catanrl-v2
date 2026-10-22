@@ -1,0 +1,119 @@
+# az-2p-2048 again with one change, the policy target the network learns from (the owner's call
+# of 2026-10-22: keep the search, rebuild a softer training target from its root statistics, pick
+# it on CPU against a deeper search, rerun from the same start and judge it in the search harness).
+# Everything else is az-2p-2048's: start, rules, map pool, 512 games, 2048-sim fair Gumbel searches
+# (m 16, c_puct 0.75, dets 1) on every move, which still choose the move played and run Sequential
+# Halving with the engine's own sigma, lr, replay, updates, 30 iterations and the time limit.
+#
+# Why: az-2p-2048's targets were one-hot. The engine's target is softmax(log prior + sigma), sigma =
+# (50 + the most visits) * 0.1 * completed Q min-max rescaled over the root's moves, so at 2048 sims
+# (~1000 visits) the best-valued move is ~100 logits up whatever its lead in Q: every two-move target
+# in its replay put >= 0.99 on one move. Its raw policy then lost to its start (selects 48.0, 48.2)
+# and in the search (e8 in this search 61.8 vs the start's 62.4 against the raw start, paired -0.6
+# [-3.7, 2.5], c4ea7b52 vs 831eea84), and it stopped at e8.
+#
+# The target (train.policy_target: gumbel, train/alphazero.py gumbel_target): Gumbel's improved
+# policy rebuilt in float64 from the same search's visits and Q and the network's own outputs at its
+# root (at the engine's constants it is the engine's target to ~3e-8), here softmax(logits / 10 +
+# (50 + max visits) * 0.15 * completed Q), completed Q clamped to [0, 1] rather than rescaled.
+# Picked on CPU from e3600's own base-2p self-play (600 positions weighted to the self-play mix, two
+# 2048-sim searches each, scored against one 8192-sim search's move; gsoft/sweep.py): mean
+# -log t(8192 move) 0.660 against the engine target's 1.784 (paired -1.12 [-1.39, -0.86]; better
+# on every tag: two-legal 1.87 -> 0.44, knight|roll 1.69 -> 0.49, discard 4.75 -> 1.01, setup,
+# robber, wide); argmax agreement with the 8192 move 80.5% (engine 81.4%), 8192 move under 1e-6 in
+# 0.2% of searches (engine 8.6%), entropy 0.64 nats (engine 0.05), >= 0.99 on one move in 21.9%
+# (engine 87.3%), regret 0.24 win points (engine 0.19). No sigma-only setting differs from the engine
+# target (best, rescaled c_scale 0.05: -0.10 [-0.24, 0.03]): e3600's prior puts < 1e-6 on the 8192
+# move in ~9% of searches and only tempering the prior term fixes that. The optimum is flat (T 8-12,
+# c_scale 0.1-0.3 unrescaled); one 8192 search against another scores 0.565 with this target, about
+# what the 2048 target scores (0.517 on those positions). Trained on, the logits' fixed point is
+# ~1.11 sigma (T / (T - 1)) rather than growth by sigma every generation (the formula; not measured).
+#
+# Evals, all in the search harness (the network inside the search against the raw start):
+#   select, every checkpoint (checkpoint_interval 5: e0, e5, ..., e30; learning starts in the 5th
+#     iteration, as in az-2p-2048, so e5 has one learn()): the checkpoint in this search at 512
+#     sims vs the start's raw policy on the first 500 boards of az-2p-2048's select suite x 2 seats
+#     = 1000 games, the same games at every checkpoint, so each pairs by game id with e0's (the
+#     start's exact weights in the same search, played, not assumed). best is e0 first and moves
+#     only to a checkpoint scoring above every earlier one (score_rate, slot 0).
+#   finals, on heldout-2p's first 500 boards x 2 seats with exactly gumbel-edge-2p's search spec, so
+#     each pairs by game id with 831eea84 (the start's weights in this search, 62.4) through
+#     tools/search_probe.py --pair (records under this run's folder, so name them by path):
+#     - MCTS(best) vs the raw start: the decision row (if best is e0, it replays 831eea84);
+#     - MCTS(latest) vs the raw start: the last checkpoint, which no select chose (a cache hit, so
+#       free, when latest holds best's weights; else another 3.9 h);
+#     - raw best and raw latest vs the raw start on all 2500 boards (secondary, about a minute each).
+#
+# Time (one RTX 2070 SUPER; time_limit_hours counts self-play, learning and selects, not finals):
+#   self-play + learning: az-2p-2048's 8 iterations took 1388-1423 s, mean 1408 (the rebuilt target
+#     adds ~1.4 s of CPU per iteration): 30 x 1408 s = 11.7 h;
+#   selects: gumbel-edge-2p took 3.90 h for 1000 games at 2048 sims with 256 games in flight; the
+#     engine scales ~linearly in sims, so 1000 games at 512 sims ~ 3.9 x 512 / 2048 = 0.98 h (1.1 h
+#     allowing for costs that do not shrink with sims), x 7 selects (e0, e5, ..., e30) = 6.8-7.7 h;
+#   total 18.6-19.4 h against the 22 h limit: 2.6-3.4 h of margin (a stop at the limit would
+#     itself add one select);
+#   finals afterwards: 3.9 h per 2048-sim row (best; latest unless a cache hit), raw rows ~minutes.
+#
+# time_limit_hours: at the limit the trainer saves a checkpoint (selected) and stops with status
+# time_limit, and the finals do NOT run: relaunch (`catanrl run az-2p-2048-soft` resumes, then plays
+# the finals) or `catanrl finish az-2p-2048-soft/main && catanrl run az-2p-2048-soft`.
+name: az-2p-2048-soft
+seed: 42
+env:
+  # puffer-graph2's scenario and seed: the start's own 4096-board training pool
+  scenarios: [{game: base-2p, turn_limit: 1000, maps: 4096}]
+  num_envs: 512
+obs: {level: public}
+model: {preset: graph-s, args: {shared: true}}   # puffer-graph2's network (graph-s alone is unshared)
+# e3600 is #3cd78e6dafac: the run pins it at creation (config.json resolved.init_from), and the e0
+# checkpoint holds exactly those weights. No #sha here: --smoke turns epoch refs into @latest.
+init_from: {ckpt: "puffer-graph2/public@e3600", parts: [actor, critic]}
+train:
+  algo: alphazero
+  iterations: 30
+  steps_per_iteration: 32       # x 512 games = 16,384 searched decisions (targets) per iteration
+  root: gumbel
+  sims: 2048
+  fast_sims: 64                 # unused at full_search_prob 1.0
+  full_search_prob: 1.0
+  dets: 1                       # fair: one tracker world per search (the evals' search)
+  c_puct: 0.75
+  gumbel_m: 16
+  dirichlet_noise: false        # PUCT roots only; a Gumbel root ignores it either way
+  temperature_start: 1.0
+  temperature_end: 0.0
+  temperature_moves: 30
+  truncation_value: share
+  # the one change: the target rebuilt from each search (the search itself is untouched)
+  policy_target: gumbel
+  target_c_visit: 50.0          # the engine's
+  target_c_scale: 0.15          # the engine's 0.1, on unrescaled Q
+  target_rescale: false         # completed Q clamped to [0, 1], not min-max rescaled over the moves
+  target_prior_temperature: 10.0
+  replay_capacity: 400_000      # ~24 iterations of positions; ~2.3 GB of RAM (and of trainer state on disk)
+  min_replay: 20_000            # about half the first games (iteration ~5), not only the shortest ones
+  updates_per_iteration: 64     # x 512 = 32,768 samples per 16,384 new positions
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  value_coef: 1.0
+  max_grad_norm: 1.0
+  search_rows: 512
+  checkpoint_interval: 5        # e0, e5, ..., e30: 7 search selects of ~1 h (az-2p-2048: 2, raw selects of ~1 min)
+eval:
+  select:
+    # select-2p-2k's seed and purpose (az-2p-2048's select boards): its first 500 boards
+    suite: {name: select-2p-500, purpose: select, seed: 123, boards: 500, scenarios: [base-2p], turn_limit: 500}
+    lineup: ["MCTS:ckpt=${self}:sims=512:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16", "POLICY:ckpt=${init}"]
+    every: 1                    # every checkpoint
+    metric: score_rate
+  final:
+    - suite: {name: heldout-2p, boards: 500}
+      lineup: ["MCTS:ckpt=${run}@best:sims=2048:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16", "POLICY:ckpt=${init}"]
+    - suite: {name: heldout-2p, boards: 500}
+      lineup: ["MCTS:ckpt=${run}@latest:sims=2048:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16", "POLICY:ckpt=${init}"]
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${init}"]}
+    - {suite: heldout-2p, lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=${init}"]}
+runtime: {device: cuda, threads: 12, compile: true, time_limit_hours: 22}   # compile is read by ppo only
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

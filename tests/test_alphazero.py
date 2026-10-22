@@ -436,7 +436,8 @@ def test_the_target_constants_default_to_the_engines_and_never_reach_the_search(
         engine.gumbel_c_visit, engine.gumbel_c_scale, engine.gumbel_rescale_values)
     assert ALPHAZERO_KEYS["policy_target"] == "engine"
     same = repr(selfplay(dets=1)[0].full_pool.config)
-    soft = selfplay(dets=1, policy_target="gumbel", target_c_visit=0.0, target_c_scale=0.01, target_rescale=False)[0]
+    soft = selfplay(dets=1, policy_target="gumbel", target_c_visit=0.0, target_c_scale=0.01, target_rescale=False,
+                    target_prior_temperature=10.0)[0]
     assert repr(soft.full_pool.config) == same and "gumbel_c_scale=0.1," in same
 
 
@@ -445,7 +446,9 @@ def test_check_train_refuses_targets_it_cannot_build():
     for bad, match in (({"policy_target": "visits"}, "engine or gumbel"),
                        ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root"),
                        ({"policy_target": "gumbel", "target_c_scale": -0.1}, "non-negative"),
-                       ({"target_c_scale": 0.01}, "set policy_target: gumbel")):  # silently unused otherwise
+                       ({"policy_target": "gumbel", "target_prior_temperature": 0.0}, "positive"),
+                       ({"target_c_scale": 0.01}, "set policy_target: gumbel"),  # silently unused otherwise
+                       ({"target_prior_temperature": 10.0}, "set policy_target: gumbel")):
         with pytest.raises(ValueError, match=match):
             check_train({**ALPHAZERO_KEYS, **bad})
 
@@ -469,10 +472,17 @@ def test_gumbel_target_at_the_engine_constants_is_the_engines(level, dets, game)
         target = gumbel_target(r["logits"], r["legal"], r["visits"], r["q"], r["value"])
         assert np.all(r["engine"][~r["legal"]] == 0) and np.all(target[~r["legal"]] == 0)
         worst = max(worst, float(np.abs(target - r["engine"]).max()))
-        for sigma in ({"rescale": False}, {"c_scale": 0.01}, {"c_visit": 0.0, "c_scale": 0.0}):
+        for sigma in ({"rescale": False}, {"c_scale": 0.01}, {"c_visit": 0.0, "c_scale": 0.0},
+                      {"rescale": False, "c_scale": 0.15, "prior_temperature": 10.0}):
             soft = gumbel_target(r["logits"], r["legal"], r["visits"], r["q"], r["value"], **sigma)
             assert np.all(soft[~r["legal"]] == 0) and np.all(soft[r["legal"]] > 0)
             assert soft.sum() == pytest.approx(1.0, abs=1e-12)
+        # A prior temperature is the (float64) logits divided by it, v_mix's prior weights included; T = 1 is exact.
+        tempered = gumbel_target(r["logits"], r["legal"], r["visits"], r["q"], r["value"], prior_temperature=10.0)
+        divided = r["logits"].astype(np.float64) / 10.0
+        assert np.array_equal(tempered, gumbel_target(divided, r["legal"], r["visits"], r["q"], r["value"]))
+        assert np.array_equal(target, gumbel_target(r["logits"], r["legal"], r["visits"], r["q"], r["value"],
+                                                    prior_temperature=1.0))
     assert worst <= 1e-6
 
 
@@ -496,6 +506,12 @@ def test_a_gentler_sigma_is_less_concentrated_at_two_moves():
     raw = gumbel_target(logits, legal, np.array([0, 1000, 0, 0, 0, 0]), np.where(visits == 1000, 0.52, np.nan), 0.5,
                         rescale=False)
     assert np.log(raw[1] / raw[4]) == pytest.approx(0.5 + 105.0 * (0.52 - mixed), rel=1e-9)
+    # A prior temperature T divides the prior's log-odds: a 9-nat prior lead (the knight over a roll, say)
+    # is 0.9 at T = 10, under the same sigma.
+    sharp = np.array([-1e9, 4.5, -1e9, -1e9, -4.5, -1e9])
+    for T in (1.0, 10.0):
+        soft = gumbel_target(sharp, legal, visits, q, 0.5, rescale=False, c_scale=0.15, prior_temperature=T)
+        assert np.log(soft[1] / soft[4]) == pytest.approx(9.0 / T - (50 + 1048) * 0.15 * 0.03, rel=1e-9)
 
 
 def test_a_rebuilt_target_changes_the_targets_and_nothing_else():

@@ -65,6 +65,7 @@ MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
     (5, "train.target_c_visit", 50.0, "alphazero"),
     (5, "train.target_c_scale", 0.1, "alphazero"),
     (5, "train.target_rescale", True, "alphazero"),
+    (5, "train.target_prior_temperature", 1.0, "alphazero"),
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
