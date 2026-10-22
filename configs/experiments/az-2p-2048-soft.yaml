@@ -4,14 +4,12 @@
 # dets 1) on every move, which still choose the move played and run Sequential Halving with the
 # engine's own sigma, lr, replay, updates, 30 iterations and the time limit.
 #
-# NOT APPROVED TO LAUNCH. The owner's call of 2026-10-22 was: keep the search, rebuild a softer
-# training target from its root statistics with a gentler sigma, pick it on CPU against an 8192-sim
-# search, rerun from the same start and judge it in the search harness. The prior temperature here
-# (target_prior_temperature: 10) is NOT part of that: it is this probe's proposal, waiting for his OK.
-# Without it the probe finds no setting that differs from the engine target (best sigma-only,
-# rescaled c_scale 0.05: -0.10 [-0.24, 0.03] in the score below), so a sigma-only rerun would be
-# expected to repeat az-2p-2048 and is not worth its ~19 h. The decision rule and the matched-epoch
-# row under Evals are proposals too.
+# The owner's call of 2026-10-22: keep the search, rebuild a softer training target from its root
+# statistics with a gentler sigma, pick it on CPU against an 8192-sim search, rerun from the same
+# start and judge it in the search harness. The probe found no sigma-only setting that differs from
+# the engine target (best, rescaled c_scale 0.05: -0.10 [-0.24, 0.03] in the score below), so a
+# sigma-only rerun would be expected to repeat az-2p-2048; the prior temperature here
+# (target_prior_temperature: 10) was the probe's proposal, which he approved the same day.
 #
 # Why: az-2p-2048's targets were one-hot. The engine's target is softmax(log prior + sigma), sigma =
 # (50 + the most visits) * 0.1 * completed Q min-max rescaled over the root's moves, so at 2048 sims
@@ -82,7 +80,7 @@
 #     - MCTS(latest) vs the raw start: the last checkpoint, which no select chose (a cache hit, so
 #       free, when latest holds best's weights; else another 3.9 h);
 #     - raw best and raw latest vs the raw start on all 2500 boards (secondary, about a minute each).
-#   Decision (proposed): the two MCTS rows, each against 831eea84 by paired McNemar, Holm at 0.05
+#   Decision (fixed before launch): the two MCTS rows, each against 831eea84 by paired McNemar, Holm at 0.05
 #     over the pair (the smaller p against 0.025, the other against 0.05); a row whose checkpoint is
 #     e0 is 831eea84 itself and drops out, leaving the other against 0.05.
 #   Matched epoch (proposed, not in this run): soft@e8 in gumbel-edge-2p's spec vs the raw start,
@@ -136,7 +134,7 @@ train:
   target_c_visit: 50.0          # the engine's
   target_c_scale: 0.15          # the engine's 0.1, on unrescaled Q
   target_rescale: false         # completed Q clamped to [0, 1], not min-max rescaled over the moves
-  target_prior_temperature: 10.0  # the probe's proposal, NOT yet approved (see the header)
+  target_prior_temperature: 10.0  # logits / 10 in the target only (the probe's proposal, approved 2026-10-22)
   replay_capacity: 400_000      # ~24 iterations of positions; ~2.3 GB of RAM (and of trainer state on disk)
   min_replay: 20_000            # about half the first games (iteration ~5), not only the shortest ones
   updates_per_iteration: 64     # x 512 = 32,768 samples per 16,384 new positions
