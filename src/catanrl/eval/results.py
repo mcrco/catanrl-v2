@@ -361,6 +361,56 @@ def _execution(device: str, infer_rows: int) -> dict:
             "torch": torch.__version__, "numpy": np.__version__}
 
 
+def _canopy_execution(agents: Sequence[Any]) -> dict:
+    """``{"canopy": ...}`` when a CANOPY agent of the lineup plays a GPU build, else nothing (a
+    CPU build's records keep the execution they always had).
+
+    A CUDA bridge loads the driver's libcuda and the toolkit's NVRTC at run time and compiles its
+    kernels there for the GPU it finds (headers from ``$CUDA_PATH``, else /usr/local/cuda or
+    /opt/cuda, as cubecl looks), so besides the binary (in the key) its bits can move with the
+    GPU, the driver and NVRTC: those are recorded per segment like ``device_class``."""
+    backends = sorted({str(a.release.manifest.get("backend")) for a in agents
+                       if a is not None and getattr(a, "release", None) is not None} - {"cpu-ndarray"})
+    if not backends:
+        return {}
+    return {"canopy": {"backend": backends if len(backends) > 1 else backends[0], **_cuda_runtime()}}
+
+
+def _cuda_runtime() -> dict:
+    """The GPU the bridge runs on (CUDA ordinal 0: the first of ``$CUDA_VISIBLE_DEVICES``), the
+    NVIDIA driver, NVRTC and the toolkit whose headers NVRTC compiles with. From nvidia-smi and
+    NVRTC, so the harness process opens no CUDA context of its own for it."""
+    import ctypes
+    import subprocess
+
+    info: dict[str, Any] = {"gpu": None, "capability": None, "driver": None}
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip() or "0"
+    smi = subprocess.run(["nvidia-smi", "-i", visible, "--query-gpu=name,compute_cap,driver_version",
+                          "--format=csv,noheader"], capture_output=True, text=True, check=False)
+    if smi.returncode == 0 and smi.stdout.strip():
+        fields = [f.strip() for f in smi.stdout.strip().splitlines()[0].split(",")]
+        info.update(zip(("gpu", "capability", "driver"), fields))
+    try:
+        nvrtc = ctypes.CDLL("libnvrtc.so")  # cudarc's first candidate name
+        major, minor = ctypes.c_int(), ctypes.c_int()
+        nvrtc.nvrtcVersion(ctypes.byref(major), ctypes.byref(minor))
+        info["nvrtc"] = f"{major.value}.{minor.value}"
+    except (OSError, AttributeError):
+        info["nvrtc"] = None
+    cuda_path = os.environ.get("CUDA_PATH") or next(
+        (p for p in ("/usr/local/cuda", "/opt/cuda") if os.path.exists(p)), None)
+    info["cuda_path"] = cuda_path
+    info["toolkit"] = None  # CUDA_VERSION of the headers NVRTC compiles against
+    try:
+        for line in Path(cuda_path, "include", "cuda.h").read_text(errors="replace").splitlines():
+            if line.startswith("#define CUDA_VERSION "):
+                info["toolkit"] = int(line.split()[2])
+                break
+    except (TypeError, OSError, ValueError):
+        pass
+    return info
+
+
 def _strict(suite: Suite):
     """The suite's determinism flags, with autocast off (PuffeRL leaks bf16 autocast)."""
     import contextlib
@@ -440,7 +490,7 @@ def _segment(path: Path, eval_id: str, segment: int, execution: dict) -> dict:
 def _play(agents, fill_agent, suite, key, eval_id, path, *, harness="native", allow_mixed, restart_partial, device,
           num_envs, threads, infer_rows) -> EvalRecord:
     games_path, segments_path = path.with_suffix(".games.jsonl"), path.with_suffix(".segments.jsonl")
-    execution = _execution(device, infer_rows)
+    execution = {**_execution(device, infer_rows), **_canopy_execution([*agents, fill_agent])}
     segments = canon.read_jsonl(segments_path)
     if any(s["execution"] != execution for s in segments):
         if restart_partial:  # nothing cites a partial record: set its games aside and start over

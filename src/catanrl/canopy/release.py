@@ -13,8 +13,19 @@ pinned ones, or whose binary is not the one its manifest names. The agent's key 
 binary's and the checkpoint's sha256, the commit and every patch's sha256, so a record names
 exactly what played.
 
+Two builds of the same source exist (``build_bridge.sh --backend cpu|cuda``): burn's CPU
+ndarray backend (manifest ``backend`` ``cpu-ndarray``, ``third_party/canopy/canopy-bridge.manifest.json``)
+and its CUDA backend (``cuda``, ``canopy-bridge-cuda.manifest.json``), which batches the network
+on the GPU. ``$CATANRL_CANOPY_DIR`` picks the directory, so the build; the key carries the
+binary's sha256 and the backend, so a CUDA record never reads as a CPU one (or the reverse), and
+a CPU build keys as it always did. A CUDA bridge compiles its kernels at run time (NVRTC, for the
+GPU it finds); the eval record's segment execution names the GPU, driver and NVRTC
+(``catanrl.eval.results._canopy_execution``). Unlike the CPU build, the CUDA build is not
+bit-reproducible (cubecl's kernel macro expands in hash order), so its installed copy is the
+release: a rebuild is another binary, so another player for the keys.
+
 ``python -m catanrl.canopy.release SRC PATCH_DIR BINARY OUT_DIR CHECKPOINT`` writes a manifest
-for a build: it checks that ``SRC``'s HEAD tree is :data:`CANOPY_COMMIT` with the patches
+for a CPU build (``write_manifest(..., backend=...)`` for another; build_bridge.sh passes it): it checks that ``SRC``'s HEAD tree is :data:`CANOPY_COMMIT` with the patches
 applied in order (through a scratch index, nothing in the checkout changes), that ``BINARY`` is
 ``SRC``'s built example, and copies the binary, checkpoint and manifest into ``OUT_DIR``.
 """

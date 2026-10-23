@@ -697,7 +697,19 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   the pinned commit, patch, binary and checkpoint hashes, which its
   `key_dict()` carries; `third_party/canopy/build_bridge.sh` rebuilds it
   from the committed patches to the same binary (paths remapped, the pinned
-  rustc). Each decision is serialized from the seat's view
+  rustc). `build_bridge.sh --backend cuda` builds the same source on burn's
+  CUDA backend, which batches the network on the GPU: another binary with
+  `backend: cuda` in the key, picked by pointing `$CATANRL_CANOPY_DIR` at
+  its directory, so CPU-build records keep their keys and the two never
+  mix. It is not bit-reproducible (cubecl's kernel macro expands in hash
+  order; two builds played identically), so the installed build is kept.
+  Its outputs do not depend on the batch (a position alone or among 7 to
+  300 others, raw or at 1600 simulations, bit for bit) and repeat across
+  runs, so rows depend on neither `num_envs` nor `procs`; the kernels are
+  compiled at run time by NVRTC for the GPU found, so a GPU record's
+  segment execution adds `canopy` (GPU, driver, NVRTC, toolkit headers),
+  and a replay on another of those may differ in the last bits. Each
+  decision is serialized from the seat's view
   (the opponent's hand dealt from its tracker, its development cards as a
   count) and Canopy's choice is played as the engine's action with that
   Canopy id; a choice the engine does not offer is a counted, logged

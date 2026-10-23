@@ -2,15 +2,21 @@
 # Build the Canopy bridge the CANOPY agent plays (src/catanrl/canopy) and install it as a release
 # directory: canopy-bridge, canopy-bridge.manifest.json and model_iter_315.mpk.
 #
-#   third_party/canopy/build_bridge.sh SRC OUT CHECKPOINT
+#   third_party/canopy/build_bridge.sh [--backend cpu|cuda] SRC OUT CHECKPOINT
 #
+#   --backend   the network backend (default cpu):
+#                 cpu   burn's ndarray backend, one thread per process (manifest backend
+#                       "cpu-ndarray"; pinned by canopy-bridge.manifest.json here)
+#                 cuda  burn's CUDA backend (cubecl), `--features cuda` (manifest backend "cuda";
+#                       pinned by canopy-bridge-cuda.manifest.json here)
 #   SRC         where the canopy source is built: a new directory (cloned from $CANOPY_GIT,
 #               default github.com/cullback/canopy, checked out at tag catan-nexus-v3 and the
-#               three patches below committed on top), or such a clone made by this script before
+#               patches below committed on top), or such a clone made by this script before
 #   OUT         the release directory to install into (CATANRL_CANOPY_DIR, or <runs>/_canopy)
 #   CHECKPOINT  model_iter_315.mpk of release catan-nexus-v3 (sha256 f8e4e685...68c60cc)
 #
-# The patches, in order (their sha256s are pinned in src/catanrl/canopy/release.py PATCHES):
+# The patches, in order (their sha256s are pinned in src/catanrl/canopy/release.py PATCHES; the
+# same for every backend):
 #   canopy-nexus-v3-reset-search-budget.patch  v1's pin: a reused tree gets a full, fresh budget
 #   canopy-catanatron-bridge.patch             v1's JSON-lines bridge (v1 9c66130)
 #   canopy-v2-bench-ext.patch                  v2: hidden opponent cards, rules/seed per snapshot,
@@ -20,15 +26,37 @@
 # The build is reproducible: source, cargo and toolchain paths are remapped (--remap-path-prefix)
 # and the last patch drops the one env!("CARGO_MANIFEST_DIR"), so the binary does not depend on
 # where SRC is, and Cargo.lock is used as committed (--locked). With the
-# pinned rustc it gives the binary_sha256 in canopy-bridge.manifest.json next to this script, so a
-# lost release directory can be rebuilt under the same record keys. A different rustc gives a
+# pinned rustc it gives the binary_sha256 in the backend's committed manifest next to this script,
+# so a lost release directory can be rebuilt under the same record keys. A different rustc gives a
 # different binary and so different record keys: the script refuses one unless CANOPY_ANY_RUSTC=1.
+# One SRC builds one backend at a time (cargo's target/release/examples/catan is the last build).
 #
-# CPU (ndarray) backend, nice 15, $JOBS (default 4) jobs. GPU builds (not built or tested): add
-# `--features cuda` (v1 set CUDA_HOME and CUDARC_CUDA_VERSION) or `--features wgpu`; the agent's
-# key records the manifest's backend.
+# cuda is NOT bit-reproducible: cubecl's #[cube] proc macro iterates a HashMap when it expands
+# kernels (cubecl-macros 0.9.0 src/parse/kernel.rs:104), so the expansion order, and with it the
+# codegen of cubek-*, burn-cubecl, burn-cuda, burn and canopy, changes from one compiler run to the
+# next (two builds of the same tree: 1f7cc246... and 533dffaf..., same size, 12262 bytes apart).
+# The two played bit-identically (1609 raw positions, 100 positions at 1600 sims), but a record
+# names its binary: keep the installed cuda release; a rebuild is a new player for the keys (this
+# script then exits 3), unless its sha happens to match.
+#
+# cuda: cudarc's bindings are pinned to CUDA 13.1 (CUDARC_CUDA_VERSION=13010, the newest cudarc
+# 0.18.2 knows; v1 built the same way), so the binary does not depend on the nvcc found at build
+# time. Nothing CUDA is linked: at run time the bridge loads the driver's libcuda and the
+# toolkit's NVRTC, which compiles burn's kernels for the GPU it finds (headers from $CUDA_PATH,
+# else /usr/local/cuda or /opt/cuda). Those, the driver and the GPU are the execution, not the
+# binary (the agent records them per eval segment).
+#
+# Nice 15, $JOBS (default 4) jobs. The agent's key records the manifest's backend.
 set -euo pipefail
-[[ $# -eq 3 ]] || { sed -n '2,13p' "$0" >&2; exit 2; }
+backend=cpu
+if [[ ${1:-} == --backend ]]; then backend=${2:-}; shift 2 || true; fi
+case $backend in
+  cpu)  features=() manifest_backend=cpu-ndarray pinned_manifest=canopy-bridge.manifest.json ;;
+  cuda) features=(--features cuda) manifest_backend=cuda pinned_manifest=canopy-bridge-cuda.manifest.json
+        export CUDARC_CUDA_VERSION=13010 ;;
+  *) echo "--backend is cpu or cuda, not '$backend'" >&2; exit 2 ;;
+esac
+[[ $# -eq 3 ]] || { sed -n '2,16p' "$0" >&2; exit 2; }
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$here/../.." && pwd)
 src=$1 out=$2 checkpoint=$3
@@ -64,15 +92,20 @@ sys.exit(0 if _git(src, "rev-parse", "HEAD^{tree}") == want else f"{src}: HEAD i
   "$src" "$here/patches"
 
 export RUSTFLAGS="--remap-path-prefix=$src=/canopy --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$sysroot=/rust"
-(cd "$src" && env CUDA_VISIBLE_DEVICES= nice -n 15 cargo build --release --locked -j"${JOBS:-4}" --example catan)
+# No GPU is needed to build (CUDA is loaded at run time), so none is visible to cargo.
+(cd "$src" && env CUDA_VISIBLE_DEVICES= nice -n 15 cargo build --release --locked -j"${JOBS:-4}" --example catan \
+   ${features[@]+"${features[@]}"})
 
-"$python" -m catanrl.canopy.release "$src" "$here/patches" "$src/target/release/examples/catan" "$out" "$checkpoint"
+"$python" -c 'import sys; from catanrl.canopy.release import write_manifest
+print(write_manifest(*sys.argv[1:6], backend=sys.argv[6]))' \
+  "$src" "$here/patches" "$src/target/release/examples/catan" "$out" "$checkpoint" "$manifest_backend"
 built=$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))["binary_sha256"])' "$out/canopy-bridge.manifest.json")
-if [[ ! -f $here/canopy-bridge.manifest.json ]]; then
-  echo "installed in $out: binary $built (no committed manifest yet: copy $out/canopy-bridge.manifest.json here to pin it)"
+if [[ ! -f $here/$pinned_manifest ]]; then
+  echo "installed in $out: binary $built (no committed manifest yet: copy $out/canopy-bridge.manifest.json to" \
+       "$here/$pinned_manifest to pin it)"
   exit 0
 fi
-pinned=$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))["binary_sha256"])' "$here/canopy-bridge.manifest.json")
+pinned=$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))["binary_sha256"])' "$here/$pinned_manifest")
 if [[ $built == "$pinned" ]]; then
   echo "installed in $out: binary $built, the committed manifest's"
 else
