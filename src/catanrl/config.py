@@ -49,7 +49,7 @@ from catanrl.canon import digest
 from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
-SCHEMA = 5
+SCHEMA = 6
 #: (schema that added it, dotted key, the value configs written before it meant, and its
 #: scope: for a ``train.*`` key the algo it belongs to, for a ``model.args.*`` key (a class
 #: default, which resolution fills in) the model class, or None for every algo / class).
@@ -66,6 +66,7 @@ MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
     (5, "train.target_c_scale", 0.1, "alphazero"),
     (5, "train.target_rescale", True, "alphazero"),
     (5, "train.target_prior_temperature", 1.0, "alphazero"),
+    (6, "train.freeze", [], "ppo"),
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
@@ -76,9 +77,11 @@ OPEN = {"meta", "params", "model.args"}
 ENTRY_KEYS = {
     "eval.select": {"suite", "lineup", "every", "metric", "fill"},
     "eval.final": {"suite", "lineup", "fill", "harness"},
-    "init_from": {"ckpt", "parts", "restore"},
+    "init_from": {"ckpt", "parts", "restore", "split_shared"},
 }
 PARTS = ("actor", "critic")
+#: The parts ``train.freeze`` may name (a network's ``parts``; ``aux`` only on an aux head).
+FREEZE_PARTS = ("actor", "critic", "aux")
 RESTORE = ("weights", "weights+optimizer")
 #: Execution keys: set by the runner from ``runtime``, never under ``train``.
 EXECUTION_KEYS = {"device", "seed", "data_dir", "compile", "compile_mode", "cpu_offload", "torch_deterministic",
@@ -343,9 +346,20 @@ def _check_train(train: Any) -> dict:
         # defaults critic_gamma to 1.0, so a YAML pinning critic_targets: vtrace alone lands here
         raise ConfigError(f"train.critic_gamma is the discount of critic_targets: lambda; critic_targets: "
                           f"{out['critic_targets']} takes critic_gamma: null (set both)")
+    if algo == "ppo":
+        _check_freeze(out.get("freeze", []))
     if algo == "alphazero":
         _check_alphazero_targets(out, base)
     return out
+
+
+def _check_freeze(freeze: Any) -> None:
+    """train.freeze: a list of distinct network parts (the trainer checks them against the network)."""
+    if not isinstance(freeze, list) or not all(isinstance(part, str) for part in freeze):
+        raise ConfigError(f"train.freeze is a list of network parts {list(FREEZE_PARTS)}, not {freeze!r}")
+    unknown = [part for part in freeze if part not in FREEZE_PARTS]
+    if unknown or len(set(freeze)) != len(freeze):
+        raise ConfigError(f"train.freeze takes distinct parts of {list(FREEZE_PARTS)}, not {freeze!r}")
 
 
 def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) -> None:
@@ -393,6 +407,11 @@ def _check_semantics(cfg: dict) -> None:
             raise ConfigError(f"init_from.ckpt per part takes keys {PARTS}")
         if init.get("restore", "weights") not in RESTORE:
             raise ConfigError(f"init_from.restore must be one of {RESTORE}")
+        if not isinstance(init.get("split_shared", False), bool):
+            raise ConfigError("init_from.split_shared is true or false")
+        if init.get("split_shared") and init.get("restore", "weights") != "weights":
+            raise ConfigError("init_from.split_shared copies a shared trunk's weights into separate actor and critic "
+                              "networks; it restores weights only")
     select = cfg["eval"]["select"]
     if select is not None and ("suite" not in select or "lineup" not in select):
         raise ConfigError("eval.select needs suite and lineup")

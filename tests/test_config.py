@@ -254,14 +254,17 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: 57fd361629823202, s64-d4 3b565fffa56c89eb); schema 4 added the lstm class's aux default,
 #: which moves no fixture here (none is an lstm: the stored lstm hashes are pinned below);
 #: schema 5 added AlphaZero's policy_target and target_* keys, which move none either (none is
-#: AlphaZero: the stored az-2p-2048 hash is pinned below).
-#: Stored schema-1 to schema-4 runs migrate to the hashes below.
+#: AlphaZero: the stored az-2p-2048 hash is pinned below); schema 6 added PPO's freeze (schema
+#: 5's hashes: graph-tiny-s42.ppo d1bd50a558dcb0d1, graph-tiny-s42.g1 700cfba93f2a4e09,
+#: mlp-s43.ppo 3666bf72fc1f3b1f, mlp-s43.g1 94da3f005acf8a95, s16-oracle 03c620ea32b0d5f2,
+#: s64-d4 32c708b2b94de072).
+#: Stored schema-1 to schema-5 runs migrate to the hashes below.
 GOLDEN = {
     "fx-lineage": {
-        "graph-tiny-s42.ppo": "d1bd50a558dcb0d1", "graph-tiny-s42.g1": "700cfba93f2a4e09",
-        "mlp-s43.ppo": "3666bf72fc1f3b1f", "mlp-s43.g1": "94da3f005acf8a95",
+        "graph-tiny-s42.ppo": "2356b3dd107674e0", "graph-tiny-s42.g1": "c1a3a24496207afc",
+        "mlp-s43.ppo": "c0d55b1dd1e9dbb0", "mlp-s43.g1": "948dfd95aada58e6",
     },
-    "fx-mcts": {"s16-oracle": "03c620ea32b0d5f2", "s64-d4": "32c708b2b94de072"},
+    "fx-mcts": {"s16-oracle": "38e8806bb8a46cd2", "s64-d4": "286a848b716e2fd9"},
 }
 
 
@@ -280,7 +283,7 @@ def test_schema_1_ppo_configs_migrate_to_schema_2_hashes():
     for (name, variant), old_hash in schema_1.items():
         new = load_plan(FIXTURES / f"{name}.yaml").variant(variant)
         stored = json.loads(json.dumps(new.config))
-        for key in ("critic_targets", "critic_gamma", "muon_exclude", "muon_exclude_lr", "aux_coef"):
+        for key in ("critic_targets", "critic_gamma", "muon_exclude", "muon_exclude_lr", "aux_coef", "freeze"):
             del stored["train"][key]
         if stored["model"]:
             del stored["model"]["args"]["aux"]
@@ -297,7 +300,7 @@ def test_schema_2_ppo_configs_migrate_to_schema_3_hashes(tmp_path):
     for (name, variant), old_hash in schema_2.items():
         new = load_plan(FIXTURES / f"{name}.yaml").variant(variant)
         stored = json.loads(json.dumps(new.config))
-        del stored["train"]["aux_coef"]
+        del stored["train"]["aux_coef"], stored["train"]["freeze"]
         if stored["model"] and stored["model"]["class"] == "graph":  # resolution fills the class default
             del stored["model"]["args"]["aux"]
         assert config_hash(stored) == old_hash
@@ -305,7 +308,7 @@ def test_schema_2_ppo_configs_migrate_to_schema_3_hashes(tmp_path):
     # The class default is a graph key: another class's stored args stay as they are.
     cnn = load_plan(write(tmp_path, model={"preset": "cnn-tiny"})).variants[0].config
     stored = json.loads(json.dumps(cnn))
-    del stored["train"]["aux_coef"]
+    del stored["train"]["aux_coef"], stored["train"]["freeze"]
     assert "aux" not in migrate(stored, from_schema=2)["model"]["args"]
     assert config_hash(migrate(stored, from_schema=2)) == config_hash(cnn)
 
@@ -319,7 +322,7 @@ def test_schema_3_lstm_configs_migrate_to_schema_4_hashes():
         new = load_plan(name).variant(variant)
         stored = json.loads(json.dumps(new.config))
         assert stored["model"]["class"] == "lstm" and stored["model"]["args"]["aux"] is False
-        del stored["model"]["args"]["aux"]
+        del stored["model"]["args"]["aux"], stored["train"]["freeze"]
         assert config_hash(stored) == old_hash
         assert config_hash(migrate(stored, from_schema=3)) == new.config_hash
     graph = load_plan("aux-hidden-4p").variant("plain").config
@@ -340,6 +343,42 @@ def test_schema_4_alphazero_configs_migrate_to_schema_5_hashes():
     assert config_hash(migrate(stored, from_schema=4)) == new.config_hash
     ppo = load_plan("aux-hidden-4p").variant("plain").config
     assert config_hash(migrate(json.loads(json.dumps(ppo)), from_schema=4)) == config_hash(ppo)
+
+
+def test_schema_5_ppo_configs_migrate_to_schema_6_hashes():
+    """A PPO run stored under schema 5 (no freeze: every PPO run before 2026-10-23) hashed as
+    schema 5 did and migrates to the current resolution's hash, so it still resumes; an
+    AlphaZero config (az-2p-2048-soft, live at the time) keeps its hash."""
+    schema_5 = {("fx-lineage", "graph-tiny-s42.ppo"): "d1bd50a558dcb0d1",
+                ("fx-lineage", "mlp-s43.g1"): "94da3f005acf8a95",
+                ("fx-mcts", "s16-oracle"): "03c620ea32b0d5f2"}
+    for (name, variant), old_hash in schema_5.items():
+        new = load_plan(FIXTURES / f"{name}.yaml").variant(variant)
+        stored = json.loads(json.dumps(new.config))
+        assert stored["train"]["freeze"] == []
+        del stored["train"]["freeze"]
+        assert config_hash(stored) == old_hash
+        assert config_hash(migrate(stored, from_schema=5)) == new.config_hash
+    az = load_plan("az-2p-2048-soft").variant("main").config
+    assert "freeze" not in az["train"]
+    assert config_hash(migrate(json.loads(json.dumps(az)), from_schema=5)) == config_hash(az)
+
+
+def test_freeze_and_split_shared_are_checked(tmp_path):
+    cfg = load_plan(write(tmp_path, train={"freeze": ["actor"]})).variants[0].config
+    assert cfg["train"]["freeze"] == ["actor"]
+    for bad in ("actor", ["policy"], ["actor", "actor"], [1]):
+        with pytest.raises(ConfigError, match="train.freeze"):
+            load_plan(write(tmp_path, train={"freeze": bad}))
+    with pytest.raises(ConfigError, match="unknown key 'train.freeze'"):
+        load_plan(write(tmp_path, train={"algo": "imitation", "freeze": []}))
+    init = {"ckpt": "x/y@e1", "parts": ["actor", "critic"], "split_shared": True}
+    cfg = load_plan(write(tmp_path, init_from=init)).variants[0].config
+    assert cfg["init_from"]["split_shared"] is True
+    with pytest.raises(ConfigError, match="split_shared"):
+        load_plan(write(tmp_path, init_from={**init, "split_shared": "yes"}))
+    with pytest.raises(ConfigError, match="split_shared"):
+        load_plan(write(tmp_path, init_from={**init, "restore": "weights+optimizer"}))
 
 
 def _keyed(key: str, algo: str | None) -> str:

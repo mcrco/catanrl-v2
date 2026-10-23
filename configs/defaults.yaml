@@ -13,7 +13,9 @@ env:
 obs: {level: private, critic_level: null}   # private | public | full; critic null = actor's level
 model: null                  # required: {preset} or {preset, class, args}; no default architecture
 train: {algo: ppo}           # ppo | imitation | alphazero
-init_from: null              # {ckpt: REF or {actor: REF, critic: REF}, parts: [actor, critic], restore: weights}
+init_from: null              # {ckpt: REF or {actor: REF, critic: REF}, parts: [actor, critic], restore: weights,
+                             #  split_shared: false (true: a shared-trunk graph checkpoint into separate actor and
+                             #  critic networks, each an exact copy of the trunk with its own head)}
 eval:
   select: null               # {suite, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate, fill: null}
   final: []                  # [{suite, lineup: ["POLICY:ckpt=${run}@best", F], fill: null}]

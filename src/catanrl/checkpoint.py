@@ -464,11 +464,62 @@ class Checkpoint:
 # ---------------------------------------------------------------- warm starts
 
 
+#: ``init_from.split_shared``: per model class, where each key prefix of a network with separate
+#: actor and critic networks (``model.args.shared: false``) is read from in a shared-trunk
+#: checkpoint of the same class. Both networks get a copy of the shared trunk.
+SPLIT_SHARED = {
+    "graph": {
+        "actor": {"actor.trunk.": "backbone.", "actor.policy.": "policy_head."},
+        "critic": {"critic.trunk.": "backbone.", "critic.value.": "value_head."},
+    },
+}
+
+
+def _split_source_keys(model: nn.Module, part: str, source: Checkpoint, keys: set[str]) -> dict[str, str]:
+    """``init_from.split_shared``: each of ``keys`` (the model's keys of ``part``) -> its key
+    in the shared-trunk ``source``, after checking that the copy is the source's function."""
+    cls = model.spec["class"]
+    if cls not in SPLIT_SHARED:
+        raise CheckpointError(f"init_from.split_shared splits a shared graph trunk; a {cls} network has no split")
+    if model.spec["args"].get("shared", False):
+        raise CheckpointError("init_from.split_shared loads into separate actor and critic networks: "
+                              "set model.args.shared: false")
+    if getattr(model, "has_critic_block", False):
+        raise CheckpointError("init_from.split_shared copies a trunk that reads the actor's row: a critic at "
+                              "another level (obs.critic_level) would read other features with it")
+    theirs = source.header["model"]
+    if theirs["class"] != cls or not theirs["args"].get("shared", False):
+        raise CheckpointError(f"init_from.split_shared needs a shared-trunk {cls} checkpoint; {source.ref} is a "
+                              f"{'shared' if theirs['args'].get('shared') else 'separate'} {theirs['class']} network")
+    mine_args = {k: v for k, v in model.spec["args"].items() if k not in ("shared", "aux")}
+    their_args = {k: v for k, v in theirs["args"].items() if k not in ("shared", "aux")}
+    if mine_args != their_args:
+        raise CheckpointError(f"init_from.split_shared from {source.ref}: model args {their_args} differ from "
+                              f"{mine_args}")
+    if source.levels["level"] != model.levels["level"]:
+        raise CheckpointError(f"init_from.split_shared from {source.ref}: its rows are {source.levels['level']}, "
+                              f"the model's {model.levels['level']}")
+    mapping = SPLIT_SHARED[cls][part]
+    out = {}
+    for key in keys:
+        prefix = next((p for p in mapping if key.startswith(p)), None)
+        if prefix is None:
+            raise CheckpointError(f"init_from.split_shared: {key} has no source in a shared {cls} network")
+        out[key] = mapping[prefix] + key[len(prefix):]
+    return out
+
+
 def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[CheckpointRef]:
     """Copy the ``init_from`` parts into ``model``, each through the full checks.
 
     ``init_from = {"ckpt": REF or {"actor": REF, "critic": REF}, "parts": [...]}``.
     Every key of a part must exist in the source with the same shape.
+
+    ``split_shared: true`` reads a shared-trunk checkpoint into a network with separate
+    actor and critic networks (:data:`SPLIT_SHARED`): the actor gets the trunk and the
+    policy head, the critic the trunk and the value head, so the split network computes
+    exactly the source's logits and values. Every source key of the part's prefixes
+    must be used; an aux head is not loaded.
     """
     def load_checkpoint(ref: Any) -> Checkpoint:
         if str(ref).endswith(".pt"):
@@ -479,6 +530,7 @@ def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[Checkpoin
 
     ckpt = init_from["ckpt"]
     parts = list(init_from.get("parts") or (ckpt.keys() if isinstance(ckpt, Mapping) else ("actor", "critic")))
+    split = bool(init_from.get("split_shared", False))
     target = model.state_dict()
     loaded, refs = {}, []
     for part in parts:
@@ -488,14 +540,25 @@ def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[Checkpoin
         refs.append(source.ref)
         prefixes = tuple(model.parts[part])
         mine = {k for k in target if k.startswith(prefixes)}
-        theirs = {k for k in source.state_dict if k.startswith(prefixes)}
-        if mine != theirs:
-            raise CheckpointError(f"init_from {part} from {source.ref}: keys differ "
-                                  f"(missing {sorted(mine - theirs)[:3]}, extra {sorted(theirs - mine)[:3]})")
+        if split:
+            names = _split_source_keys(model, part, source, mine)
+            their_prefixes = tuple(SPLIT_SHARED[model.spec["class"]][part].values())
+            theirs = {k for k in source.state_dict if k.startswith(their_prefixes)}
+            if set(names.values()) != theirs:
+                found = set(names.values())
+                raise CheckpointError(f"init_from {part} from {source.ref} (split_shared): keys differ "
+                                      f"(missing {sorted(found - theirs)[:3]}, extra {sorted(theirs - found)[:3]})")
+        else:
+            names = {k: k for k in mine}
+            theirs = {k for k in source.state_dict if k.startswith(prefixes)}
+            if mine != theirs:
+                raise CheckpointError(f"init_from {part} from {source.ref}: keys differ "
+                                      f"(missing {sorted(mine - theirs)[:3]}, extra {sorted(theirs - mine)[:3]})")
         for key in mine:
-            if source.state_dict[key].shape != target[key].shape:
+            value = source.state_dict[names[key]]
+            if value.shape != target[key].shape:
                 raise CheckpointError(f"init_from {part} from {source.ref}: {key} has shape "
-                                      f"{tuple(source.state_dict[key].shape)}, the model {tuple(target[key].shape)}")
-            loaded[key] = source.state_dict[key]
+                                      f"{tuple(value.shape)}, the model {tuple(target[key].shape)}")
+            loaded[key] = value
     model.load_state_dict({**target, **loaded})
     return refs

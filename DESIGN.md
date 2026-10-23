@@ -613,6 +613,17 @@ one ref per part (v1's hybrid). Each part loads strictly through the checks
 in 6.3. `e000000.pt` is always saved, and `catanrl ls` flags a `best` that is
 still the parent's weights.
 
+**Critic refits.** `init_from.split_shared: true` loads a shared-trunk graph
+checkpoint into separate actor and critic networks (`model.args.shared:
+false`): each gets a copy of the trunk, with the policy head and the value
+head respectively, so the split network's logits and values are the
+source's bit for bit (same args and row level; a critic at another level is
+refused). PPO's `train.freeze: [actor]` then trains the critic alone under
+the fixed policy: frozen parts get no gradient and leave the optimizer, the
+policy's logits are checked to read no trained parameter, and rollouts
+still sample the policy. On a shared trunk the same key trains the value
+head alone. Searches over a split network read the critic network's values.
+
 **Lineage.** `run.lineage()` follows the resolved `init_from` back to the
 root. W&B tags are derived from it and never read back.
 

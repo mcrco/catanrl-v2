@@ -4,7 +4,7 @@
 # PuffeRL keys minus the runner's (device, seed, data_dir, compile,
 # batch_size, ...: set from `runtime` and the env) plus catanrl's
 # (algo, lr_schedule, kl_target, lr_min, lr_max, log_interval, muon_exclude,
-# muon_exclude_lr).
+# muon_exclude_lr, aux_coef, freeze).
 algo: ppo
 total_timesteps: 400_000_000   # agent steps: rows (num_envs x max_players) per VecEnv step
 learning_rate: 3.0e-4
@@ -48,5 +48,9 @@ muon_exclude: []               # parameter-name patterns (fnmatch, e.g. value_he
 muon_exclude_lr: null          # AdamW's learning rate for them while the main one is at learning_rate (it follows the schedule)
 aux_coef: 0.0                  # weight of the aux hidden-information loss (model.args.aux on a shared graph trunk, trained
                                # on the critic block: obs.critic_level above obs.level); 0 = off, the plain PPO
+freeze: []                     # network parts (actor, critic, aux: model.parts) left as they are: no gradient, not in the
+                               # optimizer. [actor] refits the critic under a fixed policy (rollouts still sample it; the
+                               # policy and entropy terms reach no trained parameter): on a shared trunk only the value
+                               # head trains, so split one first (init_from.split_shared) to refit a whole critic network
 checkpoint_interval: 50        # epochs
 log_interval: 32               # VecEnv steps between episode-stat pops
