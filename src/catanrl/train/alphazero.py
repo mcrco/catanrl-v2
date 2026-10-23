@@ -70,7 +70,7 @@ from catanrl.envs.puffer import plan_env
 from catanrl.models import CatanModel, feature_names
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
 from catanrl.seeding import derive_seed, determinism, rng_state, seed_everything, set_rng_state
-from catanrl.train.puffer import build_policy_model, check_bindable, resolve_device
+from catanrl.train.puffer import build_policy_model, check_bindable, resolve_device, starts_fresh
 from catanrl.train.select import Selector
 
 #: The ``train`` keys AlphaZero reads (configs/train/alphazero.yaml has the same values).
@@ -794,7 +794,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
     check_bindable(model, plan)
     if getattr(model, "recurrent", False):
         raise ValueError("train.algo: alphazero evaluates single positions; a recurrent network trains with ppo")
-    if cfg.get("init_from") and writer.mode == "new":
+    if cfg.get("init_from") and starts_fresh(writer):
         from catanrl.checkpoint import load_parts
 
         load_parts(model, cfg["init_from"])

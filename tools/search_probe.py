@@ -95,16 +95,23 @@ def pair(a, b, *, slot: int = 0) -> dict:
 
 
 def record(ref: str):
-    """A record by path, or by (a prefix of) its eval id under the runs directory."""
+    """A record by path, or by (a prefix of) its eval id under the runs directory. One eval
+    stored by several runs (a select of weights another run already played in the same
+    search) resolves when every copy holds the same games (``games_sha256``)."""
     from catanrl.eval.results import EvalRecord, all_records
 
     path = Path(ref)
     if path.suffix == ".json" and path.is_file():
         return EvalRecord.load(path)
-    found = [p for p in all_records() if p.stem.startswith(ref)]
+    found = [EvalRecord.load(p) for p in all_records() if p.stem.startswith(ref)]
+    if len(found) > 1 and len({r.eval_id for r in found}) == 1:
+        if len({r.data.get("games_sha256") for r in found}) == 1 and found[0].data.get("games_sha256"):
+            return found[0]
+        raise SystemExit(f"{ref}: {len(found)} records of eval {found[0].eval_id} hold different games "
+                         f"({', '.join(str(r.path) for r in found)}); give a path")
     if len(found) != 1:
         raise SystemExit(f"{ref}: {len(found)} records match (give a path or a longer id)")
-    return EvalRecord.load(found[0])
+    return found[0]
 
 
 def play(args) -> dict:

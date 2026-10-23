@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch import nn
 
-from catanrl.train.critic_metrics import OutcomeCalibration
+from catanrl.train.critic_metrics import EPS, OutcomeCalibration
 from catanrl.train.puffer_policy import PufferPolicy, ValueBatch
 
 
@@ -18,7 +18,7 @@ def brute_force(finished: list[dict], gamma: float, max_players: int) -> dict[st
     for game in finished:
         n, winner, decisions = game["n"], game["winner"], game["decisions"]
         total = sums.setdefault(n, {"games": 0, "decisions": 0, "pred": np.zeros(n), "real": np.zeros(n),
-                                    "sq": np.zeros(n)})
+                                    "sq": np.zeros(n), "bce": np.zeros(n)})
         total["games"] += 1
         for t, (actor, pred) in enumerate(decisions):
             total["decisions"] += 1
@@ -27,6 +27,8 @@ def brute_force(finished: list[dict], gamma: float, max_players: int) -> dict[st
                 total["pred"][k] += pred[k]
                 total["real"][k] += y
                 total["sq"][k] += (pred[k] - y) ** 2
+                q = min(max(float(pred[k]), EPS), 1.0 - EPS)
+                total["bce"][k] -= y * np.log(q) + (1.0 - y) * np.log1p(-q)
     out = {}
     for n, total in sums.items():
         d = total["decisions"]
@@ -37,6 +39,7 @@ def brute_force(finished: list[dict], gamma: float, max_players: int) -> dict[st
             out[f"pred_slot{k}_{n}p"] = total["pred"][k] / d
             out[f"real_slot{k}_{n}p"] = total["real"][k] / d
             out[f"brier_slot{k}_{n}p"] = total["sq"][k] / d
+            out[f"bce_slot{k}_{n}p"] = total["bce"][k] / d
     return out
 
 
@@ -71,6 +74,7 @@ def test_outcome_calibration_matches_brute_force(gamma):
             actor = int(rng.integers(0, game["n"]))
             pred = np.zeros(players, np.float32)
             pred[:game["n"]] = rng.random(game["n"])
+            pred[:game["n"]][rng.random(game["n"]) < 0.05] = 1.0  # a saturated float32 sigmoid: the clamp
             game["decisions"].append((actor, pred))
             rows.append(e * players + actor)
             probs.append(pred)
@@ -81,7 +85,7 @@ def test_outcome_calibration_matches_brute_force(gamma):
             expected = brute_force(finished, gamma, players)
             finished = []
             assert set(found) == set(expected)
-            assert set(expected) >= {"truth_sum_2p", "truth_sum_3p", "truth_sum_4p", "brier_slot3_4p"}
+            assert set(expected) >= {"truth_sum_2p", "truth_sum_3p", "truth_sum_4p", "brier_slot3_4p", "bce_slot3_4p"}
             for key, value in expected.items():
                 assert found[key] == pytest.approx(value, rel=1e-6, abs=1e-9), key
     if gamma == 1.0:  # undiscounted: the truth is the share of decisions in games somebody won

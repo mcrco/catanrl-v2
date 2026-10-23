@@ -22,6 +22,19 @@ docs/experiments-implementation.md are handled here:
   the fork's ``aux_loss`` hook; ``losses/aux`` and ``aux/mse_<feature>`` /
   ``aux/var_<feature>`` are logged. At 0 (the default) the head, if any, is
   not run and training is the plain PPO.
+* ``train.freeze`` (default ``[]``) names network parts (``model.parts``:
+  actor, critic, aux) that do not train: their parameters get no gradient
+  and are left out of the optimizer (:func:`freeze_parts`). ``[actor]``
+  refits the critic under a fixed policy: rollouts still sample the policy,
+  whose logits then read no trained parameter (checked on real rows before
+  training), so the policy loss and the entropy bonus reach nothing and the
+  update is the value loss's (and the aux loss's, if any) alone. On a shared
+  trunk that trains the value head only; a split network
+  (``init_from.split_shared``) refits a whole critic network. Every launch
+  then checks that the frozen parts are exactly ``init_from``'s
+  (:func:`check_frozen_init`).
+* ``init_from`` loads whenever a launch starts fresh (:func:`starts_fresh`): a
+  new run, or a resume whose earlier launches all died before their e0 commit.
 """
 
 from __future__ import annotations
@@ -30,6 +43,7 @@ import copy
 import math
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -63,7 +77,7 @@ RUNNER_KEYS = frozenset({
 })
 #: Keys of the ``train`` section that catanrl reads and PuffeRL does not.
 CATANRL_TRAIN_KEYS = frozenset({"algo", "lr_schedule", "kl_target", "lr_min", "lr_max", "log_interval",
-                                "muon_exclude", "muon_exclude_lr", "aux_coef"})
+                                "muon_exclude", "muon_exclude_lr", "aux_coef", "freeze"})
 
 
 def resolve_device(device: str) -> str:
@@ -134,7 +148,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
     def __init__(self, config: dict, vecenv: Any, policy: PufferPolicy, *, writer: Any,
                  select: Mapping[str, Any] | None = None, eval_runtime: Mapping[str, Any] | None = None,
                  lr_schedule: Mapping[str, Any] | None = None, muon_exclude: Sequence[str] = (),
-                 muon_exclude_lr: float | None = None) -> None:
+                 muon_exclude_lr: float | None = None, frozen: Sequence[str] = ()) -> None:
         self.writer = writer
         self.selector = Selector(select, writer, eval_runtime or {})
         self.lr_schedule = dict(lr_schedule or {"kind": "constant"})
@@ -147,11 +161,17 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.capture = _CaptureLogger()
         self.msg = ""
         super().__init__(config, vecenv, policy, logger=self.capture)
-        if muon_exclude:
-            from catanrl.train.muon_exclude import exclude_from_muon
+        try:  # a refusal here must stop PuffeRL's non-daemon utilization thread, or the process never exits
+            if frozen:
+                drop_frozen(self.optimizer)
+            if muon_exclude:
+                from catanrl.train.muon_exclude import exclude_from_muon
 
-            exclude_from_muon(self.optimizer, self.model, muon_exclude, lr=float(muon_exclude_lr),
-                              base_lr=float(config["learning_rate"]))
+                exclude_from_muon(self.optimizer, self.model, muon_exclude, lr=float(muon_exclude_lr),
+                                  base_lr=float(config["learning_rate"]))
+        except BaseException:
+            self.utilization.stop()
+            raise
         # PuffeRL.__init__ set matmul precision, cudnn.benchmark and cudnn.deterministic.
         strict = bool(config["torch_deterministic"])
         torch.backends.cudnn.benchmark = not strict
@@ -162,8 +182,12 @@ class CatanPuffeRL(pufferl.PuffeRL):
             torch.set_float32_matmul_precision("highest")
         from catanrl.provenance import torch_runtime
 
-        writer.record_runtime({"torch": torch_runtime(), "advantage_cuda": bool(pufferl.ADVANTAGE_CUDA),
-                               "amp": config.get("amp"), "precision": config["precision"]})
+        runtime = {"torch": torch_runtime(), "advantage_cuda": bool(pufferl.ADVANTAGE_CUDA),
+                   "amp": config.get("amp"), "precision": config["precision"]}
+        if frozen:
+            runtime["frozen"] = {"parts": list(frozen), "trained_parameters": sum(
+                p.numel() for group in self.optimizer.param_groups for p in group["params"])}
+        writer.record_runtime(runtime)
 
     @property
     def model(self) -> CatanModel:
@@ -346,6 +370,92 @@ def _aux_coef(train: Mapping[str, Any], model: CatanModel) -> float:
     return coef
 
 
+def freeze_parts(model: CatanModel, parts: Sequence[str]) -> list[str]:
+    """Stop ``parts`` of ``model`` (names of ``model.parts``) from training: their parameters
+    stop requiring gradients. Returns the frozen parameter names.
+
+    Refused: a part the network does not have, freezing every parameter, and a frozen
+    module with running statistics (batch norm), which would still move in training."""
+    parts = list(parts)
+    unknown = [part for part in parts if part not in model.parts]
+    if unknown:
+        raise ValueError(f"train.freeze: this network's parts are {sorted(model.parts)}, not {unknown}")
+    prefixes = tuple(prefix for part in parts for prefix in model.parts[part])
+    frozen = [name for name, _ in model.named_parameters() if name.startswith(prefixes)]
+    if len(frozen) == len(list(model.parameters())):
+        raise ValueError(f"train.freeze: {parts} is every parameter of the network; nothing would train")
+    for name, module in model.named_modules():
+        if name and (name + ".").startswith(prefixes) and isinstance(module, torch.nn.modules.batchnorm._NormBase) \
+                and module.track_running_stats:
+            raise ValueError(f"train.freeze: {name} keeps running statistics, which training would still move")
+    for name, param in model.named_parameters():
+        if name.startswith(prefixes):
+            param.requires_grad_(False)
+    return frozen
+
+
+def check_policy_frozen(model: CatanModel, games: Sequence[Any] = ()) -> None:
+    """Refuse a network whose policy logits read a parameter that trains, on real rows (the
+    checkpoint self-test's positions): with ``actor`` frozen the policy must stay fixed."""
+    from catanrl.checkpoint import encode_positions, select_positions
+
+    levels = model.levels
+    obs = encode_positions(select_positions(model.dims, 2, games), model.dims, levels["level"],
+                           levels.get("critic_level"))
+    device = next(model.parameters()).device
+    with torch.enable_grad():
+        logits = model.policy_logits(torch.from_numpy(obs).to(device))
+    if logits.requires_grad:
+        trained = [name for name, p in model.named_parameters() if p.requires_grad]
+        raise ValueError(f"train.freeze: the policy's logits read parameters that still train ({trained[:3]} ...)")
+
+
+def check_frozen_init(model: CatanModel, init_from: Mapping[str, Any] | None, frozen: Sequence[str]) -> None:
+    """Refuse frozen actor or critic parameters that are not exactly ``init_from``'s, at every
+    launch once the weights are in place (loaded fresh or restored from the committed state).
+
+    A frozen part never moves, so it must come from ``init_from`` (never the seed's random
+    initialization), and a launch must hold it as ``init_from`` has it: a resume that skipped
+    ``init_from`` would otherwise freeze a random policy and pass every other check."""
+    parts = [part for part in frozen if part in ("actor", "critic")]
+    if not parts:
+        return
+    from catanrl.checkpoint import init_parts, init_tensors
+
+    missing = [part for part in parts if not init_from or part not in init_parts(init_from)]
+    if missing:
+        raise ValueError(f"train.freeze: {missing} would stay at the seed's random initialization; "
+                         "init_from must load every frozen part")
+    expected, _ = init_tensors(model, {**init_from, "parts": parts})
+    state = model.state_dict()
+    differ = [key for key, value in expected.items() if not torch.equal(state[key].detach().cpu(), value.cpu())]
+    if differ:
+        raise ValueError(f"train.freeze: {len(differ)} frozen tensors of {parts} differ from init_from's "
+                         f"({sorted(differ)[:3]} ...): this launch's weights did not start from init_from")
+
+
+def starts_fresh(writer: Any) -> bool:
+    """Whether this launch builds its network from the seed and ``init_from`` rather than a
+    committed trainer state: a new run, or a resume of one whose launches all died before their
+    first commit (no ``trainer_state.pt``; the resume saves e000000 again). A fork's
+    ``restore: weights+optimizer`` starts from the copied state, so it is not fresh."""
+    mode = getattr(writer, "mode", "new")
+    if mode == "new":
+        return True
+    path = getattr(writer, "path", None)
+    return mode == "resume" and path is not None and not (Path(path) / "trainer_state.pt").exists()
+
+
+def drop_frozen(optimizer: torch.optim.Optimizer) -> None:
+    """Leave parameters that require no gradient out of ``optimizer`` (before its first step)."""
+    if optimizer.state:
+        raise RuntimeError("drop_frozen runs before the optimizer's first step")
+    for group in optimizer.param_groups:
+        group["params"] = [p for p in group["params"] if p.requires_grad]
+    if not any(group["params"] for group in optimizer.param_groups):
+        raise ValueError("train.freeze leaves the optimizer no parameter")
+
+
 def _critic_options(train: Mapping[str, Any]) -> dict[str, Any]:
     """train.critic_targets, critic_gamma, muon_exclude and muon_exclude_lr, checked."""
     # the fallbacks (vtrace, None) are the pre-2026-10-19 defaults, for callers that bypass config
@@ -395,10 +505,15 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     _seed_everything(_derive_seed(seed, "init"))
     model = build_policy_model(cfg, plan.dims)
     check_bindable(model, plan)
-    if cfg.get("init_from") and getattr(writer, "mode", "new") == "new":
+    if cfg.get("init_from") and starts_fresh(writer):
         from catanrl.checkpoint import load_parts
 
         load_parts(model, cfg["init_from"])
+    frozen = list(train.get("freeze") or [])
+    if frozen:
+        freeze_parts(model, frozen)
+        if "actor" in frozen:
+            check_policy_frozen(model, [spec.game for spec in plan.specs])
     device = resolve_device(runtime.get("device", "auto"))
     model.to(device)
 
@@ -423,7 +538,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
     trainer = CatanPuffeRL(config, vecenv, policy, writer=writer, select=select, eval_runtime=eval_runtime,
                            lr_schedule=_lr_schedule(train), muon_exclude=train["muon_exclude"],
-                           muon_exclude_lr=train["muon_exclude_lr"])
+                           muon_exclude_lr=train["muon_exclude_lr"], frozen=frozen)
     status = "finished"
     try:  # from here on, close() stops PuffeRL's non-daemon utilization thread
         trainer.extra_state["map_pool"] = plan.pool["hash"]
@@ -435,7 +550,9 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
                 raise RuntimeError("the map pool changed since the run started; refusing to resume")
             trainer.restore(state)
             trainer.selector.restore()
-        else:
+        if frozen:
+            check_frozen_init(model, cfg.get("init_from"), frozen)
+        if state is None:
             trainer.save_checkpoint()  # e000000
         for ref in writer.pending_selects():
             trainer.selector.run(ref, model)
