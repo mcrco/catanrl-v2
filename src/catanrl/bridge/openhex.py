@@ -1063,6 +1063,9 @@ class OpenHexBot:
                 info, state = reply["game"], reply["state"]
                 if info.get("status") != "active":
                     return self._record(game_id, seat, info)
+                # The search runs in plan(): a plan's first action reports it, the rest
+                # the time since the action before them (OpenHex's per-move duration).
+                started = time.monotonic()
                 try:
                     plan = seat.plan(state)
                 except (OpenHexError, ValueError, RuntimeError) as error:
@@ -1076,10 +1079,10 @@ class OpenHexBot:
                 if problems:
                     logger.warning("%s: game %s: the replay differs from OpenHex: %s", self.name, game_id,
                                    "; ".join(problems[:3]))
-                started = time.monotonic()
                 for action in plan.actions:
                     try:
                         self.client.act(game_id, action, int(1000 * (time.monotonic() - started)))
+                        started = time.monotonic()
                         refused = 0
                     except OpenHexHTTPError as error:
                         if error.status >= 500:

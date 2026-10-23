@@ -507,3 +507,73 @@ def test_a_draining_bot_with_no_game_in_play_stops_without_queueing(monkeypatch)
     assert bot.client.joined == ["1v1"] and len(sleeps) == 1
     bot.leave()
     assert bot.client.left == ["1v1"]
+
+
+class _TimedSeat:
+    """A seat whose one plan (two actions) takes 7 s of a fake clock to decide."""
+
+    last_seq = 0
+    stats: dict = {}  # noqa: RUF012
+
+    def __init__(self, clock, *_args):
+        self.clock = clock
+        self.planned = False
+
+    def feed(self, _events):
+        pass
+
+    def plan(self, _state):
+        from catanrl.bridge.openhex import Plan
+
+        if self.planned:
+            return None
+        self.planned = True
+        self.clock[0] += 7.0
+        return Plan([{"type": "playKnight"}, {"type": "moveRobber"}])
+
+    def mismatches(self, _state):
+        return []
+
+    def close(self):
+        pass
+
+
+class _TimedClient(_QueueClient):
+    """One state poll with the game active, then the game over; acts are
+    recorded with their durations, each taking 0.25 s of the fake clock."""
+
+    def __init__(self, clock):
+        super().__init__()
+        self.clock = clock
+        self.polls = 0
+        self.acted = []
+
+    def state(self, _game_id):
+        self.polls += 1
+        status = "active" if self.polls <= 2 else "completed"
+        return {"state": {}, "game": {"status": status, "players": []}, "your_color": "red"}
+
+    def events(self, _game_id, _after):
+        return []
+
+    def act(self, _game_id, action, duration_ms):
+        self.acted.append((action["type"], duration_ms))
+        self.clock[0] += 0.25
+
+
+def test_a_plans_first_action_reports_the_search_time(monkeypatch):
+    """OpenHex shows each bot's thinking time from the actions' duration_ms: the
+    search runs in plan(), so the plan's first action carries it, and an action
+    after it the time since the one before (before, the clock started after the
+    plan and every action reported about 0 ms)."""
+    clock = [100.0]
+    monkeypatch.setattr("catanrl.bridge.openhex.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("catanrl.bridge.openhex.time.sleep", lambda _s: None)
+    monkeypatch.setattr("catanrl.bridge.openhex.OpenHexSeat", lambda *a: _TimedSeat(clock, *a))
+    bot = _idle_bot()
+    bot.client = _TimedClient(clock)
+    bot.native = None
+    bot.board_of = lambda _game_id, _state: {}
+    bot._record = lambda *_a: {}
+    bot.play("g")
+    assert bot.client.acted == [("playKnight", 7000), ("moveRobber", 0)]
