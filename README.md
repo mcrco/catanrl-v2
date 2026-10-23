@@ -106,7 +106,10 @@ natively only).
 `MCTS:…:pending=P` sends P leaves to the network
 per forward (virtual visits while they wait): at the default 1 a decision is
 `sims` forwards of one row each, which no GPU speeds up; at 32 a 16k-simulation
-decision takes about a second on a GPU. Fair agents use only their seat's information:
+decision takes about a second on a GPU. `MCTS:…:kernels=fused` runs a
+shared-trunk graph network on custom CUDA kernels (`models/graph_kernels.cu`,
+built with nvcc on first use): the same outputs to the last bits, 2.5x faster per
+forward on a GTX 1080, keyed when set. Fair agents use only their seat's information:
 `POLICY` at the `private` level (or `public` in two-player games, where every
 resource movement is seen by both seats), `MCTS` with `dets ≥ 1`, `BELIEF`,
 and `TRADE` with a `private` critic unless `oracle=true` (true hands). The

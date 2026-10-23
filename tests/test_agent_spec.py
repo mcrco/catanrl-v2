@@ -160,6 +160,23 @@ def test_reuse_transpositions_and_dedup_are_keyed_only_when_set(ckpts):
     assert native.reuse and native.needs_memory and native.config.transpositions
 
 
+def test_fused_kernels_are_keyed_only_when_set(ckpts):
+    """kernels=fused changes the network's outputs in the last bits: keyed when set, and
+    the default leaves every stored key as it was. The CPU refuses it when the agent builds
+    its evaluator."""
+    base = resolve_agent("MCTS:ckpt=exp/v:sims=8")
+    assert resolve_agent("MCTS:ckpt=exp/v:sims=8:kernels=torch").key_dict() == base.key_dict()
+    assert "kernels" not in base.key_dict()["params"]
+    fused = resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true:kernels=fused")
+    assert fused.canonical == base.canonical + ":reuse=true:kernels=fused"
+    assert resolve_agent(fused.canonical).canonical == fused.canonical
+    assert fused.key_dict()["params"] == {**base.key_dict()["params"], "reuse": True, "kernels": "fused"}
+    with pytest.raises(SpecError):
+        resolve_agent("MCTS:ckpt=exp/v:sims=8:kernels=triton")
+    with pytest.raises(ValueError, match="CUDA"):
+        fused.native(device="cpu")
+
+
 def _rebuilds_unchanged(entry: dict) -> None:
     params = MctsParams(ckpt="x", **entry["params"])
     assert key_params(params) == entry["params"]

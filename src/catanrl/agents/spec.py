@@ -98,6 +98,10 @@ class MctsParams:
     #: after records were stored leaves their keys and canonical specs as they were.
     reuse: bool = field(default=False, metadata={"key_if_set": True})
     transpositions: bool = field(default=False, metadata={"key_if_set": True})
+    #: ``fused``: the network on custom CUDA kernels (models/graph_kernels.py; shared-trunk
+    #: graph networks on a CUDA device). Its outputs differ from the module's in the last
+    #: bits, so it is keyed when set.
+    kernels: Literal["torch", "fused"] = field(default="torch", metadata={"key_if_set": True})
     dedup: bool = field(default=True, metadata={"execution": True})
     #: Leaves one search sends to the network per forward (virtual visits while they
     #: wait). More leaves per forward is what makes a GPU pay: at 1 the search is one

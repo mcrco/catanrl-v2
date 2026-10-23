@@ -34,6 +34,9 @@ catanrl = "catanrl.cli:main"
 where = ["src"]
 include = ["catanrl*"]
 
+[tool.setuptools.package-data]
+"catanrl.models" = ["*.cu"]
+
 [tool.uv]
 no-build-isolation-package = ["pufferlib"]
 conflicts = [[{ extra = "cu130" }, { extra = "cu126" }]]
