@@ -1,0 +1,30 @@
+# canopy's search vs our search, first: row 2 of canopy-bench-2p-gpu.yaml (wt/canopy-gpu, still
+# under review) launched on its own because marco asked for it soonest. the same row, the same
+# record id, so the full gpu config skips it once this record is written.
+#
+# released canopy (nexus-v3 iteration 315, 1600 sims, the cpu benchmark's search settings) on its
+# cuda build vs our raw public network in the 2048-sim gumbel search of 831eea84 (resolved spec
+# checked identical to that record's). 1000 games: heldout-2p's first 500 boards in both seat
+# orders, the boards of 831eea84 and 1c916131, so it pairs game by game with row 1 (canopy vs our
+# raw policy) when that runs. +-3.1 pp at 50% (wilson 95%); ~80% power for a 4-5 pp gap from 50%.
+#
+# launch (main, after b385ea9 merged the cuda build; the release copied into runs/_canopy-cuda,
+# key binary 1f7cc246...68802689 backend cuda; never rebuild it, the cuda build isn't
+# bit-reproducible):
+#   CATANRL_CANOPY_DIR=$PWD/runs/_canopy-cuda OMP_NUM_THREADS=1 nice -n 5 catanrl run configs/experiments/canopy-search-2p-gpu.yaml
+# the gpu has to be free: the critic refit is paused at e266 for this (resumable).
+# num_envs 512: 831eea84 ran 256 in flight; 512 keeps ~256 live 2048-sim searches in host memory.
+# num_envs, threads and procs are execution only (canopy's outputs don't depend on the batch).
+# slot 0 is canopy: a record's score_rate is canopy's share. records land in runs/_evals, which
+# the w&b mirror doesn't read, so read the record.
+name: canopy-search-2p-gpu
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p, boards: 500}
+      lineup:
+        - "CANOPY:sims=1600:c_puct=2.5:c_visit=50:c_scale=1:dirichlet_epsilon=0:procs=4"
+        - "MCTS:ckpt=puffer-graph2/public@e3600:sims=2048:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16"
+runtime: {device: cuda, threads: 8, num_envs: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
