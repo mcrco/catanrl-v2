@@ -674,6 +674,21 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   Catanatron mirror returns one action and the server bridge cannot negotiate,
   so both harnesses refuse it. A game with a trade writes `trades` (offers,
   accepts, confirms, cancels per seat) on its row; other rows are unchanged.
+* **CANOPY** (`catanrl.canopy`) is the released Canopy (cullback/canopy,
+  `catan-nexus-v3` iteration 315) through its Rust bridge:
+  `CANOPY:sims=1600` (`0` plays its raw policy), Canopy's `c_puct` 2.5,
+  `c_visit` 50, `c_scale` 1, Dirichlet off, `reuse` (re-root the game's
+  search when the moves since the seat's last decision replay exactly);
+  `procs` and `timeout` are execution-only. The bridge build lives in
+  `$CATANRL_CANOPY_DIR` (default `<runs>/_canopy`) and is verified against
+  the pinned commit, patch, binary and checkpoint hashes, which its
+  `key_dict()` carries. Each decision is serialized from the seat's view
+  (the opponent's hand dealt from its tracker, its development cards as a
+  count) and Canopy's choice is played as the engine's action with that
+  Canopy id; a choice the engine does not offer is a counted, logged
+  fallback, written with the seat's other counts in the row's `canopy`
+  entry. Native harness, base-2p rules (2 players, base supply, no friendly
+  robber) and BASE-shaped boards only. `fair`: always.
 
 `resolve_agent(spec)` does four things:
 
@@ -690,6 +705,7 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
    | TRADE | its policy by POLICY's rule, and not `oracle` (the critic reads private rows of worlds dealt from its tracker) |
    | built-in bots | never |
    | LLM | always: it reads only the public state text |
+   | CANOPY | always: its snapshot holds the seat's view (opponent cards as counts) |
 
 4. Writes a canonical spec that is a fixed point of resolution:
    `MCTS:ckpt=arch-lineage/graph-s-s42.g1@e600#41f2a9c07d11:sims=256:dets=4:oracle=false:root=puct:c_puct=0.75:…`.
@@ -810,7 +826,9 @@ n, p, `eval_id`, canonical specs, `run@eN#sha`, flags), which Typst reads with
   and `agents/llm` (the prompts and the answer parser), so a native record
   does not move when they change;
 * for training, also `catanrl/train` and PufferLib's `pufferl.py`,
-  `pytorch.py` and `_C`.
+  `pytorch.py` and `_C`;
+* for a record with a `CANOPY` agent in its lineup, also `catanrl/canopy`
+  (the `canopy` component, `EXTRAS`); no other record's code id holds it.
 
 Python is hashed by AST, so comments and formatting change nothing. No key
 holds a git SHA, so unrelated commits keep every cache valid.

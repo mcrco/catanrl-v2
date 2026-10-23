@@ -217,6 +217,13 @@ def _cmd_eval(args) -> int:
             print(f"{slot['label']:<40} per game: {llm['decisions']:.1f} decisions, {llm['prompt_tokens']:.0f} prompt + "
                   f"{llm['completion_tokens']:.0f} completion tokens{' (estimated)' if slot['llm']['estimated'] else ''}, "
                   f"{llm['fallbacks']:.2f} fallbacks, {llm['wall_s']:.1f} s")
+        if "canopy" in slot:
+            c = slot["canopy"]
+            print(f"{slot['label']:<40} Canopy: {c['decisions']} decisions ({c['per_game_decisions']:.1f}/game, "
+                  f"{c['searched']} searched, {c['forced']} forced), {c['per_decision_s']:.2f} s/decision "
+                  f"({c['bridge_per_decision_s']:.2f} in the bridge), trees reused {c['reused']}, "
+                  f"{c['fallbacks']} fallbacks, {c['refreshed']} refreshed, {c['canopy_illegal']} Canopy-legal "
+                  "moves the engine refused")
         if "trades" in slot:  # a loaded record's keys are canonical (sorted): print the steps in order
             trades = slot["trades"]
             print(f"{slot['label']:<40} per game: "

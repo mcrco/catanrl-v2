@@ -111,8 +111,8 @@ def play(args) -> dict:
     """The lineup's probe report over the suite's first ``boards`` boards."""
     os.environ.setdefault("CATANRL_DEDUP_FORCE", "1")  # before any agent builds its evaluator
 
-    from catanrl.agents import resolve_agent
     from catanrl.agents.native import MctsAgent
+    from catanrl.canopy import resolve as resolve_agent  # every key, CANOPY too
     from catanrl.eval.harness import play_schedule
     from catanrl.eval.results import summarize
     from catanrl.eval.suites import load_suite
@@ -125,8 +125,13 @@ def play(args) -> dict:
     games = suite.schedule(len(agents), fill=fill_agent is not None)
     rows: list[dict] = []
     start = time.perf_counter()
-    play_schedule(agents, games, fill=fill_agent, suite=suite, on_game=rows.append, device=args.device,
-                  num_envs=args.num_envs, threads=args.threads, infer_rows=args.infer_rows)
+    try:
+        play_schedule(agents, games, fill=fill_agent, suite=suite, on_game=rows.append, device=args.device,
+                      num_envs=args.num_envs, threads=args.threads, infer_rows=args.infer_rows)
+    finally:
+        for agent in [*agents, fill_agent]:
+            if hasattr(agent, "close"):
+                agent.close()
     wall = time.perf_counter() - start
     summary = summarize(rows, [r.label for r in resolved])
     report = {"suite": suite.name, "boards": args.boards, "games": len(rows), "wall_s": wall,

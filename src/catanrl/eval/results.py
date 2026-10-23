@@ -25,7 +25,13 @@ time) that the summary totals per slot and ``verify`` ignores. Rows of a game
 with a domestic trade (a ``TRADE`` seat at the table) carry ``trades`` (offers,
 accepts, confirms and cancels per seat: :data:`TRADE_KEYS`), an outcome the
 summary totals per slot with the cancel rate; other rows are as they always
-were. A record with
+were. Rows of a game with a
+``CANOPY`` seat (:mod:`catanrl.canopy`, native harness) carry ``canopy``: per slot, that seat's
+decisions, Canopy's search modes, tree reuse, fallbacks (a Canopy choice the engine does not
+offer, played as its best offered one and logged), rule mismatches seen (Canopy-legal actions
+the engine refuses) and timings, totalled per slot in the summary; like ``llm`` it is not an
+outcome. Such a record's ``code`` also holds the ``canopy`` component (the adapter's code,
+:data:`catanrl.provenance.EXTRAS`), and its lineup entry the release's hashes. A record with
 a real language model (not a stub) in its lineup is :class:`Unreplayable`:
 ``verify`` refuses it unless forced, since the model never answers the same
 way twice and every replayed game is paid for.
@@ -55,7 +61,7 @@ class ExecutionMismatch(RuntimeError):
 
 HARNESSES = ("native", "catanatron")
 #: Row keys that are not outcomes (dropped from games_sha256 and from verify's comparison).
-NOT_OUTCOME = ("segment", "llm")
+NOT_OUTCOME = ("segment", "llm", "canopy")
 #: The per-seat counts a trading row's ``trades`` holds, in order: the trade steps a learner
 #: seat played (the harness's ``TRADE_COUNTS`` maps the engine's action types to them).
 TRADE_KEYS = ("offers", "accepts", "confirms", "cancels")
@@ -94,8 +100,57 @@ def _play_games(agents, fill_agent, games, suite, harness, *, device, num_envs, 
     natives = [a.native(device=device, infer_rows=infer_rows, mode=suite.determinism) for a in agents]
     fill_native = fill_agent.native(device=device, infer_rows=infer_rows, mode=suite.determinism) \
         if fill_agent is not None else None
-    play_schedule(natives, games, fill=fill_native, device=device, num_envs=int(num_envs or 256),
-                  threads=int(threads or 8), infer_rows=infer_rows, suite=suite, on_game=on_game)
+    slots = [*natives, *([fill_native] if fill_native is not None else [])]
+    try:
+        play_schedule(natives, games, fill=fill_native, device=device, num_envs=int(num_envs or 256),
+                      threads=int(threads or 8), infer_rows=infer_rows, suite=suite,
+                      on_game=_with_canopy(slots, games, on_game))
+    finally:
+        for agent in slots:
+            close = getattr(agent, "close", None)
+            if close is not None:
+                close()
+
+
+def _with_canopy(slots: Sequence[Any], games: Sequence[Any], on_game):
+    """``on_game`` with each row's ``canopy`` entry (per slot: the CANOPY seat's stats in that
+    game, None for other slots) when a CANOPY agent plays; ``on_game`` itself otherwise."""
+    canopy = {slot for slot, agent in enumerate(slots) if hasattr(agent, "pop_game")}
+    if not canopy:
+        return on_game
+    from catanrl.seeding import derive_seed
+
+    by_id = {g.game_id: g for g in games}
+
+    def wrapped(row: dict) -> None:
+        scheduled = by_id[row["game_id"]]
+        entry: list[dict | None] = [None] * len(slots)
+        for seat, slot in enumerate(scheduled.seats):
+            if slot in canopy:
+                # The harness's first decision seed of the seat: the agent's key for the game.
+                first = derive_seed(int(scheduled.game_seed), "decide", int(scheduled.rotation), seat, 0)
+                stats = slots[slot].pop_game(first)
+                if stats is None:
+                    raise RuntimeError(f"{row['game_id']}: the CANOPY seat {seat} has no stats")
+                entry[slot] = stats if entry[slot] is None else _merge_counts(entry[slot], stats)
+        on_game({**row, "canopy": entry})
+
+    return wrapped
+
+
+def _merge_counts(a: Mapping[str, Any], b: Mapping[str, Any]) -> dict:
+    out = dict(a)
+    for k, v in b.items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            out[k] = out.get(k, 0) + v
+        elif isinstance(v, list):
+            out[k] = [*out.get(k, []), *v]
+        elif isinstance(v, dict):
+            merged = dict(out.get(k, {}))
+            for kk, vv in v.items():
+                merged[kk] = merged.get(kk, 0) + vv
+            out[k] = merged
+    return out
 
 
 @dataclass(frozen=True)
@@ -134,20 +189,36 @@ class EvalRecord:
 def _resolve(lineup: Sequence[Any], suite: Suite, fill: Any, harness: str):
     """Resolved agents for this suite's games (a resolved agent is re-resolved from its
     canonical spec, so its fairness is judged on these games)."""
-    from catanrl.agents import ResolvedAgent, resolve_agent
+    from catanrl.canopy import resolve
 
     def one(spec: Any):
-        spec = spec.canonical if isinstance(spec, ResolvedAgent) else spec
-        return resolve_agent(spec, harness=harness, games=suite.games())
+        return resolve(spec, harness=harness, games=suite.games())
 
     return [one(a) for a in lineup], (one(fill) if fill is not None else None)
 
 
-def eval_key(lineup: Sequence[Any], suite: Suite, *, harness: str, fill: Any = None) -> dict:
+def code_extras(entries: Sequence[Any]) -> tuple[str, ...]:
+    """The :data:`catanrl.provenance.EXTRAS` components a lineup runs (agents or key dicts)."""
+    from catanrl.canopy import lineup_has_canopy
+
+    return ("canopy",) if lineup_has_canopy(entries) else ()
+
+
+def _code_id(harness: str, extras: tuple[str, ...]) -> dict:
     from catanrl.provenance import code_id
 
+    # Without extras, the call every record made before extras existed.
+    return code_id("eval", harness, extras=extras) if extras else code_id("eval", harness)
+
+
+def key_code_id(key: Mapping[str, Any]) -> dict:
+    """This checkout's ``code`` for a record key (its harness, its lineup's extras)."""
+    return _code_id(key["harness"], code_extras([*key.get("lineup", []), key.get("fill")]))
+
+
+def eval_key(lineup: Sequence[Any], suite: Suite, *, harness: str, fill: Any = None) -> dict:
     return {"schema": SCHEMA, "harness": harness, "determinism": suite.determinism,
-            "code": code_id("eval", harness),
+            "code": _code_id(harness, code_extras([*lineup, fill])),
             "suite": suite.key(len(lineup), fill=fill is not None),
             "lineup": [a.key_dict() for a in lineup], "fill": fill.key_dict() if fill is not None else None}
 
@@ -234,6 +305,11 @@ def summarize(rows: Sequence[Mapping[str, Any]], labels: Sequence[str]) -> dict:
         trading = [r for r in mine if r.get("trades")]  # written only by trading lineups, and only when non-zero
         if trading:
             info["trades"] = trade_totals(trading, slot, n)
+        canopy = [r["canopy"][slot] for r in mine if r.get("canopy") and slot < len(r["canopy"]) and r["canopy"][slot]]
+        if canopy:
+            from catanrl.canopy.agent import summary_totals
+
+            info["canopy"] = summary_totals(canopy)
         slots.append(info)
     return {"games": len(rows), "score_rate": slots[0]["score_rate"], "wilson": slots[0]["wilson"],
             "truncated": sum(1 for r in rows if r.get("truncated")),
@@ -420,9 +496,15 @@ def paired(a: EvalRecord, b: EvalRecord, *, slot_a: int = 0, slot_b: int = 0) ->
         raise ValueError("paired records compare the same slot (same seat order against the same opponents)")
     if a.key["suite"]["schedule_hash"] != b.key["suite"]["schedule_hash"]:
         raise ValueError("paired records must play the same schedule (schedule hashes differ)")
-    for part in ("code", "determinism", "harness"):
+    for part in ("determinism", "harness"):
         if a.key[part] != b.key[part]:
             raise ValueError(f"paired records differ in {part}")
+    # An extra component (catanrl.provenance.EXTRAS) runs only in the lineups holding its agent:
+    # compared when both records hold it, ignored when only the slot that differs does.
+    code_a, code_b = a.key["code"], b.key["code"]
+    if any(code_a[k] != code_b[k] for k in set(code_a) & set(code_b)) or not (
+            (set(code_a) ^ set(code_b)) <= set(_extra_names())):
+        raise ValueError("paired records differ in code")
     others_a = [d for i, d in enumerate(a.key["lineup"]) if i != slot_a] + [a.key["fill"]]
     others_b = [d for i, d in enumerate(b.key["lineup"]) if i != slot_b] + [b.key["fill"]]
     if others_a != others_b or len(a.key["lineup"]) != len(b.key["lineup"]):
@@ -476,13 +558,17 @@ def verify(record: EvalRecord | str | Path, *, games: int | None = 16, device: s
     return {"identical": len(chosen) - len(differing), "of": len(chosen), "differing": differing}
 
 
+def _extra_names() -> tuple[str, ...]:
+    from catanrl.provenance import EXTRAS
+
+    return tuple(EXTRAS)
+
+
 def _strip(row: Mapping[str, Any]) -> dict:
     return {k: v for k, v in row.items() if k not in NOT_OUTCOME}
 
 
 def stale(pattern: str = "*") -> list[EvalRecord]:
     """Records whose outcome code differs from this checkout's."""
-    from catanrl.provenance import code_id
-
     records = [EvalRecord.load(p) for p in all_records(pattern)]
-    return [r for r in records if r.key["code"] != code_id("eval", r.key["harness"])]
+    return [r for r in records if r.key["code"] != key_code_id(r.key)]
