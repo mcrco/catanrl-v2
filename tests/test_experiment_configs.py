@@ -175,3 +175,59 @@ def test_az_2p_2048_starts_from_puffer_graph2_public():
     assert s.kind == "eval" and [(f["suite"], f["lineup"]) for f in s.config["eval"]["final"]] == [
         ({"name": "heldout-2p", "boards": 500}, [f"MCTS:ckpt={v.ref}@{which}:{search}", "POLICY:ckpt=puffer-graph2/public@e3600"])
         for which in ("best", "init")]
+
+
+def test_critic_refit_2p_is_puffer_graph2_public_with_only_the_critic_training():
+    """Marco's critic refit (2026-10-22): puffer-graph2/public@e3600's network, rows, rules and
+    training pool, the policy frozen (split into two trunks in main, the shared trunk in head),
+    undiscounted outcome targets over 256-step segments in the start's rollout memory budget,
+    uniform segments, one pass per rollout, 500 epochs; the search rows exactly
+    az-2p-2048-soft's select (512 sims, select-2p-500) and gumbel-edge-2p's final (2048 sims,
+    heldout-2p's first 500 boards), against the start's raw policy."""
+    from catanrl.envs.encoding import dims_for, row_layout, row_size
+    from catanrl.games import load_game
+    from catanrl.train.puffer import build_policy_model, puffer_config, rollout_bytes
+
+    ref = load_plan("puffer-graph2").variant("public").config
+    soft = load_plan("az-2p-2048-soft").variants[0].config
+    edge = load_plan("gumbel-edge-2p").variants[0].config
+    plan = load_plan("critic-refit-2p")
+    assert [v.name for v in plan.variants] == ["main", "head"]
+    dims = dims_for([load_game("base-2p")])
+    trained = {}
+    for v in plan.variants:
+        cfg = v.config
+        assert {k: cfg[k] for k in ("seed", "obs")} == {k: ref[k] for k in ("seed", "obs")}
+        assert cfg["env"]["scenarios"] == ref["env"]["scenarios"] and cfg["env"]["map_pool"] == ref["env"]["map_pool"]
+        args = {k: a for k, a in cfg["model"]["args"].items() if k != "shared"}
+        assert args == {k: a for k, a in ref["model"]["args"].items() if k != "shared"}
+        assert cfg["model"]["args"]["shared"] == (v.name == "head")
+        assert cfg["init_from"] == {"ckpt": "puffer-graph2/public@e3600", "parts": ["actor", "critic"],
+                                    **({"split_shared": True} if v.name == "main" else {})}
+        train = cfg["train"]
+        assert train["freeze"] == ["actor"]
+        assert (train["critic_targets"], train["critic_gamma"], train["gae_lambda"]) == ("lambda", 1.0, 1.0)
+        assert (train["update_epochs"], train["prio_alpha"], train["optimizer"]) == (1, 0.0, "adam")
+        rows = 2 * cfg["env"]["num_envs"]
+        config = puffer_config(train, cfg["runtime"], rows=rows, seed=0, data_dir=".")
+        assert config["batch_size"] == 264_192 and config["total_timesteps"] // config["batch_size"] == 500
+        assert config["total_timesteps"] % config["batch_size"] == 0
+        assert config["bptt_horizon"] == 256 and config["minibatch_size"] // config["max_minibatch_size"] == 4
+        obs = row_size(row_layout(dims, "public"))
+        start_rollout = rollout_bytes(2 * ref["env"]["num_envs"], ref["train"]["bptt_horizon"], obs)
+        assert rollout_bytes(rows, config["bptt_horizon"], obs) == 2 * start_rollout < 2.6 * 2**30
+
+        select = cfg["eval"]["select"]
+        assert {k: select[k] for k in ("suite", "lineup", "metric")} == \
+            {k: soft["eval"]["select"][k] for k in ("suite", "lineup", "metric")}
+        assert select["every"] == 500  # e0 and the last epoch only
+        (edge_final,) = edge["eval"]["final"]
+        (final,) = cfg["eval"]["final"]
+        assert final["suite"] == edge_final["suite"]
+        assert final["lineup"] == [edge_final["lineup"][0].replace("puffer-graph2/public@e3600", f"{v.ref}@latest"),
+                                   "POLICY:ckpt=${init}"]
+        model = build_policy_model(cfg, dims)
+        assert sum(p.numel() for p in model.parameters()) == (541_540 if v.name == "head" else 843_652)
+        trained[v.name] = sum(p.numel() for n, p in model.named_parameters()
+                              if not n.startswith(tuple(model.parts["actor"])))
+    assert trained == {"main": 376_225, "head": 74_113}

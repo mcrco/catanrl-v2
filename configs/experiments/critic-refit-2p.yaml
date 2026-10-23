@@ -1,0 +1,146 @@
+# marco's idea (2026-10-22): "could we continue to train the critic head after marl ppo to predict
+# the outcome of the game for alpha zero? during marl training, the critic is continuously adapting
+# to a changing policy, so it probably never converges as much as it possibly could on the final
+# policy over many many games. if we continue to train it so it does converge, mcts might get better
+# since the critic is more accurate?"
+#
+# why: puffer-graph2/public@e3600 (#3cd78e6dafac, the search's start everywhere) learned its critic
+# from v-trace returns at gamma 0.999 while the policy kept moving. so it estimates 0.999^(decisions
+# left, both seats) x P(win), for a policy that changed under it. the search backs up values as win
+# probabilities, but the critic was never fit to the undiscounted outcome of the final policy.
+#
+# what this run does: the policy stays exactly e3600's, and only the critic is refit to the
+# undiscounted outcome of games that policy plays against itself. the env is the start's own
+# (base-2p, its 4096-board pool from seed 42, turn limit 1000, temperature-1 sampling).
+#   - main: graph-s split into two trunks (model.args.shared: false). the actor trunk and policy head
+#     are copied from e3600's shared trunk and policy head, the critic trunk and value head from its
+#     trunk and value head (init_from.split_shared). so e0 computes e3600's logits and values bit for
+#     bit (tests/test_critic_refit.py, on 208 real rows of e3600). train.freeze: [actor] takes the
+#     467,427 actor parameters out of the gradient and the optimizer, so the policy can't move
+#     (approx_kl ~0 and clipfrac 0 are logged as a live check; the cpu smoke found every actor
+#     tensor equal to its start's at every checkpoint). the critic network's 376,225 parameters
+#     train.
+#   - head: the shared network as it is, freeze: [actor] (trunk and policy head), so only the value
+#     head's 74,113 parameters train. second, and optional: `catanrl run critic-refit-2p --only main`
+#     runs the split arm alone.
+# the targets: critic_targets lambda with critic_gamma 1 and gae_lambda 1. a seat's target is its
+# outcome (1 win, 0 loss or truncation) when its game ends inside the 256-step segment, else the
+# critic's own value at the segment's last step (which itself gets no target). with games ~162
+# decisions long, ~68% of the targets are the real outcome (19% at the start's 64-step segments),
+# which is why the segments are 4x longer and the games in flight halved (516 x 2 rows x 256
+# steps: the same 2.53 GiB rollout buffer as 1032 x 128). prio_alpha 0 samples segments uniformly
+# (the start's 0.8 weights them by policy advantage, which the value loss never corrects for).
+# update_epochs 1 uses each fresh rollout about once, and adam starts fresh at 3e-5 with a cosine
+# down to 3e-6.
+#
+# the probe (cpu, 2026-10-23; 5,120 raw-policy games of e3600 on this env, 827k decisions):
+#   - against the undiscounted outcome, the start's acting-seat BCE is 0.370 [0.361, 0.378] (Brier
+#     0.1195; a constant guess is 0.682). it fits V = 0.999^k x P(win) (fitted discount 0.99939),
+#     the two seats sum to 0.936, and it is under-confident (predicted 0.744 wins 0.830 of the time).
+#   - headroom on 1,536 held-out games (start 0.3759, AUC within turn bins 0.8939): calibration
+#     only. dividing by v0+v1 gives -0.0100, per-bin platt -0.0119, and a value-head refit on the
+#     frozen trunk -0.0118 [-0.0160, -0.0071] nats, all with AUC 0.894. that's ~0.011 nats, ~3% of
+#     the BCE, and it stops growing by ~800 games.
+#   - the gumbel root min-max rescales Q (engine search_pool.cpp:998-1006), which mostly cancels a
+#     calibration change; interior PUCT nodes read raw Q. so the probe expects no harness change
+#     unless the critic trunk learns to discriminate better, and only a run can show that.
+# watch critic/bce_slot0_2p (and brier_slot0_2p): the rollout network's predictions against the
+# outcomes of games it hasn't trained on, so out of sample, every epoch on ~815 fresh games.
+# epoch 1 should read the start's ~0.37. calibration alone brings it to ~0.357-0.36, so only
+# clearly below that is more than calibration. (the probe proposed gating the search evals on a
+# 0.005-nat gain; that's not wired in, so the evals below run regardless.) losses/value_loss is
+# the same BCE against the targets above, on minibatches drawn before their own update (a segment
+# can come up twice in an epoch).
+#
+# evals, all in marco's search harness: MCTS with the refit network against e3600's raw policy,
+# paired game by game with the start's weights in exactly the same search.
+#   - 512 sims: the select, on az-2p-2048-soft's select-2p-500 (500 boards x 2 seats = 1000 games),
+#     every 500, so it plays at e0 and at the last epoch e500 only. it's a select because
+#     validate_plan refuses a select suite in eval.final, and this row has to be on that suite to
+#     pair with 856a0421 (e3600's weights in this search, 57.4). main's e0 is the split start, the
+#     same function as e3600, so it should replay 856a0421 game for game (the cpu smoke's split e0
+#     replayed its start's search exactly). if it doesn't, one vs two trunks moved some searches on
+#     the GPU, and e0 becomes e500's matched baseline. head's e0 is e3600's exact weights: its
+#     select has 856a0421's eval id and replays it under this run. best is just the higher of the
+#     two, and nothing reads it.
+#   - 2048 sims: the final at latest (e500) on heldout-2p's first 500 boards x 2 seats, with
+#     gumbel-edge-2p's spec exactly, so it pairs with 831eea84 (e3600's weights in this search, 62.4).
+#   decision (fixed before launch): e500's select against 856a0421 and the final against 831eea84,
+#     each by paired McNemar over the 1000 shared game ids (tools/search_probe.py --pair <record>
+#     856a0421 / 831eea84; same code and schedule, so catanrl.eval.results.paired accepts them too),
+#     holm at 0.05 over the two rows (the smaller p against 0.025, the other against 0.05). a row
+#     that passes says the refit critic changed that search's strength, in the sign of its delta.
+#     neither passing means no detectable effect: the paired SD of a difference is ~1.6 pp, so
+#     effects under ~3 pp are out of reach. the head arm's rows read the same way, and the two arms
+#     pair with each other.
+#
+# time (rtx 2070 super; none of it measured with two trunks on the gpu):
+#   training: puffer-graph2/public's last 386 epochs took 7.46 s per 132,096 agent steps (collect
+#     1.58 s, train 5.88 s over 2 update epochs). here an epoch is 264,192 agent steps (132,096
+#     decisions, ~815 games). collect is 256 steps of 516 games with two trunks (1.8x a forward on
+#     cpu), 5-10 s depending on whether the forward scales with rows. train is the start's 64
+#     micro-batches of 4096 rows, with a 1.8x forward and a critic-only backward, ~7-7.7 s. so
+#     12-18 s per epoch x 500 = 1.7-2.5 h: ~408k games, 66M decisions, 8,000 adam steps. the gpu
+#     peak should be ~6.0 GiB (the start's 4.74 with 1.27 GiB of rollout, here 2.53).
+#   selects: 856a0421 took 1.00 h with one trunk. two trunks add a forward to every search round,
+#     so 1.0-1.9 h each (1.87x is the cpu forward ratio, the bound if the forward were all the
+#     time). x 2 (e0, e500) = 2.0-3.8 h, inside the run.
+#   final: 831eea84 took 3.90 h, so 3.9-7.3 h, after the run.
+#   main: ~8-14 h in all. head (one trunk, value-head backward): ~1 h of training + 2 x 1.0 h of
+#     selects + 3.9 h of final, ~7 h.
+name: critic-refit-2p
+seed: 42                        # puffer-graph2's: the map pool is derived from it (the start's own 4096 boards)
+env:
+  scenarios: [{game: base-2p, turn_limit: 1000, maps: 4096}]
+  num_envs: 516                 # x 2 rows x 256 steps = 264,192 agent steps per epoch (the start: 1032 x 64)
+obs: {level: public}
+model: {preset: graph-s}        # shared per arm (sweep)
+# e3600 is #3cd78e6dafac: the run pins it at creation (config.json resolved.init_from), and ${init}
+# with it. No #sha here: --smoke turns epoch refs into @latest. A fresh optimizer (restore: weights).
+init_from: {ckpt: "puffer-graph2/public@e3600", parts: [actor, critic]}
+train:
+  algo: ppo
+  freeze: [actor]               # the policy stays e3600's, bit for bit
+  total_timesteps: 132_096_000  # 500 epochs x 264,192
+  optimizer: adam
+  learning_rate: 3.0e-5         # the probe's best on the value head (adam, 1e-4 and up overfit its 3.6k games)
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true               # cosine over the 500 epochs ...
+  min_lr_ratio: 0.1             # ... down to 3e-6
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 1.0e-8
+  critic_targets: lambda
+  critic_gamma: 1.0             # undiscounted per-seat win probabilities
+  gae_lambda: 1.0               # the critic's lambda too (shared key): returns to the segment's end
+  gamma: 0.999                  # the policy's advantages only: logged, reach nothing
+  update_epochs: 1
+  bptt_horizon: 256             # ~68% of targets are outcomes (19% at 64)
+  minibatch_size: 16384         # the start's: 16 adam steps per epoch, 4 accumulated micro-batches
+  max_minibatch_size: 4096
+  prio_alpha: 0.0               # uniform segments
+  prio_beta0: 1.0
+  vf_coef: 1.0                  # the update is the value loss alone
+  max_grad_norm: 1.0
+  ent_coef: 0.005               # the start's; reaches nothing (the actor is frozen)
+  clip_coef: 0.2                # reaches nothing
+  checkpoint_interval: 25       # e0, e25, ..., e500 (~3.4 MB each split)
+eval:
+  select:
+    # az-2p-2048-soft's select exactly (select-2p-2k's seed and purpose, its first 500 boards)
+    suite: {name: select-2p-500, purpose: select, seed: 123, boards: 500, scenarios: [base-2p], turn_limit: 500}
+    lineup: ["MCTS:ckpt=${self}:sims=512:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16", "POLICY:ckpt=${init}"]
+    every: 500                  # e0 and e500 only
+    metric: score_rate
+  final:
+    - suite: {name: heldout-2p, boards: 500}
+      lineup: ["MCTS:ckpt=${run}@latest:sims=2048:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16", "POLICY:ckpt=${init}"]
+sweep:
+  axes:
+    arm:
+      main: {model.args.shared: false, init_from.split_shared: true}   # two trunks: the critic network refits
+      head: {model.args.shared: true}                                   # one trunk: the value head refits
+  name: "{arm}"
+runtime: {device: cuda, threads: 12, num_envs: 256, compile: true}   # num_envs: eval games in flight
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
