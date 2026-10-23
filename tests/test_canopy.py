@@ -626,6 +626,94 @@ def test_a_gpu_build_records_its_execution_and_a_cpu_build_nothing_new(monkeypat
     assert results._canopy_execution([agent("cuda"), agent(None), None]) == {"canopy": {"backend": "cuda", **runtime}}
 
 
+def test_runtime_canopy_dir_names_the_build_the_plans_evals_play(tmp_path, monkeypatch):
+    """``runtime.canopy_dir`` is $CATANRL_CANOPY_DIR while a plan's evals resolve and play (under
+    the runs root when relative), and only then; a variable naming another build is refused."""
+    from catanrl import runner
+    from catanrl.config import ConfigError
+
+    monkeypatch.setenv("CATANRL_RUNS_DIR", str(tmp_path / "runs"))
+    (tmp_path / "runs").mkdir()
+    cuda = _release_dir(tmp_path / "runs" / "_canopy-cuda", "cuda", b"cuda binary")
+    monkeypatch.setattr("catanrl.canopy.release.CHECKPOINT_SHA256", canon.sha256_file(cuda / "model_iter_315.mpk"))
+    monkeypatch.delenv("CATANRL_CANOPY_DIR", raising=False)
+    with runner.canopy_release({"canopy_dir": "_canopy-cuda"}) as path:
+        assert path == cuda.resolve() and os.environ["CATANRL_CANOPY_DIR"] == str(path)
+        assert load_release().manifest["backend"] == "cuda"
+    assert "CATANRL_CANOPY_DIR" not in os.environ
+    with runner.canopy_release({"canopy_dir": str(cuda)}) as path:  # absolute, as given
+        assert path == cuda.resolve()
+    with runner.canopy_release({"canopy_dir": None}) as path, runner.canopy_release(None) as other:
+        assert path is None and other is None and "CATANRL_CANOPY_DIR" not in os.environ
+    monkeypatch.setenv("CATANRL_CANOPY_DIR", str(cuda))  # the same build: fine, and kept after
+    with runner.canopy_release({"canopy_dir": "_canopy-cuda"}):
+        pass
+    assert os.environ["CATANRL_CANOPY_DIR"] == str(cuda)
+    monkeypatch.setenv("CATANRL_CANOPY_DIR", str(tmp_path / "elsewhere"))
+    with pytest.raises(ConfigError, match="unset one"), runner.canopy_release({"canopy_dir": "_canopy-cuda"}):
+        pass
+
+
+def test_final_evals_play_under_the_plans_canopy_dir(tmp_path, monkeypatch):
+    """The runner's evals see runtime.canopy_dir as $CATANRL_CANOPY_DIR, and it is no eval option."""
+    import types
+
+    from catanrl import runner
+
+    monkeypatch.setenv("CATANRL_RUNS_DIR", str(tmp_path))
+    monkeypatch.delenv("CATANRL_CANOPY_DIR", raising=False)
+    seen = []
+
+    def evaluate(lineup, suite, **options):
+        seen.append((os.environ.get("CATANRL_CANOPY_DIR"), options))
+        return types.SimpleNamespace(data={"specs": lineup, "suite": "s"}, summary={"score_rate": 0.5, "games": 2},
+                                     eval_id="e")
+
+    monkeypatch.setattr(runner, "bound_lineup", lambda run, lineup, **kw: list(lineup))
+    monkeypatch.setattr(results, "evaluate", evaluate)
+    runtime = {"device": "cpu", "num_envs": 1000, "threads": 2, "canopy_dir": "_canopy-cuda"}
+    plan = types.SimpleNamespace(config={"runtime": runtime, "eval": {"final": [
+        {"suite": "s", "lineup": ["CANOPY:sims=8", "F"]}, {"suite": "s", "lineup": ["CANOPY:sims=8", "R"]}]}})
+    assert len(runner.final_evals(types.SimpleNamespace(ref="x/main"), plan)) == 2
+    assert [d for d, _ in seen] == [str((tmp_path / "_canopy-cuda").resolve())] * 2
+    assert all("canopy_dir" not in o and o["num_envs"] == 1000 for _, o in seen)
+    assert "CATANRL_CANOPY_DIR" not in os.environ
+
+
+def test_the_gpu_bench_plays_one_canopy_and_its_rows_pair(monkeypatch):
+    """canopy-bench-2p-gpu: four 1000-game rows on heldout-2p's first 500 boards, one canopy
+    (the cuda build, named by runtime.canopy_dir) in slot 0 of every row, all games in flight;
+    every row keys the same schedule, code and slot 0, so results.paired pairs rows 1 and 2 (POLICY
+    and MCTS) on slot 1, and the execution knobs (procs, $CATANRL_CANOPY_PROCS, num_envs) are in
+    no key."""
+    from catanrl.config import load_plan
+    from catanrl.eval.suites import load_suite
+
+    release = Release(directory=Path("."), binary=Path("b"), checkpoint=Path("c"), binary_sha256="cd" * 32,
+                      manifest={"backend": "cuda"})
+    monkeypatch.setattr(canopy_agent, "load_release", lambda: release)
+    [variant] = load_plan("canopy-bench-2p-gpu").variants
+    cfg = variant.config
+    rows = cfg["eval"]["final"]
+    assert [r["suite"] for r in rows] == [{"name": "heldout-2p", "boards": 500}] * 4
+    assert len({r["lineup"][0] for r in rows}) == 1 and is_canopy_spec(rows[0]["lineup"][0])
+    # row 2 (MCTS) last: canopy-search-2p-gpu plays it as the same record, so it is found or waited for
+    assert [r["lineup"][1].split(":")[0] for r in rows] == ["POLICY", "BELIEF", "F", "MCTS"]
+    assert not any("sims=0" in r["lineup"][0] for r in rows)  # row 3 stays the cpu record (1c916131)
+    runtime = cfg["runtime"]
+    assert (runtime["device"], runtime["canopy_dir"]) == ("cuda", "_canopy-cuda") and runtime["num_envs"] >= 1000
+    suite = load_suite(rows[0]["suite"])
+    assert len(suite.schedule(2)) == 1000 <= runtime["num_envs"]
+    # Slot 0 keys alike in every row (the opponents need checkpoints this test has not: F stands in).
+    keys = [results.eval_key([resolve(r["lineup"][0], games=suite.games()), resolve("F")], suite, harness="native")
+            for r in rows]
+    assert all(k == keys[0] for k in keys) and keys[0]["lineup"][0]["canopy"]["backend"] == "cuda"
+    assert set(keys[0]["code"]) == {"catanrl", "engine", "canopy"}
+    monkeypatch.setenv("CATANRL_CANOPY_PROCS", "2")
+    one = resolve(rows[0]["lineup"][0].replace("procs=4", "procs=1"), games=suite.games())
+    assert results.eval_key([one, resolve("F")], suite, harness="native") == keys[0]
+
+
 @pytest.mark.parametrize("args,match", [(["--backend", "metal", "s", "o", "c"], "cpu or cuda"),
                                         (["--backend", "cuda", "s", "o"], "build_bridge.sh")])
 def test_the_build_script_takes_a_backend(args, match):

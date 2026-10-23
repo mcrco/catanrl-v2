@@ -700,8 +700,9 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   rustc). `build_bridge.sh --backend cuda` builds the same source on burn's
   CUDA backend, which batches the network on the GPU: another binary with
   `backend: cuda` in the key, picked by pointing `$CATANRL_CANOPY_DIR` at
-  its directory, so CPU-build records keep their keys and the two never
-  mix. It is not bit-reproducible (cubecl's kernel macro expands in hash
+  its directory (or a plan's `runtime.canopy_dir`, which the runner sets as
+  that variable for its evals; relative to the runs root), so CPU-build
+  records keep their keys and the two never mix. It is not bit-reproducible (cubecl's kernel macro expands in hash
   order; two builds played identically), so the installed build is kept.
   Its outputs do not depend on the batch (a position alone or among 7 to
   300 others, raw or at 1600 simulations, bit for bit) and repeat across
