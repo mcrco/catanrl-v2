@@ -1,0 +1,30 @@
+{
+ "backend": "cuda",
+ "binary_sha256": "1f7cc2464baddd01427b7e238c462a825cf8824c86a6b41853d36d5a68802689",
+ "checkpoint_sha256": "f8e4e6858930243a30243e38c1b2b96b1a8da23970f5cba69906c65b268c60cc",
+ "commit": "6185983a88ba6802e7fa9893cef5a76a15de2595",
+ "example": "catan",
+ "format": "catanrl.canopy_bridge_manifest/1",
+ "patches": [
+  [
+   "canopy-nexus-v3-reset-search-budget.patch",
+   "506fb91bff6bbedb764031e8d252dd4cf6ef92ce91d1d22c9bbe353bcc4e3f67"
+  ],
+  [
+   "canopy-catanatron-bridge.patch",
+   "6eba3e9204ee0340febb931957b6cbcc62c1dadb8c8460562cbae54715c444ac"
+  ],
+  [
+   "canopy-v2-bench-ext.patch",
+   "60fbc1776e25ce8d6231b7fd7b905cd4e05b69fc7481c5baf24a76737300dec0"
+  ],
+  [
+   "canopy-v2-reproducible-build.patch",
+   "a0fd083cd6e6ea253d155bb06436cd1569dedde8f96a4dc81c4ed4b1aa208012"
+  ]
+ ],
+ "profile": "release",
+ "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+ "source_head": "ace94d2f641028efb1f4cd1a8a3afa6da01b986c",
+ "tree": "40a0d6b7a861fd2a4772a197c01c7c668a03772b"
+}

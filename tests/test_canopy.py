@@ -558,16 +558,82 @@ def test_procs_env_sets_the_bridge_processes_and_no_key(fake_release, monkeypatc
         agent.native()
 
 
-def test_the_committed_patches_and_manifest_are_the_pinned_build():
-    """third_party/canopy holds the pinned patches and the manifest of the build they make
-    (third_party/canopy/build_bridge.sh rebuilds it to the same binary)."""
-    root = Path(__file__).resolve().parents[1] / "third_party" / "canopy"
+THIRD_PARTY = Path(__file__).resolve().parents[1] / "third_party" / "canopy"
+#: The committed manifest per backend of build_bridge.sh (--backend cpu | cuda).
+COMMITTED = {"cpu-ndarray": MANIFEST_NAME, "cuda": "canopy-bridge-cuda.manifest.json"}
+
+
+def test_the_committed_patches_and_manifests_are_the_pinned_builds():
+    """third_party/canopy holds the pinned patches and, per backend, the manifest of the build
+    they make (third_party/canopy/build_bridge.sh rebuilds it to the same binary): the same
+    source, patches and weights; another binary."""
     for name, sha in PATCHES:
-        assert canon.sha256_file(root / "patches" / name) == sha, name
-    assert sorted(p.name for p in (root / "patches").iterdir()) == sorted(name for name, _ in PATCHES)
-    manifest = json.loads((root / MANIFEST_NAME).read_text())
-    assert manifest["commit"] == CANOPY_COMMIT and [tuple(p) for p in manifest["patches"]] == list(PATCHES)
-    assert manifest["checkpoint_sha256"] == CHECKPOINT_SHA256 and len(manifest["binary_sha256"]) == 64
+        assert canon.sha256_file(THIRD_PARTY / "patches" / name) == sha, name
+    assert sorted(p.name for p in (THIRD_PARTY / "patches").iterdir()) == sorted(name for name, _ in PATCHES)
+    binaries = set()
+    for backend, file in COMMITTED.items():
+        manifest = json.loads((THIRD_PARTY / file).read_text())
+        assert manifest["commit"] == CANOPY_COMMIT and [tuple(p) for p in manifest["patches"]] == list(PATCHES)
+        assert manifest["checkpoint_sha256"] == CHECKPOINT_SHA256 and len(manifest["binary_sha256"]) == 64
+        assert manifest["backend"] == backend and manifest["tree"] == json.loads(
+            (THIRD_PARTY / MANIFEST_NAME).read_text())["tree"]
+        binaries.add(manifest["binary_sha256"])
+    assert len(binaries) == len(COMMITTED)
+
+
+def _release_dir(path: Path, backend: str, binary: bytes) -> Path:
+    path.mkdir()
+    (path / "canopy-bridge").write_bytes(binary)
+    (path / "model_iter_315.mpk").write_bytes(b"weights")
+    manifest = {"format": "catanrl.canopy_bridge_manifest/1", "commit": CANOPY_COMMIT, "backend": backend,
+                "patches": [list(p) for p in PATCHES], "binary_sha256": canon.sha256_file(path / "canopy-bridge")}
+    (path / "canopy-bridge.manifest.json").write_text(canon.canonical_json(manifest).decode())
+    return path
+
+
+def test_a_cuda_release_keys_apart_from_the_cpu_one(tmp_path, monkeypatch):
+    """$CATANRL_CANOPY_DIR picks the build; the key names its binary and backend, so a CUDA
+    build's records never mix with the CPU build's, and a CPU build keys as it always did."""
+    monkeypatch.setattr("catanrl.canopy.release.CHECKPOINT_SHA256", canon.sha256_file(
+        _release_dir(tmp_path / "cpu", "cpu-ndarray", b"cpu binary") / "model_iter_315.mpk"))
+    _release_dir(tmp_path / "cuda", "cuda", b"cuda binary")
+    keys = {}
+    for backend in ("cpu", "cuda"):
+        monkeypatch.setenv("CATANRL_CANOPY_DIR", str(tmp_path / backend))
+        keys[backend] = load_release().key()
+    differs = {k for k in keys["cpu"] if keys["cpu"][k] != keys["cuda"][k]}
+    assert differs == {"binary_sha256", "backend"} and keys["cuda"]["backend"] == "cuda"
+    assert set(keys["cpu"]) == {"commit", "patches", "binary_sha256", "checkpoint_sha256", "backend"}
+
+
+def test_a_gpu_build_records_its_execution_and_a_cpu_build_nothing_new(monkeypatch):
+    """The segment's execution gains a ``canopy`` entry (GPU, driver, NVRTC, toolkit) only for
+    a GPU build: a CPU build's records resume under the execution they started with."""
+    runtime = {"gpu": "G", "capability": "7.5", "driver": "1", "nvrtc": "13.2", "cuda_path": "/c", "toolkit": 13020}
+    monkeypatch.setattr(results, "_cuda_runtime", lambda: dict(runtime))
+
+    def agent(backend):
+        if backend is None:
+            return resolve("F")
+        release = Release(directory=Path("."), binary=Path("b"), checkpoint=Path("c"), binary_sha256="ab" * 32,
+                          manifest={"backend": backend})
+        return canopy_agent.CanopyResolved(key="CANOPY", impl="catanrl.canopy", params=CanopyParams(),
+                                           checkpoint=None, fair=True, label="CANOPY", canonical="CANOPY",
+                                           release=release)
+
+    assert results._canopy_execution([agent("cpu-ndarray"), agent(None), None]) == {}
+    assert results._canopy_execution([agent(None), agent(None)]) == {}
+    assert results._canopy_execution([agent("cuda"), agent(None), None]) == {"canopy": {"backend": "cuda", **runtime}}
+
+
+@pytest.mark.parametrize("args,match", [(["--backend", "metal", "s", "o", "c"], "cpu or cuda"),
+                                        (["--backend", "cuda", "s", "o"], "build_bridge.sh")])
+def test_the_build_script_takes_a_backend(args, match):
+    import subprocess
+
+    done = subprocess.run(["bash", str(THIRD_PARTY / "build_bridge.sh"), *args], capture_output=True, text=True,
+                          check=False)
+    assert done.returncode == 2 and match in done.stderr
 
 
 def test_release_refuses_a_directory_that_is_not_the_pinned_build(tmp_path):
