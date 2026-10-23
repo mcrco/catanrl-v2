@@ -678,11 +678,15 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   `catan-nexus-v3` iteration 315) through its Rust bridge:
   `CANOPY:sims=1600` (`0` plays its raw policy), Canopy's `c_puct` 2.5,
   `c_visit` 50, `c_scale` 1, Dirichlet off, `reuse` (re-root the game's
-  search when the moves since the seat's last decision replay exactly);
-  `procs` and `timeout` are execution-only. The bridge build lives in
+  search when the moves since the seat's last decision replay exactly: its
+  own move and moves it knows were forced whatever the opponent's hidden
+  cards); `procs` and `timeout` are execution-only (`$CATANRL_CANOPY_PROCS`
+  overrides `procs`, e.g. for a verify). The bridge build lives in
   `$CATANRL_CANOPY_DIR` (default `<runs>/_canopy`) and is verified against
   the pinned commit, patch, binary and checkpoint hashes, which its
-  `key_dict()` carries. Each decision is serialized from the seat's view
+  `key_dict()` carries; `third_party/canopy/build_bridge.sh` rebuilds it
+  from the committed patches to the same binary (paths remapped, the pinned
+  rustc). Each decision is serialized from the seat's view
   (the opponent's hand dealt from its tracker, its development cards as a
   count) and Canopy's choice is played as the engine's action with that
   Canopy id; a choice the engine does not offer is a counted, logged

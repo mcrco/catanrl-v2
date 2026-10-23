@@ -1,0 +1,879 @@
+diff --git a/examples/catan/catanatron_bridge.rs b/examples/catan/catanatron_bridge.rs
+index 6ad0032..1e9960f 100644
+--- a/examples/catan/catanatron_bridge.rs
++++ b/examples/catan/catanatron_bridge.rs
+@@ -6,35 +6,102 @@
+ //! run all searches in lockstep so neural evaluations are batched on the GPU,
+ //! and return Canopy action IDs.  No Catanatron state or action representation
+ //! is modified by this adapter.
++//!
++//! catanrl-v2 benchmark extensions (on top of v1's bridge, see rust.md):
++//! - hidden opponent dev cards: `hidden_dev_cards` / `hidden_dev_cards_bought_this_turn`
++//!   per player (Canopy's colonist representation).  By default a snapshot that
++//!   carries the non-deciding player's dev-card identities is rejected.
++//! - per-snapshot `friendly_robber`, `port_set`, `seed`; per-request `simulations`
++//!   and `details`; `simulations = 0` plays the raw policy argmax.
++//! - tree reuse by replaying `tree_actions` through `Search::apply_action` on the
++//!   saved search and checking the result against the imported state (v1's
++//!   final reuse check compared against a stale root state and so always reset).
++//! - sanity checks (resource and dev-card conservation, piece counts).
+ 
+ use std::io::{BufRead, Write};
+ use std::sync::Arc;
++use std::time::Instant;
+ use std::{collections::HashMap, collections::HashSet};
+ 
+ use canopy::eval::{Evaluation, Evaluator};
++use canopy::game::{Game, Status};
+ use canopy::mcts::{Config, LeafId, Search, Select};
+ use canopy::player::Player;
+ use serde::{Deserialize, Serialize};
+ 
++use crate::game::action::{
++    BUY_DEV_CARD, MONOPOLY_END, PLAY_KNIGHT, PLAY_ROAD_BUILDING, ROLL, YOP_START,
++};
++use crate::game::state::ORIGINAL_DEV_DECK;
++
+ use crate::game::board::{NodeId, Terrain};
+ use crate::game::dev_card::{DevCardArray, DevCardDeck};
+ use crate::game::dice::Dice;
+ use crate::game::resource::{Resource, ResourceArray};
+ use crate::game::road::RoadNetwork;
+ use crate::game::state::{GameState, Phase, PlayerBoards, PlayerState};
+-use crate::game::topology::{PORT_SPECS, Topology};
++use crate::game::topology::{PORT_SPECS, PORT_SPECS_ALT, Topology};
+ 
+ #[derive(Deserialize)]
+ struct BridgeRequest {
+     id: u64,
+     active_game_ids: Option<Vec<String>>,
++    #[serde(default)]
+     states: Vec<StateSnapshot>,
++    /// Per-request simulation budget (overrides --simulations). 0 = raw policy.
++    #[serde(default)]
++    simulations: Option<u32>,
++    /// Return a `details` entry per state.
++    #[serde(default)]
++    details: bool,
++    /// Return Canopy's fixed topology (tile nodes/edges, port nodes) instead of searching.
++    #[serde(default)]
++    topology: bool,
+ }
+ 
+ #[derive(Serialize)]
+ struct BridgeResponse {
+     id: u64,
+-    actions: Vec<usize>,
++    /// Canopy action id per state, or null when Canopy has no legal action there.
++    actions: Vec<Option<usize>>,
++    elapsed_ms: f64,
++    nn_batches: u64,
++    nn_states: u64,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    details: Option<Vec<Detail>>,
++}
++
++#[derive(Serialize, Default)]
++struct Detail {
++    game_id: String,
++    /// "search", "raw", "forced" (one Canopy-legal action) or "no_legal".
++    mode: &'static str,
++    /// "fresh", "reused", or "reset:<reason>".
++    reuse: String,
++    canopy_legal: Vec<usize>,
++    sims_budget: u32,
++    /// Root visits already present (reused subtree) before this search.
++    root_visits_before: u32,
++    root_visits: u32,
++    selected_visits: u32,
++    prior_top1: usize,
++    /// Root value (W - L) from the deciding player's perspective.
++    value: f32,
++    /// Raw network value at the root from the deciding player's perspective.
++    network_value: f32,
++    /// (action, probability): improved policy after search, or the prior softmax.
++    policy: Vec<(usize, f32)>,
++}
++
++#[derive(Serialize)]
++struct TopologyResponse {
++    id: u64,
++    land_hexes_axial: Vec<(i8, i8)>,
++    tile_nodes: Vec<[u8; 6]>,
++    tile_edges: Vec<[u8; 6]>,
++    edge_nodes: Vec<[u8; 2]>,
++    port_nodes_primary: Vec<[u8; 2]>,
++    port_nodes_alt: Vec<[u8; 2]>,
+ }
+ 
+ #[derive(Serialize)]
+@@ -72,6 +139,15 @@ struct StateSnapshot {
+     discard_threshold: u8,
+     settlements_at_turn_start: Vec<u8>,
+     roads_placed_at_turn_start: u8,
++    /// Friendly-robber house rule (Canopy's training default was on; base-2p is off).
++    #[serde(default)]
++    friendly_robber: bool,
++    /// "primary" (PORT_SPECS, Catanatron's BASE positions) or "alt" (PORT_SPECS_ALT).
++    #[serde(default)]
++    port_set: Option<String>,
++    /// Search RNG seed for this decision; default: drawn from the process RNG.
++    #[serde(default)]
++    seed: Option<u64>,
+ }
+ 
+ #[derive(Deserialize)]
+@@ -91,6 +167,12 @@ struct PlayerSnapshot {
+     trade_ratios: [u8; 5],
+     #[serde(default)]
+     tested_non_knight: u8,
++    /// Unrevealed dev cards (count only), as in Canopy's colonist mode.
++    #[serde(default)]
++    hidden_dev_cards: u8,
++    /// How many of `hidden_dev_cards` were bought this turn.
++    #[serde(default)]
++    hidden_dev_cards_bought_this_turn: u8,
+ }
+ 
+ #[derive(Deserialize)]
+@@ -168,10 +250,105 @@ struct ImportedState {
+     game_id: String,
+     tree_actions: Vec<usize>,
+     reuse_tree: bool,
++    seed: Option<u64>,
+     state: GameState,
+ }
+ 
+-fn build_state(snapshot: StateSnapshot) -> Result<ImportedState, String> {
++/// Reject snapshots that are inconsistent or that reveal hidden information.
++///
++/// The deciding player is `current_player` (Canopy is only asked to act on its
++/// own decisions).  Unless `allow_opponent_identities` is set, the other
++/// player's unplayed dev cards must arrive as a count in `hidden_dev_cards`,
++/// never as identities in `dev_cards` / `dev_cards_bought_this_turn`.
++fn validate_snapshot(snapshot: &StateSnapshot, allow_opponent_identities: bool) -> Result<(), String> {
++    let me = snapshot.current_player;
++    if me > 1 {
++        return Err(format!("invalid current_player {me}"));
++    }
++    let opp = 1 - me;
++    let mine = &snapshot.players[me];
++    if mine.hidden_dev_cards != 0 || mine.hidden_dev_cards_bought_this_turn != 0 {
++        return Err("the deciding player's own dev cards must be exact (hidden_dev_cards = 0)".into());
++    }
++    let theirs = &snapshot.players[opp];
++    if !allow_opponent_identities
++        && (theirs.dev_cards.iter().any(|&c| c != 0)
++            || theirs.dev_cards_bought_this_turn.iter().any(|&c| c != 0))
++    {
++        return Err(format!(
++            "fairness: snapshot carries the opponent's dev-card identities \
++             (dev_cards={:?}, bought_this_turn={:?}); send only hidden_dev_cards counts",
++            theirs.dev_cards, theirs.dev_cards_bought_this_turn
++        ));
++    }
++    let mut deck_used = 0u32;
++    for (index, p) in snapshot.players.iter().enumerate() {
++        if p.hidden_dev_cards_bought_this_turn > p.hidden_dev_cards {
++            return Err(format!("player {index}: hidden bought-this-turn exceeds hidden cards"));
++        }
++        for t in 0..5 {
++            if p.dev_cards_bought_this_turn[t] > p.dev_cards[t] {
++                return Err(format!("player {index}: dev card kind {t} bought-this-turn exceeds held"));
++            }
++        }
++        if p.dev_cards_played[1] != 0 {
++            return Err(format!("player {index}: victory-point cards are never played"));
++        }
++        let built_settlements = snapshot.settlements[index].len() as u8;
++        let built_cities = snapshot.cities[index].len() as u8;
++        let built_roads = snapshot.roads[index].len() as u8;
++        if p.settlements_left as u16 + built_settlements as u16 != 5
++            || p.cities_left as u16 + built_cities as u16 != 4
++            || p.roads_left as u16 + built_roads as u16 != 15
++        {
++            return Err(format!(
++                "player {index}: pieces left {}/{}/{} do not match the board {}/{}/{}",
++                p.settlements_left, p.cities_left, p.roads_left,
++                built_settlements, built_cities, built_roads
++            ));
++        }
++        if p.building_vps as u16 != built_settlements as u16 + 2 * built_cities as u16 {
++            return Err(format!("player {index}: building_vps {} does not match the board", p.building_vps));
++        }
++        deck_used += p.dev_cards.iter().map(|&c| c as u32).sum::<u32>()
++            + p.hidden_dev_cards as u32
++            + p.dev_cards_played.iter().map(|&c| c as u32).sum::<u32>();
++    }
++    for t in 0..5 {
++        let used: u32 = snapshot
++            .players
++            .iter()
++            .map(|p| p.dev_cards[t] as u32 + p.dev_cards_played[t] as u32)
++            .sum();
++        if used > ORIGINAL_DEV_DECK[t] as u32 {
++            return Err(format!("dev card kind {t}: {used} known exceeds the deck's {}", ORIGINAL_DEV_DECK[t]));
++        }
++    }
++    let deck_total: u32 = ORIGINAL_DEV_DECK.iter().map(|&c| c as u32).sum();
++    if deck_used + snapshot.dev_deck_total as u32 != deck_total {
++        return Err(format!(
++            "dev cards do not add up: deck {} + held/hidden/played {} != {deck_total}",
++            snapshot.dev_deck_total, deck_used
++        ));
++    }
++    for r in 0..5 {
++        let total = snapshot.bank[r] as u32
++            + snapshot.players[0].hand[r] as u32
++            + snapshot.players[1].hand[r] as u32;
++        if total != 19 {
++            return Err(format!("resource {r}: bank + hands = {total}, expected 19"));
++        }
++    }
++    Ok(())
++}
++
++fn build_state(snapshot: StateSnapshot, allow_opponent_identities: bool) -> Result<ImportedState, String> {
++    validate_snapshot(&snapshot, allow_opponent_identities)?;
++    let port_specs = match snapshot.port_set.as_deref() {
++        None | Some("primary") => &PORT_SPECS,
++        Some("alt") => &PORT_SPECS_ALT,
++        Some(other) => return Err(format!("invalid port_set {other:?}")),
++    };
+     let terrains: [Terrain; 19] = snapshot
+         .terrains
+         .iter()
+@@ -197,7 +374,7 @@ fn build_state(snapshot: StateSnapshot) -> Result<ImportedState, String> {
+         terrains,
+         numbers,
+         ports,
+-        &PORT_SPECS,
++        port_specs,
+     ));
+     if snapshot.tile_nodes.len() != 19 || snapshot.tile_edges.len() != 19 {
+         return Err(format!(
+@@ -258,8 +435,8 @@ fn build_state(snapshot: StateSnapshot) -> Result<ImportedState, String> {
+             has_played_dev_card_this_turn: p.has_played_dev_card_this_turn,
+             has_traded_this_turn: p.has_traded_this_turn,
+             dev_cards_played: DevCardArray(p.dev_cards_played),
+-            hidden_dev_cards: 0,
+-            hidden_dev_cards_bought_this_turn: 0,
++            hidden_dev_cards: p.hidden_dev_cards,
++            hidden_dev_cards_bought_this_turn: p.hidden_dev_cards_bought_this_turn,
+             building_vps: p.building_vps,
+             trade_ratios: p.trade_ratios,
+             tested_non_knight: p.tested_non_knight,
+@@ -311,7 +488,7 @@ fn build_state(snapshot: StateSnapshot) -> Result<ImportedState, String> {
+     };
+     state.vp_limit = snapshot.vp_limit;
+     state.discard_threshold = snapshot.discard_threshold;
+-    state.friendly_robber = false;
++    state.friendly_robber = snapshot.friendly_robber;
+     state.settlements_at_turn_start = mask(
+         &snapshot.settlements_at_turn_start,
+         54,
+@@ -333,6 +510,7 @@ fn build_state(snapshot: StateSnapshot) -> Result<ImportedState, String> {
+         game_id: snapshot.game_id,
+         tree_actions: snapshot.tree_actions,
+         reuse_tree: snapshot.reuse_tree,
++        seed: snapshot.seed,
+         state,
+     })
+ }
+@@ -430,71 +608,297 @@ mod bridge_tests {
+     }
+ }
+ 
++/// Name the first authoritative field on which two states differ (diagnostics).
++fn first_difference(left: &GameState, right: &GameState) -> &'static str {
++    for pid in [Player::One, Player::Two] {
++        let (a, b) = (&left.players[pid], &right.players[pid]);
++        if a.hand != b.hand { return "players.hand"; }
++        if a.dev_cards != b.dev_cards { return "players.dev_cards"; }
++        if a.dev_cards_bought_this_turn != b.dev_cards_bought_this_turn { return "players.dev_cards_bought_this_turn"; }
++        if a.hidden_dev_cards != b.hidden_dev_cards { return "players.hidden_dev_cards"; }
++        if a.hidden_dev_cards_bought_this_turn != b.hidden_dev_cards_bought_this_turn { return "players.hidden_dev_cards_bought_this_turn"; }
++        if a.knights_played != b.knights_played { return "players.knights_played"; }
++        if a.roads_placed != b.roads_placed { return "players.roads_placed"; }
++        if a.has_played_dev_card_this_turn != b.has_played_dev_card_this_turn { return "players.has_played_dev_card_this_turn"; }
++        if a.has_traded_this_turn != b.has_traded_this_turn { return "players.has_traded_this_turn"; }
++        if a.dev_cards_played != b.dev_cards_played { return "players.dev_cards_played"; }
++        if a.trade_ratios != b.trade_ratios { return "players.trade_ratios"; }
++        if a.tested_non_knight != b.tested_non_knight { return "players.tested_non_knight"; }
++        if a != b { return "players.other"; }
++    }
++    if left.current_player != right.current_player { return "current_player"; }
++    for pid in [Player::One, Player::Two] {
++        let (a, b) = (&left.boards[pid], &right.boards[pid]);
++        if a.settlements != b.settlements { return "boards.settlements"; }
++        if a.cities != b.cities { return "boards.cities"; }
++        if a.road_network.roads != b.road_network.roads { return "boards.roads"; }
++        if a.road_network.reachable_edges() != b.road_network.reachable_edges() { return "boards.reachable"; }
++        if a.road_network.longest_road() != b.road_network.longest_road() { return "boards.longest_len"; }
++    }
++    if left.bank != right.bank { return "bank"; }
++    if left.dev_deck != right.dev_deck { return "dev_deck"; }
++    if left.robber != right.robber { return "robber"; }
++    if !same_authoritative_phase(&left.phase, &right.phase) { return "phase"; }
++    if left.turn_number != right.turn_number { return "turn_number"; }
++    if left.pre_roll != right.pre_roll { return "pre_roll"; }
++    if left.setup_count != right.setup_count { return "setup_count"; }
++    if left.longest_road != right.longest_road { return "longest_road"; }
++    if left.largest_army != right.largest_army { return "largest_army"; }
++    if left.dice != right.dice { return "dice"; }
++    if left.vp_limit != right.vp_limit { return "vp_limit"; }
++    if left.discard_threshold != right.discard_threshold { return "discard_threshold"; }
++    if left.friendly_robber != right.friendly_robber { return "friendly_robber"; }
++    if left.last_setup_node != right.last_setup_node { return "last_setup_node"; }
++    "none"
++}
++
++fn is_dev_play(action: usize) -> bool {
++    action == PLAY_KNIGHT as usize
++        || action == PLAY_ROAD_BUILDING as usize
++        || (YOP_START as usize..MONOPOLY_END as usize).contains(&action)
++}
++
++/// Replay `actions` on a saved search (moving its root and advancing its root
++/// state).  Stops with a reason when an action cannot be replayed exactly or
++/// would need hidden information: any dev-card buy or play by the player who
++/// is not deciding now (their cards are hidden in Canopy's state).
++fn advance_saved_search(
++    search: &mut Search<GameState>,
++    actions: &[usize],
++    decider: Player,
++) -> Result<(), String> {
++    let mut legal = Vec::new();
++    let mut outcomes = Vec::new();
++    for (index, &action) in actions.iter().enumerate() {
++        let state = search.state();
++        match state.status() {
++            Status::Terminal(_) => return Err(format!("terminal_at_{index}")),
++            Status::Chance => {
++                // After a pre-roll knight + robber move Canopy goes straight to
++                // the dice chance node; Catanatron still records a ROLL action.
++                if matches!(state.phase, Phase::Roll) && action == ROLL as usize {
++                    continue;
++                }
++                outcomes.clear();
++                state.chance_outcomes(&mut outcomes);
++                if !outcomes.iter().any(|&(o, w)| o == action && w > 0) {
++                    return Err(format!("chance_outcome_{action}_impossible_at_{index}"));
++                }
++            }
++            Status::Decision(_) => {
++                if state.current_player != decider
++                    && (action == BUY_DEV_CARD as usize || is_dev_play(action))
++                {
++                    return Err(format!("opponent_dev_action_{action}_at_{index}"));
++                }
++                state.legal_actions(&mut legal);
++                if !legal.contains(&action) {
++                    return Err(format!("action_{action}_not_canopy_legal_at_{index}"));
++                }
++            }
++        }
++        search.apply_action(action);
++    }
++    Ok(())
++}
++
++struct BridgeStats {
++    nn_batches: u64,
++    nn_states: u64,
++}
++
++fn mover_value(state: &GameState, p1_value: f32) -> f32 {
++    p1_value * state.current_player.sign()
++}
++
++fn softmax_over(logits: &[f32], actions: &[usize]) -> Vec<(usize, f32)> {
++    let max = actions
++        .iter()
++        .map(|&a| logits[a])
++        .fold(f32::NEG_INFINITY, f32::max);
++    let mut out: Vec<(usize, f32)> = actions.iter().map(|&a| (a, (logits[a] - max).exp())).collect();
++    let total: f32 = out.iter().map(|(_, w)| w).sum();
++    for item in &mut out {
++        item.1 /= total;
++    }
++    out
++}
++
++pub struct BridgeOptions {
++    pub simulations: u32,
++    pub seed: u64,
++    pub config: Config,
++    pub tree_reuse: bool,
++    pub allow_opponent_identities: bool,
++}
++
++#[allow(clippy::too_many_arguments)]
+ fn search_batch(
+     states: Vec<ImportedState>,
+     active_game_ids: Option<&[String]>,
+     evaluator: &(dyn Evaluator<GameState> + Sync),
+     simulations: u32,
+-    rng: &mut fastrand::Rng,
++    options: &BridgeOptions,
++    process_rng: &mut fastrand::Rng,
+     saved_searches: &mut HashMap<String, Search<GameState>>,
+-) -> Vec<usize> {
++    stats: &mut BridgeStats,
++) -> (Vec<Option<usize>>, Vec<Detail>) {
+     let config = Config {
+         num_simulations: simulations,
+-        // Evaluation must be deterministic policy improvement, not noisy
+-        // self-play exploration.
+-        dirichlet_epsilon: 0.0,
+-        ..Config::default()
++        ..options.config.clone()
+     };
+     let active_ids: HashSet<String> = active_game_ids
+         .map(|ids| ids.iter().cloned().collect())
+         .unwrap_or_else(|| states.iter().map(|state| state.game_id.clone()).collect());
+     saved_searches.retain(|game_id, _| active_ids.contains(game_id));
+ 
+-    let mut game_ids = Vec::with_capacity(states.len());
+-    let mut searches = Vec::with_capacity(states.len());
+-    for imported in states {
++    let n = states.len();
++    let mut game_ids = Vec::with_capacity(n);
++    let mut searches = Vec::with_capacity(n);
++    let mut rngs = Vec::with_capacity(n);
++    let mut details: Vec<Detail> = Vec::with_capacity(n);
++    let mut actions: Vec<Option<usize>> = vec![None; n];
++    let mut finished = vec![false; n];
++    let mut legal = Vec::new();
++
++    for (index, imported) in states.into_iter().enumerate() {
+         let game_id = imported.game_id;
+-        let mut search = saved_searches
+-            .remove(&game_id)
+-            .unwrap_or_else(|| Search::new(imported.state.clone(), config.clone()));
+-        search.set_num_simulations(simulations);
+-        if imported.reuse_tree {
+-            let walked = search.walk_tree_exact(&imported.tree_actions);
+-            if walked == imported.tree_actions.len()
+-                && same_authoritative_state(search.state(), &imported.state)
+-            {
+-                search.cancel_search();
+-            } else {
++        let decider = imported.state.current_player;
++        let seed = imported.seed.unwrap_or_else(|| process_rng.u64(..));
++        rngs.push(fastrand::Rng::with_seed(seed));
++        let mut detail = Detail {
++            game_id: game_id.clone(),
++            sims_budget: simulations,
++            ..Detail::default()
++        };
++        let saved = saved_searches.remove(&game_id);
++        let mut search = match saved {
++            Some(mut search) if options.tree_reuse && imported.reuse_tree && simulations > 0 => {
++                match advance_saved_search(&mut search, &imported.tree_actions, decider) {
++                    Ok(()) if same_authoritative_state(search.state(), &imported.state) => {
++                        // Keep Canopy's own (more exact) canonical-ordering fields.
++                        search.cancel_search();
++                        detail.reuse = "reused".into();
++                    }
++                    Ok(()) => {
++                        detail.reuse = format!(
++                            "reset:state_differs:{}",
++                            first_difference(search.state(), &imported.state)
++                        );
++                        search.reset(imported.state);
++                    }
++                    Err(reason) => {
++                        detail.reuse = format!("reset:{reason}");
++                        search.reset(imported.state);
++                    }
++                }
++                search
++            }
++            Some(mut search) => {
++                detail.reuse = "fresh".into();
+                 search.reset(imported.state);
++                search
++            }
++            None => {
++                detail.reuse = "fresh".into();
++                Search::new(imported.state, config.clone())
+             }
++        };
++        search.set_num_simulations(simulations);
++        search.state().legal_actions(&mut legal);
++        detail.canopy_legal = legal.clone();
++        if legal.is_empty() {
++            detail.mode = "no_legal";
++            finished[index] = true;
++        } else if legal.len() == 1 {
++            // Canopy's own game loop applies forced actions without search.
++            detail.mode = "forced";
++            actions[index] = Some(legal[0]);
++            finished[index] = true;
++        } else if simulations == 0 {
++            detail.mode = "raw";
+         } else {
+-            search.reset(imported.state);
++            detail.mode = "search";
++            detail.root_visits_before = search.root_visits();
+         }
++        details.push(detail);
+         game_ids.push(game_id);
+         searches.push(search);
+     }
+-    let mut actions = vec![None; searches.len()];
+ 
+-    while actions.iter().any(Option::is_none) {
++    if simulations == 0 {
++        let pending: Vec<usize> = (0..n).filter(|&i| !finished[i]).collect();
++        if !pending.is_empty() {
++            let refs: Vec<&GameState> = pending.iter().map(|&i| searches[i].state()).collect();
++            let evaluations = evaluator.evaluate_batch(&refs, &mut rngs[pending[0]]);
++            stats.nn_batches += 1;
++            stats.nn_states += pending.len() as u64;
++            for (&i, evaluation) in pending.iter().zip(evaluations) {
++                let state = searches[i].state();
++                let prior = softmax_over(&evaluation.policy_logits, &details[i].canopy_legal);
++                let best = prior
++                    .iter()
++                    .max_by(|a, b| a.1.total_cmp(&b.1))
++                    .map(|&(a, _)| a)
++                    .unwrap();
++                let value = mover_value(state, evaluation.wdl.q());
++                let d = &mut details[i];
++                d.prior_top1 = best;
++                d.value = value;
++                d.network_value = value;
++                d.policy = prior;
++                actions[i] = Some(best);
++                finished[i] = true;
++            }
++        }
++    }
++
++    while finished.iter().any(|done| !done) {
+         let mut pending = Vec::new();
+-        for (index, search) in searches.iter_mut().enumerate() {
+-            if actions[index].is_some() {
++        for index in 0..n {
++            if finished[index] {
+                 continue;
+             }
+-            match search.select(rng) {
++            let search = &mut searches[index];
++            match search.select(&mut rngs[index]) {
+                 Select::Eval(leaf, state) => pending.push(PendingLeaf {
+                     search_index: index,
+                     leaf,
+                     state,
+                 }),
+                 Select::Terminal(leaf, wdl) => search.backup_terminal(leaf, wdl),
+-                Select::Done => actions[index] = Some(search.result().selected_action),
++                Select::Done => {
++                    let result = search.result();
++                    let root_state = search.state();
++                    let d = &mut details[index];
++                    d.root_visits = search.root_visits();
++                    d.selected_visits = search
++                        .tree()
++                        .edges(search_root(search))
++                        .iter()
++                        .find(|e| e.action == result.selected_action)
++                        .map(|e| e.visits)
++                        .unwrap_or(0);
++                    d.prior_top1 = result.prior_top1_action;
++                    d.value = mover_value(root_state, result.wdl.q());
++                    d.network_value = mover_value(root_state, result.network_value);
++                    d.policy = d
++                        .canopy_legal
++                        .iter()
++                        .map(|&a| (a, result.policy[a]))
++                        .collect();
++                    actions[index] = Some(result.selected_action);
++                    finished[index] = true;
++                }
+             }
+         }
+ 
+         if !pending.is_empty() {
+             let refs: Vec<&GameState> = pending.iter().map(|item| &item.state).collect();
+-            let evaluations: Vec<Evaluation> = evaluator.evaluate_batch(&refs, rng);
++            let evaluations: Vec<Evaluation> =
++                evaluator.evaluate_batch(&refs, &mut rngs[pending[0].search_index]);
++            stats.nn_batches += 1;
++            stats.nn_states += pending.len() as u64;
+             for (item, evaluation) in pending.into_iter().zip(evaluations) {
+                 searches[item.search_index].backup(item.leaf, evaluation);
+             }
+@@ -504,13 +908,66 @@ fn search_batch(
+     for (game_id, search) in game_ids.into_iter().zip(searches) {
+         saved_searches.insert(game_id, search);
+     }
+-    actions.into_iter().map(Option::unwrap).collect()
++    (actions, details)
++}
++
++/// The current root node id (the search has finished, so the root exists).
++fn search_root(search: &Search<GameState>) -> canopy::mcts::NodeId {
++    search.root_id().expect("finished search has a root")
++}
++
++fn topology_response(id: u64) -> TopologyResponse {
++    use crate::game::board::Port;
++    let terrains = [Terrain::Desert; 19];
++    let numbers = [None; 19];
++    // Port i is marked as a lumber port and every other port as generic, so the
++    // nodes carrying `Specific(Lumber)` are exactly port i's two nodes.
++    let port_nodes = |specs: &[(crate::game::hex::Hex, crate::game::hex::Direction); 9]| -> Vec<[u8; 2]> {
++        (0..9)
++            .map(|i| {
++                let mut ports = [None; 9];
++                ports[i] = Some(Resource::Lumber);
++                let topology = Topology::from_layout_with_ports(terrains, numbers, ports, specs);
++                let nodes: Vec<u8> = topology
++                    .nodes
++                    .iter()
++                    .filter(|n| n.port == Some(Port::Specific(Resource::Lumber)))
++                    .map(|n| n.id.0)
++                    .collect();
++                assert_eq!(nodes.len(), 2, "port {i} should touch two nodes");
++                [nodes[0], nodes[1]]
++            })
++            .collect()
++    };
++    let primary = Topology::from_layout_with_ports(terrains, numbers, [None; 9], &PORT_SPECS);
++    TopologyResponse {
++        id,
++        land_hexes_axial: crate::game::topology::LAND_HEXES
++            .iter()
++            .map(|h| (h.q, h.r))
++            .collect(),
++        tile_nodes: primary.tiles.iter().map(|t| t.nodes.map(|n| n.0)).collect(),
++        tile_edges: primary.tiles.iter().map(|t| t.edges.map(|e| e.0)).collect(),
++        edge_nodes: primary
++            .edges
++            .iter()
++            .map(|e| [e.nodes[0].0, e.nodes[1].0])
++            .collect(),
++        port_nodes_primary: port_nodes(&PORT_SPECS),
++        port_nodes_alt: port_nodes(&PORT_SPECS_ALT),
++    }
+ }
+ 
+-pub fn run(evaluator: Arc<dyn Evaluator<GameState> + Sync>, simulations: u32, seed: u64) {
++fn write_line<T: Serialize>(stdout: &mut impl Write, value: &T) {
++    serde_json::to_writer(&mut *stdout, value).unwrap();
++    writeln!(stdout).unwrap();
++    stdout.flush().unwrap();
++}
++
++pub fn run(evaluator: Arc<dyn Evaluator<GameState> + Sync>, options: BridgeOptions) {
+     let stdin = std::io::stdin();
+     let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+-    let mut rng = fastrand::Rng::with_seed(seed);
++    let mut rng = fastrand::Rng::with_seed(options.seed);
+     let mut saved_searches: HashMap<String, Search<GameState>> = HashMap::new();
+ 
+     for line in stdin.lock().lines() {
+@@ -519,13 +976,7 @@ pub fn run(evaluator: Arc<dyn Evaluator<GameState> + Sync>, simulations: u32, se
+             Ok(_) => continue,
+             Err(error) => {
+                 let message = error.to_string();
+-                let response = BridgeError {
+-                    id: None,
+-                    error: &message,
+-                };
+-                serde_json::to_writer(&mut stdout, &response).unwrap();
+-                writeln!(&mut stdout).unwrap();
+-                stdout.flush().unwrap();
++                write_line(&mut stdout, &BridgeError { id: None, error: &message });
+                 continue;
+             }
+         };
+@@ -534,43 +985,50 @@ pub fn run(evaluator: Arc<dyn Evaluator<GameState> + Sync>, simulations: u32, se
+             Ok(request) => request,
+             Err(error) => {
+                 let message = error.to_string();
+-                let response = BridgeError {
+-                    id: None,
+-                    error: &message,
+-                };
+-                serde_json::to_writer(&mut stdout, &response).unwrap();
+-                writeln!(&mut stdout).unwrap();
+-                stdout.flush().unwrap();
++                write_line(&mut stdout, &BridgeError { id: None, error: &message });
+                 continue;
+             }
+         };
+         let request_id = request.id;
++        if request.topology {
++            write_line(&mut stdout, &topology_response(request_id));
++            continue;
++        }
++        let started = Instant::now();
++        let simulations = request.simulations.unwrap_or(options.simulations);
+         let active_game_ids = request.active_game_ids;
+-        let states: Result<Vec<_>, _> = request.states.into_iter().map(build_state).collect();
++        let want_details = request.details;
++        let states: Result<Vec<_>, _> = request
++            .states
++            .into_iter()
++            .map(|s| build_state(s, options.allow_opponent_identities))
++            .collect();
+         match states {
+             Ok(states) => {
++                let mut stats = BridgeStats { nn_batches: 0, nn_states: 0 };
++                let (actions, details) = search_batch(
++                    states,
++                    active_game_ids.as_deref(),
++                    &*evaluator,
++                    simulations,
++                    &options,
++                    &mut rng,
++                    &mut saved_searches,
++                    &mut stats,
++                );
+                 let response = BridgeResponse {
+                     id: request_id,
+-                    actions: search_batch(
+-                        states,
+-                        active_game_ids.as_deref(),
+-                        &*evaluator,
+-                        simulations,
+-                        &mut rng,
+-                        &mut saved_searches,
+-                    ),
++                    actions,
++                    elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
++                    nn_batches: stats.nn_batches,
++                    nn_states: stats.nn_states,
++                    details: want_details.then_some(details),
+                 };
+-                serde_json::to_writer(&mut stdout, &response).unwrap();
++                write_line(&mut stdout, &response);
+             }
+             Err(message) => {
+-                let response = BridgeError {
+-                    id: Some(request_id),
+-                    error: &message,
+-                };
+-                serde_json::to_writer(&mut stdout, &response).unwrap();
++                write_line(&mut stdout, &BridgeError { id: Some(request_id), error: &message });
+             }
+         }
+-        writeln!(&mut stdout).unwrap();
+-        stdout.flush().unwrap();
+     }
+ }
+diff --git a/examples/catan/game/road.rs b/examples/catan/game/road.rs
+index 424c778..4d9ea65 100644
+--- a/examples/catan/game/road.rs
++++ b/examples/catan/game/road.rs
+@@ -72,7 +72,14 @@ impl RoadNetwork {
+         }
+ 
+         reachable &= !(roads | opponent_roads) & EDGE_MASK;
+-        let longest_len = compute_longest_road(roads, adj, opponent_buildings);
++        // Match the incremental network: `add_road` only maintains the cached
++        // length once the player has 5+ roads (it stays 0 below that), and the
++        // encoder reads this cache as the longest-road feature.
++        let longest_len = if roads.count_ones() >= 5 {
++            compute_longest_road(roads, adj, opponent_buildings)
++        } else {
++            0
++        };
+         Self {
+             roads,
+             reachable,
+@@ -452,6 +459,10 @@ mod tests {
+         for _ in 0..6 {
+             let edge = incremental.reachable_edges().trailing_zeros() as u8;
+             incremental.add_road(EdgeId(edge), adj, 0, 0, true);
++            // Below 5 roads the cached length stays 0 in both constructions.
++            let partial = RoadNetwork::from_snapshot(incremental.roads, own_buildings, 0, 0, adj);
++            assert_eq!(partial.longest_road(), incremental.longest_road());
++            assert_eq!(partial.reachable_edges(), incremental.reachable_edges());
+         }
+ 
+         let rebuilt = RoadNetwork::from_snapshot(incremental.roads, own_buildings, 0, 0, adj);
+diff --git a/examples/catan/main.rs b/examples/catan/main.rs
+index dae0691..b24b6ea 100644
+--- a/examples/catan/main.rs
++++ b/examples/catan/main.rs
+@@ -145,6 +145,28 @@ fn main() {
+                         .long("seed")
+                         .default_value("0")
+                         .help("Determinization/search RNG seed"),
++                )
++                .arg(Arg::new("c-puct").long("c-puct").default_value("2.5"))
++                .arg(Arg::new("c-visit").long("c-visit").default_value("50"))
++                .arg(Arg::new("c-scale").long("c-scale").default_value("1"))
++                .arg(Arg::new("dirichlet-alpha").long("dirichlet-alpha").default_value("0.05"))
++                .arg(
++                    Arg::new("dirichlet-epsilon")
++                        .long("dirichlet-epsilon")
++                        .default_value("0")
++                        .help("Root Dirichlet weight (v1 bridge: 0; Canopy tournament default: 0.25)"),
++                )
++                .arg(
++                    Arg::new("no-tree-reuse")
++                        .long("no-tree-reuse")
++                        .action(clap::ArgAction::SetTrue)
++                        .help("Always start a fresh search tree"),
++                )
++                .arg(
++                    Arg::new("allow-opponent-dev-identities")
++                        .long("allow-opponent-dev-identities")
++                        .action(clap::ArgAction::SetTrue)
++                        .help("Accept snapshots that reveal the opponent's dev cards (v1 behaviour; unfair)"),
+                 ),
+         )
+         .get_matches();
+@@ -178,8 +200,29 @@ fn main() {
+             .unwrap()
+             .parse()
+             .expect("invalid seed");
++        let float = |name: &str| -> f32 {
++            sub.get_one::<String>(name)
++                .unwrap()
++                .parse()
++                .unwrap_or_else(|_| panic!("invalid {name}"))
++        };
++        let config = canopy::mcts::Config {
++            num_simulations: simulations,
++            c_puct: float("c-puct"),
++            c_visit: float("c-visit"),
++            c_scale: float("c-scale"),
++            dirichlet_alpha: float("dirichlet-alpha"),
++            dirichlet_epsilon: float("dirichlet-epsilon"),
++        };
++        let options = catanatron_bridge::BridgeOptions {
++            simulations,
++            seed,
++            config,
++            tree_reuse: !sub.get_flag("no-tree-reuse"),
++            allow_opponent_identities: sub.get_flag("allow-opponent-dev-identities"),
++        };
+         let (evaluator, _) = setup.load_checkpoint(checkpoint, Some("nexus-v3"));
+-        catanatron_bridge::run(evaluator, simulations, seed);
++        catanatron_bridge::run(evaluator, options);
+         return;
+     }
+ 
+diff --git a/src/mcts/mod.rs b/src/mcts/mod.rs
+index aea931d..e0fe1c5 100644
+--- a/src/mcts/mod.rs
++++ b/src/mcts/mod.rs
+@@ -179,6 +179,11 @@ impl<G: Game> Search<G> {
+         &self.tree
+     }
+ 
++    /// The current root node, if expanded (read-only; used by external adapters).
++    pub fn root_id(&self) -> Option<NodeId> {
++        self.root
++    }
++
+     /// Mutate the root state without clearing the tree.
+     ///
+     /// Use for minor corrections (e.g. robber position, turn flags) that

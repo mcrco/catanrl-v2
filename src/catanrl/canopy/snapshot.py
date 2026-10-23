@@ -26,7 +26,11 @@ them (None for what Canopy cannot express: player trades, a one-card year of ple
 the drawn card's Canopy kind, the stolen resource. :func:`replay_chain` builds them for the
 moves between two decisions of the seat that it can replay exactly: its own move and the forced
 moves the engine played after it (in the true game, whose random stream the engine shares), with
-outcomes the seat observed.
+outcomes the seat observed. A move of the opponent continues a chain only when the seat knows it
+was forced (:func:`publicly_forced`), so whether a search is re-rooted never depends on the
+opponent's hidden cards. The agent sees the game only at its own decisions (the harness plays
+forced moves itself and keeps no action log), so a chain stops at any move the opponent chose:
+Canopy's own tournament re-roots through every move, the opponent's included.
 """
 
 from __future__ import annotations
@@ -173,7 +177,11 @@ class SeatHistory:
     turn (exact: they are its own moves) and Canopy's ``tested_non_knight`` per seat, the count of
     a seat's old unplayed cards seen held through a turn it ended blocked by the robber
     (``game/mod.rs`` ``apply_end_turn``): kept from the seat's decisions, so a stretch of several
-    turns without one (a turn of forced moves) is approximated with the values at its end."""
+    turns without one (a turn of forced moves) is approximated with the values at its end (the
+    robber where it is now, not where it was when each skipped turn ended). Against Canopy's rule
+    applied to the full action log of 30 random-play base-2p games, the opponent's value sent
+    differed at 290 of 11,203 decisions (2.6%; 281 too low, 9 too high). Exact needs the moves
+    between the seat's decisions, which the harness does not hand an agent."""
 
     seat: int
     turn: int = -1
@@ -329,11 +337,33 @@ def chain_step(board: CanopyBoard, game: cpp.Game, action: cpp.Action, seat: int
     return ids
 
 
+def publicly_forced(game: cpp.Game, seat: int) -> cpp.Action | None:
+    """The move ``game`` forces, if ``seat`` would know it is forced whatever the hidden cards are;
+    else None. The seat's own legal set is its to see. Another seat's depends on its unplayed
+    development cards only through playing one, so its single legal move counts as forced only when
+    it could not play a card: it holds none (a count everyone sees), it played one this turn, or the
+    prompt allows none (a discard, a robber move, the initial placement)."""
+    legal = list(game.playable_actions)
+    if len(legal) != 1:
+        return None
+    actor = int(game.current_player_index)
+    if actor != seat:
+        player = game.player(actor)
+        no_card_choice = (game.is_initial_build_phase or game.current_prompt != cpp.ActionPrompt.PLAY_TURN
+                          or sum(int(n) for n in player.development_cards) == 0
+                          or bool(player.has_played_development_card_in_turn))
+        if not no_card_choice:
+            return None
+    return legal[0]
+
+
 def replay_chain(board: CanopyBoard, previous: cpp.Game, chosen: cpp.Action, game: cpp.Game, seat: int,
                  *, limit: int = 64) -> list[int] | None:
     """The Canopy ids that take ``previous`` (the seat's last decision) to ``game`` (its decision
-    now): its chosen move, then the forced moves the engine played; None when the game moved
-    otherwise (another seat decided, a move Canopy cannot replay)."""
+    now): its chosen move, then the moves the engine forced (:func:`publicly_forced`: forced
+    whatever the opponent's hidden cards, so whether a chain continues is the seat's to know); None
+    when the game moved otherwise (another seat decided, or might have, or a move Canopy cannot
+    replay)."""
     x = previous.copy()
     ids: list[int] = []
     for _ in range(limit):
@@ -345,10 +375,9 @@ def replay_chain(board: CanopyBoard, previous: cpp.Game, chosen: cpp.Action, gam
             return ids
         if x.winning_player_index is not None:
             return None
-        legal = list(x.playable_actions)
-        if len(legal) != 1:
+        chosen = publicly_forced(x, seat)
+        if chosen is None:
             return None
-        chosen = legal[0]
     return None
 
 

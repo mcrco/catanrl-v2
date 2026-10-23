@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import json
 import os
 import random
 from collections import Counter
@@ -27,6 +28,7 @@ from catanrl.canopy.agent import CanopyAgent, CanopyParams, canopy_params, summa
 from catanrl.canopy.release import (
     CANOPY_COMMIT,
     CHECKPOINT_SHA256,
+    MANIFEST_NAME,
     PATCHES,
     Release,
     ReleaseError,
@@ -329,6 +331,66 @@ def test_chains_replay_the_seats_own_turns(sample):
     assert replayed > 100 and refused <= replayed // 20, (replayed, refused)
 
 
+def _dealt(game: cpp.Game, seat: int, cards: list[int], seed: int) -> cpp.Game | None:
+    """``game`` with the opponent's unplayed development cards dealt as ``cards`` (engine order),
+    every other hidden card kept, the deck and random stream reshuffled by ``seed``; None if the
+    unseen cards cannot make ``cards``."""
+    hands = []
+    for s in range(2):
+        p = game.player(s)
+        devs = cards if s != seat else list(p.development_cards)
+        owned = tuple(p.development_card_owned_at_start) if s == seat else tuple(devs[k] > 0 for k in range(4))
+        hands.append(cpp.HiddenHand(resources=list(p.resources), development_cards=devs,
+                                    development_card_owned_at_start=list(owned)))
+    out = game.copy()
+    try:
+        out.redeal_hidden_cards(hands, seed=seed)
+    except ValueError:
+        return None
+    return out
+
+
+def test_whether_a_chain_continues_never_depends_on_the_opponents_hidden_cards():
+    """The seat ends its turn while the opponent holds old development cards; the game then goes on
+    with the same public moves, forced in the world where those cards are victory points (the
+    opponent's roll and end of turn), not where they are knights. Whether the seat's next search is
+    re-rooted (and through what) must be the same in both worlds: the seat cannot tell them apart."""
+    compared = 0
+    for game, seat, _tracker, _history, board, _previous in positions(games=10, seed=6):
+        end = next((a for a in game.playable_actions if a.action_type == AT.END_TURN), None)
+        held = sum(game.player(1 - seat).development_cards)
+        if end is None or held == 0:
+            continue
+        worlds = [_dealt(game, seat, [0, 0, 0, 0, held], 7), _dealt(game, seat, [held, 0, 0, 0, 0], 7)]
+        if None in worlds:
+            continue
+        a, b = worlds[0].copy(), worlds[1].copy()
+        a.execute(end)
+        b.execute(end)
+        for _ in range(40):  # the same public moves in both, while they are forced in the first
+            legal = list(a.playable_actions)
+            if a.winning_player_index is not None or (int(a.current_player_index) != seat and len(legal) != 1):
+                a = None
+                break
+            if int(a.current_player_index) == seat and len(legal) > 1:
+                break
+            try:
+                b.execute(legal[0])
+            except ValueError:
+                a = None
+                break
+            a.execute(legal[0])
+        if a is None or int(a.current_player_index) != seat:
+            continue
+        # The same public position in both (the dice came from the same reseeded stream).
+        assert [list(w.player(s).resources) for w in (a, b) for s in range(2)][:2] == \
+            [list(b.player(s).resources) for s in range(2)] and a.num_turns == b.num_turns
+        chains = [replay_chain(board, worlds[0], end, a, seat), replay_chain(board, worlds[1], end, b, seat)]
+        assert chains[0] == chains[1], chains
+        compared += 1
+    assert compared >= 10, compared
+
+
 # ---------------------------------------------------------------- the agent, with a stand-in pool
 
 
@@ -369,7 +431,9 @@ class FakePool:
                 actions.append(choice)
                 details.append({"mode": "search" if len(canopy_legal) > 1 else "forced",
                                 "reuse": "reused" if snap["reuse_tree"] else "fresh", "canopy_legal": canopy_legal,
-                                "policy": policy, "root_visits": sims})
+                                "policy": policy, "root_visits": sims,
+                                # a re-rooted search lands on a node with visits for every other seed
+                                "root_visits_before": sims // 2 if snap["reuse_tree"] and seed % 2 else 0})
             out.append({"actions": actions, "details": details, "elapsed_ms": 2.0})
         return out
 
@@ -406,6 +470,7 @@ def test_agent_plays_the_harness_deterministically_and_counts_fallbacks():
     assert totals["refreshed"] == sum(a_pool.unoffered) > 0
     assert totals["fallbacks"] == sum(not u for u in a_pool.unoffered) > 0
     assert totals["reused"] > 0 and totals["fallback_examples"]
+    assert 0 < totals["reused_visits"] < totals["reused"] and totals["retained_visits"] == 4 * totals["reused_visits"]
     assert totals["canopy_illegal"] > 0  # the injected choices were Canopy-legal and refused
     assert a_agent.pop_game(12345) is None and not a_agent._games  # every game's stats went to its row
     # Fairness at the boundary: no snapshot the pool saw carries the opponent's card identities.
@@ -480,6 +545,29 @@ def test_bad_specs_are_refused(fake_release, spec, kwargs, match):
 
 def test_params_parse_like_specs():
     assert canopy_params([], {"sims": "400", "reuse": "false"}) == CanopyParams(sims=400, reuse=False)
+
+
+def test_procs_env_sets_the_bridge_processes_and_no_key(fake_release, monkeypatch):
+    agent = resolve("CANOPY:sims=8:procs=2", games=["base-2p"])
+    assert agent.native().params.procs == 2
+    monkeypatch.setenv("CATANRL_CANOPY_PROCS", "5")
+    assert agent.native().params.procs == 5
+    assert resolve(agent.canonical).key_dict() == agent.key_dict() == resolve("CANOPY:sims=8").key_dict()
+    monkeypatch.setenv("CATANRL_CANOPY_PROCS", "0")
+    with pytest.raises(SpecError, match="CATANRL_CANOPY_PROCS"):
+        agent.native()
+
+
+def test_the_committed_patches_and_manifest_are_the_pinned_build():
+    """third_party/canopy holds the pinned patches and the manifest of the build they make
+    (third_party/canopy/build_bridge.sh rebuilds it to the same binary)."""
+    root = Path(__file__).resolve().parents[1] / "third_party" / "canopy"
+    for name, sha in PATCHES:
+        assert canon.sha256_file(root / "patches" / name) == sha, name
+    assert sorted(p.name for p in (root / "patches").iterdir()) == sorted(name for name, _ in PATCHES)
+    manifest = json.loads((root / MANIFEST_NAME).read_text())
+    assert manifest["commit"] == CANOPY_COMMIT and [tuple(p) for p in manifest["patches"]] == list(PATCHES)
+    assert manifest["checkpoint_sha256"] == CHECKPOINT_SHA256 and len(manifest["binary_sha256"]) == 64
 
 
 def test_release_refuses_a_directory_that_is_not_the_pinned_build(tmp_path):

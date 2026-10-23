@@ -1,6 +1,7 @@
 """The released Canopy build a CANOPY agent runs, pinned by hash.
 
-A release directory (``$CATANRL_CANOPY_DIR``, else ``<runs root>/_canopy``) holds
+A release directory (``$CATANRL_CANOPY_DIR``, else ``<runs root>/_canopy``; built and installed
+by ``third_party/canopy/build_bridge.sh``, the patches in ``third_party/canopy/patches``) holds
 
 * ``canopy-bridge``: the bridge binary, cullback/canopy's ``catan`` example built at
   :data:`CANOPY_COMMIT` (tag ``catan-nexus-v3``) with :data:`PATCHES` applied;
@@ -33,13 +34,17 @@ from catanrl.canon import sha256_file
 
 #: cullback/canopy at tag catan-nexus-v3.
 CANOPY_COMMIT = "6185983a88ba6802e7fa9893cef5a76a15de2595"
-#: Patches applied in this order: the released search did not reset its budget on tree reuse
-#: (v1's pin), v1's Catanatron bridge (v1 9c66130), and the v2 benchmark extensions (hidden
-#: opponent cards, per-snapshot rules and seed, raw policy, exact tree reuse, sanity checks).
+#: Patches applied in this order (the files are in ``third_party/canopy/patches``): the released
+#: search did not reset its budget on tree reuse (v1's pin), v1's Catanatron bridge (v1 9c66130),
+#: the v2 benchmark extensions (hidden opponent cards, per-snapshot rules and seed, raw policy,
+#: exact tree reuse, sanity checks), and no build path in the binary (the web UI's directory was
+#: ``env!("CARGO_MANIFEST_DIR")``; nothing the bridge runs), so a rebuild anywhere with the pinned
+#: rustc gives the same binary (``third_party/canopy/build_bridge.sh``).
 PATCHES = (
     ("canopy-nexus-v3-reset-search-budget.patch", "506fb91bff6bbedb764031e8d252dd4cf6ef92ce91d1d22c9bbe353bcc4e3f67"),
     ("canopy-catanatron-bridge.patch", "6eba3e9204ee0340febb931957b6cbcc62c1dadb8c8460562cbae54715c444ac"),
     ("canopy-v2-bench-ext.patch", "60fbc1776e25ce8d6231b7fd7b905cd4e05b69fc7481c5baf24a76737300dec0"),
+    ("canopy-v2-reproducible-build.patch", "a0fd083cd6e6ea253d155bb06436cd1569dedde8f96a4dc81c4ed4b1aa208012"),
 )
 #: model_iter_315.mpk of release catan-nexus-v3 (v1's CANOPY_NEXUS_V3_CHECKPOINT_SHA256).
 CHECKPOINT_NAME = "model_iter_315.mpk"
@@ -90,7 +95,7 @@ def load_release(directory: str | Path | None = None) -> Release:
     missing = [p.name for p in (binary, checkpoint, manifest_path) if not p.is_file()]
     if missing:
         raise ReleaseError(f"{directory} is not a Canopy release directory (missing {', '.join(missing)}); "
-                           "set CATANRL_CANOPY_DIR (see catanrl.canopy.release)")
+                           "set CATANRL_CANOPY_DIR, or build one with third_party/canopy/build_bridge.sh")
     stamp = tuple((p, p.stat().st_mtime_ns, p.stat().st_size) for p in (binary, checkpoint, manifest_path))
     if stamp in _VERIFIED:
         return _VERIFIED[stamp]

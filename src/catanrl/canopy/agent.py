@@ -19,18 +19,24 @@ in the game's stats as a fallback. Every Canopy-legal action the engine refuses 
 Determinism: a decision depends on the snapshot, its seed (``derive_seed(decision seed,
 "canopy")``) and the game's saved search, which depends only on the game's earlier decisions
 (``reuse``: the search is re-rooted when the moves since the seat's last decision replay
-exactly, :func:`~catanrl.canopy.snapshot.replay_chain`; within a turn, or across a turn of
-forced moves). A game stays with one bridge process (its env's, ``env % procs``), the bridge
-searches each state with its own seed and its batches do not mix states, so rows do not depend on
-``procs``, ``num_envs`` or ``threads`` (checked by the smoke's replay).
+exactly, :func:`~catanrl.canopy.snapshot.replay_chain`; within a turn, or across moves the seat
+knows were forced, whatever the opponent's hidden cards). A game stays with one bridge process
+(its env's, ``env % procs``), the bridge searches each state with its own seed and its batches do
+not mix states, so rows do not depend on ``procs`` (or ``$CATANRL_CANOPY_PROCS``, which overrides
+it), ``num_envs`` or ``threads`` (checked by the smoke's replay).
 
 Per game (keyed by the seat's first decision seed) :meth:`CanopyAgent.pop_game` returns the
 seat's counts and timings, which :mod:`catanrl.eval.results` writes into the row's ``canopy``
-entry (not an outcome: wall times differ between runs).
+entry (not an outcome: wall times differ between runs). ``reused`` counts decisions whose search
+was re-rooted at the position (the bridge's replay matched it), ``reused_visits`` those whose new
+root had visits already (``retained_visits`` sums them): a re-rooted search can land on a node
+the old search never expanded, and every search gets its full budget either way.
 """
 
 from __future__ import annotations
 
+import dataclasses
+import os
 import sys
 import time
 from collections import Counter
@@ -81,8 +87,25 @@ class CanopyParams:
     #: Re-root the game's saved search at the moves since the seat's last decision when they
     #: replay exactly (Canopy's own tree reuse); false searches every decision afresh.
     reuse: bool = True
+    #: Bridge processes (execution-only; ``$CATANRL_CANOPY_PROCS`` overrides it, e.g. for a verify,
+    #: which resolves the canonical spec and so would run one).
     procs: int = field(default=1, metadata={"execution": True})
     timeout: float = field(default=3600.0, metadata={"execution": True})
+
+
+def _procs_override() -> int | None:
+    """``$CATANRL_CANOPY_PROCS``: bridge processes for every CANOPY agent of this process (procs is
+    execution-only, so no key changes; rows do not depend on it)."""
+    value = os.environ.get("CATANRL_CANOPY_PROCS")
+    if not value:
+        return None
+    try:
+        procs = int(value)
+    except ValueError:
+        procs = 0
+    if procs < 1:
+        raise SpecError(f"CATANRL_CANOPY_PROCS={value!r}: a positive count of bridge processes")
+    return procs
 
 
 class _Spec:
@@ -158,8 +181,8 @@ def resolve_canopy(spec: str | Mapping[str, Any], *, harness: str = "native", ga
 
 
 def _new_stats() -> dict[str, Any]:
-    return {"decisions": 0, "searched": 0, "raw": 0, "forced": 0, "no_legal": 0, "reused": 0, "fresh": 0,
-            "reset": 0, "reset_reasons": {}, "refreshed": 0, "fallbacks": 0, "fallback_examples": [], "ambiguous": 0,
+    return {"decisions": 0, "searched": 0, "raw": 0, "forced": 0, "no_legal": 0, "reused": 0, "reused_visits": 0,
+            "retained_visits": 0, "fresh": 0, "reset": 0, "reset_reasons": {}, "refreshed": 0, "fallbacks": 0, "fallback_examples": [], "ambiguous": 0,
             "canopy_illegal": 0, "canopy_illegal_examples": [], "unexpressed": 0, "unexpressed_examples": [],
             "pruned": 0, "trade_prompts": 0, "opponent_unknown_cards": 0, "history_mismatches": 0,
             "root_visits": 0, "bridge_s": 0.0, "wall_s": 0.0}
@@ -195,6 +218,9 @@ class CanopyAgent(NativeAgent):
     def __init__(self, params: CanopyParams, release: Release, *, pool_factory: Any = None) -> None:
         # No network of ours: NativeAgent.__init__ is not called; the harness reads level, dims,
         # the encoder (for rows it builds itself) and the flags above.
+        procs = _procs_override()
+        if procs is not None:
+            params = dataclasses.replace(params, procs=procs)
         self.params = params
         self.release = release
         self.level = "public"
@@ -359,6 +385,11 @@ class CanopyAgent(NativeAgent):
             stats["reset_reasons"][reason] = stats["reset_reasons"].get(reason, 0) + 1
         else:
             stats["reused" if reuse == "reused" else "fresh"] += 1
+        before = int(detail.get("root_visits_before", 0) or 0)
+        if reuse == "reused" and before > 0:
+            # ``reused`` counts re-rooted searches; this, those whose new root kept visits.
+            stats["reused_visits"] += 1
+            stats["retained_visits"] += before
         stats["root_visits"] += int(detail.get("root_visits", 0) or 0)
         canopy_legal = {int(a) for a in detail.get("canopy_legal", [])}
         stats["pruned"] += sum(1 for a in by_id if a not in canopy_legal)
@@ -412,7 +443,8 @@ class CanopyAgent(NativeAgent):
 
 def summary_totals(stats: Sequence[Mapping[str, Any]]) -> dict:
     """One slot's Canopy stats over its games: sums, per-decision times, reset reasons."""
-    keys = ("decisions", "searched", "raw", "forced", "no_legal", "reused", "fresh", "reset", "refreshed", "fallbacks",
+    keys = ("decisions", "searched", "raw", "forced", "no_legal", "reused", "reused_visits", "retained_visits", "fresh",
+            "reset", "refreshed", "fallbacks",
             "ambiguous", "canopy_illegal", "unexpressed", "pruned", "trade_prompts", "opponent_unknown_cards",
             "history_mismatches", "root_visits", "bridge_s", "wall_s")
     totals = {k: sum(s.get(k, 0) for s in stats) for k in keys}
