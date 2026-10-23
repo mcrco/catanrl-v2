@@ -30,7 +30,11 @@ docs/experiments-implementation.md are handled here:
   training), so the policy loss and the entropy bonus reach nothing and the
   update is the value loss's (and the aux loss's, if any) alone. On a shared
   trunk that trains the value head only; a split network
-  (``init_from.split_shared``) refits a whole critic network.
+  (``init_from.split_shared``) refits a whole critic network. Every launch
+  then checks that the frozen parts are exactly ``init_from``'s
+  (:func:`check_frozen_init`).
+* ``init_from`` loads whenever a launch starts fresh (:func:`starts_fresh`): a
+  new run, or a resume whose earlier launches all died before their e0 commit.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ import copy
 import math
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -405,6 +410,42 @@ def check_policy_frozen(model: CatanModel, games: Sequence[Any] = ()) -> None:
         raise ValueError(f"train.freeze: the policy's logits read parameters that still train ({trained[:3]} ...)")
 
 
+def check_frozen_init(model: CatanModel, init_from: Mapping[str, Any] | None, frozen: Sequence[str]) -> None:
+    """Refuse frozen actor or critic parameters that are not exactly ``init_from``'s, at every
+    launch once the weights are in place (loaded fresh or restored from the committed state).
+
+    A frozen part never moves, so it must come from ``init_from`` (never the seed's random
+    initialization), and a launch must hold it as ``init_from`` has it: a resume that skipped
+    ``init_from`` would otherwise freeze a random policy and pass every other check."""
+    parts = [part for part in frozen if part in ("actor", "critic")]
+    if not parts:
+        return
+    from catanrl.checkpoint import init_parts, init_tensors
+
+    missing = [part for part in parts if not init_from or part not in init_parts(init_from)]
+    if missing:
+        raise ValueError(f"train.freeze: {missing} would stay at the seed's random initialization; "
+                         "init_from must load every frozen part")
+    expected, _ = init_tensors(model, {**init_from, "parts": parts})
+    state = model.state_dict()
+    differ = [key for key, value in expected.items() if not torch.equal(state[key].detach().cpu(), value.cpu())]
+    if differ:
+        raise ValueError(f"train.freeze: {len(differ)} frozen tensors of {parts} differ from init_from's "
+                         f"({sorted(differ)[:3]} ...): this launch's weights did not start from init_from")
+
+
+def starts_fresh(writer: Any) -> bool:
+    """Whether this launch builds its network from the seed and ``init_from`` rather than a
+    committed trainer state: a new run, or a resume of one whose launches all died before their
+    first commit (no ``trainer_state.pt``; the resume saves e000000 again). A fork's
+    ``restore: weights+optimizer`` starts from the copied state, so it is not fresh."""
+    mode = getattr(writer, "mode", "new")
+    if mode == "new":
+        return True
+    path = getattr(writer, "path", None)
+    return mode == "resume" and path is not None and not (Path(path) / "trainer_state.pt").exists()
+
+
 def drop_frozen(optimizer: torch.optim.Optimizer) -> None:
     """Leave parameters that require no gradient out of ``optimizer`` (before its first step)."""
     if optimizer.state:
@@ -464,7 +505,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     _seed_everything(_derive_seed(seed, "init"))
     model = build_policy_model(cfg, plan.dims)
     check_bindable(model, plan)
-    if cfg.get("init_from") and getattr(writer, "mode", "new") == "new":
+    if cfg.get("init_from") and starts_fresh(writer):
         from catanrl.checkpoint import load_parts
 
         load_parts(model, cfg["init_from"])
@@ -509,7 +550,9 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
                 raise RuntimeError("the map pool changed since the run started; refusing to resume")
             trainer.restore(state)
             trainer.selector.restore()
-        else:
+        if frozen:
+            check_frozen_init(model, cfg.get("init_from"), frozen)
+        if state is None:
             trainer.save_checkpoint()  # e000000
         for ref in writer.pending_selects():
             trainer.selector.run(ref, model)

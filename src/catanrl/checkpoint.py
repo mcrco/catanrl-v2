@@ -521,6 +521,21 @@ def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[Checkpoin
     exactly the source's logits and values. Every source key of the part's prefixes
     must be used; an aux head is not loaded.
     """
+    loaded, refs = init_tensors(model, init_from)
+    model.load_state_dict({**model.state_dict(), **loaded})
+    return refs
+
+
+def init_parts(init_from: Mapping[str, Any]) -> list[str]:
+    """The parts ``init_from`` loads (its ``parts``, else its per-part refs, else actor and critic)."""
+    ckpt = init_from["ckpt"]
+    return list(init_from.get("parts") or (ckpt.keys() if isinstance(ckpt, Mapping) else ("actor", "critic")))
+
+
+def init_tensors(model: nn.Module, init_from: Mapping[str, Any]) -> tuple[dict[str, torch.Tensor],
+                                                                         list[CheckpointRef]]:
+    """What :func:`load_parts` copies into ``model``: the state-dict entries of the ``init_from``
+    parts under ``model``'s names, each through the full checks; and the source refs."""
     def load_checkpoint(ref: Any) -> Checkpoint:
         if str(ref).endswith(".pt"):
             return Checkpoint.load(ref)
@@ -529,7 +544,7 @@ def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[Checkpoin
         return load_run_checkpoint(ref)
 
     ckpt = init_from["ckpt"]
-    parts = list(init_from.get("parts") or (ckpt.keys() if isinstance(ckpt, Mapping) else ("actor", "critic")))
+    parts = init_parts(init_from)
     split = bool(init_from.get("split_shared", False))
     target = model.state_dict()
     loaded, refs = {}, []
@@ -560,5 +575,4 @@ def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[Checkpoin
                 raise CheckpointError(f"init_from {part} from {source.ref}: {key} has shape "
                                       f"{tuple(value.shape)}, the model {tuple(target[key].shape)}")
             loaded[key] = value
-    model.load_state_dict({**target, **loaded})
-    return refs
+    return loaded, refs

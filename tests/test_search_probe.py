@@ -79,3 +79,29 @@ def test_the_command_line_pairs_by_path_and_writes_the_report(tmp_path, capsys):
         search_probe.main([])
     with pytest.raises(SystemExit):
         search_probe.main(["POLICY:x", "--pair", str(a.path), str(b.path)])
+
+
+def test_an_eval_id_stored_by_several_runs_resolves_when_their_games_agree():
+    """A select of weights another run already played in the same search keys the same eval id
+    (critic-refit-2p/head's e0 repeats 856a0421): the id resolves while the copies hold the same
+    games, and is refused, naming the files, when they do not."""
+    from catanrl.runs import runs_root
+
+    def stored(run: str, eval_id: str, games_sha256: str, winners) -> Path:
+        folder = runs_root() / run / "evals" / "select-2p-500"
+        folder.mkdir(parents=True)
+        path = folder / f"{eval_id}.json"
+        write_record(path, eval_id, winners)
+        path.write_text(json.dumps({**json.loads(path.read_text()), "games_sha256": games_sha256}))
+        return path
+
+    first = stored("az/main", "856a0421185ce86f", "g1", {"s0b0r0": 0})
+    stored("refit/head", "856a0421185ce86f", "g1", {"s0b0r0": 0})
+    stored("other/x", "856a9999aaaaaaaa", "g3", {"s0b0r0": 1})
+    assert search_probe.record("856a0421").path == first
+    assert search_probe.record("856a0421185ce86f").eval_id == "856a0421185ce86f"
+    with pytest.raises(SystemExit, match="3 records match"):
+        search_probe.record("856a")
+    stored("refit/main", "856a0421185ce86f", "g2", {"s0b0r0": 1})
+    with pytest.raises(SystemExit, match="hold different games"):
+        search_probe.record("856a0421")

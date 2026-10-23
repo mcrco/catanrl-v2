@@ -7,7 +7,10 @@
   logits are the start's bit for bit, the critic's parameters moved, and the optimizer holds
   the critic's parameters only (a split network under Adam and Muon; on a shared trunk the
   value head alone trains). Refusals: unknown parts, every parameter, a policy that would
-  still read a trained parameter, muon_exclude on a frozen parameter.
+  still read a trained parameter, muon_exclude on a frozen parameter, a frozen part init_from
+  does not load, and frozen weights that are not init_from's at a launch.
+* A relaunch of a run whose first launch died before its e0 commit loads init_from again (it
+  used to resume into the seed's random network, then freeze it).
 * The critic's target under ``critic_targets: lambda``, ``critic_gamma: 1``, ``gae_lambda: 1``:
   each seat's outcome (1 for its win, 0 for a loss or a turn-limit truncation) where its game
   ends inside the rollout segment, else the stored value at the segment's last step (whose
@@ -38,7 +41,7 @@ from catanrl.envs.encoding import action_size, dims_for, row_layout
 from catanrl.models import build_model
 from catanrl.search import make_pool, run_searches
 from catanrl.train import puffer
-from catanrl.train.puffer import check_policy_frozen, freeze_parts, train_ppo
+from catanrl.train.puffer import check_frozen_init, check_policy_frozen, freeze_parts, starts_fresh, train_ppo
 from catanrl.train.puffer_policy import PufferPolicy
 
 DIMS = dims_for(["base-2p"])
@@ -226,6 +229,87 @@ def critic_refit(tmp_path, *, shared: bool = False, optimizer: str = "adam", epo
     return source, writer
 
 
+def test_frozen_parts_must_be_init_froms(tmp_path):
+    source = network(shared=True)
+    init = {"ckpt": saved(source, tmp_path), **SPLIT}
+    split = network(shared=False, seed=1)
+    with pytest.raises(ValueError, match="random initialization"):
+        check_frozen_init(split, None, ["actor"])
+    with pytest.raises(ValueError, match="random initialization"):
+        check_frozen_init(split, {**init, "parts": ["critic"]}, ["actor"])
+    with pytest.raises(ValueError, match="differ from init_from's"):
+        check_frozen_init(split, init, ["actor"])
+    load_parts(split, init)
+    check_frozen_init(split, init, ["actor"])
+    check_frozen_init(split, init, ["actor", "critic"])
+    with torch.no_grad():
+        split.critic.value.mlp[-1].bias.add_(1.0)  # a trained critic: only frozen parts are compared
+    check_frozen_init(split, init, ["actor"])
+    with pytest.raises(ValueError, match="differ from init_from's"):
+        check_frozen_init(split, init, ["critic"])
+    check_frozen_init(split, None, [])  # nothing frozen, nothing checked
+    check_frozen_init(network(shared=True), None, ["aux"])  # only actor and critic come from init_from
+
+
+def test_starts_fresh(tmp_path):
+    class Writer:
+        def __init__(self, mode, path=None):
+            self.mode, self.path = mode, path
+    assert starts_fresh(Writer("new")) and starts_fresh(object())
+    assert starts_fresh(Writer("resume", tmp_path))  # died before its first commit
+    (tmp_path / "trainer_state.pt").write_bytes(b"")
+    assert not starts_fresh(Writer("resume", tmp_path)) and not starts_fresh(Writer("done", tmp_path))
+    assert not starts_fresh(Writer("resume"))
+
+
+@pytest.mark.train
+@pytest.mark.parametrize("shared", [False, True])
+def test_a_relaunch_after_a_death_before_e0_loads_init_from(tmp_path, monkeypatch, shared):
+    """A first launch killed between its launch row and the e0 commit (a kill, Ctrl-C, an OOM
+    allocating the rollout) leaves a resumable run with no trainer state: the relaunch must load
+    init_from, not resume into the seed's random network and freeze that."""
+    source = network(shared=True)
+    config = tiny_ppo(epochs=2, freeze=["actor"], critic_targets="lambda", critic_gamma=1.0, gae_lambda=1.0)
+    config["model"] = {"preset": "graph-tiny", "args": {"shared": shared}}
+    config["init_from"] = {"ckpt": saved(source, tmp_path), **(SPLIT if not shared else {"parts": ["actor", "critic"]})}
+    name = f"early-{'shared' if shared else 'split'}"
+
+    def die(self):
+        raise KeyboardInterrupt("killed before e0")
+    with monkeypatch.context() as patch:
+        patch.setattr(puffer.CatanPuffeRL, "save_checkpoint", die)
+        with pytest.raises(KeyboardInterrupt):
+            train(train_ppo, config, name)
+    writer = train(train_ppo, config, name)
+    assert writer.status == "finished"
+    launches = writer._run_json()["launches"]
+    assert [l["mode"] for l in launches] == ["new", "resume"] and launches[-1]["resumed_from"] == -1
+    obs = rows(count=8)
+    first, last = writer.saved[0], writer.saved[-1]
+    assert first.epoch == 0 and writer._run_json()["checkpoints"][0]["launch"] == launches[-1]["launch"]
+    assert_same(outputs(model_at(first), obs), outputs(source, obs))
+    assert_same(outputs(model_at(last), obs), outputs(source, obs), keys=("logits", "open_logits"))
+
+
+@pytest.mark.train
+def test_a_resume_refuses_a_frozen_actor_that_is_not_init_froms(tmp_path):
+    """The committed state of a run that resumed into a random network before the fix (or any
+    state whose frozen weights drifted) is refused at the next launch, before it trains."""
+    source = network(shared=True)
+    config = tiny_ppo(epochs=4, freeze=["actor"], critic_targets="lambda", critic_gamma=1.0, gae_lambda=1.0)
+    config["model"] = {"preset": "graph-tiny", "args": {"shared": False}}
+    config["init_from"] = {"ckpt": saved(source, tmp_path), **SPLIT}
+    writer = train(train_ppo, config, "drifted", stop_after=2)
+    assert writer.status == "interrupted"
+    path = writer.path / "trainer_state.pt"
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    key = next(k for k in state["model"] if k.startswith("actor."))
+    state["model"][key] = state["model"][key] + 1.0
+    torch.save(state, path)
+    with pytest.raises(ValueError, match="differ from init_from's"):
+        train(train_ppo, config, "drifted")
+
+
 def weights(ref) -> dict[str, torch.Tensor]:
     return Checkpoint.load(ref.path).state_dict
 
@@ -340,6 +424,8 @@ def test_a_refit_trains_on_outcomes_or_the_segment_end(tmp_path, monkeypatch):
     monkeypatch.setattr(puffer.CatanPuffeRL, "__init__", keep)
     monkeypatch.setattr(PufferPolicy, "value_loss", hook)
     config = tiny_ppo(epochs=3, freeze=["actor"], critic_targets="lambda", critic_gamma=1.0, gae_lambda=1.0)
+    config["model"] = {"preset": "graph-tiny", "args": {"shared": True}}
+    config["init_from"] = {"ckpt": saved(network(shared=True), tmp_path), "parts": ["actor", "critic"]}
     config["env"]["scenarios"][0]["turn_limit"] = 4
     writer = train(train_ppo, config, "targets")
     assert writer.status == "finished" and checked and max(checked) > 0

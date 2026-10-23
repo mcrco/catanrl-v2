@@ -38,6 +38,7 @@ from catanrl.train.puffer import (
     build_policy_model,
     check_bindable,
     resolve_device,
+    starts_fresh,
 )
 from catanrl.train.select import Selector
 
@@ -226,7 +227,7 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
     check_bindable(model, plan)
     if getattr(model, "recurrent", False):
         raise ValueError("train.algo: imitation evaluates single positions; a recurrent network trains with ppo")
-    if cfg.get("init_from") and getattr(writer, "mode", "new") == "new":
+    if cfg.get("init_from") and starts_fresh(writer):
         from catanrl.checkpoint import load_parts
 
         load_parts(model, cfg["init_from"])
