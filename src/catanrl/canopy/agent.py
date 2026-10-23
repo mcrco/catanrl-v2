@@ -182,10 +182,10 @@ def resolve_canopy(spec: str | Mapping[str, Any], *, harness: str = "native", ga
 
 def _new_stats() -> dict[str, Any]:
     return {"decisions": 0, "searched": 0, "raw": 0, "forced": 0, "no_legal": 0, "reused": 0, "reused_visits": 0,
-            "retained_visits": 0, "fresh": 0, "reset": 0, "reset_reasons": {}, "refreshed": 0, "fallbacks": 0, "fallback_examples": [], "ambiguous": 0,
-            "canopy_illegal": 0, "canopy_illegal_examples": [], "unexpressed": 0, "unexpressed_examples": [],
-            "pruned": 0, "trade_prompts": 0, "opponent_unknown_cards": 0, "history_mismatches": 0,
-            "root_visits": 0, "bridge_s": 0.0, "wall_s": 0.0}
+            "retained_visits": 0, "fresh": 0, "reset": 0, "reset_reasons": {}, "refreshed": 0, "fallbacks": 0,
+            "fallback_examples": [], "ambiguous": 0, "canopy_illegal": 0, "canopy_illegal_examples": [],
+            "unexpressed": 0, "unexpressed_examples": [], "pruned": 0, "trade_prompts": 0,
+            "opponent_unknown_cards": 0, "history_mismatches": 0, "root_visits": 0, "bridge_s": 0.0, "wall_s": 0.0}
 
 
 @dataclass
@@ -444,9 +444,8 @@ class CanopyAgent(NativeAgent):
 def summary_totals(stats: Sequence[Mapping[str, Any]]) -> dict:
     """One slot's Canopy stats over its games: sums, per-decision times, reset reasons."""
     keys = ("decisions", "searched", "raw", "forced", "no_legal", "reused", "reused_visits", "retained_visits", "fresh",
-            "reset", "refreshed", "fallbacks",
-            "ambiguous", "canopy_illegal", "unexpressed", "pruned", "trade_prompts", "opponent_unknown_cards",
-            "history_mismatches", "root_visits", "bridge_s", "wall_s")
+            "reset", "refreshed", "fallbacks", "ambiguous", "canopy_illegal", "unexpressed", "pruned", "trade_prompts",
+            "opponent_unknown_cards", "history_mismatches", "root_visits", "bridge_s", "wall_s")
     totals = {k: sum(s.get(k, 0) for s in stats) for k in keys}
     reasons: Counter[str] = Counter()
     for s in stats:

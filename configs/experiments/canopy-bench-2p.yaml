@@ -19,13 +19,42 @@
 #  5. canopy (1600) vs the deployed 1v1 bot (deploy/house.yaml and openhex.yaml:
 #     BELIEF:ckpt=puffer-graph2/full@best:worlds=16, best = e3350, 95.06 vs F, 67869e7a).
 #
+# launch (from this worktree, or main once wt/canopy-bench is merged; see "before launch"):
+#   OMP_NUM_THREADS=1 nice -n 15 catanrl run configs/experiments/canopy-bench-2p.yaml
+# W&B as meta below. the bridges are plain child processes, so they run at the launcher's
+# niceness, and procs=4 is 4 bridge cores plus the harness's (OMP_NUM_THREADS=1: torch here
+# defaults to 8 threads, and the timings below were measured at 1).
+#
+# before launch:
+#  - the canopy build: canopy-bridge, canopy-bridge.manifest.json and model_iter_315.mpk in
+#    runs/_canopy, or a directory named by $CATANRL_CANOPY_DIR. an installed copy is in
+#    ~/.local/share/catanrl/canopy/nexus-v3-315 (`mkdir -p runs/_canopy && cp -a
+#    ~/.local/share/catanrl/canopy/nexus-v3-315/. runs/_canopy/`). check it with
+#    `python -c "from catanrl.canopy.release import load_release as l; print(l().key())"`
+#    (binary 66057955...a9cd40c8). a CANOPY spec does not resolve without it (row 1 fails at once).
+#  - merge wt/canopy-bench first (or right after launch): main's code has no CANOPY resolver and
+#    no canopy code component, so from main every canopy record reads as stale and
+#    verify/find/--pair fail on them. until then read them from this worktree. the records
+#    land in main's runs/_evals either way (runs_root is shared by every worktree).
+#  - row 2's device: pick it before row 2 starts and keep it. a relaunch with another
+#    runtime.device restarts the row (cpu and cuda have different execution ids, so its partial
+#    games are set aside as .discarded-*). cuda only when no training run holds the gpu.
+#
 # rules: base-2p as in every 2p row (15 vp, discard above 9 cards, friendly robber off, random
 # 2d6 dice, bank 19 each, a short resource pays nobody) with heldout-2p's 500-turn cap. the
 # bridge sets canopy's own flags to match (vp 15, discard threshold 9, friendly robber off,
-# random dice in its search). what differs from canopy's training rules, or can't be expressed:
+# random dice in its search). what differs from canopy's training, or can't be expressed:
 #  - dice: it trained on colonist's balanced dice. its dice input (11 probabilities and the deck
-#    fraction) is now a constant it never saw in training. its search samples random dice like
-#    our engine.
+#    fraction) is here always the 2d6 probabilities with a full deck: what it saw before the
+#    first roll of every training game, never mid-game. its search samples random dice like our
+#    engine.
+#  - the opponent's dev cards at a raw root (row 3): self-play encoded the opponent's unplayed
+#    cards exactly at every root (src/train/game.rs:234; encoder/mod.rs:112-147 reads them
+#    exactly when hidden_dev_cards is 0, as in self-play). here they are hidden, so canopy's raw
+#    policy reads a hypergeometric expectation from their count wherever the opponent holds
+#    cards: an input shift that row 3 takes at every such decision. its search (rows 1, 2, 4, 5)
+#    deals the opponent's cards before every simulation, the root's expansion included
+#    (src/mcts/mod.rs:542), so there the network only sees dealt hands, as in self-play.
 #  - friendly robber: it trained with it on (nobody under 3 vp is robbed), so early robber and
 #    steal positions are out of its training distribution.
 #  - discard: same rule (above 9 discards half, one card a decision). inside a reused tree
@@ -39,9 +68,21 @@
 #  - maps: heldout-2p's BASE boards. ports must sit on one of canopy's two position sets (checked
 #    every board; a board that doesn't is refused). number layouts canopy's own generator
 #    wouldn't make are out of its distribution.
+#  - tested_non_knight (canopy's count of the opponent's cards seen held through a turn it ended
+#    blocked by the robber; one network input and the knight weight when it deals hands): kept
+#    from canopy's own decisions, so across a stretch of turns without one it uses the robber
+#    where it is now. against canopy's rule on the full log of 30 random-play games the value
+#    sent for the opponent was off at 290 of 11,203 decisions (2.6%; 281 low, 9 high).
+#  - tree reuse is narrower than canopy's own play. its tournament re-roots every search through
+#    every move, the opponent's too. the harness hands an agent the game only at its own
+#    decisions, so canopy's search is re-rooted through its own moves and through moves it knows
+#    were forced (an opponent move only when the opponent could not have played a card, so whether
+#    the tree is kept never depends on the opponent's hidden cards), and starts fresh after any
+#    move the opponent chose. every search gets its full 1600 sims either way. the summary counts
+#    reused (re-rooted at the position) and reused_visits (the new root already had visits) apart.
 #  - not expressible: player trades (canopy rejects every offer, counted in trade_prompts; our
 #    2p bots don't offer) and a one-card year of plenty (the engine offers it when the bank can't
-#    cover a pair; counted in unexpressed: 7 decisions in the smoke's F row).
+#    cover a pair; counted in unexpressed: 7 decisions in each smoke's F row).
 #  - canopy's own pruning only removes options: robber only on tiles touching the opponent, only
 #    a knight before the roll, no setup spot under 8 pips.
 #  if canopy picks a move the engine doesn't offer, it is asked again on a fresh tree (counted in
@@ -50,59 +91,78 @@
 #
 # fairness: canopy's seat sees what our public seat sees. the opponent's resources come from
 # its own hand tracker (exact in 2p), and the opponent's dev cards go in as a count only. the
-# moves since its last decision carry only outcomes it saw (its own draws, dice, steals). the
-# bridge refuses a snapshot that carries the opponent's card identities. redealing the hidden
-# cards at 20+ real positions left the bytes sent identical. canopy's search redraws the
-# opponent's dev cards every simulation (its own SO-ISMCTS), from that count.
+# moves since its last decision carry only outcomes it saw (its own draws, dice, steals), and
+# whether they are sent at all depends only on what it saw (tests/test_canopy.py redeals the
+# opponent's cards as victory points or knights: same chain in both). the bridge refuses a
+# snapshot that carries the opponent's card identities. redealing the hidden cards at 20+ real
+# positions left the bytes sent identical. canopy's search redraws the opponent's dev cards
+# every simulation (its own SO-ISMCTS), from that count.
 #
 # canopy as played: cullback/canopy, tag catan-nexus-v3, commit
 # 6185983a88ba6802e7fa9893cef5a76a15de2595. checkpoint model_iter_315.mpk, sha256
-# f8e4e6858930243a30243e38c1b2b96b1a8da23970f5cba69906c65b268c60cc. three patches, applied in
-# this order:
+# f8e4e6858930243a30243e38c1b2b96b1a8da23970f5cba69906c65b268c60cc. four patches, applied in
+# this order (third_party/canopy/patches):
 #  - canopy-nexus-v3-reset-search-budget.patch (506fb91b, v1's pin): a reused tree gets a full,
 #    fresh budget.
 #  - canopy-catanatron-bridge.patch (6eba3e92, v1 9c66130).
 #  - canopy-v2-bench-ext.patch (60fbc177): hidden cards as counts, rules and seed per snapshot,
 #    raw policy, exact tree reuse.
-# cpu ndarray build, binary sha256 54c1f7dc...e65104d9. its search: puct root with the tag's
-# c_puct 2.5, c_visit 50 and c_scale 1, and 1600 sims, its self-play full search (its cli
-# default is 800, its web board 400). tree reuse on. root dirichlet off: epsilon 0, as v1
-# evaluated it (the tag's own tournaments ran 0.25). every record's key holds the commit, the
-# patch hashes and the hashes of the binary and checkpoint. the build is read from runs/_canopy,
-# or $CATANRL_CANOPY_DIR: canopy-bridge, canopy-bridge.manifest.json and model_iter_315.mpk,
-# checked against src/catanrl/canopy/release.py when a spec resolves.
+#  - canopy-v2-reproducible-build.patch (a0fd083c): no build path in the binary (the web ui's
+#    directory was env!("CARGO_MANIFEST_DIR"); nothing the bridge runs).
+# cpu ndarray build with rustc 1.92.0, binary sha256 66057955...a9cd40c8.
+# third_party/canopy/build_bridge.sh rebuilds it from the tag and the patches with paths
+# remapped: two builds in different directories gave the same binary, so a lost build can be
+# rebuilt under the same record keys. its search: puct root with the tag's c_puct 2.5, c_visit
+# 50 and c_scale 1, and 1600 sims, its self-play full search (its cli default is 800, its web
+# board 400). tree reuse on. root dirichlet off: epsilon 0, as v1 evaluated it (the tag's own
+# tournaments ran 0.25). every record's key holds the commit, the patch hashes and the hashes
+# of the binary and checkpoint, checked against src/catanrl/canopy/release.py when a spec
+# resolves.
 #
 # reading: slot 0 is canopy, so a record's score_rate is canopy's share, with a wilson 95% ci.
 # per_seat is the seat split: seat 0 wins about 56% of base-2p games whoever sits there
-# (72819d1a), so read both seats. the summary's canopy block counts:
+# (72819d1a), so read both seats. the records are in runs/_evals (canopy is not a run), which
+# the w&b mirror does not read: the launch's w&b run shows no finals, read the records. the
+# summary's canopy block counts:
 #  - fallbacks (should be 0, each one listed);
 #  - canopy-legal moves our engine refused (canopy_illegal) and refreshes;
-#  - tree resets, by reason;
+#  - tree reuse (reused, reused_visits, fresh) and resets, by reason;
 #  - trade prompts and unexpressed moves;
 #  - seconds per decision.
+# a verify or recompute resolves the canonical spec, which has no procs (execution-only): set
+# CATANRL_CANOPY_PROCS=4 (~45 min for 16 games of a 1600-sim row) or it runs one bridge (~2-3 h).
+# tools/search_probe.py prints the same canopy block per slot.
 #
-# cost, from the cpu smoke on this box (nice 15, load 1.5-6, 4 games a row, one game per bridge):
-#  - canopy at 1600 sims takes 7.0-7.5 s of one core per searched decision (rust probe: 4.9 s
-#    a state when a bridge gets 8 at once). it searches ~90 of its ~100 decisions a game
-#    against our policy.
+# smoke (catanrl run --smoke on the cpu, scratch runs dir, 4 games a row, 2 bridge processes
+# through CATANRL_CANOPY_PROCS=2, idle box, 2.4 h; the build and code of this commit): every row
+# played and wrote its record (9cdbea44, 7c1a22b2, 2687e4d7, b230e6fc, 1b2f30d6). fallbacks,
+# refreshes, resets, refused canopy moves, history mismatches and trade prompts were all 0; 7
+# one-card year-of-plenty offers went unexpressed in the F row. canopy's searches were re-rooted
+# at 67-79% of its decisions and kept visits at 51-57%. verifies replayed 4 of 4 games
+# identically with other bridge counts: row 1 with 3 (25 min), row 3 with 1.
+#
+# cost, on this box's cpu at nice 15 with OMP_NUM_THREADS=1, from the two smokes (the first at
+# procs=4 under load 1.5-6) and a lockstep model fitted to them (scratch cost_model.py; on the
+# second smoke it was within -3% to +14% per row):
+#  - a bridge is one thread. canopy at 1600 sims takes 7.0-7.5 s of it per searched decision
+#    when it has one state, ~5.2 s a state with 4 at once, ~4.9 with 8. it searches ~86-89% of
+#    its 100-115 decisions a game against our bots.
 #  - the harness steps every game together, so a bridge idles while its games are on our move,
-#    and each step waits for the slowest bridge. smoke wall times: row 1 25 min, row 2 37.5 min,
-#    row 3 4 s, row 4 32 min, row 5 21 min.
-#  - procs=4 and 32 games in flight put 8 games on each bridge. a lockstep model that matches
-#    the smoke rows to within 5-20% gives ~21 games/h against a raw policy.
-#  - row 1, 30 boards = 60 games: ~2.9 h (+-12 pp at 50%; more boards later if it is close).
+#    and each step waits for the slowest bridge. procs=4 and 32 games in flight put 8 games on
+#    each bridge.
+#  - row 1, 30 boards = 60 games: ~3.0-3.3 h (+-12 pp at 50%; more boards later if it is close).
 #  - row 2, 20 boards = 40 games: our search adds its own step after canopy's. on the cpu
-#    (strict evals forward one row at a time, on one core) it was 2.9 s per searched decision
-#    per game in flight, so ~4.5 h. the gpu would do a 14-tree 2048-sim step in ~10-20 s (from
-#    gumbel-edge-2p's 3.9 h for 1000 games), so ~3-3.5 h with --set runtime.device=cuda, only
-#    when no training run holds the gpu.
+#    (strict evals forward one row at a time, on one core) it was 2.6-2.9 s per searched
+#    decision per game in flight, so ~4.5-5.2 h. the gpu would do a 14-tree 2048-sim step in
+#    ~10-20 s (from gumbel-edge-2p's 3.9 h for 1000 games), so ~3-3.5 h with
+#    --set runtime.device=cuda (decided before row 2 starts, see "before launch").
 #  - row 3, 500 boards = 1000 games: canopy's raw policy is 6 ms a decision, so ~10-20 min.
-#  - row 4, 20 boards = 40 games: ~2-2.6 h. F moves inside the engine, so canopy acts on every
-#    step: 185 decisions a game in the smoke (one game ran 135 turns), 122 in the port's 20
-#    games at 64 sims.
-#  - row 5, 20 boards = 40 games: ~2 h.
-#  - about 12-13 h for all five, on at most 5 cores (4 bridges and the harness). expect up to
-#    ~1.3x that if a training run shares the cpu. procs=8 would bring row 1 to ~2 h. procs is
+#  - row 4, 20 boards = 40 games: ~2.6-2.9 h. F moves inside the engine, so canopy acts on every
+#    step: 185.5 decisions a game in both smokes. the model ran 18% fast on the first smoke's
+#    row 4 (under load), on the mark on the second.
+#  - row 5, 20 boards = 40 games: ~2.0-2.2 h.
+#  - about 12.5-14 h for all five: plan on 14, on 5 cores (4 bridges and the harness). expect up
+#    to ~1.3x that if a training run shares the cpu. procs=8 would bring row 1 to ~2 h. procs is
 #    execution-only: not in a record's key.
 name: canopy-bench-2p
 kind: eval
@@ -130,7 +190,8 @@ eval:
         - "BELIEF:ckpt=puffer-graph2/full@best:worlds=16"
 # cpu by default: canopy is cpu-only, and the gpu belongs to training runs. row 2 is the one
 # row the gpu would speed up (see cost above). runtime is not hashed, so --set
-# runtime.device=cuda keeps every record id.
+# runtime.device=cuda keeps every record id, but switching it while row 2 is part-played
+# restarts row 2 (see "before launch").
 runtime: {device: cpu, threads: 2, num_envs: 32}
 meta:
   wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
