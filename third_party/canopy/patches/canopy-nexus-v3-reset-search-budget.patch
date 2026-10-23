@@ -1,0 +1,12 @@
+diff --git a/src/mcts/mod.rs b/src/mcts/mod.rs
+index b611cb7..4472fea 100644
+--- a/src/mcts/mod.rs
++++ b/src/mcts/mod.rs
+@@ -219,6 +219,7 @@ impl<G: Game> Search<G> {
+     /// search will discard the old tree and start fresh.
+     pub fn apply_action(&mut self, action: usize) {
+         self.root_state.apply_action(action);
++        self.sims_done = 0;
+         if let Some(root) = self.root {
+             self.root = self.tree.child_for_action(root, action);
+         }

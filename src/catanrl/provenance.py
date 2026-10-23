@@ -34,10 +34,13 @@ OUTCOME = ("models", "agents", "search", "envs", "eval/harness.py", "maps.py", "
 #: Outcome code of the catanatron harness only: the harness and the LLM agent (its prompts and
 #: answer parser); a native record does not move when they change.
 CATANATRON_ONLY = ("eval/catanatron.py", "agents/llm")
+#: Outcome code only some lineups run, by component: hashed into the code id of a record whose
+#: lineup holds such an agent (``code_id(..., extras=...)``), so the rest stay as they were.
+EXTRAS = {"canopy": ("canopy",)}
 #: PufferLib files a training process runs (besides _C).
 PUFFERLIB = ("__init__.py", "pufferl.py", "pytorch.py", "vector.py", "emulation.py", "spaces.py")
 ENV_VARS = ("CUDA_VISIBLE_DEVICES", "CUBLAS_WORKSPACE_CONFIG", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-            "PYTHONHASHSEED", "CATANRL_RUNS_DIR", "CATANRL_ALLOW_STALE_BUILD")
+            "PYTHONHASHSEED", "CATANRL_RUNS_DIR", "CATANRL_ALLOW_STALE_BUILD", "CATANRL_CANOPY_DIR")
 
 
 def _process_start() -> float:
@@ -110,6 +113,15 @@ def _components(kind: str, harness: str) -> dict[str, dict[str, list]]:
     return parts
 
 
+def _extra_components(extras: Sequence[str]) -> dict[str, dict[str, list]]:
+    """The :data:`EXTRAS` components named by ``extras`` (Python files only)."""
+    unknown = sorted(set(extras) - set(EXTRAS))
+    if unknown:
+        raise ValueError(f"unknown code components {unknown}; known: {sorted(EXTRAS)}")
+    return {name: {"py": [f for part in EXTRAS[name] for f in _py_files(PACKAGE / part, part)], "bin": []}
+            for name in sorted(set(extras))}
+
+
 def _digest_component(files: dict[str, list]) -> str:
     h = hashlib.sha256(ast_digest(files["py"]).encode())
     for path in files["bin"]:
@@ -117,11 +129,15 @@ def _digest_component(files: dict[str, list]) -> str:
     return h.hexdigest()[:16]
 
 
-_SNAPSHOTS: dict[tuple[str, str], tuple[dict[str, str], dict[str, dict[str, list]]]] = {}
+_SNAPSHOTS: dict[tuple[str, str, tuple[str, ...]], tuple[dict[str, str], dict[str, dict[str, list]]]] = {}
 
 
-def code_id(kind: Literal["eval", "train"] = "eval", harness: Literal["native", "catanatron"] = "native") -> dict:
+def code_id(kind: Literal["eval", "train"] = "eval", harness: Literal["native", "catanatron"] = "native",
+            extras: Sequence[str] = ()) -> dict:
     """``{component: digest}`` of the outcome code, frozen at the first call.
+
+    ``extras`` adds :data:`EXTRAS` components (``canopy`` for a lineup with a CANOPY agent);
+    without them the id is what it always was.
 
     The first call also refuses files (Python or binaries) modified after this
     process started that it has loaded: it may be running older code than the
@@ -130,9 +146,9 @@ def code_id(kind: Literal["eval", "train"] = "eval", harness: Literal["native", 
     if kind not in ("eval", "train") or harness not in ("native", "catanatron", "server"):
         raise ValueError(f"code_id({kind!r}, {harness!r})")
     harness = "catanatron" if harness == "server" else harness
-    key = (kind, harness)
+    key = (kind, harness, tuple(sorted(set(extras))))
     if key not in _SNAPSHOTS:
-        components = _components(kind, harness)
+        components = {**_components(kind, harness), **_extra_components(extras)}
         paths = [p for files in components.values() for p in [*(p for _, p in files["py"]), *files["bin"]]]
         late = [p for p in paths if Path(p).stat().st_mtime > _PROCESS_START + 1.0 and _loaded(p)]
         if late:
@@ -150,7 +166,7 @@ def _loaded(path: str | Path) -> bool:
 
 def assert_code_current() -> None:
     """Raise :class:`StaleProcess` if any hashed file changed since the snapshot."""
-    for (kind, harness), (ids, components) in _SNAPSHOTS.items():
+    for (kind, harness, _), (ids, components) in _SNAPSHOTS.items():
         for name, files in components.items():
             if _digest_component(files) != ids[name]:
                 raise StaleProcess(f"{name} code changed on disk since this process hashed it "

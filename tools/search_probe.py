@@ -118,10 +118,10 @@ def play(args) -> dict:
     """The lineup's probe report over the suite's first ``boards`` boards."""
     os.environ.setdefault("CATANRL_DEDUP_FORCE", "1")  # before any agent builds its evaluator
 
-    from catanrl.agents import resolve_agent
     from catanrl.agents.native import MctsAgent
+    from catanrl.canopy import resolve as resolve_agent  # every key, CANOPY too
     from catanrl.eval.harness import play_schedule
-    from catanrl.eval.results import summarize
+    from catanrl.eval.results import _with_canopy, summarize
     from catanrl.eval.suites import load_suite
 
     suite = dataclasses.replace(load_suite(args.suite), boards=args.boards)
@@ -132,8 +132,16 @@ def play(args) -> dict:
     games = suite.schedule(len(agents), fill=fill_agent is not None)
     rows: list[dict] = []
     start = time.perf_counter()
-    play_schedule(agents, games, fill=fill_agent, suite=suite, on_game=rows.append, device=args.device,
-                  num_envs=args.num_envs, threads=args.threads, infer_rows=args.infer_rows)
+    slots = [*agents, *([fill_agent] if fill_agent is not None else [])]
+    try:
+        # A CANOPY slot's per-game stats (fallbacks, refreshes, refused moves) go into the rows, as in
+        # a record, and into the report's slot entry.
+        play_schedule(agents, games, fill=fill_agent, suite=suite, on_game=_with_canopy(slots, games, rows.append),
+                      device=args.device, num_envs=args.num_envs, threads=args.threads, infer_rows=args.infer_rows)
+    finally:
+        for agent in [*agents, fill_agent]:
+            if hasattr(agent, "close"):
+                agent.close()
     wall = time.perf_counter() - start
     summary = summarize(rows, [r.label for r in resolved])
     report = {"suite": suite.name, "boards": args.boards, "games": len(rows), "wall_s": wall,
@@ -143,6 +151,8 @@ def play(args) -> dict:
                  "wilson": summary["slots"][slot]["wilson"]}
         if isinstance(agent, MctsAgent):
             entry.update(probe(agent))
+        if "canopy" in summary["slots"][slot]:
+            entry["canopy"] = summary["slots"][slot]["canopy"]
         report["slots"].append(entry)
     return report
 

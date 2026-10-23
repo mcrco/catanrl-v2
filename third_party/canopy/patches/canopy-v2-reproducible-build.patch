@@ -1,0 +1,26 @@
+diff --git a/examples/catan/colonist/mod.rs b/examples/catan/colonist/mod.rs
+index a15beff..5da87d2 100644
+--- a/examples/catan/colonist/mod.rs
++++ b/examples/catan/colonist/mod.rs
+@@ -1053,7 +1053,7 @@ pub fn run_serve(
+         }
+     }
+ 
+-    let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/catan/web");
++    let static_dir = PathBuf::from(option_env!("CANOPY_SOURCE_DIR").unwrap_or(".")).join("examples/catan/web");
+     let dice = Dice::Balanced(BalancedDice::new());
+     let presenter =
+         Arc::new(CatanPresenter::new(static_dir.clone(), dice).with_player_names(names));
+diff --git a/examples/catan/main.rs b/examples/catan/main.rs
+index b24b6ea..54a1b4d 100644
+--- a/examples/catan/main.rs
++++ b/examples/catan/main.rs
+@@ -253,7 +253,7 @@ fn main() {
+     // Serve subcommand
+     if let Some(sub) = matches.subcommand_matches("serve") {
+         let static_dir =
+-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/catan/web");
++            std::path::PathBuf::from(option_env!("CANOPY_SOURCE_DIR").unwrap_or(".")).join("examples/catan/web");
+         let presenter = Arc::new(presenter::CatanPresenter::new(static_dir, dice));
+         setup.run_serve(sub, presenter);
+         return;

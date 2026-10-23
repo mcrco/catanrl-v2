@@ -1,0 +1,901 @@
+diff --git a/examples/catan/catanatron_bridge.rs b/examples/catan/catanatron_bridge.rs
+new file mode 100644
+index 0000000..6ad0032
+--- /dev/null
++++ b/examples/catan/catanatron_bridge.rs
+@@ -0,0 +1,576 @@
++//! JSON-lines bridge for evaluating the released Canopy Catan model on
++//! authoritative Catanatron states.
++//!
++//! The Python side owns the actual game.  Each request contains a batch of
++//! complete decision-state snapshots.  We reconstruct Canopy's search state,
++//! run all searches in lockstep so neural evaluations are batched on the GPU,
++//! and return Canopy action IDs.  No Catanatron state or action representation
++//! is modified by this adapter.
++
++use std::io::{BufRead, Write};
++use std::sync::Arc;
++use std::{collections::HashMap, collections::HashSet};
++
++use canopy::eval::{Evaluation, Evaluator};
++use canopy::mcts::{Config, LeafId, Search, Select};
++use canopy::player::Player;
++use serde::{Deserialize, Serialize};
++
++use crate::game::board::{NodeId, Terrain};
++use crate::game::dev_card::{DevCardArray, DevCardDeck};
++use crate::game::dice::Dice;
++use crate::game::resource::{Resource, ResourceArray};
++use crate::game::road::RoadNetwork;
++use crate::game::state::{GameState, Phase, PlayerBoards, PlayerState};
++use crate::game::topology::{PORT_SPECS, Topology};
++
++#[derive(Deserialize)]
++struct BridgeRequest {
++    id: u64,
++    active_game_ids: Option<Vec<String>>,
++    states: Vec<StateSnapshot>,
++}
++
++#[derive(Serialize)]
++struct BridgeResponse {
++    id: u64,
++    actions: Vec<usize>,
++}
++
++#[derive(Serialize)]
++struct BridgeError<'a> {
++    id: Option<u64>,
++    error: &'a str,
++}
++
++#[derive(Deserialize)]
++struct StateSnapshot {
++    game_id: String,
++    tree_actions: Vec<usize>,
++    reuse_tree: bool,
++    terrains: Vec<String>,
++    numbers: Vec<Option<u8>>,
++    ports: Vec<Option<String>>,
++    tile_nodes: Vec<[u8; 6]>,
++    tile_edges: Vec<[u8; 6]>,
++    players: [PlayerSnapshot; 2],
++    settlements: [Vec<u8>; 2],
++    cities: [Vec<u8>; 2],
++    roads: [Vec<u8>; 2],
++    bank: [u8; 5],
++    dev_deck_total: u8,
++    robber: u8,
++    current_player: usize,
++    phase: PhaseSnapshot,
++    turn_number: u16,
++    pre_roll: bool,
++    setup_count: u8,
++    last_setup_node: Option<u8>,
++    longest_road: Option<AwardSnapshot>,
++    largest_army: Option<AwardSnapshot>,
++    vp_limit: u8,
++    discard_threshold: u8,
++    settlements_at_turn_start: Vec<u8>,
++    roads_placed_at_turn_start: u8,
++}
++
++#[derive(Deserialize)]
++struct PlayerSnapshot {
++    hand: [u8; 5],
++    dev_cards: [u8; 5],
++    dev_cards_bought_this_turn: [u8; 5],
++    dev_cards_played: [u8; 5],
++    knights_played: u8,
++    roads_placed: u8,
++    settlements_left: u8,
++    cities_left: u8,
++    roads_left: u8,
++    has_played_dev_card_this_turn: bool,
++    has_traded_this_turn: bool,
++    building_vps: u8,
++    trade_ratios: [u8; 5],
++    #[serde(default)]
++    tested_non_knight: u8,
++}
++
++#[derive(Deserialize)]
++#[serde(tag = "kind", rename_all = "snake_case")]
++enum PhaseSnapshot {
++    PlaceSettlement,
++    PlaceRoad,
++    PreRoll,
++    Discard { remaining: u8, roller: usize },
++    MoveRobber,
++    Main,
++    RoadBuilding { roads_left: u8 },
++}
++
++#[derive(Deserialize)]
++struct AwardSnapshot {
++    player: usize,
++    length: u8,
++}
++
++fn player(index: usize) -> Result<Player, String> {
++    match index {
++        0 => Ok(Player::One),
++        1 => Ok(Player::Two),
++        _ => Err(format!("invalid player index {index}")),
++    }
++}
++
++fn resource(name: &str) -> Result<Resource, String> {
++    match name {
++        "WOOD" => Ok(Resource::Lumber),
++        "BRICK" => Ok(Resource::Brick),
++        "SHEEP" => Ok(Resource::Wool),
++        "WHEAT" => Ok(Resource::Grain),
++        "ORE" => Ok(Resource::Ore),
++        _ => Err(format!("invalid resource {name:?}")),
++    }
++}
++
++fn terrain(name: &str) -> Result<Terrain, String> {
++    match name {
++        "WOOD" => Ok(Terrain::Forest),
++        "BRICK" => Ok(Terrain::Hills),
++        "SHEEP" => Ok(Terrain::Pasture),
++        "WHEAT" => Ok(Terrain::Fields),
++        "ORE" => Ok(Terrain::Mountains),
++        "DESERT" => Ok(Terrain::Desert),
++        _ => Err(format!("invalid terrain {name:?}")),
++    }
++}
++
++fn mask(ids: &[u8], limit: u8, label: &str) -> Result<u64, String> {
++    let mut result = 0u64;
++    for &id in ids {
++        if id >= limit {
++            return Err(format!("{label} id {id} is outside 0..{limit}"));
++        }
++        result |= 1u64 << id;
++    }
++    Ok(result)
++}
++
++fn road_mask(ids: &[u8]) -> Result<u128, String> {
++    let mut result = 0u128;
++    for &id in ids {
++        if id >= 72 {
++            return Err(format!("road id {id} is outside 0..72"));
++        }
++        result |= 1u128 << id;
++    }
++    Ok(result)
++}
++
++struct ImportedState {
++    game_id: String,
++    tree_actions: Vec<usize>,
++    reuse_tree: bool,
++    state: GameState,
++}
++
++fn build_state(snapshot: StateSnapshot) -> Result<ImportedState, String> {
++    let terrains: [Terrain; 19] = snapshot
++        .terrains
++        .iter()
++        .map(|name| terrain(name))
++        .collect::<Result<Vec<_>, _>>()?
++        .try_into()
++        .map_err(|values: Vec<Terrain>| format!("expected 19 terrains, got {}", values.len()))?;
++    let numbers: [Option<u8>; 19] = snapshot
++        .numbers
++        .try_into()
++        .map_err(|values: Vec<Option<u8>>| format!("expected 19 numbers, got {}", values.len()))?;
++    let ports: [Option<Resource>; 9] = snapshot
++        .ports
++        .iter()
++        .map(|value| value.as_deref().map(resource).transpose())
++        .collect::<Result<Vec<_>, _>>()?
++        .try_into()
++        .map_err(|values: Vec<Option<Resource>>| {
++            format!("expected 9 port resources, got {}", values.len())
++        })?;
++
++    let topology = Arc::new(Topology::from_layout_with_ports(
++        terrains,
++        numbers,
++        ports,
++        &PORT_SPECS,
++    ));
++    if snapshot.tile_nodes.len() != 19 || snapshot.tile_edges.len() != 19 {
++        return Err(format!(
++            "expected 19 tile node/edge mappings, got {}/{}",
++            snapshot.tile_nodes.len(),
++            snapshot.tile_edges.len()
++        ));
++    }
++    for (index, tile) in topology.tiles.iter().enumerate() {
++        let expected_nodes = tile.nodes.map(|node| node.0);
++        let expected_edges = tile.edges.map(|edge| edge.0);
++        if snapshot.tile_nodes[index] != expected_nodes {
++            return Err(format!(
++                "Catanatron/Canopy node indexing mismatch on tile {index}: {:?} != {:?}",
++                snapshot.tile_nodes[index], expected_nodes
++            ));
++        }
++        if snapshot.tile_edges[index] != expected_edges {
++            return Err(format!(
++                "Catanatron/Canopy edge indexing mismatch on tile {index}: {:?} != {:?}",
++                snapshot.tile_edges[index], expected_edges
++            ));
++        }
++    }
++    let mut state = GameState::new(
++        topology,
++        DevCardDeck {
++            total: snapshot.dev_deck_total,
++        },
++        Dice::Random,
++    );
++
++    let settlement_masks = [
++        mask(&snapshot.settlements[0], 54, "settlement")?,
++        mask(&snapshot.settlements[1], 54, "settlement")?,
++    ];
++    let city_masks = [
++        mask(&snapshot.cities[0], 54, "city")?,
++        mask(&snapshot.cities[1], 54, "city")?,
++    ];
++    let road_masks = [
++        road_mask(&snapshot.roads[0])?,
++        road_mask(&snapshot.roads[1])?,
++    ];
++
++    for index in 0..2 {
++        let pid = player(index)?;
++        let p = &snapshot.players[index];
++        state.players[pid] = PlayerState {
++            hand: ResourceArray(p.hand),
++            dev_cards: DevCardArray(p.dev_cards),
++            dev_cards_bought_this_turn: DevCardArray(p.dev_cards_bought_this_turn),
++            knights_played: p.knights_played,
++            roads_placed: p.roads_placed,
++            settlements_left: p.settlements_left,
++            cities_left: p.cities_left,
++            roads_left: p.roads_left,
++            has_played_dev_card_this_turn: p.has_played_dev_card_this_turn,
++            has_traded_this_turn: p.has_traded_this_turn,
++            dev_cards_played: DevCardArray(p.dev_cards_played),
++            hidden_dev_cards: 0,
++            hidden_dev_cards_bought_this_turn: 0,
++            building_vps: p.building_vps,
++            trade_ratios: p.trade_ratios,
++            tested_non_knight: p.tested_non_knight,
++        };
++        state.boards[pid] = PlayerBoards {
++            settlements: settlement_masks[index],
++            cities: city_masks[index],
++            road_network: RoadNetwork::from_snapshot(
++                road_masks[index],
++                settlement_masks[index] | city_masks[index],
++                settlement_masks[1 - index] | city_masks[1 - index],
++                road_masks[1 - index],
++                &state.topology.adj,
++            ),
++        };
++    }
++
++    state.bank = ResourceArray(snapshot.bank);
++    if snapshot.robber >= 19 {
++        return Err(format!("robber tile {} is outside 0..19", snapshot.robber));
++    }
++    state.robber = crate::game::board::TileId(snapshot.robber);
++    state.current_player = player(snapshot.current_player)?;
++    state.phase = match snapshot.phase {
++        PhaseSnapshot::PlaceSettlement => Phase::PlaceSettlement,
++        PhaseSnapshot::PlaceRoad => Phase::PlaceRoad,
++        PhaseSnapshot::PreRoll => Phase::PreRoll,
++        PhaseSnapshot::Discard { remaining, roller } => Phase::Discard {
++            player: state.current_player,
++            remaining,
++            roller: player(roller)?,
++            min_resource: 0,
++        },
++        PhaseSnapshot::MoveRobber => Phase::MoveRobber,
++        PhaseSnapshot::Main => Phase::Main,
++        PhaseSnapshot::RoadBuilding { roads_left } => Phase::RoadBuilding { roads_left },
++    };
++    state.turn_number = snapshot.turn_number;
++    state.pre_roll = snapshot.pre_roll;
++    state.setup_count = snapshot.setup_count;
++    state.last_setup_node = snapshot.last_setup_node.map(NodeId);
++    state.longest_road = match snapshot.longest_road {
++        Some(award) => Some((player(award.player)?, award.length)),
++        None => None,
++    };
++    state.largest_army = match snapshot.largest_army {
++        Some(award) => Some((player(award.player)?, award.length)),
++        None => None,
++    };
++    state.vp_limit = snapshot.vp_limit;
++    state.discard_threshold = snapshot.discard_threshold;
++    state.friendly_robber = false;
++    state.settlements_at_turn_start = mask(
++        &snapshot.settlements_at_turn_start,
++        54,
++        "turn-start settlement",
++    )?;
++    state.roads_placed_at_turn_start = snapshot.roads_placed_at_turn_start;
++    // Preserve Canopy's canonical search pruning. It only removes dominated
++    // action orderings/targets inside the bot's search; every selected action
++    // is still resolved against Catanatron's authoritative legal-action list.
++    state.canonical_build_order = true;
++    state.min_step = 0;
++    state.min_trade_idx = 0;
++    state.min_city_node = 0;
++    state.min_road_key = 0;
++    state.min_settle_node = 0;
++    state.min_port_settle_node = 0;
++    state.compute_road_distances();
++    Ok(ImportedState {
++        game_id: snapshot.game_id,
++        tree_actions: snapshot.tree_actions,
++        reuse_tree: snapshot.reuse_tree,
++        state,
++    })
++}
++
++struct PendingLeaf {
++    search_index: usize,
++    leaf: LeafId,
++    state: GameState,
++}
++
++fn same_authoritative_phase(left: &Phase, right: &Phase) -> bool {
++    match (left, right) {
++        (
++            Phase::Discard {
++                player: left_player,
++                remaining: left_remaining,
++                roller: left_roller,
++                ..
++            },
++            Phase::Discard {
++                player: right_player,
++                remaining: right_remaining,
++                roller: right_roller,
++                ..
++            },
++        ) => {
++            left_player == right_player
++                && left_remaining == right_remaining
++                && left_roller == right_roller
++        }
++        _ => left == right,
++    }
++}
++
++/// Compare every game field governed by authoritative Catanatron outcomes.
++///
++/// Canopy-only canonical ordering fields are intentionally excluded: when the
++/// real action path reaches the same authoritative position, the retained
++/// values are more exact than a root imported midway through a turn. In
++/// particular, discard `min_resource` and turn-start build snapshots encode
++/// how the retained subtree was canonicalized, not a Catanatron rule.
++fn same_authoritative_state(left: &GameState, right: &GameState) -> bool {
++    left.players == right.players
++        && left.current_player == right.current_player
++        && left.boards == right.boards
++        && left.bank == right.bank
++        && left.dev_deck == right.dev_deck
++        && left.robber == right.robber
++        && same_authoritative_phase(&left.phase, &right.phase)
++        && left.turn_number == right.turn_number
++        && left.pre_roll == right.pre_roll
++        && left.setup_count == right.setup_count
++        && left.longest_road == right.longest_road
++        && left.largest_army == right.largest_army
++        && left.dice == right.dice
++        && left.vp_limit == right.vp_limit
++        && left.discard_threshold == right.discard_threshold
++        && left.friendly_robber == right.friendly_robber
++        && left.last_setup_node == right.last_setup_node
++}
++
++#[cfg(test)]
++mod bridge_tests {
++    use super::*;
++
++    #[test]
++    fn retained_state_check_ignores_only_canopy_discard_ordering() {
++        let mut retained = GameState::from_seed(17, Dice::Random);
++        retained.current_player = Player::One;
++        retained.phase = Phase::Discard {
++            player: Player::One,
++            remaining: 3,
++            roller: Player::Two,
++            min_resource: 2,
++        };
++        let mut imported = retained.clone();
++        imported.phase = Phase::Discard {
++            player: Player::One,
++            remaining: 3,
++            roller: Player::Two,
++            min_resource: 0,
++        };
++        assert!(same_authoritative_state(&retained, &imported));
++
++        imported.current_player = Player::Two;
++        assert!(!same_authoritative_state(&retained, &imported));
++    }
++
++    #[test]
++    fn retained_state_check_rejects_authoritative_hand_drift() {
++        let retained = GameState::from_seed(19, Dice::Random);
++        let mut imported = retained.clone();
++        imported.players[Player::One].hand[Resource::Lumber] = 1;
++        assert!(!same_authoritative_state(&retained, &imported));
++    }
++}
++
++fn search_batch(
++    states: Vec<ImportedState>,
++    active_game_ids: Option<&[String]>,
++    evaluator: &(dyn Evaluator<GameState> + Sync),
++    simulations: u32,
++    rng: &mut fastrand::Rng,
++    saved_searches: &mut HashMap<String, Search<GameState>>,
++) -> Vec<usize> {
++    let config = Config {
++        num_simulations: simulations,
++        // Evaluation must be deterministic policy improvement, not noisy
++        // self-play exploration.
++        dirichlet_epsilon: 0.0,
++        ..Config::default()
++    };
++    let active_ids: HashSet<String> = active_game_ids
++        .map(|ids| ids.iter().cloned().collect())
++        .unwrap_or_else(|| states.iter().map(|state| state.game_id.clone()).collect());
++    saved_searches.retain(|game_id, _| active_ids.contains(game_id));
++
++    let mut game_ids = Vec::with_capacity(states.len());
++    let mut searches = Vec::with_capacity(states.len());
++    for imported in states {
++        let game_id = imported.game_id;
++        let mut search = saved_searches
++            .remove(&game_id)
++            .unwrap_or_else(|| Search::new(imported.state.clone(), config.clone()));
++        search.set_num_simulations(simulations);
++        if imported.reuse_tree {
++            let walked = search.walk_tree_exact(&imported.tree_actions);
++            if walked == imported.tree_actions.len()
++                && same_authoritative_state(search.state(), &imported.state)
++            {
++                search.cancel_search();
++            } else {
++                search.reset(imported.state);
++            }
++        } else {
++            search.reset(imported.state);
++        }
++        game_ids.push(game_id);
++        searches.push(search);
++    }
++    let mut actions = vec![None; searches.len()];
++
++    while actions.iter().any(Option::is_none) {
++        let mut pending = Vec::new();
++        for (index, search) in searches.iter_mut().enumerate() {
++            if actions[index].is_some() {
++                continue;
++            }
++            match search.select(rng) {
++                Select::Eval(leaf, state) => pending.push(PendingLeaf {
++                    search_index: index,
++                    leaf,
++                    state,
++                }),
++                Select::Terminal(leaf, wdl) => search.backup_terminal(leaf, wdl),
++                Select::Done => actions[index] = Some(search.result().selected_action),
++            }
++        }
++
++        if !pending.is_empty() {
++            let refs: Vec<&GameState> = pending.iter().map(|item| &item.state).collect();
++            let evaluations: Vec<Evaluation> = evaluator.evaluate_batch(&refs, rng);
++            for (item, evaluation) in pending.into_iter().zip(evaluations) {
++                searches[item.search_index].backup(item.leaf, evaluation);
++            }
++        }
++    }
++
++    for (game_id, search) in game_ids.into_iter().zip(searches) {
++        saved_searches.insert(game_id, search);
++    }
++    actions.into_iter().map(Option::unwrap).collect()
++}
++
++pub fn run(evaluator: Arc<dyn Evaluator<GameState> + Sync>, simulations: u32, seed: u64) {
++    let stdin = std::io::stdin();
++    let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
++    let mut rng = fastrand::Rng::with_seed(seed);
++    let mut saved_searches: HashMap<String, Search<GameState>> = HashMap::new();
++
++    for line in stdin.lock().lines() {
++        let line = match line {
++            Ok(line) if !line.trim().is_empty() => line,
++            Ok(_) => continue,
++            Err(error) => {
++                let message = error.to_string();
++                let response = BridgeError {
++                    id: None,
++                    error: &message,
++                };
++                serde_json::to_writer(&mut stdout, &response).unwrap();
++                writeln!(&mut stdout).unwrap();
++                stdout.flush().unwrap();
++                continue;
++            }
++        };
++
++        let request: BridgeRequest = match serde_json::from_str(&line) {
++            Ok(request) => request,
++            Err(error) => {
++                let message = error.to_string();
++                let response = BridgeError {
++                    id: None,
++                    error: &message,
++                };
++                serde_json::to_writer(&mut stdout, &response).unwrap();
++                writeln!(&mut stdout).unwrap();
++                stdout.flush().unwrap();
++                continue;
++            }
++        };
++        let request_id = request.id;
++        let active_game_ids = request.active_game_ids;
++        let states: Result<Vec<_>, _> = request.states.into_iter().map(build_state).collect();
++        match states {
++            Ok(states) => {
++                let response = BridgeResponse {
++                    id: request_id,
++                    actions: search_batch(
++                        states,
++                        active_game_ids.as_deref(),
++                        &*evaluator,
++                        simulations,
++                        &mut rng,
++                        &mut saved_searches,
++                    ),
++                };
++                serde_json::to_writer(&mut stdout, &response).unwrap();
++            }
++            Err(message) => {
++                let response = BridgeError {
++                    id: Some(request_id),
++                    error: &message,
++                };
++                serde_json::to_writer(&mut stdout, &response).unwrap();
++            }
++        }
++        writeln!(&mut stdout).unwrap();
++        stdout.flush().unwrap();
++    }
++}
+diff --git a/examples/catan/game/action.rs b/examples/catan/game/action.rs
+index d0ad819..422ba30 100644
+--- a/examples/catan/game/action.rs
++++ b/examples/catan/game/action.rs
+@@ -444,8 +444,8 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
+     let opp = me.opponent();
+     let my_buildings = state.player_buildings(me);
+     let opp_buildings = state.player_buildings(opp);
+-    let friendly_opp = state.public_vps(opp) < super::FRIENDLY_ROBBER_VP;
+-    let friendly_me = state.public_vps(me) < super::FRIENDLY_ROBBER_VP;
++    let friendly_opp = state.friendly_robber && state.public_vps(opp) < super::FRIENDLY_ROBBER_VP;
++    let friendly_me = state.friendly_robber && state.public_vps(me) < super::FRIENDLY_ROBBER_VP;
+
+     // Collect legal tiles, optionally filtering tiles without opponent
+     // buildings (dominated: no steal, no opponent production blocked).
+@@ -1304,8 +1304,9 @@ mod tests {
+             );
+         }
+
+-        // Verify opponent tiles ARE included once VP >= 3
+-        state.players[Player::Two].building_vps = 3;
++        // The interoperability adapter can disable the house rule without
++        // changing the default used by Canopy training.
++        state.friendly_robber = false;
+         legal_actions(&state, &mut actions);
+         let has_opp_tile = actions.iter().any(|a| {
+             let tid = a.robber_tile();
+@@ -1314,8 +1315,18 @@ mod tests {
+         });
+         assert!(
+             has_opp_tile,
+-            "above threshold, should include opponent tiles"
++            "disabled friendly robber should include opponent tiles"
+         );
++
++        // The ordinary Canopy rule also permits those tiles once VP >= 3.
++        state.friendly_robber = true;
++        state.players[Player::Two].building_vps = 3;
++        legal_actions(&state, &mut actions);
++        assert!(actions.iter().any(|a| {
++            let tid = a.robber_tile();
++            let tile_mask = topo.adj.tile_nodes[tid.0 as usize];
++            tile_mask & opp_buildings != 0
++        }));
+     }
+
+     /// When both players share a tile and one is friendly-protected,
+diff --git a/examples/catan/game/dev_card.rs b/examples/catan/game/dev_card.rs
+index b9e9981..c85314d 100644
+--- a/examples/catan/game/dev_card.rs
++++ b/examples/catan/game/dev_card.rs
+@@ -42,7 +42,7 @@ impl IndexMut<DevCardKind> for DevCardArray {
+ /// Per-type distributions are derived from visible information (hands + played
+ /// piles) via `GameState::unknown_dev_pool()` when needed. This avoids the
+ /// impossible task of tracking per-type counts when opponent draws are hidden.
+-#[derive(Clone, Copy, Debug)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct DevCardDeck {
+     pub total: u8,
+ }
+diff --git a/examples/catan/game/dice.rs b/examples/catan/game/dice.rs
+index 5cf82d1..8f954a1 100644
+--- a/examples/catan/game/dice.rs
++++ b/examples/catan/game/dice.rs
+@@ -5,7 +5,7 @@ const TOTAL_CARDS: u8 = 36;
+ const MIN_CARDS_RESHUFFLE: u8 = 13;
+ const RECENT_MEMORY: usize = 5;
+
+-#[derive(Clone, Copy, Debug)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum Dice {
+     Random,
+     Balanced(BalancedDice),
+@@ -27,7 +27,7 @@ impl Dice {
+     }
+ }
+
+-#[derive(Clone, Copy, Debug)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub struct BalancedDice {
+     deck: [u8; 11],
+     cards_left: u8,
+diff --git a/examples/catan/game/mod.rs b/examples/catan/game/mod.rs
+index d33b6e7..7480fd9 100644
+--- a/examples/catan/game/mod.rs
++++ b/examples/catan/game/mod.rs
+@@ -793,7 +793,7 @@ fn apply_move_robber(state: &mut GameState, tid: TileId) {
+     let opp_buildings = state.player_buildings(opp);
+     let has_target = (tile_mask & opp_buildings) != 0 && state.players[opp].hand.total() > 0;
+
+-    if has_target && state.public_vps(opp) >= FRIENDLY_ROBBER_VP {
++    if has_target && (!state.friendly_robber || state.public_vps(opp) >= FRIENDLY_ROBBER_VP) {
+         state.phase = Phase::StealResolve;
+     } else if state.pre_roll {
+         state.phase = Phase::Roll;
+diff --git a/examples/catan/game/road.rs b/examples/catan/game/road.rs
+index ac72148..424c778 100644
+--- a/examples/catan/game/road.rs
++++ b/examples/catan/game/road.rs
+@@ -29,7 +29,7 @@ use super::board::{AdjacencyBitboards, EdgeId, NodeId};
+
+ const EDGE_MASK: u128 = (1u128 << 72) - 1;
+
+-#[derive(Clone, Copy, Debug, Default)]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct RoadNetwork {
+     pub roads: u128, // bits 0..72 — player's placed roads
+     reachable: u128, // bits 0..72 — empty edges adjacent to network
+@@ -37,6 +37,49 @@ pub struct RoadNetwork {
+ }
+
+ impl RoadNetwork {
++    /// Rebuild the cached road-network state from an external game snapshot.
++    ///
++    /// This is used by interoperability adapters which receive a complete
++    /// board position rather than replaying the original placement order.
++    pub fn from_snapshot(
++        roads: u128,
++        own_buildings: u64,
++        opponent_buildings: u64,
++        opponent_roads: u128,
++        adj: &AdjacencyBitboards,
++    ) -> Self {
++        let mut reachable = 0u128;
++
++        let mut buildings = own_buildings;
++        while buildings != 0 {
++            let node = buildings.trailing_zeros() as usize;
++            buildings &= buildings - 1;
++            reachable |= adj.node_adj_edges[node];
++        }
++
++        let mut placed = roads;
++        while placed != 0 {
++            let edge = placed.trailing_zeros() as usize;
++            placed &= placed - 1;
++            let mut endpoints = adj.edge_endpoints[edge];
++            while endpoints != 0 {
++                let node = endpoints.trailing_zeros() as usize;
++                endpoints &= endpoints - 1;
++                if opponent_buildings & (1u64 << node) == 0 {
++                    reachable |= adj.node_adj_edges[node];
++                }
++            }
++        }
++
++        reachable &= !(roads | opponent_roads) & EDGE_MASK;
++        let longest_len = compute_longest_road(roads, adj, opponent_buildings);
++        Self {
++            roads,
++            reachable,
++            longest_len,
++        }
++    }
++
+     #[cfg(test)]
+     pub fn new() -> Self {
+         Self::default()
+@@ -399,6 +442,24 @@ mod tests {
+         );
+     }
+
++    #[test]
++    fn snapshot_rebuild_matches_incremental_network() {
++        let topo = make_topo();
++        let adj = &topo.adj;
++        let own_buildings = 1u64;
++        let mut incremental = RoadNetwork::new();
++        incremental.add_building(NodeId(0), adj, 0);
++        for _ in 0..6 {
++            let edge = incremental.reachable_edges().trailing_zeros() as u8;
++            incremental.add_road(EdgeId(edge), adj, 0, 0, true);
++        }
++
++        let rebuilt = RoadNetwork::from_snapshot(incremental.roads, own_buildings, 0, 0, adj);
++        assert_eq!(rebuilt.roads, incremental.roads);
++        assert_eq!(rebuilt.reachable_edges(), incremental.reachable_edges());
++        assert_eq!(rebuilt.longest_road(), incremental.longest_road());
++    }
++
+     #[test]
+     fn opponent_building_shrinks_frontier() {
+         let topo = make_topo();
+diff --git a/examples/catan/game/state.rs b/examples/catan/game/state.rs
+index aa8d78c..bdabf2e 100644
+--- a/examples/catan/game/state.rs
++++ b/examples/catan/game/state.rs
+@@ -14,7 +14,7 @@ use super::road::RoadNetwork;
+ use super::topology::Topology;
+
+ /// Bitboard representation of a player's buildings and road network.
+-#[derive(Clone, Copy, Debug, Default)]
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct PlayerBoards {
+     /// Bitmask of node positions with settlements (bits 0..54).
+     pub settlements: u64,
+@@ -25,7 +25,7 @@ pub struct PlayerBoards {
+ }
+
+ /// Per-player game state: resources, pieces, dev cards, and scoring.
+-#[derive(Clone, Debug)]
++#[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct PlayerState {
+     /// Resource cards currently in hand.
+     pub hand: ResourceArray,
+@@ -146,6 +146,8 @@ pub struct GameState {
+     pub dice: Dice,
+     pub vp_limit: u8,
+     pub discard_threshold: u8,
++    /// Whether robber moves may target players below the friendly-robber VP threshold.
++    pub friendly_robber: bool,
+
+     /// The node of the most recently placed setup settlement. Used by
+     /// `populate_place_road` to determine which settlement needs a road.
+@@ -257,6 +259,7 @@ impl GameState {
+             dice,
+             vp_limit: 15,
+             discard_threshold: 9,
++            friendly_robber: true,
+             last_setup_node: None,
+             min_step: 0,
+             min_trade_idx: 0,
+diff --git a/examples/catan/main.rs b/examples/catan/main.rs
+index 8e5a710..dae0691 100644
+--- a/examples/catan/main.rs
++++ b/examples/catan/main.rs
+@@ -14,6 +14,7 @@ use clap::Arg;
+ use canopy::cli::GameCli;
+ use canopy::train::TrainConfig;
+
++mod catanatron_bridge;
+ mod colonist;
+ mod encoder;
+ mod game;
+@@ -124,6 +125,28 @@ fn main() {
+                         .help("Evaluator (name or checkpoint path)"),
+                 ),
+         )
++        .subcommand(
++            clap::Command::new("catanatron-bridge")
++                .about("Serve released Canopy search over Catanatron JSON snapshots")
++                .arg(
++                    Arg::new("checkpoint")
++                        .long("checkpoint")
++                        .required(true)
++                        .help("Released nexus-v3 model_iter_N.mpk checkpoint"),
++                )
++                .arg(
++                    Arg::new("simulations")
++                        .long("simulations")
++                        .default_value("1600")
++                        .help("MCTS simulations per Catanatron decision"),
++                )
++                .arg(
++                    Arg::new("seed")
++                        .long("seed")
++                        .default_value("0")
++                        .help("Determinization/search RNG seed"),
++                ),
++        )
+         .get_matches();
+
+     let dice = if matches.get_flag("random-dice") {
+@@ -143,6 +166,23 @@ fn main() {
+         .parse()
+         .expect("invalid discard-threshold");
+
++    if let Some(sub) = matches.subcommand_matches("catanatron-bridge") {
++        let checkpoint = sub.get_one::<String>("checkpoint").unwrap();
++        let simulations = sub
++            .get_one::<String>("simulations")
++            .unwrap()
++            .parse()
++            .expect("invalid simulations");
++        let seed = sub
++            .get_one::<String>("seed")
++            .unwrap()
++            .parse()
++            .expect("invalid seed");
++        let (evaluator, _) = setup.load_checkpoint(checkpoint, Some("nexus-v3"));
++        catanatron_bridge::run(evaluator, simulations, seed);
++        return;
++    }
++
+     // Colonist CDP subcommand
+     if let Some(sub) = matches.subcommand_matches("colonist") {
+         let cdp_port: u16 = sub
+diff --git a/src/mcts/mod.rs b/src/mcts/mod.rs
+index b611cb7..0349651 100644
+--- a/src/mcts/mod.rs
++++ b/src/mcts/mod.rs
+@@ -270,6 +270,27 @@ impl<G: Game> Search<G> {
+         walked
+     }
+
++    /// Walk through only exact, already-expanded children.
++    ///
++    /// Unlike [`Self::walk_tree`], this never substitutes the most-visited
++    /// chance outcome and never skips a trailing chance node.  External game
++    /// adapters use this when they have recorded the authoritative chance
++    /// outcomes: retaining a subtree for a different dice/card/steal outcome
++    /// would leave its root edges inconsistent with the imported state.
++    pub fn walk_tree_exact(&mut self, actions: &[usize]) -> usize {
++        let mut walked = 0;
++        for &action in actions {
++            let Some(root) = self.root else { break };
++            let Some(child) = self.tree.child_for_action(root, action) else {
++                break;
++            };
++            self.root = Some(child);
++            walked += 1;
++        }
++        self.needs_compact = true;
++        walked
++    }
++
+     /// Select a leaf node by descending from root via PUCT.
+     ///
+     /// Returns [`Select::Eval`] with a leaf state needing evaluation,
