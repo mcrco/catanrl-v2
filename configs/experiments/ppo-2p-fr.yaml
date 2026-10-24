@@ -248,7 +248,7 @@
 #     code_id catanrl 948205ccc476da20 -> 55ba5984c434c839). base-2p-fr needs that engine: on
 #     main's current engine (e9f12af) the friendly rule is catanatron's (actual points < 3, which
 #     reads hidden vp cards) and there is no dice_mode, and games.py calls cpp.DiceMode for every
-#     game, so every catanrl entry point fails until main's engine is rebuilt.
+#     game, so every run, eval and bridge game fails until main's engine is rebuilt.
 #   - the merge moves the catanrl, train and engine code ids (engine 5ebaacdac482cf5f, main's
 #     build of e9f12af, -> a9b40d9ca81fefcf) for every experiment in main, not only this one, so
 #     finish or record anything pending in main first: after the merge, cached eval records from
@@ -262,7 +262,7 @@
 #     github mcrco/cppanatron, which never got them, so a bare `git submodule update` fails. git
 #     merge doesn't move a submodule's checkout (submodule.recurse is unset), and uv sync keys the
 #     engine's rebuild on its checkout (git commit and sources), so a merge plus uv sync alone
-#     leaves main on e9f12af and every catanrl entry point fails (AttributeError: cpp.DiceMode).
+#     leaves main on e9f12af, and every game catanrl builds fails (AttributeError: cpp.DiceMode).
 #     so: fetch the engine commit into main's submodule (step 2), then merge (3), then move the
 #     checkout (4), then rebuild (5). don't remove the integration worktree before step 2: its
 #     module store is the only copy of the engine commits.
