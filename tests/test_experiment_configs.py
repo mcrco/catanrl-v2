@@ -231,3 +231,50 @@ def test_critic_refit_2p_is_puffer_graph2_public_with_only_the_critic_training()
         trained[v.name] = sum(p.numel() for n, p in model.named_parameters()
                               if not n.startswith(tuple(model.parts["actor"])))
     assert trained == {"main": 376_225, "head": 74_113}
+
+
+def test_ppo_2p_fr_is_puffer_graph2_full_continued():
+    """Marco's friendly-robber continuation (2026-10-24): puffer-graph2/full@best (e3350) trained
+    on for ~1B agent steps on base-2p-fr (base-2p plus OpenHex's friendly robber), its recipe key
+    for key but the budget and the learning rate (half the start's peak, the same 0.1x cosine),
+    from its weights (init_from, a fresh optimizer); best follows the champion monitor (POLICY
+    vs the start), F is a monitor; the finals on heldout-2p-fr pair @best and the start."""
+    from catanrl.train.puffer import puffer_config
+
+    ref = load_plan("puffer-graph2").variant("full").config
+    (v,) = load_plan("ppo-2p-fr").variants
+    cfg = v.config
+    assert v.name == "full" and cfg["obs"] == ref["obs"] == {"level": "full", "critic_level": None}
+    assert {k: cfg[k] for k in ("seed", "model", "runtime")} == {k: ref[k] for k in ("seed", "model", "runtime")}
+    assert {k: cfg["env"][k] for k in cfg["env"] if k != "scenarios"} == \
+        {k: ref["env"][k] for k in ref["env"] if k != "scenarios"}
+    (scenario,), (start,) = cfg["env"]["scenarios"], ref["env"]["scenarios"]
+    assert {**scenario, "game": None} == {**start, "game": None}  # turn limit, maps, weight, seats
+    assert {**scenario["game"], "name": None, "friendly_robber": None} == \
+        {**start["game"], "name": None, "friendly_robber": None}
+    assert scenario["game"]["friendly_robber"] and not start["game"]["friendly_robber"]
+
+    changed = {"total_timesteps", "learning_rate"}
+    assert {k: cfg["train"][k] for k in cfg["train"] if k not in changed} == \
+        {k: ref["train"][k] for k in ref["train"] if k not in changed}
+    assert cfg["train"]["learning_rate"] == ref["train"]["learning_rate"] / 2
+    config = puffer_config(cfg["train"], cfg["runtime"], rows=2 * cfg["env"]["num_envs"], seed=0, data_dir=".")
+    epochs = config["total_timesteps"] // config["batch_size"]
+    assert config["batch_size"] == 132_096 and config["total_timesteps"] == epochs * config["batch_size"]
+    assert epochs == 7600 and epochs % config["checkpoint_interval"] == 0  # the last epoch is a select epoch
+
+    assert cfg["init_from"] == {"ckpt": "puffer-graph2/full@best#3355b5059503", "parts": ["actor", "critic"]}
+    assert "champion" not in cfg["eval"]  # ${champion} is ${init}: the start
+    champion = {"name": "champion", "suite": "select-2p-fr", "lineup": ["POLICY:ckpt=${self}", "POLICY:ckpt=${init}"],
+                "every": 50, "metric": "score_rate"}
+    f = {"name": "f", "suite": "select-2p-fr", "lineup": ["POLICY:ckpt=${self}", "F"], "every": 50,
+         "metric": "score_rate"}
+    assert cfg["eval"]["monitor"] == [champion, f]
+    assert cfg["eval"]["select"] == {**{k: x for k, x in champion.items() if k != "name"}, "from": "champion"}
+    best, start_ref = f"{v.ref}@best", "${init}"
+    finals = [(e["suite"], e["lineup"]) for e in cfg["eval"]["final"]]
+    assert finals == [("heldout-2p-fr", lineup) for lineup in (
+        [f"POLICY:ckpt={best}", "F"], [f"BELIEF:ckpt={best}:worlds=16", "F"],
+        [f"POLICY:ckpt={start_ref}", "F"], [f"BELIEF:ckpt={start_ref}:worlds=16", "F"],
+        [f"POLICY:ckpt={best}", f"POLICY:ckpt={start_ref}"],
+        [f"BELIEF:ckpt={best}:worlds=16", f"BELIEF:ckpt={start_ref}:worlds=16"])]

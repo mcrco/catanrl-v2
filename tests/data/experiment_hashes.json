@@ -68,6 +68,7 @@
  "mcts-reuse-2p/main": "1ed1e18fd1348eb5",
  "mcts-reuse-4p-both/main": "7630220cda2c3bb3",
  "mcts-reuse-4p/main": "98b6791581c9ca91",
+ "ppo-2p-fr/full": "1efb94c8273c9789",
  "ppo-4p-critic-fix/lambda": "8a1d03e70b308142",
  "ppo-4p-critic-fix/lambda-adamw": "815e88f3ad537a7b",
  "ppo-4p-critic-fix/lambda-critic-g1": "ce402ea7ee7f214d",
