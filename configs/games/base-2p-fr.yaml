@@ -1,4 +1,5 @@
-# base-2p under OpenHex's 1v1 rules. OpenHex's code defaults (openhex/state.py GameConfig)
+# base-2p under OpenHex's 1v1 rules, exactly: 15 VP to win, discard above 9 cards, the
+# friendly robber and balanced dice. OpenHex's code defaults (openhex/state.py GameConfig)
 # are 4 players, 10 VP, discard limit 7, the normal robber and random dice; its queue
 # overrides them per mode (services/game_manager.py create_game): "1v1" is two players,
 # 15 VP to win, discard limit 9 (discard at 10+ cards), the friendly robber and balanced
@@ -11,10 +12,17 @@
 # knight's Largest Army award (execute_action: validate, execute, then _check_awards), so
 # a seat that knight takes the award from keeps its 2 points for that robber move (the
 # engine's Game.largest_army_taken_from). The steal targets are not filtered.
-# Not here: OpenHex's balanced dice (openhex/dice.py); the engine rolls fair random dice.
+# Balanced dice (diceMode "balanced", openhex/dice.py; the engine's DiceMode::balanced,
+# cppanatron.BalancedDice): a 36-card deck of face pairs, refilled to 36 before a draw
+# when 13 or fewer are left and when the main phase starts; a total's weight is its cards
+# left times max(0, 1 - 0.34 x its count among the last 5 totals), the 7's further times
+# clamp(imbalance + 0.4 per 7 of the current streak (negative for the streak's owner), 0, 2).
+# All of it is public. The graph encoder has no input for it (its rule inputs are
+# vps_to_win, discard_limit and friendly_robber), so a row reads the same under either dice.
 name: base-2p-fr
 num_players: 2
 map: {type: BASE}
 victory_points_to_win: 15
 discard_limit: 9
 friendly_robber: true
+dice_mode: balanced

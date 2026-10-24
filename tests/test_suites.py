@@ -67,18 +67,18 @@ def test_fill_expands(game, n):
 
 
 def test_the_friendly_robber_suites_play_openhex_1v1_rules():
-    """base-2p-fr is base-2p with the friendly robber (OpenHex's 1v1): its games
-    have the rule and the encoder's friendly_robber feature reads 1 (0 on
-    base-2p). The -fr suites keep the base-2p suites' seeds and sizes; the
-    scenario hash includes the rules, so their boards are other boards, and
-    select and heldout stay disjoint."""
+    """base-2p-fr is base-2p with the friendly robber and balanced dice (OpenHex's
+    1v1): its games have both rules and the encoder's friendly_robber feature
+    reads 1 (0 on base-2p); no feature reads the dice. The -fr suites keep the
+    base-2p suites' seeds and sizes; the scenario hash includes the rules, so
+    their boards are other boards, and select and heldout stay disjoint."""
     import cppanatron as cpp
 
     from catanrl import games
     from catanrl.envs.encoding import make_encoder
 
     fr, base = games.load_game("base-2p-fr"), games.load_game("base-2p")
-    assert fr.to_dict() == {**base.to_dict(), "name": "base-2p-fr", "friendly_robber": True}
+    assert fr.to_dict() == {**base.to_dict(), "name": "base-2p-fr", "friendly_robber": True, "dice_mode": "balanced"}
     dims = {"max_players": 2, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
     for level in ("private", "full"):
         encoder = make_encoder(dims, level)
@@ -87,9 +87,11 @@ def test_the_friendly_robber_suites_play_openhex_1v1_rules():
         for config, expected in ((fr, 1.0), (base, 0.0)):
             game = config.cppanatron_game(map_seed=11, seed=12)
             assert game.friendly_robber is bool(expected) and game.rules.friendly_robber is bool(expected)
+            assert game.dice_mode == (cpp.DiceMode.BALANCED if expected else cpp.DiceMode.RANDOM)
             assert np.asarray(encoder.encode(game, 0))[feature] == expected
     scenario = cpp.Scenario(num_players=2, rules=fr.cppanatron_rules())
     assert scenario.rules.friendly_robber and scenario.rules.vps_to_win == 15 and scenario.rules.discard_limit == 9
+    assert scenario.rules.dice_mode == cpp.DiceMode.BALANCED
 
     for purpose, boards in (("select", 500), ("heldout", 2500), ("dev", 50)):
         suite, plain = load_suite(f"{purpose}-2p-fr"), load_suite(f"{purpose}-2p")

@@ -6,8 +6,8 @@ experiment hashes as before it existed: the goldens (tests/data/dice_mode_hashes
 were recorded by the code before dice_mode (cfec40a) for every file under
 configs/games, configs/suites and configs/experiments, and each is checked while
 the files its hashes come from are unchanged (an entry whose sources changed since is
-skipped; the structural check, no ``dice_mode`` in any resolved config, runs on every
-file). An experiment's sources are its YAML, the train and model presets and its
+skipped; the structural check, ``dice_mode`` only where base-2p-fr, OpenHex's 1v1 game,
+is played, runs on every file). An experiment's sources are its YAML, the train and model presets and its
 games' YAML: not config.py, nor configs/defaults.yaml and smoke.yaml, which every
 experiment resolves through, so that a change to them (another branch's config keys
 merged in) still meets the goldens and fails them if it moves a hash. A balanced game keys apart from its fair twin, plays in the native harness,
@@ -115,24 +115,57 @@ def _keys(value):
             yield from _keys(v)
 
 
-def test_no_existing_config_names_a_dice_mode():
+#: The games that roll balanced dice: OpenHex's 1v1 rules (friendly robber and balanced dice).
+BALANCED_GAMES = {"base-2p-fr"}
+
+
+def _plays_balanced(config) -> bool:
+    return any(isinstance(g, dict) and g.get("name") in BALANCED_GAMES for g in _games_in(config))
+
+
+def _games_in(value):
+    if isinstance(value, dict):
+        if "game" in value:
+            yield value["game"]
+        for v in value.values():
+            yield from _games_in(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _games_in(v)
+
+
+def test_only_openhex_1v1_configs_name_a_dice_mode():
+    """base-2p-fr (OpenHex's 1v1) rolls balanced dice; every other game is fair and keys
+    as before dice_mode existed, and dice_mode reaches a suite's scenarios or an
+    experiment's resolved config only through base-2p-fr."""
     for path in sorted((CONFIGS / "games").glob("*.yaml")):
         game = load_game(path)
+        if game.name in BALANCED_GAMES:
+            assert game.dice_mode == "balanced" and game.to_dict()["dice_mode"] == "balanced"
+            assert game.cppanatron_rules().dice_mode == cpp.DiceMode.BALANCED
+            continue
         assert game.dice_mode == "random" and "dice_mode" not in game.to_dict()
         assert game.cppanatron_rules().dice_mode == cpp.DiceMode.RANDOM
     for path in sorted((CONFIGS / "suites").glob("*.yaml")):
         suite = load_suite(path)
-        assert "dice_mode" not in set(_keys([suite._scenario(i) for i in range(len(suite.scenarios))]))
+        for i, game in enumerate(suite.games()):
+            assert ("dice_mode" in set(_keys(suite._scenario(i)))) == (game.name in BALANCED_GAMES), \
+                f"{path.name}: scenario {i}"
     for path in sorted((CONFIGS / "experiments").glob("*.yaml")):
         for v in load_plan(path).variants:
-            assert "dice_mode" not in set(_keys(v.config)), f"{path.name}: {v.name}"
+            if not _plays_balanced(v.config):
+                assert "dice_mode" not in set(_keys(v.config)), f"{path.name}: {v.name}"
+            else:
+                assert {g["dice_mode"] for g in _games_in(v.config) if isinstance(g, dict)
+                        and g.get("name") in BALANCED_GAMES} == {"balanced"}, f"{path.name}: {v.name}"
 
 
 # ---------------------------------------------------------------- a balanced game
 
 
 def balanced(game: str | GameConfig = "base-2p") -> GameConfig:
-    """``game`` with OpenHex's balanced dice (a test-only game: no config file names one yet)."""
+    """``game`` with OpenHex's balanced dice (a test-only game; base-2p-fr is the config file
+    that names them, with the friendly robber)."""
     data = (game if isinstance(game, GameConfig) else load_game(game)).to_dict()
     return GameConfig.from_dict({**data, "name": f"{data['name']}-balanced", "dice_mode": "balanced"})
 

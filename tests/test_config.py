@@ -257,7 +257,8 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: AlphaZero: the stored az-2p-2048 hash is pinned below); schema 6 added PPO's freeze (schema
 #: 5's hashes: graph-tiny-s42.ppo d1bd50a558dcb0d1, graph-tiny-s42.g1 700cfba93f2a4e09,
 #: mlp-s43.ppo 3666bf72fc1f3b1f, mlp-s43.g1 94da3f005acf8a95, s16-oracle 03c620ea32b0d5f2,
-#: s64-d4 32c708b2b94de072).
+#: s64-d4 32c708b2b94de072); schema 7 added runtime.canopy_dir, which moves no hash (runtime is
+#: not hashed; stored configs get null, the default).
 #: Stored schema-1 to schema-5 runs migrate to the hashes below.
 GOLDEN = {
     "fx-lineage": {
@@ -404,6 +405,13 @@ def test_migrations_keep_hashes_and_cover_new_keys(monkeypatch, tmp_path):
     # A PPO key's migration leaves other algos' configs alone.
     dagger = load_plan(write(tmp_path, train={"algo": "imitation"})).variants[0].config
     assert "ent_coef" not in migrate(dagger, from_schema=config.SCHEMA)["train"]
+    monkeypatch.undo()
+    # An unhashed runtime key (schema 7's canopy_dir): a stored config without it gets the
+    # default back and its hash is untouched.
+    before = json.loads(json.dumps(stored))
+    del before["runtime"]["canopy_dir"]
+    assert config_hash(before) == config_hash(stored)
+    assert migrate(before, from_schema=6)["runtime"] == stored["runtime"] and stored["runtime"]["canopy_dir"] is None
 
 
 def test_tied_axes_on_one_section_merge(tmp_path):

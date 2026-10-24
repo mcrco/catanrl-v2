@@ -61,7 +61,7 @@ from catanrl.canon import digest
 from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
-SCHEMA = 6
+SCHEMA = 7
 #: (schema that added it, dotted key, the value configs written before it meant, and its
 #: scope: for a ``train.*`` key the algo it belongs to, for a ``model.args.*`` key (a class
 #: default, which resolution fills in) the model class, or None for every algo / class).
@@ -79,6 +79,8 @@ MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
     (5, "train.target_rescale", True, "alphazero"),
     (5, "train.target_prior_temperature", 1.0, "alphazero"),
     (6, "train.freeze", [], "ppo"),
+    # runtime is not hashed: this keeps a stored config's runtime whole (null = no Canopy build pinned).
+    (7, "runtime.canopy_dir", None, None),
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")

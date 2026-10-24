@@ -235,7 +235,7 @@ def test_critic_refit_2p_is_puffer_graph2_public_with_only_the_critic_training()
 
 def test_ppo_2p_fr_is_puffer_graph2_full_continued():
     """Marco's friendly-robber continuation (2026-10-24): puffer-graph2/full@best (e3350) trained
-    on for ~1B agent steps on base-2p-fr (base-2p plus OpenHex's friendly robber), its recipe key
+    on for ~1B agent steps on base-2p-fr (base-2p plus OpenHex's friendly robber and balanced dice), its recipe key
     for key but the budget and the learning rate (half the start's peak, the same 0.1x cosine),
     from its weights (init_from, a fresh optimizer); best follows the champion monitor (POLICY
     vs the start), F is a monitor; the finals on heldout-2p-fr pair @best and the start."""
@@ -250,9 +250,10 @@ def test_ppo_2p_fr_is_puffer_graph2_full_continued():
         {k: ref["env"][k] for k in ref["env"] if k != "scenarios"}
     (scenario,), (start,) = cfg["env"]["scenarios"], ref["env"]["scenarios"]
     assert {**scenario, "game": None} == {**start, "game": None}  # turn limit, maps, weight, seats
-    assert {**scenario["game"], "name": None, "friendly_robber": None} == \
-        {**start["game"], "name": None, "friendly_robber": None}
+    assert {**scenario["game"], "name": None, "friendly_robber": None, "dice_mode": None} == \
+        {**start["game"], "name": None, "friendly_robber": None, "dice_mode": None}
     assert scenario["game"]["friendly_robber"] and not start["game"]["friendly_robber"]
+    assert scenario["game"]["dice_mode"] == "balanced" and "dice_mode" not in start["game"]  # start: fair dice
 
     changed = {"total_timesteps", "learning_rate"}
     assert {k: cfg["train"][k] for k in cfg["train"] if k not in changed} == \
