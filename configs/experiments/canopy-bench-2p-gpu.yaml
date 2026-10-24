@@ -4,14 +4,21 @@
 # boards, both seat orders, the boards of every other 2p row here (831eea84, 1c916131). that's
 # +-3.1 pp at 50% and +-2.8 at 30%. canopy keeps its real 1600 sims. what makes it affordable is
 # canopy's network on the gpu (third_party/canopy/build_bridge.sh --backend cuda) with all 1000
-# games in flight, so each bridge searches ~125 positions per network batch (~250 against F).
+# games in flight, so a step has ~500 canopy positions (~1000 against F) for 4 bridges to batch
+# (not evenly: see gpu memory below).
 #
 # rows, in launch order (each record is written when its row finishes):
-#  1. canopy 1600 vs our raw public policy (94.96 vs F, dc8a611a): the question marco asked.
+#  1. canopy 1600 vs our raw public policy: the question marco asked. (vs F on these 500 boards
+#     it scores 95.6% [94.1, 96.7]: dc8a611a's first 1000 games; 94.96 over all 2500.)
 #  5. canopy 1600 vs the deployed 1v1 bot (deploy/house.yaml and openhex.yaml:
-#     BELIEF:ckpt=puffer-graph2/full@best:worlds=16, best = e3350, 95.06 vs F, 67869e7a).
+#     BELIEF:ckpt=puffer-graph2/full@best:worlds=16, best = e3350; 94.9% vs F on these boards,
+#     67869e7a's first 1000 games; 95.06 over 2500).
 #  4. canopy 1600 vs F, the common yardstick. canopy decides every step against F (F moves
 #     inside the engine) and its games run ~2x the decisions, so it's the longest canopy row.
+#     it pairs with our bots' F records on the same 1000 game ids (search_probe pairs a record
+#     with a board prefix of a longer one):
+#       tools/search_probe.py --pair 9f0bafd72747d56f dc8a611a --slot 0   (vs our policy)
+#       tools/search_probe.py --pair 9f0bafd72747d56f 67869e7a --slot 0   (vs belief)
 #  2. the same canopy vs that network in our 2048-sim gumbel search (gumbel-edge-2p's spec,
 #     62.4 over its raw self, 831eea84): search vs search. this row is already playing as
 #     canopy-search-2p-gpu.yaml (main, launched 13:41 2026-10-23, record 96d94fab004f11c3, the
@@ -28,7 +35,28 @@
 # (the record key holds the binary's sha256 and the backend), so it would be a new record
 # replaying the same games. the cpu record still pairs with row 1 (same boards, same opponent,
 # same code ids: catanrl 948205cc, engine 5ebaacda, canopy b81da62d):
-# `--pair 67e147c4d79dd412 1c916131 --slot 0` says what canopy's search buys.
+# `--pair 67e147c4d79dd412 1c916131 --slot 0` says what canopy's search buys. rows 1 and 5 pair
+# the same way: `--pair 67e147c4d79dd412 aeaab0be7f473b41 --slot 1` (policy vs belief, both
+# against canopy).
+#
+# power (1000 games a row; mde = the gap found 80% of the time at two-sided 5%, 2.8 se; the
+# paired se's are estimates from stored records on these same game ids):
+#  - a row alone: se 1.58 pp at 50%, ci +-3.1, so row 1 against parity has an mde of ~4.4 pp.
+#    the small reads put canopy at 45.0% (cpu, 60 games, 00291a24) and 47.5% (gpu, 40,
+#    b45345a3), so row 1 may well come out "parity within +-3". that's an answer, not a miss.
+#  - rows 1 vs 2 (--slot 1: our policy vs our 2048-sim search, both against this canopy on the
+#    same boards and seats): stored pairs of two of our matchups on these ids are 42-45%
+#    discordant (1c916131 vs 831eea84 44.9%, vs 72819d1a 41.8%), so paired se ~1.85 pp
+#    (unpaired 2.1-2.2) and mde ~5.2 pp. if search buys against canopy anything like the +12.4
+#    it buys against our raw self (831eea84), power is above 0.99.
+#  - row 1 vs 1c916131 (--slot 0: canopy's 1600 sims vs its raw policy, against our policy):
+#    se ~1.8 pp (the 60-game cpu pair scaled to 1000: 1.77), mde ~5 pp. raw is at 30.5% and the
+#    60-game cpu read was +8.3 on its games, so expect ~+10-15.
+#  - rows 1 vs 5 (--slot 1: policy vs belief against canopy): se ~1.9-2.1 pp (not measured; the
+#    stored pairs above), mde ~5.5 pp. the two score alike vs F (95.6 / 94.9 here), so only a
+#    large gap between them against canopy will show.
+#  - row 4 vs dc8a611a (--slot 0): near the ceiling (policy 95.6% here) the paired se is ~0.8
+#    pp, so it separates canopy from our policy vs F only if the gap is ~2.2 pp or more.
 #
 # launch (from main once wt/canopy-gpu is merged; see "before launch"):
 #   OMP_NUM_THREADS=1 nice -n 5 catanrl run configs/experiments/canopy-bench-2p-gpu.yaml
@@ -38,25 +66,40 @@
 #
 # before launch:
 #  - the cuda build in runs/_canopy-cuda (it's there: canopy-search-2p-gpu plays from it). check
-#    it: CATANRL_CANOPY_DIR=runs/_canopy-cuda python -c "from catanrl.canopy.release import
-#    load_release as l; print(l().key())" (binary 1f7cc246...68802689, backend cuda). never
-#    rebuild it for these rows: the cuda build isn't bit-reproducible (cubecl's kernel macro
-#    expands in hash order), so a rebuild is another binary, another key, and the rows restart
-#    from zero. ~/.local/share/catanrl/canopy/nexus-v3-315-cuda is the backup copy.
+#    it plays as pinned (~1 min of gpu, exit 0 = every answer bit-identical to the committed
+#    fingerprint): python third_party/canopy/fingerprint.py runs/_canopy-cuda --check
+#    third_party/canopy/canopy-bridge-cuda.fingerprint.json. never rebuild it for these rows:
+#    the cuda build isn't bit-reproducible (cubecl's kernel macro expands in hash order), so a
+#    rebuild is another binary, another key, and the rows restart from zero (build_bridge.sh
+#    now refuses to install one, or to overwrite a release dir holding another binary).
+#    ~/.local/share/catanrl/canopy/nexus-v3-315-cuda is the backup copy.
 #  - merge wt/canopy-gpu first: main's config schema refuses runtime.canopy_dir.
-#  - gpu memory: rows 1 and 5 take ~1.6 GB (4 bridges at ~125 positions, ~0.3 GB each, plus our
-#    network), row 4 ~3.3 GB (~250 positions a bridge, ~0.8 GB each). the critic refit holds up
-#    to 7.3 GB, so it stays paused while these run: a bridge that can't get memory panics and
-#    takes its row down (it happened twice in the smokes while the refit ran).
-#  - alongside row 2 (canopy-search-2p-gpu, ~1.5 GB of gpu, ~6.8 GB of host memory for its
+#  - gpu memory: every row reaches ~3.4-3.6 GB, not only row 4. env i plays game i on bridge
+#    i % 4 and the schedule alternates seat orders, so bridges 0 and 2 hold every game with
+#    canopy in seat 0 and bridges 1 and 3 every game with it in seat 1. in the setup steps all
+#    500 games of one seat order are on canopy's move at once: 250 positions on each of two
+#    bridges, and a bridge that has batched 250 holds ~0.8 GB (measured: 294 MiB at 64-160
+#    positions, 326 at 200, 806 at 250) that its memory pool never gives back. so 4 x ~0.8 GB
+#    plus our network; ~5.1 GB alongside row 2 (~1.55 GB). the critic refit reaches 7.3 GB, so
+#    it and every other gpu job stay off for this whole config: a bridge that can't get memory
+#    panics and takes its row down (twice in the smokes while the refit ran).
+#  - a crash costs most of a row. a relaunch keeps only finished games, and with all 1000 in
+#    flight they finish late: 10% of row 1's games are written only after ~51% of its time, 50%
+#    after ~70%. so a crash in a row's first half loses nearly all of it (relaunch the same line;
+#    it resumes from the finished games). optional, unmeasured: CATANRL_CANOPY_PROCS=5 (procs is
+#    execution-only, the record ids stay) puts both seat orders on every bridge and caps the
+#    setup batch near 100 positions (~0.3 GB a bridge); a model says ~9% slower. 4 is planned.
+#  - alongside row 2 (canopy-search-2p-gpu, ~1.55 GB of gpu, ~6.8 GB of host memory for its
 #    2048-sim searches): fits the gpu, and fills row 2's search phases (~30% of its steps, when
 #    the gpu runs only our network's forwards). host memory gets tight: ~9 GB was free with row
 #    2 alone, this config takes ~4-5 GB (4 bridges ~0.3 GB + ~1.6 MB a game each, the harness).
 #  - cpu: each bridge is a full core while canopy searches, the harness one more. the critic
 #    refit and the cpu canopy-bench-2p stay off.
 #  - keep runtime.device for a row from its start to its end. a relaunch with another device
-#    (or driver, or gpu) restarts the partial row (its execution differs; the old games are set
-#    aside as .discarded-*). num_envs, threads and procs can change between relaunches.
+#    (or driver, gpu, nvrtc file, CUBECL_* variable, or a cubecl.toml in the launch directory or
+#    its parents) restarts the partial row (its execution or canopy_detail differs; the old games
+#    are set aside as .discarded-*). launch from the main checkout like row 2 (no cubecl.toml
+#    there). num_envs, threads and procs can change between relaunches.
 #  - if this config ever has to play row 2 itself (canopy-search-2p-gpu died before writing it),
 #    give it --set runtime.num_envs=512: at 1000 our 2048-sim searches would need ~13 GB of host
 #    memory.
@@ -74,8 +117,9 @@
 # position alone or among up to 300) or the run, and a verify of the row-1 smoke's first two
 # games with 2 games in flight instead of 40 replayed both identically. so rows depend on neither
 # num_envs nor procs. its kernels are compiled at run time (nvrtc) for the gpu found, so each
-# record's segment execution names the gpu, driver, nvrtc and toolkit headers, and a replay on
-# another of those can differ in the last bits.
+# record's segment execution names the gpu, driver, nvrtc and toolkit headers (and its
+# canopy_detail the nvrtc file, /opt/cuda/.../libnvrtc.so.13.2.78, plus any CUBECL_* variable or
+# cubecl.toml), and a replay on another of those can differ in the last bits.
 #
 # rules: base-2p as in every 2p row (15 vp, discard above 9 cards, friendly robber off, random
 # 2d6 dice, bank 19 each, a short resource pays nobody) with heldout-2p's 500-turn cap. the
@@ -140,8 +184,14 @@
 # f8e4e6858930243a30243e38c1b2b96b1a8da23970f5cba69906c65b268c60cc. the four patches of
 # canopy-bench-2p.yaml (third_party/canopy/patches: reset-search-budget 506fb91b, the
 # catanatron bridge 6eba3e92, the v2 bench extensions 60fbc177, reproducible-build a0fd083c).
-# its search: puct root with the tag's c_puct 2.5, c_visit 50 and c_scale 1, 1600 sims (its
-# self-play full search), tree reuse on, root dirichlet off (epsilon 0, as v1 evaluated it).
+# its search: puct root with the tag's c_puct 2.5, c_visit 50 and c_scale 1, 1600 sims, tree
+# reuse on, root dirichlet off (epsilon 0, as v1 evaluated it). 1600 is nexus-v3's self-play
+# full search (examples/catan/main.rs:77; self-play searches fully on 25% of its moves and with
+# 64 sims on the rest, src/train/config.rs:133-134, with dirichlet 0.25), twice its tournament
+# default of 800 with epsilon 0.25 (src/mcts/mod.rs:33,38; the tournament cli can't change
+# epsilon). so 1600 sims at epsilon 0 is, if anything, stronger than canopy's own tournament
+# setting. the tag ships only puct, though most nexus-v3 iterations trained under gumbel root
+# search (sequential halving until ca0e656, the day of the tag).
 #
 # reading: slot 0 is canopy, so a record's score_rate is canopy's share, with a wilson 95% ci.
 # per_seat is the seat split: seat 0 wins about 56% of base-2p games whoever sits there
@@ -177,6 +227,33 @@
 #    identical.
 #  these smokes slowed the live row 2 while they ran (13:41-15:24): its canopy phases took 76 s
 #  instead of 51 and its search phases 43 s instead of 23, so it lost ~40 min.
+# re-smoke after the review fixes (2026-10-23 18:20-21:08, commit c4028a7): each row of this
+# yaml through runner.final_evals (runtime.canopy_dir resolving under a scratch runs dir) on
+# heldout-2p board 0 (2 games, both in flight, CATANRL_CANOPY_PROCS=1, threads 1), the four at
+# once alongside the live row 2 (8 bridges on the gpu; my processes peaked at ~2.2 GB):
+#  - row 1 cec8c1e011110472: canopy 0 of 2. 181 decisions (160 searched, 21 forced), 113
+#    re-rooted (91 with visits kept); resets, fallbacks, refreshes, refused moves, history
+#    mismatches, trade prompts, unexpressed all 0. 30.6 s a canopy decision on the crowded gpu,
+#    1.5 h. both games bit-identical to the same games in b45345a3 (40 in flight there).
+#  - row 5 24fc03ca315c2ee5: canopy 2 of 2. 237 decisions (217 searched), 151 re-rooted, every
+#    other count 0. both games bit-identical to e3d54454's.
+#  - row 4 3987361393fdd7bd: canopy 2 of 2. 183 decisions (161 searched), 134 re-rooted, every
+#    other count 0. both games bit-identical to the two the oom-killed smoke above had finished.
+#  - row 2: started (690fc8187f1622ee, segment written) and stopped after 2.8 h with no game
+#    finished: with 2 games in flight our 2048-sim search runs unbatched (~2 min a decision on
+#    the shared gpu), so this row can't be smoked small. the real row is the evidence: the live
+#    96d94fab at 495 of 1000 games, 41,196 canopy decisions (36,870 searched): 0 fallbacks, 0
+#    history mismatches, 0 trade prompts, 5 unexpressed, 10 tree resets, and once (s0b254r0,
+#    turn 74, on a reused tree) canopy chose end_turn where the engine didn't offer it: counted
+#    as a refused move, asked again on a fresh tree, a legal move played, no fallback.
+#  - every segment: execution identical to the live row 2's, canopy_detail {nvrtc_library
+#    /opt/cuda/targets/x86_64-linux/lib/libnvrtc.so.13.2.78, no CUBECL_* variable, no
+#    cubecl.toml}; the live row 2's segment (written before canopy_detail) still resumes
+#    (checked: _segment_differs false). records valid, not mixed.
+#  - fingerprint: the installed build repeats canopy-bridge-cuda.fingerprint.json bit for bit;
+#    the review's rebuild (9bfb7370) gives the same bits; the cpu build the same 80 moves with
+#    other bits.
+#  these smokes slowed the live row 2 for ~2.8 h (by how much, not measured).
 #
 # cost: measured on this gpu, then a lockstep model over real game lengths (1c916131's for rows
 # 1, 5 and 2; dc8a611a's, scaled to canopy's ~185 decisions a game against F, for row 4).
@@ -192,14 +269,19 @@
 #    beats 512 by ~1 h a row (fewer steps).
 #  - our side: POLICY and BELIEF ~0 (~1 ms a decision); MCTS 2048 sims ~23 s a step at 256
 #    searches, ~46 s at 500 (fitted to that live phase and to 831eea84's 3.9 h).
-#   row             gpu free     shared with the refit
-#   1 POLICY        5.7 h        6.7 h
-#   5 BELIEF        5.7 h        6.7 h
-#   4 F             7.7 h        9.0 h    (the least sure: 6 games of canopy vs F to go on)
+#   row             gpu free
+#   1 POLICY        5.7 h
+#   5 BELIEF        5.7 h
+#   4 F             ~7.7 h, anywhere from 5 to 10 h: canopy's game length vs F comes from 4 cpu
+#                   games (b230e6fc: 72, 111, 198, 361 decisions; mean 185.5, 2.13x our policy's
+#                   87.0) and 2 gpu ones; length factors 1.5-3.0 give 4.9-9.8 h
 #   2 MCTS          10.1 h at 512 in flight, as it's running (8.7 h at 1000)
-#  ~29 h for all four one after another. row 2 is already under way, so ~19 h for rows 1, 5, 4
-#  after it, or started alongside it (it leaves the gpu to its search ~30% of the time), likely
-#  a few hours less overall (not measured).
+#  rows 1, 5, 4: 16-21 h on a free gpu (point ~19 h). sharing the gpu with the critic refit
+#  (the build's numbers were +15-20%) is out: the refit's 7.3 GB and these rows' ~3.5 GB don't
+#  fit in 8. launched after row 2 finishes: its remaining hours + 16-21 h. launched alongside it
+#  (8 bridges share the gpu, whose kernels serialize; each config runs at ~60-75% of its free
+#  speed until row 2 ends, and gets row 2's search phases): a model, not measured, says all of
+#  it ends ~2-3 h sooner than one after the other.
 #  4 bridges is the build agent's best measured count; procs is execution-only and can change
 #  between relaunches. not tried: other bridge counts on a free gpu, MPS, burn's fusion.
 name: canopy-bench-2p-gpu

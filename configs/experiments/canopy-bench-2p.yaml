@@ -114,7 +114,7 @@
 # remapped: two builds in different directories gave the same binary, so a lost build can be
 # rebuilt under the same record keys. its search: puct root with the tag's c_puct 2.5, c_visit
 # 50 and c_scale 1, and 1600 sims, its self-play full search (its cli default is 800, its web
-# board 400). tree reuse on. root dirichlet off: epsilon 0, as v1 evaluated it (the tag's own
+# board 50). tree reuse on. root dirichlet off: epsilon 0, as v1 evaluated it (the tag's own
 # tournaments ran 0.25). every record's key holds the commit, the patch hashes and the hashes
 # of the binary and checkpoint, checked against src/catanrl/canopy/release.py when a spec
 # resolves.
