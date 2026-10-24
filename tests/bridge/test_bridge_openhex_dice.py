@@ -195,6 +195,33 @@ def test_a_balanced_game_replays_with_its_dice_state(color):
     assert [p.split(" ")[0] for p in seat.mismatches(view)] == ["dice"]
 
 
+def test_a_lasting_deck_difference_replays_on_fair_dice():
+    record, events, _after, generator = _balanced_game()
+    native = _Forgetful()
+    seat = OpenHexSeat(native, "balanced", record, "blue")
+    env = seat.env
+    seat.feed(_redacted(events, "blue"))
+    rolls = _rolls_applied(seat)
+    view = {"players": [], "board": {}, "balancedDice": {"remaining": generator.balanced_dice.remaining}}
+    wrong = {**view, "balancedDice": {"remaining": 0}}  # OpenHex lost its state: an empty deck, drawn on use
+    # A difference that does not last (OpenHex's state lags its events) changes nothing.
+    assert [seat.check(wrong), seat.check(wrong), seat.check(view)] == [[], [], []]
+    assert not seat.fair_dice and "mismatches" not in seat.stats
+    # Three polls running: fair dice from here on, the stream restarted.
+    assert seat.check(wrong) == [] and seat.check(wrong) == []
+    problems = seat.check(wrong)
+    assert [p.split(" ")[0] for p in problems] == ["dice"]
+    assert seat.fair_dice and seat.rules.dice_mode == cpp.DiceMode.RANDOM and seat.replay.game.balanced_dice is None
+    assert seat.stats["dice_desync"] == rolls and seat.stats["dice_desync_cause"] == "deck"
+    assert seat.stats["mismatches"] == 1 and native.forgotten == [env]
+    game = seat.replay.game
+    assert _rolls_applied(seat) == rolls and tuple(game.resource_bank) == tuple(generator.resource_bank)
+    assert [sum(p.resources) for p in game.players] == [sum(p.resources) for p in generator.players]
+    # On fair dice, a view's deck size is no longer compared.
+    assert [seat.check(wrong) for _ in range(4)] == [[]] * 4 and seat.stats["mismatches"] == 1
+    seat.close()
+
+
 # ---------------------------------------------------------------- the recorded games, as recorded
 
 
@@ -231,7 +258,7 @@ def test_a_recorded_game_follows_its_dice_until_a_roll_they_cannot_give(name, co
             state = state.apply(rolls[checked][1], rolls[checked][0])
             checked += 1
         assert seat.replay.game.balanced_dice is not None and _as_reference(seat.replay.game.balanced_dice) == state
-    assert checked == first and seat.stats["dice_desync"] == first
+    assert checked == first and seat.stats["dice_desync"] == first and seat.stats["dice_desync_cause"] == "refused"
     assert seat.fair_dice and seat.rules.dice_mode == cpp.DiceMode.RANDOM and seat.replay.game.balanced_dice is None
     assert native.forgotten == [env]  # the stream restarts with the game replayed again
     seat.feed(events)

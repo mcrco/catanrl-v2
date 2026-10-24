@@ -13,7 +13,7 @@
     "lstm": "47f063e85a79bd49",
     "mlp": "60b7881048ed3e7b"
    },
-   "sources": "fa98a06ced4a287a"
+   "sources": "b99291a476d8b8c2"
   },
   "arch-lineage.yaml": {
    "full": {
@@ -44,7 +44,7 @@
     "mlp-s43.g1": "4480266a04ea7af0",
     "mlp-s43.ppo": "0ebaa7a44df755bd"
    },
-   "sources": "9cbcf3fb1ca36ec7"
+   "sources": "98b08d7494eae0f3"
   },
   "aux-hidden-4p.yaml": {
    "full": {
@@ -55,7 +55,7 @@
     "aux": "2a3ea7a02f9c4936",
     "plain": "e83e756b39715431"
    },
-   "sources": "07c1c97320aae3b8"
+   "sources": "ba143e7f3db86e4c"
   },
   "aux-hidden.yaml": {
    "full": {
@@ -64,7 +64,7 @@
    "smoke": {
     "main": "a2ea2905c76a95c0"
    },
-   "sources": "909fb9d96570b32d"
+   "sources": "a2799737b6bc80fc"
   },
   "az-2p-2048-search.yaml": {
    "full": {
@@ -73,7 +73,7 @@
    "smoke": {
     "main": "77ac708e6ef998dc"
    },
-   "sources": "6b775170a92f036d"
+   "sources": "589343055fe94399"
   },
   "az-2p-2048-soft.yaml": {
    "full": {
@@ -82,7 +82,7 @@
    "smoke": {
     "main": "c4b527f250e05751"
    },
-   "sources": "4bd2259a65f38498"
+   "sources": "99c36fde43fa22b3"
   },
   "az-2p-2048.yaml": {
    "full": {
@@ -91,7 +91,7 @@
    "smoke": {
     "main": "a8a43e5587b249d0"
    },
-   "sources": "7ac1684b7678077d"
+   "sources": "8174cfe7351cd37a"
   },
   "az-from-ppo.yaml": {
    "full": {
@@ -102,7 +102,7 @@
     "main.az": "37a2c696bff01a85",
     "main.ppo": "cad7870c6d463fc1"
    },
-   "sources": "f9b0ca8a55d6502b"
+   "sources": "59ac3fdfd65be3b0"
   },
   "canopy-bench-2p-gpu.yaml": {
    "full": {
@@ -111,7 +111,7 @@
    "smoke": {
     "main": "04aa05d5536d11a9"
    },
-   "sources": "a8181df6dc919a3f"
+   "sources": "754fa35f3447cf75"
   },
   "canopy-bench-2p.yaml": {
    "full": {
@@ -120,7 +120,7 @@
    "smoke": {
     "main": "445137c653bcd64a"
    },
-   "sources": "7265e480bd8fc453"
+   "sources": "d3b7d189d0480e5d"
   },
   "canopy-search-2p-gpu.yaml": {
    "full": {
@@ -129,7 +129,7 @@
    "smoke": {
     "main": "9b009eda76dc997c"
    },
-   "sources": "b67731adb321c163"
+   "sources": "6d7d85cbd266311a"
   },
   "critic-refit-2p.yaml": {
    "full": {
@@ -140,7 +140,7 @@
     "head": "c44b908d45de45de",
     "main": "610f615419862670"
    },
-   "sources": "6d513d3ea41394b9"
+   "sources": "824250815db4b873"
   },
   "gumbel-edge-2p-e8.yaml": {
    "full": {
@@ -149,7 +149,7 @@
    "smoke": {
     "main": "3dd5dbd56317d666"
    },
-   "sources": "e553dcb0e78cb38d"
+   "sources": "584a924deff65ed7"
   },
   "gumbel-edge-2p.yaml": {
    "full": {
@@ -158,7 +158,7 @@
    "smoke": {
     "main": "0f45e6c770752f4e"
    },
-   "sources": "018a69e2f5d38d24"
+   "sources": "656390e122d4d045"
   },
   "info-levels.yaml": {
    "full": {
@@ -181,7 +181,7 @@
     "uf-s42": "c3c27eb6fbd5b657",
     "uf-s43": "221cf746bb3cc4b7"
    },
-   "sources": "5133729bcdde2bbd"
+   "sources": "87424dbea589dfba"
   },
   "llm-eval.yaml": {
    "full": {
@@ -220,7 +220,7 @@
     "stub-plan-f": "27fbcb522036d86f",
     "stub-plan-policy": "81199691e25d29bf"
    },
-   "sources": "4ef0f5e3bbe82b7a"
+   "sources": "25ed9df97a2dde1e"
   },
   "lstm-4p.yaml": {
    "full": {
@@ -229,7 +229,7 @@
    "smoke": {
     "main": "976c83e1381b2d48"
    },
-   "sources": "749bfbf98862d9f9"
+   "sources": "e86b4ffeace4ab97"
   },
   "lstm-aux-4p.yaml": {
    "full": {
@@ -238,7 +238,7 @@
    "smoke": {
     "main": "7a3a4937d1c2e0bd"
    },
-   "sources": "305b93e91922320f"
+   "sources": "44043f9a2af0b37a"
   },
   "mcts-dets-sims.yaml": {
    "full": {
@@ -263,7 +263,7 @@
     "s64-d4": "67dc3e1014d00ecf",
     "s64-oracle": "b49b61c1fa4346c6"
    },
-   "sources": "f688325122e30d0d"
+   "sources": "52d1846b2635abb6"
   },
   "mcts-reuse-2p.yaml": {
    "full": {
@@ -272,7 +272,7 @@
    "smoke": {
     "main": "1f7168c074954de1"
    },
-   "sources": "2f04b8f411e73060"
+   "sources": "ba0e16ad78749576"
   },
   "mcts-reuse-4p-both.yaml": {
    "full": {
@@ -281,7 +281,7 @@
    "smoke": {
     "main": "149a7604fcbb3ad6"
    },
-   "sources": "5cb8b0686bfe5179"
+   "sources": "13a79883e7d01f2b"
   },
   "mcts-reuse-4p.yaml": {
    "full": {
@@ -290,7 +290,7 @@
    "smoke": {
     "main": "539b7640bb12bc2a"
    },
-   "sources": "f0e88200a2fc1982"
+   "sources": "e924465487fabb9a"
   },
   "ppo-4p-critic-fix.yaml": {
    "full": {
@@ -305,7 +305,7 @@
     "lambda-critic-g1": "6b0dbdafaeb1e62e",
     "lambda-g1": "5ab7dff05aac46f3"
    },
-   "sources": "9b2804811b9f0fac"
+   "sources": "ebaf42d6b491951b"
   },
   "ppo-4p.yaml": {
    "full": {
@@ -314,7 +314,7 @@
    "smoke": {
     "main": "dac4968129b62bec"
    },
-   "sources": "63370127b2e54570"
+   "sources": "146bf675892537e3"
   },
   "ppo-mixed-blob.yaml": {
    "full": {
@@ -323,7 +323,7 @@
    "smoke": {
     "main": "195c4745aea35cb5"
    },
-   "sources": "660f4dd377bf3b95"
+   "sources": "fd18b5177f0ba43a"
   },
   "ppo-mixed.yaml": {
    "full": {
@@ -332,7 +332,7 @@
    "smoke": {
     "main": "742a5579fd8137d5"
    },
-   "sources": "825bc9e8ae928be9"
+   "sources": "d77542324288f05e"
   },
   "predict-vs-belief.yaml": {
    "full": {
@@ -341,7 +341,7 @@
    "smoke": {
     "main": "86757d665984308d"
    },
-   "sources": "586f33dab5de26cc"
+   "sources": "61c6931e94eb1aca"
   },
   "puffer-graph2.yaml": {
    "full": {
@@ -352,7 +352,7 @@
     "full": "636615ce1801c8da",
     "public": "0749dbfb2c649b98"
    },
-   "sources": "a003aae605c63a54"
+   "sources": "e3c363cf8a8283ab"
   },
   "search-4p-2000.yaml": {
    "full": {
@@ -361,7 +361,7 @@
    "smoke": {
     "main": "59bd34886d7a3fdf"
    },
-   "sources": "c460bb038a0774ff"
+   "sources": "5827fc9772b89cd2"
   },
   "search-4p.yaml": {
    "full": {
@@ -370,7 +370,7 @@
    "smoke": {
     "main": "59bd34886d7a3fdf"
    },
-   "sources": "f0e5f26c7063dded"
+   "sources": "fad4eccb1291bfb1"
   },
   "slot-order.yaml": {
    "full": {
@@ -379,7 +379,7 @@
    "smoke": {
     "main": "ce263a9455ea126a"
    },
-   "sources": "3a74113d35f816a5"
+   "sources": "dfafbd1823516fac"
   },
   "tiny.yaml": {
    "full": {
@@ -390,7 +390,7 @@
     "2p": "5c06e6e0898eddfd",
     "4p": "162e6dc4a201f395"
    },
-   "sources": "ea4890e8c4b77d83"
+   "sources": "860c0e27e94016e7"
   },
   "tracker-modes.yaml": {
    "full": {
@@ -399,7 +399,7 @@
    "smoke": {
     "main": "7026de01a5510040"
    },
-   "sources": "d619d3e330f12ec8"
+   "sources": "ba88fc83edab50a6"
   },
   "tracker-search.yaml": {
    "full": {
@@ -408,7 +408,7 @@
    "smoke": {
     "main": "9f4a2ceb9c663ef6"
    },
-   "sources": "bb4e54359fa09c44"
+   "sources": "772d9d1b91557242"
   },
   "trade-harness-m3.yaml": {
    "full": {
@@ -417,7 +417,7 @@
    "smoke": {
     "main": "377a82598e8a9f88"
    },
-   "sources": "b7d9d02d0ee16926"
+   "sources": "02505aa2416c86ca"
   },
   "trade-harness-m4.yaml": {
    "full": {
@@ -426,7 +426,7 @@
    "smoke": {
     "main": "8351b681aa627bdf"
    },
-   "sources": "a3008297504322b6"
+   "sources": "40173ac021ec5a64"
   },
   "trade-harness-pilot.yaml": {
    "full": {
@@ -435,7 +435,7 @@
    "smoke": {
     "main": "b6a3a164c01f45ea"
    },
-   "sources": "3f2bd974a229ec63"
+   "sources": "54e4639bf9133dc0"
   },
   "trade-harness.yaml": {
    "full": {
@@ -444,7 +444,7 @@
    "smoke": {
     "main": "569c6922bee5fba6"
    },
-   "sources": "4f065ad1ad65cdd6"
+   "sources": "6220a7eb9f8ad736"
   },
   "v1-anchor.yaml": {
    "full": {
@@ -455,7 +455,7 @@
     "s42": "759c3a48bff9bafd",
     "s43": "31270a77165cc9d2"
    },
-   "sources": "ca9462cf805cde6b"
+   "sources": "c110d93e1e1ce437"
   }
  },
  "games": {

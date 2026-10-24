@@ -7,7 +7,10 @@ were recorded by the code before dice_mode (cfec40a) for every file under
 configs/games, configs/suites and configs/experiments, and each is checked while
 the files its hashes come from are unchanged (an entry whose sources changed since is
 skipped; the structural check, no ``dice_mode`` in any resolved config, runs on every
-file). A balanced game keys apart from its fair twin, plays in the native harness,
+file). An experiment's sources are its YAML, the train and model presets and its
+games' YAML: not config.py, nor configs/defaults.yaml and smoke.yaml, which every
+experiment resolves through, so that a change to them (another branch's config keys
+merged in) still meets the goldens and fails them if it moves a hash. A balanced game keys apart from its fair twin, plays in the native harness,
 and is refused by the catanatron harness (and by ``validate_plan`` for a catanatron
 final), whose Catanatron games roll fair dice.
 """
@@ -72,7 +75,7 @@ def experiment_hashes(path: Path) -> dict:
     full, smoke = load_plan(path), load_plan(path, smoke=True)
     names = {s["game"]["name"] for plan in (full, smoke) for v in plan.variants for s in v.config["env"]["scenarios"]}
     defaults = [*sorted((CONFIGS / "train").glob("*.yaml")), *sorted((CONFIGS / "models").glob("*.yaml"))]
-    return {"sources": _sources_digest([path, *defaults, *_game_files(names)], [PACKAGE / "config.py"]),
+    return {"sources": _sources_digest([path, *defaults, *_game_files(names)]),
             "full": {v.name: v.config_hash for v in full.variants},
             "smoke": {v.name: v.config_hash for v in smoke.variants}}
 

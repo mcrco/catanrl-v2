@@ -30,7 +30,10 @@ are public too, and the searches' chance nodes use them. A roll the state
 cannot give means OpenHex's dice are not the ones replayed (its recorded 1v1
 games of 2026-10-17 and -19 rolled fair dice, see
 ``tests/test_dice_reference.py``): the seat replays the game again on fair
-dice and says so (``stats["dice_desync"]``, the index of that roll).
+dice and says so (``stats["dice_desync"]``, the index of that roll, and
+``stats["dice_desync_cause"]``, "refused"). So does a view whose deck size
+differs from the replay's for three polls running (cause "deck"): OpenHex's
+state was reset or lost, as when its older servers dropped it.
 """
 
 from __future__ import annotations
@@ -466,8 +469,8 @@ class OpenHexSeat:
     remembered game stale, so the stream restarts there, as it does after an
     error in the agent (which emptied its pool); :meth:`close` at the game's
     end drops the searches and frees the slot. The game replayed again on fair
-    dice (a roll its balanced dice cannot give, see the module doc) restarts
-    the stream the same way.
+    dice (a roll its balanced dice cannot give, or a lasting difference in the
+    deck size, see the module doc) restarts the stream the same way.
     """
 
     native: Any
@@ -508,6 +511,8 @@ class OpenHexSeat:
         self.victim: str | None = None
         self.discarded_at: int | None = None
         self.waited = 0
+        #: The kinds of difference from OpenHex's state at the last poll, and the polls they have lasted.
+        self.lagging: tuple[list[str], int] = ([], 0)
         self.decisions = 0
         self.fallbacks = 0
 
@@ -555,13 +560,19 @@ class OpenHexSeat:
                 if self.fair_dice:
                     raise
                 # OpenHex rolled what its balanced dice, as replayed, cannot: its
-                # dice state is not ours (or its dice are not balanced). Nothing
-                # tells what it is, so the game replays on fair dice from here on.
-                self.fair_dice = True
-                self.stats["dice_desync"] = sum(1 for e in self.entries if e.record[0][1] == "ROLL")
-                logger.warning("game %s: roll %d: %s; replaying the game on fair dice", self.game_id,
-                               self.stats["dice_desync"], refused)
+                # dice state is not ours (or its dice are not balanced).
+                self._leave_balanced_dice(str(refused), "refused")
             self._replay_again()
+
+    def _leave_balanced_dice(self, why: str, cause: str) -> None:
+        """OpenHex's dice state is not the replayed one, and nothing tells what
+        it is (a view shows the deck size only): the game is to replay on fair
+        dice from here on (the caller replays it again)."""
+        self.fair_dice = True
+        self.stats["dice_desync"] = sum(1 for e in self.entries if e.record[0][1] == "ROLL")
+        self.stats["dice_desync_cause"] = cause
+        logger.warning("game %s: roll %d: %s; replaying the game on fair dice", self.game_id,
+                       self.stats["dice_desync"], why)
 
     def _replay_again(self) -> None:
         """The game so far on the current rules (a larger bank, fair dice)."""
@@ -647,6 +658,30 @@ class OpenHexSeat:
                 and int(dice["remaining"]) != ours.remaining:
             out.append(f"dice deck {ours.remaining} cards vs {int(dice['remaining'])}")
         return out
+
+    def check(self, state: Mapping[str, Any]) -> list[str]:
+        """The differences from OpenHex's state (:meth:`mismatches`) that have
+        lasted three polls, at the poll they reach three (else none).
+
+        OpenHex's state lags its events (and sometimes steps back): a
+        difference counts once its kind has lasted three polls. A lasting
+        difference in the dice deck means OpenHex's dice state is not the
+        replayed one (reset or lost on its side): the game replays on fair dice
+        from here on, as after a roll the replayed dice refuse. A plan already
+        made stands (its moves are legal either way); the next decision
+        searches on fair dice.
+        """
+        problems = self.mismatches(state)
+        kinds = [p.split(" ")[0] for p in problems]
+        self.lagging = (kinds, self.lagging[1] + 1 if kinds == self.lagging[0] else 1)
+        if not problems or self.lagging[1] != 3:
+            return []
+        self.stats["mismatches"] = self.stats.get("mismatches", 0) + 1
+        dice = [p for p in problems if p.startswith("dice ")]
+        if dice and not self.fair_dice:
+            self._leave_balanced_dice(dice[0], "deck")
+            self._replay_again()
+        return problems
 
     # ------------------------------------------------------------ deciding
 
@@ -1002,7 +1037,6 @@ class OpenHexBot:
         logger.info("%s: game %s as %s against %s", self.name, game_id, reply["your_color"],
                     [p.get("name") for p in reply["game"].get("players", [])])
         refused = 0
-        lagging: tuple[list[str], int] = ([], 0)  # (kinds of difference, polls they have lasted)
         try:
             while True:
                 seat.feed(self.client.events(game_id, seat.last_seq))
@@ -1019,13 +1053,8 @@ class OpenHexBot:
                 if plan is None:
                     time.sleep(self.poll_s)
                     continue
-                problems = seat.mismatches(state)
-                # OpenHex's state lags its events (and sometimes steps back): a
-                # difference counts once its kind has lasted three polls.
-                kinds = [p.split(" ")[0] for p in problems]
-                lagging = (kinds, lagging[1] + 1 if kinds == lagging[0] else 1)
-                if problems and lagging[1] == 3:
-                    seat.stats["mismatches"] = seat.stats.get("mismatches", 0) + 1
+                problems = seat.check(state)  # (a lasting dice difference: fair dice from here on)
+                if problems:
                     logger.warning("%s: game %s: the replay differs from OpenHex: %s", self.name, game_id,
                                    "; ".join(problems[:3]))
                 started = time.monotonic()
