@@ -142,7 +142,7 @@ def legal_by_id(board: CanopyBoard, game: cpp.Game) -> tuple[dict[int, list[cpp.
 
 def check_rules(game: cpp.Game) -> None:
     """Refuse a game whose rules the bridge would misstate (it pins the base supply and two
-    players; Canopy's friendly robber is another rule than the engine's)."""
+    players; Canopy's friendly robber is another rule than the engine's; Canopy's dice are fair)."""
     rules = game.rules
     supply = (tuple(int(n) for n in rules.resource_bank), tuple(int(n) for n in rules.development_deck),
               (int(rules.roads_per_player), int(rules.settlements_per_player), int(rules.cities_per_player)))
@@ -152,6 +152,8 @@ def check_rules(game: cpp.Game) -> None:
         raise SnapshotError(f"Canopy plays the base supply (bank 19, deck 14/2/2/2/5, pieces 15/5/4), not {supply}")
     if bool(rules.friendly_robber):
         raise SnapshotError("the engine's friendly robber is not Canopy's (FRIENDLY_ROBBER_VP 3); refused")
+    if rules.dice_mode != cpp.DiceMode.RANDOM:
+        raise SnapshotError("Canopy rolls two fair dice; a balanced-dice game is refused")
 
 
 # ---------------------------------------------------------------- the seat's own history

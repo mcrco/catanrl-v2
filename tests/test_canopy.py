@@ -154,7 +154,7 @@ def test_other_maps_are_refused(map_config):
 
 def test_other_rules_are_refused():
     for config in (dataclasses.replace(BASE, friendly_robber=True), dataclasses.replace(BASE, resource_bank=(24,) * 5),
-                   load_game("base-3p")):
+                   load_game("base-3p"), dataclasses.replace(BASE, dice_mode="balanced")):
         with pytest.raises(SnapshotError):
             check_rules(config.cppanatron_game(map_seed=1, seed=2))
     check_rules(BASE.cppanatron_game(map_seed=1, seed=2))
@@ -554,6 +554,7 @@ def test_specs_resolve_to_a_canonical_fixed_point(fake_release):
     ("CANOPY:nope=1", {}, "no param"),
     ("CANOPY:sims=8", {"harness": "catanatron"}, "native harness"),
     ("CANOPY:sims=8", {"games": ["base-4p"]}, "2 players"),
+    ("CANOPY:sims=8", {"games": [dataclasses.replace(BASE, dice_mode="balanced")]}, "fair dice"),
 ])
 def test_bad_specs_are_refused(fake_release, spec, kwargs, match):
     with pytest.raises(SpecError, match=match):

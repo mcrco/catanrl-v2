@@ -5,7 +5,8 @@ Catanatron game on the same map and game seed the native harness would use
 (``GameConfig.catanatron_game``), with the schedule's seat order forced (a
 Catanatron game shuffles its seats from the game RNG; the reseating happens
 before any action, as ``cppanatron.catanatron.reference_game`` does) and the
-suite's turn limit. Each seat is ``agent.player(color)``: POLICY, MCTS,
+suite's turn limit (fair dice only: a game with ``dice_mode`` balanced is
+refused before anything is played). Each seat is ``agent.player(color)``: POLICY, MCTS,
 BELIEF and PREDICT through their cppanatron mirror, Catanatron's own bots,
 and ``LLM`` players, which exist only here. Rows have the native harness's shape
 (``game_id``, ``seats``, ``winner``, ``winner_seat``, ``turns``,
@@ -135,6 +136,9 @@ def play_catanatron(
     ``on_game(row)`` per finished game, from the calling thread. ``transcripts`` (a
     directory; default from ``$CATANRL_LLM_TRANSCRIPTS``) saves every LLM exchange."""
     table = _scenarios(suite, scenarios, turn_limit)
+    unfair = sorted({f"{s.game.name} ({s.game.dice_mode} dice)" for s in table if s.game.dice_mode != "random"})
+    if unfair:
+        raise ValueError(f"the catanatron harness rolls two fair dice, not {unfair}: play them in the native harness")
     agents = [*lineup, *([fill] if fill is not None else [])]
     for scheduled in games:
         if max(scheduled.seats) >= len(agents):

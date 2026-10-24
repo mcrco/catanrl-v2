@@ -8,6 +8,7 @@ A config names only what differs from the base game::
     victory_points_to_win: 10
     discard_limit: 7
     friendly_robber: false
+    dice_mode: random                   # or balanced: OpenHex's 1v1 dice
     resource_bank: 24                   # or {wood: 24, brick: 24, ...}
     development_deck: {knight: 20, year_of_plenty: 3, monopoly: 3,
                        road_building: 3, victory_point: 5}
@@ -15,7 +16,8 @@ A config names only what differs from the base game::
 
 :class:`GameConfig` builds cppanatron rules and maps and Catanatron games, and
 :meth:`GameConfig.to_dict` gives the YAML shape back so runs record exactly
-what they played.
+what they played. ``dice_mode`` enters the YAML shape only when it is not
+``random``, so every game written before it hashes as it did.
 """
 
 from __future__ import annotations
@@ -32,6 +34,9 @@ if TYPE_CHECKING:
     import cppanatron
 
 MAX_PLAYERS = 6
+#: How rolls are drawn: two fair dice, or OpenHex's balanced dice (``cppanatron.BalancedDice``:
+#: a 36-card deck with recency and seven balancing, all of it public).
+DICE_MODES = ("random", "balanced")
 RESOURCE_NAMES = ("wood", "brick", "sheep", "wheat", "ore")
 DEVELOPMENT_CARD_NAMES = ("knight", "year_of_plenty", "monopoly", "road_building", "victory_point")
 PIECE_FIELDS = {"roads": "roads_per_player", "settlements": "settlements_per_player",
@@ -49,6 +54,8 @@ class GameConfig:
     victory_points_to_win: int = 10
     discard_limit: int = 7
     friendly_robber: bool = False
+    #: One of DICE_MODES; ``random`` (the default) is left out of :meth:`to_dict`.
+    dice_mode: str = "random"
     #: Starting bank in RESOURCE_NAMES order.
     resource_bank: tuple[int, ...] = (19, 19, 19, 19, 19)
     #: Starting deck in DEVELOPMENT_CARD_NAMES order.
@@ -63,6 +70,8 @@ class GameConfig:
         object.__setattr__(self, "development_deck", tuple(self.development_deck))
         if not 2 <= self.num_players <= MAX_PLAYERS:
             raise ValueError(f"num_players must be between 2 and {MAX_PLAYERS}")
+        if self.dice_mode not in DICE_MODES:
+            raise ValueError(f"dice_mode must be one of {DICE_MODES}, not {self.dice_mode!r}")
         if self.victory_points_to_win < 1 or self.discard_limit < 0:
             raise ValueError("victory_points_to_win must be positive, discard_limit non-negative")
         for name in ("resource_bank", "development_deck"):
@@ -91,6 +100,7 @@ class GameConfig:
             roads_per_player=self.roads_per_player,
             settlements_per_player=self.settlements_per_player,
             cities_per_player=self.cities_per_player,
+            dice_mode=cpp.DiceMode[self.dice_mode.upper()],
         )
 
     def cppanatron_game(self, map_seed: int, seed: int) -> "cppanatron.Game":
@@ -100,7 +110,10 @@ class GameConfig:
         return cpp.Game(self.num_players, map=catan_map, rules=self.cppanatron_rules(), seed=seed)
 
     def catanatron_game(self, players, map_seed: int, seed: int):
-        """A Catanatron game on the same map as :meth:`cppanatron_game`."""
+        """A Catanatron game on the same map as :meth:`cppanatron_game` (fair dice only:
+        Catanatron has no balanced dice, so such a game is refused)."""
+        if self.dice_mode != "random":
+            raise ValueError(f"game {self.name}: Catanatron rolls two fair dice, not {self.dice_mode} dice")
         from catanatron.game import Game
         from catanatron.models.decks import Supply
         from cppanatron.catanatron import catanatron_map_from_spec
@@ -124,7 +137,7 @@ class GameConfig:
     # ------------------------------------------------------------ YAML
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "name": self.name,
             "num_players": self.num_players,
             "map": dict(self.map),
@@ -135,6 +148,10 @@ class GameConfig:
             "development_deck": dict(zip(DEVELOPMENT_CARD_NAMES, self.development_deck)),
             "pieces": {key: getattr(self, attr) for key, attr in PIECE_FIELDS.items()},
         }
+        if self.dice_mode != "random":
+            # Only when set: a game (and so a scenario, suite or config hash) without it is unchanged.
+            out["dice_mode"] = self.dice_mode
+        return out
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], *, default_name: str = "game") -> GameConfig:

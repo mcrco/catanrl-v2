@@ -1,0 +1,561 @@
+{
+ "experiments": {
+  "arch-ablation.yaml": {
+   "full": {
+    "cnn": "fd8633965a8704f6",
+    "graph-s": "c219e4b5167bcbb0",
+    "lstm": "d72ba4caccde9f6e",
+    "mlp": "a3821be4406a3e64"
+   },
+   "smoke": {
+    "cnn": "47f5479c0165d28a",
+    "graph-s": "2f680243cd3162c2",
+    "lstm": "47f063e85a79bd49",
+    "mlp": "60b7881048ed3e7b"
+   },
+   "sources": "fa98a06ced4a287a"
+  },
+  "arch-lineage.yaml": {
+   "full": {
+    "graph-m-s42.g1": "e43480742c0f5b65",
+    "graph-m-s42.ppo": "afec405e49f7acf9",
+    "graph-m-s43.g1": "f9228498ebe0ef96",
+    "graph-m-s43.ppo": "2cb8b3401e1eff1b",
+    "graph-s-s42.g1": "01ce931b2b6d0631",
+    "graph-s-s42.ppo": "57c17feed5a17dd3",
+    "graph-s-s43.g1": "8824de5c17803529",
+    "graph-s-s43.ppo": "59d318941e059531",
+    "mlp-s42.g1": "1bdf9ce8f8915422",
+    "mlp-s42.ppo": "1f13a77b8b34a321",
+    "mlp-s43.g1": "11a44f939b89e8ba",
+    "mlp-s43.ppo": "2127ad02b1807b55"
+   },
+   "smoke": {
+    "graph-m-s42.g1": "ebf46be2b82dd400",
+    "graph-m-s42.ppo": "fb697d2cb36350e9",
+    "graph-m-s43.g1": "d52199e72ca4beca",
+    "graph-m-s43.ppo": "001233395fbe2c83",
+    "graph-s-s42.g1": "8378fe240e2c0b52",
+    "graph-s-s42.ppo": "a5a12ea7b95064a9",
+    "graph-s-s43.g1": "1eaf32cfd0e0fded",
+    "graph-s-s43.ppo": "3b65900905151a00",
+    "mlp-s42.g1": "4101a71d030af6e1",
+    "mlp-s42.ppo": "df0aed95342d4bb6",
+    "mlp-s43.g1": "4480266a04ea7af0",
+    "mlp-s43.ppo": "0ebaa7a44df755bd"
+   },
+   "sources": "9cbcf3fb1ca36ec7"
+  },
+  "aux-hidden-4p.yaml": {
+   "full": {
+    "aux": "bb9fb14cc9d165ad",
+    "plain": "070e558588d389b9"
+   },
+   "smoke": {
+    "aux": "2a3ea7a02f9c4936",
+    "plain": "e83e756b39715431"
+   },
+   "sources": "07c1c97320aae3b8"
+  },
+  "aux-hidden.yaml": {
+   "full": {
+    "main": "1e0037cf74d424a8"
+   },
+   "smoke": {
+    "main": "a2ea2905c76a95c0"
+   },
+   "sources": "909fb9d96570b32d"
+  },
+  "az-2p-2048-search.yaml": {
+   "full": {
+    "main": "f0bf7cfa8c9de320"
+   },
+   "smoke": {
+    "main": "77ac708e6ef998dc"
+   },
+   "sources": "6b775170a92f036d"
+  },
+  "az-2p-2048-soft.yaml": {
+   "full": {
+    "main": "8105fbb18c996dca"
+   },
+   "smoke": {
+    "main": "c4b527f250e05751"
+   },
+   "sources": "4bd2259a65f38498"
+  },
+  "az-2p-2048.yaml": {
+   "full": {
+    "main": "445ab0d7d2ba84f9"
+   },
+   "smoke": {
+    "main": "a8a43e5587b249d0"
+   },
+   "sources": "7ac1684b7678077d"
+  },
+  "az-from-ppo.yaml": {
+   "full": {
+    "main.az": "bb778461448d36ab",
+    "main.ppo": "592bfb51afbf3113"
+   },
+   "smoke": {
+    "main.az": "37a2c696bff01a85",
+    "main.ppo": "cad7870c6d463fc1"
+   },
+   "sources": "f9b0ca8a55d6502b"
+  },
+  "canopy-bench-2p-gpu.yaml": {
+   "full": {
+    "main": "9bbe81fa059b7a79"
+   },
+   "smoke": {
+    "main": "04aa05d5536d11a9"
+   },
+   "sources": "a8181df6dc919a3f"
+  },
+  "canopy-bench-2p.yaml": {
+   "full": {
+    "main": "43b0309df0b2aed6"
+   },
+   "smoke": {
+    "main": "445137c653bcd64a"
+   },
+   "sources": "7265e480bd8fc453"
+  },
+  "canopy-search-2p-gpu.yaml": {
+   "full": {
+    "main": "c0e10107b51d59e9"
+   },
+   "smoke": {
+    "main": "9b009eda76dc997c"
+   },
+   "sources": "b67731adb321c163"
+  },
+  "critic-refit-2p.yaml": {
+   "full": {
+    "head": "dbd9be2a37ff031a",
+    "main": "790938cde0ec8148"
+   },
+   "smoke": {
+    "head": "c44b908d45de45de",
+    "main": "610f615419862670"
+   },
+   "sources": "6d513d3ea41394b9"
+  },
+  "gumbel-edge-2p-e8.yaml": {
+   "full": {
+    "main": "f1936ba31bb33744"
+   },
+   "smoke": {
+    "main": "3dd5dbd56317d666"
+   },
+   "sources": "e553dcb0e78cb38d"
+  },
+  "gumbel-edge-2p.yaml": {
+   "full": {
+    "main": "99e790212339fc13"
+   },
+   "smoke": {
+    "main": "0f45e6c770752f4e"
+   },
+   "sources": "018a69e2f5d38d24"
+  },
+  "info-levels.yaml": {
+   "full": {
+    "ff-s42": "5f184999d27cdaf3",
+    "ff-s43": "c8efdce81dab65c8",
+    "pf-s42": "28cda854c7c0fbe4",
+    "pf-s43": "b9bfbcc42ee0002b",
+    "pp-s42": "167b04c19e25c2dc",
+    "pp-s43": "7c2e6379c98844bf",
+    "uf-s42": "b8d006381f39b6a7",
+    "uf-s43": "60fc43f90f351f3d"
+   },
+   "smoke": {
+    "ff-s42": "c70420e90ff9dba8",
+    "ff-s43": "71f55d61f385f721",
+    "pf-s42": "dd0bba204c4509c8",
+    "pf-s43": "8492984d3b6b46e0",
+    "pp-s42": "0aa74e23ac2c4a2a",
+    "pp-s43": "8a53fef1029cd2f9",
+    "uf-s42": "c3c27eb6fbd5b657",
+    "uf-s43": "221cf746bb3cc4b7"
+   },
+   "sources": "5133729bcdde2bbd"
+  },
+  "llm-eval.yaml": {
+   "full": {
+    "gemini25-basic-f": "8e61fc2cd15c2de5",
+    "gemini25-basic-policy": "54ef0404a35295ba",
+    "gemini25-plan-f": "bef4cd4da04bd47f",
+    "gemini25-plan-policy": "6e9f9b9ea309c00f",
+    "gpt5-basic-f": "5e70505a5310eb22",
+    "gpt5-basic-policy": "b7c8c9423938330b",
+    "gpt5-plan-f": "f9b455eccf9d5c4d",
+    "gpt5-plan-policy": "d1e36e384b22401a",
+    "sonnet45-basic-f": "a992f51767d3512b",
+    "sonnet45-basic-policy": "39f186cad17191a9",
+    "sonnet45-plan-f": "48cbfccc38b22aa7",
+    "sonnet45-plan-policy": "5c6f56719c581486",
+    "stub-basic-f": "8420395e6b13b7e3",
+    "stub-basic-policy": "aaf917df2d0f9241",
+    "stub-plan-f": "d43720a43f76c1f1",
+    "stub-plan-policy": "4bf85daef3c1c24e"
+   },
+   "smoke": {
+    "gemini25-basic-f": "deded057cbf70efa",
+    "gemini25-basic-policy": "c22c04d0b50e2588",
+    "gemini25-plan-f": "7aff27e17dd4ebfe",
+    "gemini25-plan-policy": "0d241fec5a55ae42",
+    "gpt5-basic-f": "f985b9754430bad4",
+    "gpt5-basic-policy": "65539182c7b95674",
+    "gpt5-plan-f": "09cb9137927306b4",
+    "gpt5-plan-policy": "5ee5f6225eb8417a",
+    "sonnet45-basic-f": "069cb8f4be08dd06",
+    "sonnet45-basic-policy": "37cd5c2868913c2a",
+    "sonnet45-plan-f": "e13be737bfc0901f",
+    "sonnet45-plan-policy": "e72acb934360088d",
+    "stub-basic-f": "f949e1f90740890d",
+    "stub-basic-policy": "ec949704dd6c0368",
+    "stub-plan-f": "27fbcb522036d86f",
+    "stub-plan-policy": "81199691e25d29bf"
+   },
+   "sources": "4ef0f5e3bbe82b7a"
+  },
+  "lstm-4p.yaml": {
+   "full": {
+    "main": "7465bce161260961"
+   },
+   "smoke": {
+    "main": "976c83e1381b2d48"
+   },
+   "sources": "749bfbf98862d9f9"
+  },
+  "lstm-aux-4p.yaml": {
+   "full": {
+    "main": "db6b8944c5f70402"
+   },
+   "smoke": {
+    "main": "7a3a4937d1c2e0bd"
+   },
+   "sources": "305b93e91922320f"
+  },
+  "mcts-dets-sims.yaml": {
+   "full": {
+    "s1024-d16": "3b955d3d4bab4e00",
+    "s1024-d4": "f12b1060a688a74c",
+    "s1024-oracle": "5b82321b4562f64f",
+    "s256-d16": "613722834f406619",
+    "s256-d4": "d80a8ba99f03fba9",
+    "s256-oracle": "5b518713b8bdccfd",
+    "s64-d16": "596c336e2b6f49bb",
+    "s64-d4": "1dc4436e6877a387",
+    "s64-oracle": "4f26abd7c6c27c89"
+   },
+   "smoke": {
+    "s1024-d16": "32ae60f8c121ad88",
+    "s1024-d4": "7d728d8274dc0091",
+    "s1024-oracle": "d18bf55a0a5d7951",
+    "s256-d16": "c578684365050059",
+    "s256-d4": "f0292513a99a698a",
+    "s256-oracle": "e1e9b400f207cc7f",
+    "s64-d16": "61e3ae85ff0fe49d",
+    "s64-d4": "67dc3e1014d00ecf",
+    "s64-oracle": "b49b61c1fa4346c6"
+   },
+   "sources": "f688325122e30d0d"
+  },
+  "mcts-reuse-2p.yaml": {
+   "full": {
+    "main": "1ed1e18fd1348eb5"
+   },
+   "smoke": {
+    "main": "1f7168c074954de1"
+   },
+   "sources": "2f04b8f411e73060"
+  },
+  "mcts-reuse-4p-both.yaml": {
+   "full": {
+    "main": "7630220cda2c3bb3"
+   },
+   "smoke": {
+    "main": "149a7604fcbb3ad6"
+   },
+   "sources": "5cb8b0686bfe5179"
+  },
+  "mcts-reuse-4p.yaml": {
+   "full": {
+    "main": "98b6791581c9ca91"
+   },
+   "smoke": {
+    "main": "539b7640bb12bc2a"
+   },
+   "sources": "f0e88200a2fc1982"
+  },
+  "ppo-4p-critic-fix.yaml": {
+   "full": {
+    "lambda": "8a1d03e70b308142",
+    "lambda-adamw": "815e88f3ad537a7b",
+    "lambda-critic-g1": "ce402ea7ee7f214d",
+    "lambda-g1": "47f104894592ad19"
+   },
+   "smoke": {
+    "lambda": "aeab701a71e1d832",
+    "lambda-adamw": "e69aaa1faba84bfe",
+    "lambda-critic-g1": "6b0dbdafaeb1e62e",
+    "lambda-g1": "5ab7dff05aac46f3"
+   },
+   "sources": "9b2804811b9f0fac"
+  },
+  "ppo-4p.yaml": {
+   "full": {
+    "main": "0c4db633918c98c9"
+   },
+   "smoke": {
+    "main": "dac4968129b62bec"
+   },
+   "sources": "63370127b2e54570"
+  },
+  "ppo-mixed-blob.yaml": {
+   "full": {
+    "main": "5517a9eede23aee9"
+   },
+   "smoke": {
+    "main": "195c4745aea35cb5"
+   },
+   "sources": "660f4dd377bf3b95"
+  },
+  "ppo-mixed.yaml": {
+   "full": {
+    "main": "af1e88e378523835"
+   },
+   "smoke": {
+    "main": "742a5579fd8137d5"
+   },
+   "sources": "825bc9e8ae928be9"
+  },
+  "predict-vs-belief.yaml": {
+   "full": {
+    "main": "f94c80bbd54b5475"
+   },
+   "smoke": {
+    "main": "86757d665984308d"
+   },
+   "sources": "586f33dab5de26cc"
+  },
+  "puffer-graph2.yaml": {
+   "full": {
+    "full": "e450d73095205113",
+    "public": "66a3ba412b699084"
+   },
+   "smoke": {
+    "full": "636615ce1801c8da",
+    "public": "0749dbfb2c649b98"
+   },
+   "sources": "a003aae605c63a54"
+  },
+  "search-4p-2000.yaml": {
+   "full": {
+    "main": "af067b66c56ba39e"
+   },
+   "smoke": {
+    "main": "59bd34886d7a3fdf"
+   },
+   "sources": "c460bb038a0774ff"
+  },
+  "search-4p.yaml": {
+   "full": {
+    "main": "7f9f78fa5378e61b"
+   },
+   "smoke": {
+    "main": "59bd34886d7a3fdf"
+   },
+   "sources": "f0e5f26c7063dded"
+  },
+  "slot-order.yaml": {
+   "full": {
+    "main": "5c07ae4bcc76de01"
+   },
+   "smoke": {
+    "main": "ce263a9455ea126a"
+   },
+   "sources": "3a74113d35f816a5"
+  },
+  "tiny.yaml": {
+   "full": {
+    "2p": "f5ec5cabdc7d46ae",
+    "4p": "e0cf5dbff539bb3c"
+   },
+   "smoke": {
+    "2p": "5c06e6e0898eddfd",
+    "4p": "162e6dc4a201f395"
+   },
+   "sources": "ea4890e8c4b77d83"
+  },
+  "tracker-modes.yaml": {
+   "full": {
+    "main": "f8896369c0130d88"
+   },
+   "smoke": {
+    "main": "7026de01a5510040"
+   },
+   "sources": "d619d3e330f12ec8"
+  },
+  "tracker-search.yaml": {
+   "full": {
+    "main": "66de580f2795f26d"
+   },
+   "smoke": {
+    "main": "9f4a2ceb9c663ef6"
+   },
+   "sources": "bb4e54359fa09c44"
+  },
+  "trade-harness-m3.yaml": {
+   "full": {
+    "main": "06aeef8378757884"
+   },
+   "smoke": {
+    "main": "377a82598e8a9f88"
+   },
+   "sources": "b7d9d02d0ee16926"
+  },
+  "trade-harness-m4.yaml": {
+   "full": {
+    "main": "18c5dd579aab583c"
+   },
+   "smoke": {
+    "main": "8351b681aa627bdf"
+   },
+   "sources": "a3008297504322b6"
+  },
+  "trade-harness-pilot.yaml": {
+   "full": {
+    "main": "d76da6fea6699e3a"
+   },
+   "smoke": {
+    "main": "b6a3a164c01f45ea"
+   },
+   "sources": "3f2bd974a229ec63"
+  },
+  "trade-harness.yaml": {
+   "full": {
+    "main": "917ba7680ebeae7b"
+   },
+   "smoke": {
+    "main": "569c6922bee5fba6"
+   },
+   "sources": "4f065ad1ad65cdd6"
+  },
+  "v1-anchor.yaml": {
+   "full": {
+    "s42": "9d0e0ce7398dcbbe",
+    "s43": "a49c79614e85a94c"
+   },
+   "smoke": {
+    "s42": "759c3a48bff9bafd",
+    "s43": "31270a77165cc9d2"
+   },
+   "sources": "ca9462cf805cde6b"
+  }
+ },
+ "games": {
+  "base-2p.yaml": {
+   "hash": "c7d6bd5bbec205f1",
+   "sources": "b611e74bde689e0c"
+  },
+  "base-3p.yaml": {
+   "hash": "21d70c9b03ff9b42",
+   "sources": "a013244b5759cc8d"
+  },
+  "base-4p.yaml": {
+   "hash": "ae2fd9da0d4288d7",
+   "sources": "3c3f29d4f0aa66b3"
+  },
+  "extension-5p.yaml": {
+   "hash": "ef14930c66b41c29",
+   "sources": "7227ba0cb1320128"
+  },
+  "extension-6p.yaml": {
+   "hash": "570454d95e9f2794",
+   "sources": "aeae5adcad38fe88"
+  },
+  "hexagon-3p.yaml": {
+   "hash": "3428fe9a732eb7e0",
+   "sources": "4b1327cfbd3362ed"
+  },
+  "random-4p.yaml": {
+   "hash": "48e6d9a38b06c3dd",
+   "sources": "bb7ee0587e6c7e5d"
+  }
+ },
+ "note": "Hashes of every configs/{games,suites,experiments} file as the code before dice_mode (cfec40a) computed them (tests/test_dice_mode.py's all_hashes(), identical under both); 'sources' digests the files each entry comes from, as of the dice_mode commit.",
+ "suites": {
+  "dev-2p.yaml": {
+   "key": "93eef4bd65bbe4ae",
+   "scenarios": [
+    "49aa6026bf614461"
+   ],
+   "sources": "280b7a45733c9364"
+  },
+  "heldout-2p.yaml": {
+   "key": "4615a3ca07f4d2dd",
+   "scenarios": [
+    "49aa6026bf614461"
+   ],
+   "sources": "31d49c3f1abb9103"
+  },
+  "heldout-4p.yaml": {
+   "key": "c61b073470a7b48c",
+   "scenarios": [
+    "a2529676efc4e70e"
+   ],
+   "sources": "13a9e5a67a2e1aa7"
+  },
+  "heldout-mixed.yaml": {
+   "key": "62bcba10525431ea",
+   "scenarios": [
+    "49aa6026bf614461",
+    "ced8b56beac25220",
+    "9bbfe5544baddb81"
+   ],
+   "sources": "5b513a6d3cc19af7"
+  },
+  "heldout-random-4p.yaml": {
+   "key": "2efefdb7103f8867",
+   "scenarios": [
+    "9bbfe5544baddb81"
+   ],
+   "sources": "cedd910f6dfdf514"
+  },
+  "select-2p.yaml": {
+   "key": "1fec3b0a885c357a",
+   "scenarios": [
+    "49aa6026bf614461"
+   ],
+   "sources": "2fb6f199e0ffc865"
+  },
+  "select-4p.yaml": {
+   "key": "2851c7b4904d630f",
+   "scenarios": [
+    "a2529676efc4e70e"
+   ],
+   "sources": "b6cb2339829d4021"
+  },
+  "select-mixed.yaml": {
+   "key": "08ca6a995f820a12",
+   "scenarios": [
+    "49aa6026bf614461",
+    "ced8b56beac25220",
+    "a2529676efc4e70e"
+   ],
+   "sources": "70a2a8c6a57f1a4f"
+  },
+  "select-random-4p.yaml": {
+   "key": "baeeba419bae2b01",
+   "scenarios": [
+    "9bbfe5544baddb81"
+   ],
+   "sources": "a0be6da2a439bf47"
+  }
+ }
+}

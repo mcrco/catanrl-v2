@@ -891,6 +891,11 @@ def validate_plan(path: str | Path) -> list[str]:
                 problems.append(f"{v.name}: eval.select uses {suite.name}, a {suite.purpose} suite")
             if where == "final" and suite.purpose == "select":
                 problems.append(f"{v.name}: eval.final uses the select suite {suite.name}")
+            if entry.get("harness", "native") == "catanatron":
+                unfair = sorted({f"{g.name} ({g.dice_mode} dice)" for g in suite.games() if g.dice_mode != "random"})
+                if unfair:
+                    problems.append(f"{v.name}: eval.{where} plays {suite.name} in the catanatron harness, which "
+                                    f"rolls fair dice: {unfair}")
             for spec in entry["lineup"]:
                 problem = _ref_problem(str(spec))
                 if problem:

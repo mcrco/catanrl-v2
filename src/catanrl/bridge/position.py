@@ -218,12 +218,20 @@ def _supply_counts(supply: Any) -> tuple[tuple[int, ...], tuple[int, ...], tuple
     if hasattr(supply, "cppanatron_rules"):  # catanrl.games.GameConfig
         supply = supply.cppanatron_rules()
     if isinstance(supply, cpp.GameRules):
+        check_fair_dice(supply)
         return (tuple(supply.resource_bank), tuple(supply.development_deck),
                 (supply.roads_per_player, supply.settlements_per_player, supply.cities_per_player))
     if hasattr(supply, "resource_bank") and hasattr(supply, "roads"):  # catanatron Supply
         return (tuple(supply.resource_bank), tuple(supply.development_deck),
                 (supply.roads, supply.settlements, supply.cities))
     raise ViewError(f"cannot read a supply from {supply!r}")
+
+
+def check_fair_dice(rules: cpp.GameRules) -> None:
+    """Refuse rules a Catanatron game cannot have: Catanatron rolls two fair
+    dice, so its views replayed on balanced dice would refuse its rolls."""
+    if rules.dice_mode != cpp.DiceMode.RANDOM:
+        raise ViewError(f"a Catanatron game rolls two fair dice, not {rules.dice_mode.name.lower()} dice")
 
 
 def game_rules(view: Mapping[str, Any], supply: Any = None) -> cpp.GameRules:
