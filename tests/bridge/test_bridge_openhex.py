@@ -522,6 +522,9 @@ class _TimedSeat:
     def feed(self, _events):
         pass
 
+    def check(self, _state):
+        return []
+
     def plan(self, _state):
         from catanrl.bridge.openhex import Plan
 
