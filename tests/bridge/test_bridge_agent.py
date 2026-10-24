@@ -57,7 +57,7 @@ def test_view_agent_decides_like_the_native_agent(key, name):
     true game and the seat's true tracker, the ViewAgent on the seat's views
     only (decide-only, as a TUI callback), with the same decision seeds.
     Under the friendly robber the agent is also asked about lone robber
-    moves, as a server asks (the options bound the others' points). A
+    moves, as a server asks (a forced move, the options reveal nothing). A
     reusing agent reuses alike on both sides (the exact check on the true
     game, the view check on the replayed one); only the refusals' split
     differs by construction (a replayed chance outcome the seat's view

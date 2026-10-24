@@ -5,6 +5,11 @@ A stock Catanatron game is the truth: it gives every seat its ``client_view``
 plays the same actions with the same outcomes alongside, so the native
 features, hand trackers and agents of a seat can be compared with what the
 bridge builds from that seat's views alone.
+
+The friendly robber is the one rule the engines differ on: Catanatron shields
+seats under 3 actual points (hidden victory point cards count), the engine
+follows OpenHex (at most 2 public points). Importing this module makes the
+truth play the engine's rule (:func:`openhex_friendly_robber`).
 """
 
 from __future__ import annotations
@@ -25,6 +30,29 @@ from catanrl import games
 from catanrl.agents.native import make_native_agent
 from catanrl.envs.encoding import action_size, covering_dims, row_layout
 from catanrl.models import build_model
+
+
+def openhex_friendly_robber() -> None:
+    """Stock Catanatron's friendly robber, re-ruled as OpenHex's (open-hex
+    engine.py ``_friendly_robber_shields``): a tile is shielded when an
+    opponent of the mover with at most 2 visible points has a building on it
+    (Catanatron's own fallback, every tile when all are shielded, is
+    OpenHex's)."""
+    from catanatron.models import actions
+    from catanatron.state_functions import get_visible_victory_points
+
+    def blocks(state, color, action) -> bool:
+        coordinate, _ = action.value
+        for node_id in state.board.map.land_tiles[coordinate].nodes.values():
+            building = state.board.buildings.get(node_id)
+            if building is not None and building[0] != color and get_visible_victory_points(state, building[0]) <= 2:
+                return True
+        return False
+
+    actions._robber_action_blocks_low_vp_enemy = blocks
+
+
+openhex_friendly_robber()
 
 DATA = Path(__file__).resolve().parents[1] / "data"
 GAMES = ("base-2p", "base-3p", "base-4p", "extension-5p", "extension-6p", "hexagon-3p")

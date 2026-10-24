@@ -286,11 +286,6 @@ class ViewAgent:
             self._drain()
             if len(playable_actions) == 1:
                 self.stats["forced"] += 1
-                if view["current_prompt"] == "MOVE_ROBBER" and (view.get("game") or {}).get("friendly_robber"):
-                    # Even a lone friendly-robber option bounds the others' points.
-                    tracker = self._tracker(view, playable_actions[0][0])
-                    tracker.sync(view)
-                    tracker.options([from_catanatron_action(action_from_json(list(playable_actions[0])))])
                 return playable_actions[0]
             tracker = self._tracker(view, playable_actions[0][0])
             self.stats["decisions"] += 1
@@ -356,7 +351,7 @@ class ViewAgent:
         if not mask.any():
             return self._fallback("no_indexable_offer", playable_actions)
         tracker.options(offered)
-        game = tracker.game  # the friendly robber may have redealt its placeholders
+        game = tracker.game
 
         row = self.native.encode(game, seat)
         if not np.array_equal(row[-mask.size:], mask):

@@ -1,0 +1,7 @@
+# dev-2p on base-2p-fr: quick looks while developing; fast determinism is part of the eval key.
+purpose: dev
+seed: 7
+boards: 50
+scenarios: [{game: base-2p-fr}]
+turn_limit: 500
+determinism: fast

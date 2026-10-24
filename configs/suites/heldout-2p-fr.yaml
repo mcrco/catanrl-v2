@@ -1,0 +1,6 @@
+# heldout-2p's seed and size on base-2p-fr.
+purpose: heldout
+seed: 67
+boards: 2500               # each played in every seat rotation
+scenarios: [{game: base-2p-fr}]
+turn_limit: 500

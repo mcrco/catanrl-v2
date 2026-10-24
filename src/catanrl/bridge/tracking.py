@@ -18,7 +18,8 @@ them from true states (:func:`transition_events`):
   plays of development cards, ``end_turn``;
 * after every move that does not end the game, ``public_victory_points``;
 * at a decision, ``observe_options`` with the actions the seat was offered
-  (under the friendly robber they bound the others' victory point cards).
+  (under the engine's rules they reveal nothing hidden: the friendly robber
+  reads public points).
 
 Every step is checked: ``tracker.check_public(game)`` (hand sizes, bank,
 deck, played cards, the seat's own cards) after each transition, the replay's
@@ -285,25 +286,11 @@ class SeatTracker:
         self.stats["tracker_resets"] += 1
 
     def options(self, legal: Sequence[cpp.Action]) -> None:
-        """The seat is to move with these actions (what it was offered).
-
-        Under the friendly robber they bound the others' victory point cards
-        (``observe_options``), and the replay must offer the same robber
-        moves: its placeholders then get victory point cards within the
-        tracker's bounds.
+        """The seat is to move with these actions (what it was offered):
+        ``observe_options``, which under the engine's rules learns nothing
+        (the friendly robber reads public points, so the robber options
+        bound no hidden victory point cards and no placeholder changes them).
         """
         if self.broken is not None:
             return
-        legal = list(legal)
-        self.tracker.observe_options(self.replay.game, legal)
-        wanted = sorted(map(repr, legal))
-        if not self.rules.friendly_robber or sorted(map(repr, self.replay.game.playable_actions)) == wanted:
-            return
-        others = [s for s in range(len(self.colors)) if s != self.seat]
-        try:
-            self.replay.match_points({s: self.tracker.victory_point_card_floor(s) for s in others},
-                                     {s: self.tracker.victory_point_card_cap(s) for s in others})
-        except ReplayError:
-            pass
-        matched = sorted(map(repr, self.replay.game.playable_actions)) == wanted
-        self.stats["robber_options_redealt" if matched else "robber_options_differ"] += 1
+        self.tracker.observe_options(self.replay.game, list(legal))

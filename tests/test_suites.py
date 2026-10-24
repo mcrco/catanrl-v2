@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+import numpy as np
 import pytest
 
 from catanrl.eval.suites import load_suite
@@ -63,3 +64,43 @@ def test_fill_expands(game, n):
     for g in games:
         assert sorted(g.seats) == [0, 1] + [2] * (n - 2)
     assert [g.seats.index(0) for g in games] == [(-r) % n for r in range(n)]
+
+
+def test_the_friendly_robber_suites_play_openhex_1v1_rules():
+    """base-2p-fr is base-2p with the friendly robber (OpenHex's 1v1): its games
+    have the rule and the encoder's friendly_robber feature reads 1 (0 on
+    base-2p). The -fr suites keep the base-2p suites' seeds and sizes; the
+    scenario hash includes the rules, so their boards are other boards, and
+    select and heldout stay disjoint."""
+    import cppanatron as cpp
+
+    from catanrl import games
+    from catanrl.envs.encoding import make_encoder
+
+    fr, base = games.load_game("base-2p-fr"), games.load_game("base-2p")
+    assert fr.to_dict() == {**base.to_dict(), "name": "base-2p-fr", "friendly_robber": True}
+    dims = {"max_players": 2, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
+    for level in ("private", "full"):
+        encoder = make_encoder(dims, level)
+        offset, _shape = encoder.layout()["global"]
+        feature = offset + list(encoder.feature_names("global")).index("friendly_robber")
+        for config, expected in ((fr, 1.0), (base, 0.0)):
+            game = config.cppanatron_game(map_seed=11, seed=12)
+            assert game.friendly_robber is bool(expected) and game.rules.friendly_robber is bool(expected)
+            assert np.asarray(encoder.encode(game, 0))[feature] == expected
+    scenario = cpp.Scenario(num_players=2, rules=fr.cppanatron_rules())
+    assert scenario.rules.friendly_robber and scenario.rules.vps_to_win == 15 and scenario.rules.discard_limit == 9
+
+    for purpose, boards in (("select", 500), ("heldout", 2500), ("dev", 50)):
+        suite, plain = load_suite(f"{purpose}-2p-fr"), load_suite(f"{purpose}-2p")
+        assert suite.purpose == purpose and suite.boards == boards and suite.seed == plain.seed
+        assert [g.name for g in suite.games()] == ["base-2p-fr"]
+        assert suite.turn_limit == plain.turn_limit and suite.determinism == plain.determinism
+        small = load_suite({"name": f"{purpose}-2p-fr", "boards": 20}).schedule(2)
+        assert not {g.map_hash for g in small} & {g.map_hash for g in load_suite(
+            {"name": f"{purpose}-2p", "boards": 20}).schedule(2)}
+    assert len(load_suite("select-2p-fr").schedule(2)) == 1000
+    select = load_suite({"name": "select-2p-fr", "boards": 100}).schedule(2)
+    heldout = load_suite({"name": "heldout-2p-fr", "boards": 100}).schedule(2)
+    assert not {g.game_seed for g in select} & {g.game_seed for g in heldout}
+    assert not {g.map_hash for g in select} & {g.map_hash for g in heldout}

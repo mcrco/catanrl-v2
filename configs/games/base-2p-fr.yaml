@@ -1,0 +1,14 @@
+# base-2p under OpenHex's 1v1 rules (its queue hard-codes them: game_manager.py
+# create_game): two players on BASE, 15 VP to win, discard limit 9 (discard at 10+
+# cards), and the friendly robber (robberMode "friendly", engine.py
+# _validate_robber_placement): a tile is shielded when an opponent of the mover with
+# at most 2 public VP (buildings, Longest Road, Largest Army; never hidden VP cards)
+# has a building on it, and shielded tiles are off limits unless every tile but the
+# robber's is shielded, when all are open. OpenHex's 1v1 also deals balanced dice;
+# the engine rolls fair random dice.
+name: base-2p-fr
+num_players: 2
+map: {type: BASE}
+victory_points_to_win: 15
+discard_limit: 9
+friendly_robber: true

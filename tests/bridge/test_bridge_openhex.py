@@ -231,8 +231,8 @@ def test_a_reusing_search_follows_the_seats_own_moves(color):
     (first once, the agent handed copies), the search is re-rooted wherever
     the record played the seat's own choice next and along a plan decided
     ahead on a copy: each discard of a chain after the first, and the robber
-    after a knight, where the view check passes and the engine refuses (the
-    friendly robber's options depend on hidden points). A discard chain's
+    after a knight (the friendly robber reads public points, so no world's
+    robber options differ and the engine re-roots there). A discard chain's
     search ends with it (``dropped_over``), so the decision after it is a
     first. The plans fall at the same points as without reuse, every choice
     is legal (a fallback only where the agent raised, as the plain agent does
@@ -258,18 +258,20 @@ def test_a_reusing_search_follows_the_seats_own_moves(color):
     assert [a["first"] for a in log] == \
         [True] + [log[i - 1]["raised"] or id(log[i - 1]) in ends for i in range(1, len(log))]
     assert c["reused"] + c["refused_diverged"] + c["refused_engine"] == sum(not a["first"] for a in log)
-    knights = discards = 0
+    knights = discards = reused_knights = 0
     for _seq, plan, acts in plans:
         kind = plan.actions[0]["type"]
         if kind == "playKnight":
             assert [a["prompt"] for a in acts] == ["PLAY_TURN", "MOVE_ROBBER"]
-            assert acts[1].get("refused_engine") == 1 and not acts[1].get("refused_diverged")
+            # (The agent raises at the game's last moves: no search there to re-root.)
+            assert acts[1].get("reused") == 1 or acts[1]["raised"]
             knights += 1
+            reused_knights += acts[1].get("reused", 0)
         elif kind == "discardResources":
             assert len(acts) >= 2 and all(a["prompt"] == "DISCARD" for a in acts)
             assert all(a.get("reused") == 1 for a in acts[1:])
             discards += 1
-    assert knights > 0 and discards == (1 if color == "blue" else 0)
+    assert knights > 0 and reused_knights > 0 and discards == (1 if color == "blue" else 0)
     assert len(native.pool) == 1 and set(native._live) == {seat.env * 2 + seat.seat}
     assert all(entry[1] is not seat.replay.game for entry in native._live.values())
     assert seat.search == dict(c)
