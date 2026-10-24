@@ -12,7 +12,7 @@ most experiments are a config under `configs/experiments/`. a number without an 
   *measured.* the raw policy is at 95% vs F (@sec:recipe). the search edge is 53.4–55.2% with our default PUCT search and 62.4% with gumbel alphazero's root at 2048 sims (@sec:search).
 ]
 
-*in flight (24 october 2026).* the critic refit resumed at e266 of 500 (@sec:critic). next on the gpu: the 1v1 bot continued for \~1b steps on openhex's 1v1 rules, judged against its start (being built, @sec:recipe). canopy's search lost to our search 33.0 to 67.0 over 1,000 games (@sec:canopy).
+*in flight (24 october 2026).* the 1v1 bot continued for \~1b steps on openhex's 1v1 rules (friendly robber, balanced dice), judged against its start (@sec:recipe). the critic refit came back null (@sec:critic). canopy's search lost to our search 33.0 to 67.0 over 1,000 games (@sec:canopy).
 
 == current best bots
 

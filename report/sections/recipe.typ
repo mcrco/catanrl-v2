@@ -74,18 +74,28 @@ catanrl run configs/experiments/puffer-graph2.yaml --only full
 catanrl run configs/experiments/puffer-graph2.yaml --only public
 ```)
 
-=== the 1v1 bot on openhex's 1v1 rules, \~1b more steps, judged against its start #chip("todo") <exp:recipe-2p-openhex>
+=== the 1v1 bot on openhex's 1v1 rules, \~1b more steps, judged against its start #chip("running") <exp:recipe-2p-openhex>
 #meta(
+  dates: "2026-10-24 10:46 onward",
   owner: "marco",
-  wandb: (),
-  records: (),
+  config: "configs/experiments/ppo-2p-fr.yaml",
+  wandb: (("ppo-2p-fr-full-fef9516c", "ppo-2p-fr/full"),),
+  records: ("fa6ea360", "2bfef46d", "8a137f56", "ffcc5c1a"),
 )
-#tldr[openhex's 1v1 queue plays friendly robber and balanced dice; our 2p bots trained on neither. marco: train on friendly robber from now on, continue the deployed 1v1 net for \~1b more steps on it, and judge it against its start (the champion) as well as F. being built.]
+#tldr[openhex's 1v1 queue plays friendly robber and balanced dice; our 2p bots trained on neither. marco: train on friendly robber from now on, continue the deployed 1v1 net for \~1b more steps on it, and judge it against its start (the champion) as well as F. running since 2026-10-24 10:46, \~17.5 h.]
 
-*plan.*
-- *the rules.* from openhex's source: its 1v1 queue is 15 vp, discard above 9, friendly robber, balanced dice; its 4p queue is 10 vp, discard above 7, normal robber, random dice, which is our 4p setup already. openhex's friendly robber shields an opponent with *public* points ≤ 2. our engine used *actual* points < 3, which counts hidden victory point cards (a mismatch, and the legal moves leak whether the opponent holds one), so the engine rule is being fixed. balanced dice (colonist's algorithm: a 36-card deck reshuffled at 13 left, a recency penalty and per-player seven balancing) are not in the engine; marco decides whether to add them first.
-- *the run.* `puffer-graph2/full@best` (the deployed 1v1 net) continued on `base-2p-fr` for \~1b agent steps, the recipe otherwise unchanged (\~16 h).
-- *the champion eval (marco).* ppo stagnation has been read from the win rate vs F, which sits near its 95% ceiling. every select now also plays the current checkpoint against a champion (here the start), 1,000 games on the same boards each time: ±3.1 pp, paired game by game across checkpoints. the finals include the start under the new rules, since it never trained on them.
+*setup.*
+- *the rules.* from openhex's source: its 1v1 queue is 15 vp, discard above 9, friendly robber, balanced dice; its 4p queue is 10 vp, discard above 7, normal robber, random dice, which is our 4p setup already. openhex's friendly robber shields an opponent with *public* points ≤ 2. our engine used *actual* points < 3, which counts hidden victory point cards (a mismatch, and the legal moves leak whether the opponent holds one), so the engine now uses openhex's rule (a knight is judged on the points before it takes largest army, as openhex does). balanced dice are in the engine too (marco: "do balanced dice before 1v1 retrain"), following openhex's code: a 36-card deck refilled when 13 or fewer are left, a recency penalty on totals seen in the last 5 rolls, and per-player seven balancing; search chance nodes use the state's own odds. `base-2p-fr` is openhex's 1v1 exactly: 15 vp, discard above 9, friendly robber, balanced dice. random-dice, normal-robber games play bit-identically to the old engine. the network gets no dice-state input, so the policy plays the dice blind and only the search reads them. the two recorded openhex games say balanced dice but were played on fair dice (an openhex bug, since fixed); the bridge falls back to fair dice if a roll is impossible under the balanced deck.
+- *the run.* `puffer-graph2/full@best` (e3350, the deployed 1v1 net) continued on `base-2p-fr` for \~1b agent steps, the recipe otherwise unchanged, at \~17.8k agent steps/s (\~17.5 h with monitors and finals).
+- *baselines.* the start vs F on `select-2p-fr`: *96.3* #ci[94.9][97.3] (`8a137f56`). its friendly-robber input was never on in training: a copy with that input zeroed beats it *51.5* #ci[50.2][52.9] over 5,000 games (`ffcc5c1a`), so part of any gain over the start is just learning to ignore that input; the final head to head subtracts 1.5 pp for it.
+- *identity.* the merge moved the code ids every record is keyed under (catanrl `55ba5984`, engine `a9b40d9c`, train `55588933`), so new rows pair with older records only through `tools/search_probe.py --pair` (old-rule games are bit-identical).
+- *the champion eval (marco).* ppo stagnation has been read from the win rate vs F, which sits near its 95% ceiling. every select now also plays the current checkpoint against a champion (here the start), 1,000 games on the same boards each time: ±3.1 pp, paired game by game across checkpoints. the finals include the start under the new rules, since it never trained on them. at e0 the champion row reads 50.0 (`fa6ea360`), as it must.
+
+*result.* running.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
+```)
 
 == four players
 

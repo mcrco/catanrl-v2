@@ -2,7 +2,7 @@
 
 = refitting the critic after ppo <sec:critic>
 
-marco's idea: during multi-agent ppo the critic chases a policy that keeps changing, so it probably never converges on the final one. freeze the policy, keep training the critic on many of the final policy's games, and mcts should get better with the more accurate critic. a second reason to expect a gain: the start's critic is discounted (v-trace targets at γ = 0.999, λ = 0.95). so it predicts something closer to 0.999^(moves left) × p(win) than p(win). that is also not the undiscounted win/loss alphazero's value head trains on. so far a cpu probe found only calibration headroom (\~0.01 nats), and the gpu refit is paused at e266 of 500 with no search result yet.
+marco's idea: during multi-agent ppo the critic chases a policy that keeps changing, so it probably never converges on the final one. freeze the policy, keep training the critic on many of the final policy's games, and mcts should get better with the more accurate critic. a second reason to expect a gain: the start's critic is discounted (v-trace targets at γ = 0.999, λ = 0.95). so it predicts something closer to 0.999^(moves left) × p(win) than p(win). that is also not the undiscounted win/loss alphazero's value head trains on. result: the refit calibrated the critic (it no longer discounts) but did not make it rank positions better, and the search did not get stronger: +2.1 pp at 512 sims (p = 0.15) and +0.1 pp at 2048 sims (p = 1.0). the idea fails its pre-registered rule, so the value-head-only arm was not run.
 
 == the start's critic
 
@@ -45,15 +45,15 @@ marco's idea: during multi-agent ppo the critic chases a policy that keeps chang
 
 == the refit
 
-=== critic-refit-2p: frozen policy, refit critic, judged in the search #chip("running") <exp:critic-refit>
+=== critic-refit-2p: frozen policy, refit critic, judged in the search #chip("done") <exp:critic-refit>
 #meta(
-  dates: "2026-10-23 09:57–13:40 (e0–e266), resumed 2026-10-24 00:54",
+  dates: "2026-10-23 09:57 – 2026-10-24 10:45 (paused 13:40–00:54 for canopy)",
   owner: "marco",
   config: "configs/experiments/critic-refit-2p.yaml",
   wandb: (("critic-refit-2p-main-790938cd", "critic-refit-2p/main"), ("az-2p-2048-soft-main-8105fbb1", "az-2p-2048-soft (baseline 856a0421)"), ("gumbel-edge-2p-main-efda50ac", "gumbel-edge-2p, eval only (baseline 831eea84)")),
-  records: ("576848d8", "f841ca86", "856a0421", "831eea84"),
+  records: ("576848d8", "f841ca86", "9641a3aa", "856a0421", "831eea84"),
 )
-#tldr[the policy stays bit-identical while a separate copy of the critic trains on the outcomes of \~400k of the frozen policy's games. paused at e266 for the canopy search row, it resumed on 2026-10-24. the critic's seat sum went from 0.936 to 1.000 by e50; the search rows at e500 decide the result.]
+#tldr[a separate copy of the critic, refit on \~400k of the frozen policy's games, is calibrated (the discount is gone) but ranks positions no better than the start's. inside the search it changes nothing: +2.1 pp at 512 sims (p = 0.15), +0.1 pp at 2048 (62.5 vs 62.4, p = 1.0). a more accurate critic is not what limits our search.]
 
 *question.* with only the critic different, does mcts with a refit critic beat the raw start more often than mcts with the start's own critic?
 
@@ -75,12 +75,13 @@ marco's idea: during multi-agent ppo the critic chases a policy that keeps chang
   caption: [the two rows that decide `critic-refit-2p`, and the rows they pair with.],
 )
 
-*result so far.* the main arm was paused at e266 for the canopy search row (@sec:canopy; the two don't fit in 8 gb together) and resumed on 2026-10-24 00:54; training ended at 03:00.
+*result.* the main arm was paused at e266 for the canopy search row (@sec:canopy; the two don't fit in 8 gb together) and resumed on 2026-10-24 00:54; training ended at 03:00, the 2048-sim row at 10:45.
 - *held-out critic* (2,048 games on boards outside the training pool, 330k decisions, game-clustered cis, paired per decision): cross-entropy against the outcome went from 0.3634 at e0 to *0.3460* at e500, −0.0174 nats #ci[−0.0212][−0.0134]. ranking within a turn did not move (auc 0.9010 → 0.9016). a calibration-only fix of the start, platt scaling by turn, reaches 0.3470, so the refit beats it by only −0.0011 #ci[−0.0023][+0.0002]; normalizing the start's two seats, v/(v0+v1), already gets 0.3499. converged: e500 is within 0.0001 of e450 (the rule was 0.002), and the curve is flat from about e100.
 - *512-sim search* (the 1,000 games of `select-2p-500`): e500 scores *59.5* #ci[56.4][62.5] (`f841ca86`) against the start's 57.4 (`856a0421`) on the same games, paired +2.1 pp, 105 games won only by e500 against 84 only by the start, mcnemar p = 0.15. not significant at the holm threshold (0.025 for the smaller p).
-- *2048-sim search*: running.
+- *2048-sim search* (`heldout-2p`, 500 boards, both seat orders): e500 scores *62.5* #ci[59.5][65.5] (`9641a3aa`) against the start's 62.4 (`831eea84`) on the same games, paired +0.1 pp, 110 against 109, mcnemar p = 1.0.
+- *decision:* neither row passes holm (smallest p 0.15 against 0.025), so main fails and the head arm is not run.
 
-*reading so far.* the refit fixed what the probe said was wrong, the discount, and nothing else: the critic is now calibrated but ranks positions no better, and almost all of the gain is available for free by rescaling the start's values. by e50 the critic's two seats' values summed to 1.000, against the start's 0.936.
+*reading.* the refit fixed what the probe said was wrong, the discount, and nothing else: the critic is now calibrated but ranks positions no better, and almost all of the calibration gain is available for free by rescaling the start's values. the search only compares positions and moves, so calibration alone can't help it, and at 2048 sims the two critics win and lose the same games (219 of 1,000 differ, split evenly). a better critic for the search would have to rank better, not just be calibrated. by e50 the critic's two seats' values summed to 1.000, against the start's 0.936.
 
 #repro(```sh
 catanrl run configs/experiments/critic-refit-2p.yaml --only main   # resumes from e266 in the same runs dir
@@ -89,13 +90,13 @@ uv run python tools/critic_heldout.py play --run critic-refit-2p/main --every 25
 uv run python tools/critic_heldout.py report heldout-main.npz --json heldout-main.json
 ```)
 
-=== head-only arm, and main vs head #chip("todo") <exp:critic-head>
+=== head-only arm, and main vs head #chip("parked") <exp:critic-head>
 #meta(
   owner: "marco",
   config: "configs/experiments/critic-refit-2p.yaml",
   wandb: (),
   records: (),
 )
-#tldr[arm `head` refits only the value head on the shared trunk (74k parameters). it runs only if a main row passes; main vs head, paired, then tells a more accurate critic from a merely rescaled one.]
+#tldr[arm `head` refits only the value head on the shared trunk (74k parameters). it was to run only if a main row passed. neither did, so it is parked.]
 
 *plan.* same config, same decision rows as @exp:critic-refit, one trunk instead of two. launch with `catanrl run configs/experiments/critic-refit-2p.yaml --only head`, only after a positive main row.
