@@ -810,7 +810,8 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
     monitors = Monitors(model, device=device, rows=int(train["search_rows"])) if monitoring else None
     selfplay.monitor = monitors
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
-    selector = Selector((cfg.get("eval") or {}).get("select"), writer, eval_runtime)
+    selector = Selector((cfg.get("eval") or {}).get("select"), writer, eval_runtime,
+                        monitors=(cfg.get("eval") or {}).get("monitor"))
     iteration = 0
 
     def save() -> None:
@@ -842,8 +843,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         if monitors is not None:
             monitors.capture(plan, seed=derive_seed(seed, "probe"), threads=int(runtime.get("threads", 1)))
         save()
-    for ref in writer.pending_selects():
-        selector.run(ref, model)
+    selector.catch_up(model)
 
     status, saved = "finished", iteration
     while iteration < int(train["iterations"]):

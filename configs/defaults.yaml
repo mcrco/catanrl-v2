@@ -18,8 +18,14 @@ init_from: null              # {ckpt: REF or {actor: REF, critic: REF}, parts: [
                              #  critic networks, each an exact copy of the trunk with its own head)}
 eval:
   select: null               # {suite, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate, fill: null}
+                             # or {from: NAME}: monitor NAME's suite, lineup, every, metric and fill (best follows it)
   final: []                  # [{suite, lineup: ["POLICY:ckpt=${run}@best", F], fill: null}]
                              # suite: a name, or {name, boards} for its first boards
+  # Optional, absent by default (a config without them keeps its hash; config.OPTIONAL):
+  # monitor: [{name, suite, lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"], every: 50,
+  #            metric: score_rate, fill: null}]   evals at checkpoints, logged as select/<name>/...,
+  #                                               deciding nothing (a select suite; slot 0 is ${self})
+  # champion: REF            # ${champion} in eval lineups, pinned at creation; unset: ${init}
 params: {}                   # kind: eval sweep values, referenced as ${params.NAME}
 meta: {}                     # not hashed: notes, ...; wandb: {project, entity, group, tags} turns on the
                              # live W&B mirror (catanrl.wandb_mirror; CATANRL_WANDB_PROJECT overrides;

@@ -14,9 +14,21 @@ string), and ``${...}`` interpolates:
 * ``${params.NAME}``: a ``params`` value (every ``params`` key must be used);
 * ``${run}``: this variant's ref; ``${stages.NAME}``: an earlier stage's ref
   in the same sweep cell; ``${experiment}``;
-* ``${self}``: the checkpoint under select (only inside ``eval.select``);
+* ``${self}``: the checkpoint under select (only inside ``eval.select`` and
+  ``eval.monitor``);
 * ``${init}``: the checkpoint ``init_from`` loads the actor from, as bound
-  when the run is created (only inside ``eval``; an error without one).
+  when the run is created (only inside ``eval``; an error without one);
+* ``${champion}``: ``eval.champion``, bound when the run is created like
+  ``init_from``, else ``${init}`` (only inside ``eval``; an error without either).
+
+``eval.monitor`` and ``eval.champion`` are :data:`OPTIONAL`: absent from
+``defaults.yaml``, so a config that does not set them hashes as it did before
+they existed. ``eval.monitor`` is a list of ``{name, suite, lineup, every,
+metric, fill}``: evals run at checkpoints like the select eval, each logged
+to ``metrics.jsonl`` as ``select/<name>/...`` (:mod:`catanrl.train.select`),
+deciding nothing. ``eval.select: {from: NAME}`` makes monitor NAME the select
+eval (resolution copies its suite, lineup, every, metric and fill into
+``eval.select``), so ``best`` follows it.
 
 An AlphaZero variant that starts from a network (``init_from`` with the
 actor) gets :func:`alphazero_evals` as a layer between the defaults and the
@@ -75,10 +87,16 @@ ALGOS = ("ppo", "imitation", "alphazero")
 OPEN = {"meta", "params", "model.args"}
 #: Keys of each entry of these lists or optional mappings.
 ENTRY_KEYS = {
-    "eval.select": {"suite", "lineup", "every", "metric", "fill"},
+    "eval.select": {"suite", "lineup", "every", "metric", "fill", "from"},
+    "eval.monitor": {"name", "suite", "lineup", "every", "metric", "fill"},
     "eval.final": {"suite", "lineup", "fill", "harness"},
     "init_from": {"ckpt", "parts", "restore", "split_shared"},
 }
+#: Entry sections that are lists (the others are a mapping or null).
+ENTRY_LISTS = ("eval.final", "eval.monitor")
+#: Keys a config may set that defaults.yaml leaves out, with the value that means "unset": a
+#: config without them (or with them at that value, dropped at resolution) hashes as before.
+OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None}
 PARTS = ("actor", "critic")
 #: The parts ``train.freeze`` may name (a network's ``parts``; ``aux`` only on an aux head).
 FREEZE_PARTS = ("actor", "critic", "aux")
@@ -296,8 +314,15 @@ def _check(cfg: dict, schema: Mapping[str, Any], prefix: str = "") -> dict:
     out = {}
     for key, value in cfg.items():
         path = prefix + key
+        if key not in schema and path in OPTIONAL:
+            if value is None or value == OPTIONAL[path]:
+                out[key] = copy.deepcopy(OPTIONAL[path])  # unset: _drop_unset removes it
+            else:
+                out[key] = _check_entries(value, path) if path in ENTRY_KEYS else value
+            continue
         if key not in schema:
-            raise ConfigError(f"unknown key {path!r}{_suggest(key, list(schema))}")
+            known = [*schema, *(k[len(prefix):] for k in OPTIONAL if k.rpartition(".")[0] + "." == prefix)]
+            raise ConfigError(f"unknown key {path!r}{_suggest(key, known)}")
         default = schema[key]
         if path in OPEN or path in ("train", "model"):  # train and model: _check_train, _check_model
             out[key] = value
@@ -314,8 +339,10 @@ def _check(cfg: dict, schema: Mapping[str, Any], prefix: str = "") -> dict:
 
 def _check_entries(value: Any, path: str) -> Any:
     entries = value if isinstance(value, list) else [value]
-    if path != "eval.final" and isinstance(value, list):
+    if path not in ENTRY_LISTS and isinstance(value, list):
         raise ConfigError(f"{path}: expected a mapping or null")
+    if path in ENTRY_LISTS and not isinstance(value, list):
+        raise ConfigError(f"{path}: expected a list of mappings")
     for entry in entries:
         if entry is None:
             continue
@@ -415,11 +442,71 @@ def _check_semantics(cfg: dict) -> None:
     select = cfg["eval"]["select"]
     if select is not None and ("suite" not in select or "lineup" not in select):
         raise ConfigError("eval.select needs suite and lineup")
+    _check_monitors(cfg)
     for entry in cfg["eval"]["final"]:
         if "suite" not in entry or "lineup" not in entry:
             raise ConfigError("every eval.final entry needs suite and lineup")
         if entry.get("harness", "native") not in ("native", "catanatron"):
             raise ConfigError(f"eval.final harness must be native or catanatron, not {entry['harness']!r}")
+
+
+def _check_monitors(cfg: Mapping[str, Any]) -> None:
+    monitors = cfg["eval"].get("monitor") or []
+    if monitors and cfg["kind"] != "train":
+        raise ConfigError("eval.monitor runs at a training run's checkpoints; this is kind: eval")
+    names: set[str] = set()
+    for entry in monitors:
+        if not {"name", "suite", "lineup"} <= set(entry):
+            raise ConfigError("every eval.monitor entry needs name, suite and lineup")
+        name = entry["name"]
+        if not isinstance(name, str) or not NAME_RE.match(name):
+            raise ConfigError(f"eval.monitor name {name!r} must match {NAME_RE.pattern} (it names select/<name>/...)")
+        if name in names:
+            raise ConfigError(f"two eval.monitor entries are named {name!r}")
+        names.add(name)
+        lineup = entry["lineup"]
+        if not isinstance(lineup, list) or not lineup or "${self}" not in str(lineup[0]):
+            raise ConfigError(f"eval.monitor {name}: slot 0 is the checkpoint under training (${{self}}), "
+                              "whose score the monitor logs")
+        every = entry.get("every", 1)
+        if isinstance(every, bool) or not isinstance(every, int) or every < 1:
+            raise ConfigError(f"eval.monitor {name}: every is a positive number of epochs, not {every!r}")
+    champion = cfg["eval"].get("champion")
+    if champion is not None and not isinstance(champion, str):
+        raise ConfigError(f"eval.champion is a checkpoint ref, not {champion!r}")
+
+
+def _select_from(ev: dict) -> None:
+    """``eval.select: {from: NAME}`` as monitor NAME's suite, lineup, every, metric and fill
+    (plus ``from``), so ``best`` follows that monitor and every reader of eval.select sees
+    a whole entry."""
+    select = ev.get("select")
+    if not select or "from" not in select:
+        return
+    monitors = {m.get("name"): m for m in ev.get("monitor") or [] if isinstance(m, Mapping)}
+    if select["from"] not in monitors:
+        raise ConfigError(f"eval.select.from: no eval.monitor is named {select['from']!r} "
+                          f"(monitors: {sorted(map(str, monitors)) or 'none'})")
+    copied = {k: copy.deepcopy(v) for k, v in monitors[select["from"]].items() if k != "name"}
+    given = {k: v for k, v in select.items() if k != "from"}
+    if given and given != copied:  # a resolved select (a fork's parent config) is its monitor's copy
+        extra = sorted(k for k in given if given[k] != copied.get(k))[0]
+        raise ConfigError(f"eval.select.from takes monitor {select['from']!r}'s suite, lineup, every, metric and "
+                          f"fill; eval.select.{extra} belongs there (eval.select!: {{from: NAME}} replaces an "
+                          "inherited select)")
+    ev["select"] = {**copied, "from": select["from"]}
+
+
+def _drop_unset(cfg: dict) -> None:
+    """:data:`OPTIONAL` keys written at their unset value, removed: they hash as absent."""
+    for path, unset in OPTIONAL.items():
+        section, _, key = path.rpartition(".")
+        try:
+            node = get_path(cfg, section)
+        except KeyError:
+            continue
+        if isinstance(node, dict) and key in node and node[key] == unset:
+            del node[key]
 
 
 def _resolve_scenario(entry: Any) -> dict:
@@ -558,15 +645,25 @@ def _interpolate(value: Any, scope: Mapping[str, Any], path: str, used: set[str]
     def one(name: str) -> Any:
         name = name.strip()
         if name == "self":
-            if not path.startswith("eval.select"):
-                raise ConfigError(f"{path}: ${{self}} is only allowed in eval.select")
+            if not path.startswith(("eval.select", "eval.monitor")):
+                raise ConfigError(f"{path}: ${{self}} is only allowed in eval.select and eval.monitor")
             return "${self}"
         if name == "init":  # bound when the run is created, like init_from (runs.bind_refs)
-            if not path.startswith(("eval.select", "eval.final")):
-                raise ConfigError(f"{path}: ${{init}} is only allowed in eval.select and eval.final")
+            if not path.startswith(("eval.select", "eval.monitor", "eval.final")):
+                raise ConfigError(f"{path}: ${{init}} is only allowed in eval.select, eval.monitor and eval.final")
             if "actor" not in init_parts(scope["__config__"].get("init_from")):
                 raise ConfigError(f"{path}: ${{init}} is the checkpoint init_from loads the actor from, "
                                   "and this variant has none")
+            return "${init}"
+        if name == "champion":  # eval.champion, bound when the run is created (runs.bind_refs); else ${init}
+            if not path.startswith(("eval.select", "eval.monitor", "eval.final")):
+                raise ConfigError(f"{path}: ${{champion}} is only allowed in eval.select, eval.monitor and "
+                                  "eval.final")
+            if (scope["__config__"].get("eval") or {}).get("champion") is not None:
+                return "${champion}"
+            if "actor" not in init_parts(scope["__config__"].get("init_from")):
+                raise ConfigError(f"{path}: ${{champion}} is eval.champion, else the checkpoint init_from loads "
+                                  "the actor from, and this variant has neither")
             return "${init}"
         if name.startswith("params."):
             used.add(name[len("params."):])
@@ -758,6 +855,7 @@ def resolve(raw: Mapping[str, Any], *, experiment: str, variant: str,
     merged = merge(defaults(), _algo_layer(merge(defaults(), raw)), raw)
     merged.pop("name", None)
     cfg = _check(merged, defaults())
+    _drop_unset(cfg)
     cfg["train"] = _check_train(cfg["train"])
     cfg["env"]["scenarios"] = [_resolve_scenario(e) for e in cfg["env"]["scenarios"]]
     if cfg["model"] is not None or cfg["kind"] == "train":
@@ -771,6 +869,7 @@ def resolve(raw: Mapping[str, Any], *, experiment: str, variant: str,
     unused = sorted(set(cfg["params"]) - used)
     if unused:
         raise ConfigError(f"params {unused} are referenced nowhere (expected ${{params.{unused[0]}}})")
+    _select_from(out["eval"])
     _check_semantics(out)
     return out
 
@@ -828,7 +927,8 @@ def load_plan(path: str | Path, *, overrides: Sequence[str] = (), only: str | No
                 cfg = _smoke_refs(cfg)
                 cfg["meta"] = {**cfg["meta"], "smoke": True}
                 n = int(smoke_cfg.get("eval_boards", 2))
-                entries = [e for e in [cfg["eval"]["select"], *cfg["eval"]["final"]] if e]
+                monitors = cfg["eval"].get("monitor") or []
+                entries = [e for e in [cfg["eval"]["select"], *cfg["eval"]["final"], *monitors] if e]
                 for entry in entries:  # a suite name or {name, boards}: the first n boards; LLMs as stubs
                     suite = entry["suite"] if isinstance(entry["suite"], Mapping) else {"name": entry["suite"]}
                     entry["suite"] = {**suite, "boards": min(int(suite.get("boards", n)), n)}
@@ -836,8 +936,9 @@ def load_plan(path: str | Path, *, overrides: Sequence[str] = (), only: str | No
                         entry["lineup"] = [_smoke_spec(s) for s in entry["lineup"]]
                     if entry.get("fill"):
                         entry["fill"] = _smoke_spec(entry["fill"])
-                if cfg["eval"]["select"]:
-                    cfg["eval"]["select"]["every"] = 1
+                for entry in [cfg["eval"]["select"], *monitors]:
+                    if entry:
+                        entry["every"] = 1
             own = re.compile(re.escape(f"{experiment}/") + r"([a-z0-9][a-z0-9._+-]*)")
             scanned = {k: v for k, v in cfg.items() if k not in UNHASHED}  # eval.final too: bound at creation
             deps = tuple(sorted({m for r in _refs_in(scanned) for m in own.findall(r)} - {name}))
@@ -880,15 +981,16 @@ def validate_plan(path: str | Path) -> list[str]:
     for v in plan.variants:
         cfg = v.config
         entries = ([("select", cfg["eval"]["select"])] if cfg["eval"]["select"] else []) + \
-                  [("final", e) for e in cfg["eval"]["final"]]
+                  [("final", e) for e in cfg["eval"]["final"]] + \
+                  [("monitor", e) for e in cfg["eval"].get("monitor") or []]
         for where, entry in entries:
             try:
                 suite = load_suite(entry["suite"])
             except (OSError, ValueError) as error:
                 problems.append(f"{v.name}: eval.{where}: {error}")
                 continue
-            if where == "select" and suite.purpose != "select":
-                problems.append(f"{v.name}: eval.select uses {suite.name}, a {suite.purpose} suite")
+            if where in ("select", "monitor") and suite.purpose != "select":
+                problems.append(f"{v.name}: eval.{where} uses {suite.name}, a {suite.purpose} suite")
             if where == "final" and suite.purpose == "select":
                 problems.append(f"{v.name}: eval.final uses the select suite {suite.name}")
             for spec in entry["lineup"]:
@@ -908,6 +1010,11 @@ def validate_plan(path: str | Path) -> list[str]:
                 problem = _ref_problem(f"POLICY:ckpt={ref}")
                 if problem:
                     problems.append(f"{v.name}: init_from {ref}: {problem}")
+        champion = cfg["eval"].get("champion")
+        if champion is not None:
+            problem = _ref_problem(f"POLICY:ckpt={champion}")
+            if problem:
+                problems.append(f"{v.name}: eval.champion {champion}: {problem}")
     return problems
 
 

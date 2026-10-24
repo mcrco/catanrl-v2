@@ -245,7 +245,8 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
     iteration, agent_steps = 0, 0
     beta = float(train["beta0"])
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
-    selector = Selector((cfg.get("eval") or {}).get("select"), writer, eval_runtime)
+    selector = Selector((cfg.get("eval") or {}).get("select"), writer, eval_runtime,
+                        monitors=(cfg.get("eval") or {}).get("monitor"))
 
     def save() -> None:
         ref = writer.save_checkpoint(model, epoch=iteration, agent_steps=agent_steps)
@@ -273,8 +274,7 @@ def _train(variant, writer, cfg, train, runtime, seed, launch, env_cfg) -> None:
         selector.restore()
     else:
         save()
-    for ref in writer.pending_selects():
-        selector.run(ref, model)
+    selector.catch_up(model)
     status = "finished"
     saved = iteration
     while iteration < int(train["iterations"]):

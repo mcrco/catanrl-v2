@@ -12,6 +12,11 @@ mirrored either way (or both, in turn) looks the same:
   ``select/<suite> vs <opponents>/{score_rate, wilson_low, wilson_high,
   seat<k>, games}`` at the checkpoint's ``agent_steps`` (the row of that
   epoch; ``e0`` gets a row of its own);
+* the monitors (``eval.monitor``), from their own metrics rows, as
+  ``select/<name>/...`` at the checkpoint's ``agent_steps``, joining that
+  step's row as a select record does; a record a monitor row cites is not
+  logged again under its suite-and-opponents name (with ``eval.select.from``
+  the select's record is the monitor's);
 * the finals, every other record of the run, as summary keys
   ``final/<suite>/<lineup>`` (the score rate) and a ``final_evals`` table;
 * ``config``: the run's config plus ``experiment``, ``variant`` (the ref),
@@ -331,12 +336,26 @@ def load_records(run: Any, *, skip: Iterable[Path] = ()) -> list[Any]:
     return out
 
 
-def select_entries(run: Any, records: Iterable[Any]) -> list[tuple[int, int, Any]]:
+def monitored(rows: Iterable[Mapping[str, Any]]) -> set[str]:
+    """The eval ids that monitor rows cite (``select/<name>/eval_id``)."""
+    from catanrl.runs import monitor_evals
+
+    return {eval_id for row in rows for eval_id in monitor_evals(row).values()}
+
+
+def is_monitor_row(row: Mapping[str, Any]) -> bool:
+    from catanrl.runs import is_monitor_row as monitor_row
+
+    return monitor_row(row)
+
+
+def select_entries(run: Any, records: Iterable[Any], *, exclude: Iterable[str] = ()) -> list[tuple[int, int, Any]]:
     """``(agent_steps, epoch, record)`` of the select records of committed checkpoints,
-    in step order."""
+    in step order (records whose eval id is in ``exclude``, the monitors', left out)."""
     by_epoch = {c.epoch: c.agent_steps for c in run.checkpoints()}
+    exclude = set(exclude)
     out = [(int(by_epoch[epoch]), epoch, r) for r in records
-           if is_select(r) and (epoch := record_epoch(run, r)) in by_epoch]
+           if is_select(r) and r.eval_id not in exclude and (epoch := record_epoch(run, r)) in by_epoch]
     return sorted(out, key=lambda t: (t[0], str(t[2].path)))
 
 
@@ -349,11 +368,12 @@ def timeline(run: Any, *, after: int = -1, skip: Iterable[Path] = ()) -> list[tu
     """``(agent_steps, row)`` in step order: the kept metrics rows after ``after`` merged
     with the select rows of checkpoints after it (records at ``skip`` left out)."""
     rows: dict[int, dict] = {}
-    for row in run.metrics():
+    metrics = run.metrics()
+    for row in metrics:
         steps = int(row.get("agent_steps", row.get("step", -1)))
         if steps > after:
             rows.setdefault(steps, {}).update(history_row(row))
-    for steps, epoch, record in select_entries(run, load_records(run, skip=skip)):
+    for steps, epoch, record in select_entries(run, load_records(run, skip=skip), exclude=monitored(metrics)):
         if steps > after:
             rows.setdefault(steps, {"epoch": epoch, "agent_steps": steps}).update(select_row(record))
     return sorted(rows.items())
@@ -418,6 +438,7 @@ class Mirror:
         self._through = -1  # the step wandb holds a row at; rows below it are gone for good
         self._seen: set[Path] = set()  # record files read (each once)
         self._pending: list[tuple[int, int, Any]] = []  # select rows waiting for their epoch's row
+        self._monitored: set[str] = set()  # eval ids monitor rows cite: not logged again as select rows
         self._steps_per_epoch: int | None = None
         self._queue: queue.SimpleQueue = queue.SimpleQueue()
         self._thread = threading.Thread(target=self._main, name="wandb-mirror", daemon=True)
@@ -504,7 +525,19 @@ class Mirror:
         if kind == "log":
             _, row, step = item
             steps = int(row.get("agent_steps", step))
-            self._sync_selects(limit=steps)  # never raises: a bad select must not cost this row
+            self._monitored |= monitored([row])  # before the sync, which skips their records
+            if is_monitor_row(row):
+                # A monitor's row: logged like a select record, at its checkpoint's step and
+                # without moving past it, so the epoch row at that step still lands (and
+                # after it, the monitor joins it).
+                self._sync_selects(limit=steps)  # never raises: a bad select must not cost this row
+                if steps >= self._through:
+                    self._wb.log(history_row(row), step=steps)
+                return
+            # The selects of earlier checkpoints first; this step's join the row once logged (at the
+            # next sync): a trainer that logs before it checkpoints (imitation, AlphaZero) may have
+            # written a monitor's record whose row, which marks it, is still queued behind this one.
+            self._sync_selects(limit=steps - 1)  # never raises: a bad select must not cost this row
             if steps <= self._through:
                 return
             if self._steps_per_epoch is None and (per_epoch := steps_per_epoch([row])) is not None:
@@ -538,7 +571,7 @@ class Mirror:
             _warn(f"{self.run.ref}: reading the select records failed ({error!r}); retrying at the next row")
         while self._pending and self._pending[0][0] <= limit:
             steps, epoch, record = self._pending.pop(0)
-            if steps < self._through:
+            if steps < self._through or record.eval_id in self._monitored:
                 continue
             try:
                 self._wb.log({"epoch": epoch, "agent_steps": steps, **select_row(record)}, step=steps)

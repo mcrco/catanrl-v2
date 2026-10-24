@@ -160,7 +160,7 @@ def test_interpolation_init_needs_the_actor_from_init_from(tmp_path):
         load_plan(write(tmp_path, eval=ev))
     with pytest.raises(ConfigError, match="has none"):
         load_plan(write(tmp_path, eval=ev, init_from={**start, "parts": ["critic"]}))
-    with pytest.raises(ConfigError, match="only allowed in eval.select and eval.final"):
+    with pytest.raises(ConfigError, match="only allowed in eval.select, eval.monitor and eval.final"):
         load_plan(write(tmp_path, init_from={"ckpt": "${init}"}))
 
 
