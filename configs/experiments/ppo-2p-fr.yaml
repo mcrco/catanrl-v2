@@ -233,6 +233,13 @@
 #     champion), all six finals on heldout-2p-fr. every record's key holds dice_mode balanced, and
 #     the run's training env (its stored config, 8 envs, 3000 random steps) rolls balanced dice
 #     with the friendly robber in every game (13,920 distinct dice states).
+#   - re-run on engine 2dec8dc (1777df8 plus engine tests; code ids catanrl 55ba5984c434c839,
+#     train 555889338201588f, engine a9b40d9ca81fefcf; build git_sha 2dec8dc, not dirty; config
+#     hash afa2402598128b4b, schema 7): the --smoke run finished in 93 s exactly as on 1777df8
+#     (champion 0.5, 0.5, 0, 0.25, 0.25; f 0.75, 1.0, 0.75, 0.75, 0.75; best at e0 citing e0's
+#     champion record), all six finals on heldout-2p-fr (rows 3-4 under puffer-graph2/full/evals),
+#     pool digest 89b41ee04292bc42, every record keyed with dice_mode balanced and the friendly
+#     robber.
 #
 # before launch (why the steps below are what they are):
 #   - the engine changed (engine 2dec8dc: wt/friendly's friendly robber 666b4c8 + wt/dice's
