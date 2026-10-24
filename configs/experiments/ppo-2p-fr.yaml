@@ -11,12 +11,13 @@
 # (game_manager.py create_game): 1v1 is 15 vp, discard 9, robber friendly, dice balanced.
 # marco (2026-10-24): "yeah do balanced dice before 1v1 retrain". so base-2p-fr is that game
 # exactly: 15 vp, discard above 9, the friendly robber and balanced dice. its 4p mode is the
-# defaults, our base-4p, so only 2p moves. the engine plays both rules exactly (engine 1777df8,
-# local branch wt/integration-1v1 = wt/friendly 666b4c8 + wt/dice a7f0363): the friendly robber on
-# public points, a knight's tile judged on the points before its largest army award; openhex's
-# balanced dice (dice.py), checked against an exact reference (tests/dice_reference.py) at every
-# roll of random games, with search chance nodes from the dice state. base-2p-fr's comment has
-# both rules.
+# defaults, our base-4p, so only 2p moves. the engine plays both rules exactly (engine 2dec8dc,
+# local branch wt/integration-1v1: 1777df8 = wt/friendly 666b4c8 + wt/dice a7f0363, then engine
+# tests of the two rules together, no source change): the friendly robber on public points, a
+# knight's tile judged on the points before its largest army award; openhex's balanced dice
+# (dice.py), checked against an exact reference (tests/dice_reference.py) at every roll of random
+# games, with search chance nodes from the dice state. base-2p-fr's comment has both rules. the
+# rows below cite engine 1777df8 where they ran on it; 2dec8dc builds the same sources.
 #
 # balanced dice (what changed since the friendly-robber-only version of this file, hash
 # 1efb94c8273c9789):
@@ -209,8 +210,9 @@
 #     0.5), the mirror.
 #   - friendly_robber is 1 on every acting training row (300 steps of 8 games; the only zeros are
 #     waiting rows, which are all zero) and 0 on base-2p rows.
-#   - the pool is the start's 4096 map hashes (digest 0d6dd31e against the start's 4e0f60b0: the
-#     rules), and none of select-2p-fr's 500 or heldout-2p-fr's 2500 boards is in it.
+#   - the pool is the start's 4096 map hashes (digest 89b41ee0 on balanced dice, 0d6dd31e on the
+#     friendly robber alone, against the start's 4e0f60b0: the rules), and none of select-2p-fr's
+#     500 or heldout-2p-fr's 2500 boards is in it.
 #   - this recipe on the cpu (a scratch copy of this file at smoke sizes: muon at the real lr, 8
 #     games in flight, 8 epochs of 128 agent steps, both monitors on 16 boards = 32 games every
 #     epoch): champion 0.500, 0.438, 0.406, 0.531, 0.563, 0.500, 0.500, 0.531, 0.469; f 0.906 x3,
@@ -232,27 +234,59 @@
 #     the run's training env (its stored config, 8 envs, 3000 random steps) rolls balanced dice
 #     with the friendly robber in every game (13,920 distinct dice states).
 #
-# launch (from main, after "before launch"):
-#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
-# W&B as meta below (the mirror tags it from:puffer-graph2/full).
-#
-# before launch:
-#   - the engine changed (engine 1777df8: wt/friendly's friendly robber 666b4c8 + wt/dice's
-#     balanced dice a7f0363), and so did the training code (eval.monitor: code_id train
-#     555889338201588f) and games.py (dice_mode: code_id catanrl 948205ccc476da20 ->
-#     55ba5984c434c839). base-2p-fr needs that engine: on main's current engine (e9f12af) the
-#     friendly rule is catanatron's (actual points < 3, which reads hidden vp cards) and there is
-#     no dice_mode. so this launches only after wt/integration is merged into main and main's
-#     engine is rebuilt (uv sync), and that waits until no run is live in main's checkout (a live
-#     run's evals re-hash the code on disk).
-#   - the critic refit (critic-refit-2p) has finished: this run needs the gpu alone.
-#   - `catanrl ls 'puffer-graph2/*'` still shows full's best at e3350 (the ref below carries
-#     #3355b5059503, so creation refuses any other best).
+# before launch (why the steps below are what they are):
+#   - the engine changed (engine 2dec8dc: wt/friendly's friendly robber 666b4c8 + wt/dice's
+#     balanced dice a7f0363, merged as 1777df8, then tests), and so did the training code
+#     (eval.monitor: code_id train a9a316013b8fa08d -> 555889338201588f) and games.py (dice_mode:
+#     code_id catanrl 948205ccc476da20 -> 55ba5984c434c839). base-2p-fr needs that engine: on
+#     main's current engine (e9f12af) the friendly rule is catanatron's (actual points < 3, which
+#     reads hidden vp cards) and there is no dice_mode, and games.py calls cpp.DiceMode for every
+#     game, so every catanrl entry point fails until main's engine is rebuilt.
+#   - the merge moves the catanrl, train and engine code ids (engine 5ebaacdac482cf5f, main's
+#     build of e9f12af, -> a9b40d9ca81fefcf) for every experiment in main, not only this one, so
+#     finish or record anything pending in main first: after the merge, cached eval records from
+#     before it are not reused (a pending row silently re-runs), and catanrl.eval.results.paired
+#     refuses to pair a record from before the merge with one from after (their code differs).
+#     rows from either side pair only through tools/search_probe.py --pair.
+#   - main's engine submodule doesn't have the commit. 2dec8dc (and 1777df8, 666b4c8, a7f0363)
+#     exist only in the integration worktree's module store (/home/marco/dev/catanrl-v2/.git/
+#     worktrees/catanrl-v2-integration/modules/engine/cppanatron, branch wt/integration-1v1); main's
+#     (/home/marco/dev/catanrl-v2/engine/cppanatron/.git) holds e9f12af and its only remote is
+#     github mcrco/cppanatron, which never got them, so a bare `git submodule update` fails. git
+#     merge doesn't move a submodule's checkout (submodule.recurse is unset), and uv sync keys the
+#     engine's rebuild on its checkout (git commit and sources), so a merge plus uv sync alone
+#     leaves main on e9f12af and every catanrl entry point fails (AttributeError: cpp.DiceMode).
+#     so: fetch the engine commit into main's submodule (step 2), then merge (3), then move the
+#     checkout (4), then rebuild (5). don't remove the integration worktree before step 2: its
+#     module store is the only copy of the engine commits.
 #   - eval ids key the engine, so every row here is new on the rebuilt engine; nothing pairs
-#     with a record from the old build. after the rebuild, code_id('train') in main should read
-#     catanrl 55ba5984c434c839, train 555889338201588f, and engine 77be2fb4afa85778
-#     (wt/integration's build of 1777df8; another engine id only means the build's bytes differ,
-#     not the rule), and cppanatron.build_info() git_sha 1777df8, not dirty.
+#     with a record from the old build (another engine id than step 6's only means the build's
+#     bytes differ, not the rule).
+#   - publishing: push wt/integration-1v1 to github mcrco/cppanatron before main is pushed to
+#     the public repo (mcrco/catanrl-v2), or main's engine gitlink points at a missing commit.
+#
+# launch checklist (in this order):
+#   1. wait: critic-refit-2p (and its 2048-sim row) has exited and nothing else runs in main's
+#      checkout (a live run's evals re-hash the code on disk, and this run needs the gpu alone):
+#      `pgrep -af 'bin/catanrl |catanrl\.cli'` lists no run, and no tools/ script runs from main.
+#      (the catanatron-server on 127.0.0.1:8765 from main's venv doesn't load the engine.)
+#   2. git -C /home/marco/dev/catanrl-v2/engine/cppanatron fetch \
+#        /home/marco/dev/catanrl-v2-integration/engine/cppanatron wt/integration-1v1:wt/integration-1v1
+#      then `git -C /home/marco/dev/catanrl-v2/engine/cppanatron cat-file -e 2dec8dc^{commit}` exits 0.
+#   3. git -C /home/marco/dev/catanrl-v2 merge --ff-only wt/integration
+#      (a fast-forward from cc33e1c; wt/integration touches neither main's locally modified
+#      README.md nor its untracked transcripts/.)
+#   4. git -C /home/marco/dev/catanrl-v2 submodule update engine/cppanatron
+#      (main's engine checkout moves from e9f12af to 2dec8dc, detached; third_party doesn't move.)
+#   5. cd /home/marco/dev/catanrl-v2 && uv sync   (rebuilds cppanatron)
+#   6. checks, in main: cppanatron.build_info() git_sha 2dec8dc, git_dirty False;
+#      catanrl.provenance.code_id('train') catanrl 55ba5984c434c839, train 555889338201588f,
+#      engine a9b40d9ca81fefcf; `git -C /home/marco/dev/catanrl-v2 status` shows only README.md
+#      and transcripts/; `catanrl ls 'puffer-graph2/*'` still shows full's best at e3350 (the ref
+#      below carries #3355b5059503, so creation refuses any other best).
+#   7. launch:
+#      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
+#      W&B as meta below (the mirror tags it from:puffer-graph2/full).
 name: ppo-2p-fr
 seed: 42                        # puffer-graph2's: the same map pool, and init/sample/rollout seeds
 env:
