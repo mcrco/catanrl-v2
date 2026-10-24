@@ -23,21 +23,33 @@
 #                                              raw policy, exact tree reuse, sanity checks
 #   canopy-v2-reproducible-build.patch         no build path in the binary (only the web UI used one)
 #
-# The build is reproducible: source, cargo and toolchain paths are remapped (--remap-path-prefix)
-# and the last patch drops the one env!("CARGO_MANIFEST_DIR"), so the binary does not depend on
-# where SRC is, and Cargo.lock is used as committed (--locked). With the
+# The cpu build is reproducible: source, cargo and toolchain paths are remapped
+# (--remap-path-prefix) and the last patch drops the one env!("CARGO_MANIFEST_DIR"), so the binary
+# does not depend on where SRC is, and Cargo.lock is used as committed (--locked). With the
 # pinned rustc it gives the binary_sha256 in the backend's committed manifest next to this script,
 # so a lost release directory can be rebuilt under the same record keys. A different rustc gives a
 # different binary and so different record keys: the script refuses one unless CANOPY_ANY_RUSTC=1.
-# One SRC builds one backend at a time (cargo's target/release/examples/catan is the last build).
+# Nothing outside the committed tree may steer cargo: the script refuses untracked files in SRC
+# (ignored ones too) other than target/, a cargo config in SRC, its parents or CARGO_HOME, and
+# cargo/rustc variables that override flags or the compiler (RUSTC, RUSTC_WRAPPER, CARGO_BUILD_*,
+# CARGO_PROFILE_*, CARGO_TARGET_*, CARGO_ENCODED_RUSTFLAGS, ...). One SRC builds one backend at a
+# time (cargo's target/release/examples/catan is the last build).
 #
 # cuda is NOT bit-reproducible: cubecl's #[cube] proc macro iterates a HashMap when it expands
 # kernels (cubecl-macros 0.9.0 src/parse/kernel.rs:104), so the expansion order, and with it the
 # codegen of cubek-*, burn-cubecl, burn-cuda, burn and canopy, changes from one compiler run to the
-# next (two builds of the same tree: 1f7cc246... and 533dffaf..., same size, 12262 bytes apart).
-# The two played bit-identically (1609 raw positions, 100 positions at 1600 sims), but a record
-# names its binary: keep the installed cuda release; a rebuild is a new player for the keys (this
-# script then exits 3), unless its sha happens to match.
+# next (three builds of the same tree: 1f7cc246..., 533dffaf... and 9bfb7370..., sizes within
+# ~600 bytes). They played bit-identically on the positions tried (the build agent: 1609 raw and
+# 100 at 1600 sims; review: 1639 raw and 48 at 1600 sims), but a record names its binary: the
+# installed cuda release is the release, and canopy-bridge-cuda.fingerprint.json (fingerprint.py
+# here) is what it answers on fixed positions, so any build or copy can be checked for the same
+# player. A rebuild is a new player for the keys unless its sha happens to match.
+#
+# Install: the built binary is checked against the backend's committed manifest BEFORE anything
+# is copied. A binary that is not the pinned one is not installed (exit 3; the build stays in
+# SRC/target) unless CANOPY_INSTALL_UNPINNED=1. An OUT that already holds a release with another
+# binary is never overwritten (exit 4: the records key on it; install into a new directory). The
+# files are staged in OUT/.install-* and renamed into place, manifest last.
 #
 # cuda: cudarc's bindings are pinned to CUDA 13.1 (CUDARC_CUDA_VERSION=13010, the newest cudarc
 # 0.18.2 knows; v1 built the same way), so the binary does not depend on the nvcc found at build
@@ -90,26 +102,70 @@ sysroot=$(rustc --print sysroot)
 src = Path(sys.argv[1]); want = patched_tree(src, Path(sys.argv[2]))
 sys.exit(0 if _git(src, "rev-parse", "HEAD^{tree}") == want else f"{src}: HEAD is not catan-nexus-v3 with the pinned patches")' \
   "$src" "$here/patches"
+# Nothing but the committed tree steers the build (write_manifest checks tracked files only).
+stray=$(git -C "$src" ls-files --others --directory | grep -vx 'target/' || true)
+if [[ -n $stray ]]; then
+  echo "$src has files outside its commit (untracked or ignored; they could steer cargo):" $stray >&2
+  exit 1
+fi
+d=$src
+while :; do
+  for c in "$d/.cargo/config" "$d/.cargo/config.toml"; do
+    [[ -e $c ]] && { echo "cargo config $c would steer the build: move it away" >&2; exit 1; }
+  done
+  [[ $d == / ]] && break
+  d=$(dirname "$d")
+done
+for c in "$cargo_home/config" "$cargo_home/config.toml"; do
+  [[ -e $c ]] && { echo "cargo config $c would steer the build: move it away" >&2; exit 1; }
+done
+steer=$(compgen -e | grep -E '^(RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTC_BOOTSTRAP|RUSTDOCFLAGS|CARGO_ENCODED_RUSTFLAGS|CARGO_BUILD_.*|CARGO_PROFILE_.*|CARGO_TARGET_.*|CARGO_UNSTABLE_.*|CARGO_INCREMENTAL)$' || true)
+if [[ -n $steer ]]; then
+  echo "unset these first, they would steer cargo or rustc:" $steer >&2
+  exit 1
+fi
 
 export RUSTFLAGS="--remap-path-prefix=$src=/canopy --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$sysroot=/rust"
 # No GPU is needed to build (CUDA is loaded at run time), so none is visible to cargo.
 (cd "$src" && env CUDA_VISIBLE_DEVICES= nice -n 15 cargo build --release --locked -j"${JOBS:-4}" --example catan \
    ${features[@]+"${features[@]}"})
 
+sha() { "$python" -c 'import sys; from catanrl.canon import sha256_file; print(sha256_file(sys.argv[1]))' "$1"; }
+manifest_sha() { "$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))["binary_sha256"])' "$1"; }
+built_binary=$src/target/release/examples/catan
+built=$(sha "$built_binary")
+pinned=
+[[ -f $here/$pinned_manifest ]] && pinned=$(manifest_sha "$here/$pinned_manifest")
+if [[ -n $pinned && $built != "$pinned" && ${CANOPY_INSTALL_UNPINNED:-0} != 1 ]]; then
+  echo "built $built_binary: binary $built, NOT the committed manifest's $pinned. Nothing installed in $out:" \
+       "records name the binary, so it is a different player for the record keys" \
+       "(CANOPY_INSTALL_UNPINNED=1 installs it anyway; into a new directory)" >&2
+  exit 3
+fi
+if [[ -e $out/canopy-bridge.manifest.json || -e $out/canopy-bridge ]]; then
+  have=
+  [[ -f $out/canopy-bridge.manifest.json ]] && have=$(manifest_sha "$out/canopy-bridge.manifest.json")
+  [[ -z $have && -f $out/canopy-bridge ]] && have=$(sha "$out/canopy-bridge")
+  if [[ $have != "$built" ]]; then
+    echo "$out already holds a Canopy release with binary ${have:-?}; records key on it, so it is not replaced" \
+         "by $built: install into a new directory" >&2
+    exit 4
+  fi
+fi
+mkdir -p "$out"
+stage=$(mktemp -d "$out/.install-XXXXXX")
+trap 'rm -rf "$stage"' EXIT
 "$python" -c 'import sys; from catanrl.canopy.release import write_manifest
-print(write_manifest(*sys.argv[1:6], backend=sys.argv[6]))' \
-  "$src" "$here/patches" "$src/target/release/examples/catan" "$out" "$checkpoint" "$manifest_backend"
-built=$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))["binary_sha256"])' "$out/canopy-bridge.manifest.json")
-if [[ ! -f $here/$pinned_manifest ]]; then
+write_manifest(*sys.argv[1:6], backend=sys.argv[6])' \
+  "$src" "$here/patches" "$built_binary" "$stage" "$checkpoint" "$manifest_backend"
+for f in model_iter_315.mpk canopy-bridge canopy-bridge.manifest.json; do  # each rename is atomic; manifest last
+  mv -f "$stage/$f" "$out/$f"
+done
+if [[ -z $pinned ]]; then
   echo "installed in $out: binary $built (no committed manifest yet: copy $out/canopy-bridge.manifest.json to" \
        "$here/$pinned_manifest to pin it)"
-  exit 0
-fi
-pinned=$("$python" -c 'import json, sys; print(json.load(open(sys.argv[1]))["binary_sha256"])' "$here/$pinned_manifest")
-if [[ $built == "$pinned" ]]; then
+elif [[ $built == "$pinned" ]]; then
   echo "installed in $out: binary $built, the committed manifest's"
 else
-  echo "installed in $out: binary $built, NOT the committed manifest's $pinned (records name the binary: a" \
-       "rebuild that differs is a different player for the record keys)" >&2
-  exit 3
+  echo "installed in $out: binary $built, NOT the committed manifest's $pinned (CANOPY_INSTALL_UNPINNED=1)" >&2
 fi
