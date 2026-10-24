@@ -9,10 +9,31 @@
 # yes for 1v1: openhex's code defaults are 4 players, 10 vp, discard 7, the normal robber and
 # random dice (openhex/state.py GameConfig), and its queue overrides them per mode
 # (game_manager.py create_game): 1v1 is 15 vp, discard 9, robber friendly, dice balanced.
-# base-2p-fr is that game minus the balanced dice (the engine rolls fair dice; balanced dice are
-# marco's call). its 4p mode is the defaults, our base-4p, so only 2p moves to the friendly robber.
-# the engine plays openhex's friendly robber exactly (engine 666b4c8: public points, and a
-# knight's tile judged on the points before its largest army award; base-2p-fr's comment).
+# marco (2026-10-24): "yeah do balanced dice before 1v1 retrain". so base-2p-fr is that game
+# exactly: 15 vp, discard above 9, the friendly robber and balanced dice. its 4p mode is the
+# defaults, our base-4p, so only 2p moves. the engine plays both rules exactly (engine 1777df8,
+# local branch wt/integration-1v1 = wt/friendly 666b4c8 + wt/dice a7f0363): the friendly robber on
+# public points, a knight's tile judged on the points before its largest army award; openhex's
+# balanced dice (dice.py), checked against an exact reference (tests/dice_reference.py) at every
+# roll of random games, with search chance nodes from the dice state. base-2p-fr's comment has
+# both rules.
+#
+# balanced dice (what changed since the friendly-robber-only version of this file, hash
+# 1efb94c8273c9789):
+#   - only base-2p-fr's dice_mode: balanced. ppo-2p-fr/full hashes fef9516cd5f164ff, and select/
+#     heldout/dev-2p-fr key apart: the scenario hash holds the rules, so their boards are new
+#     boards, and the friendly-only rows (8fdc24a3, 170b4db1) don't pair with these.
+#   - no dice input (marco didn't answer on a dice-state input, next-roll odds like canopy's, so
+#     the run goes without one). the graph encoder's rule inputs stay vps_to_win, discard_limit and
+#     friendly_robber, and a row reads the same under either dice: 200 random games, 240,882
+#     positions, every level and both seats, rows and legal sets bit-identical to a fair-dice twin
+#     played with the same moves and rolls (tests/test_dice_mode.py::
+#     test_no_row_feature_reads_the_dice pins a small version). so the policy plays the dice blind:
+#     it can learn their average effect (rarer 7 streaks, recency), not the deck it is in. openhex
+#     shows the deck (balancedDice.remaining) and the bridge replays it; only mcts (exact chance
+#     nodes from the dice state) uses it at deploy time, not POLICY or BELIEF.
+#   - e0 is still the start bit for bit and the champion row at e0 still the 0.500 mirror; the
+#     recipe, budget, monitors and finals are unchanged.
 #
 # what this run is: the deployed 1v1 net, puffer-graph2/full@best (e3350, #3355b5059503, obs.level
 # full, deploy/openhex.yaml plays it through BELIEF worlds=16 and MCTS 1024), trained on for
@@ -76,9 +97,14 @@
 #   - champion: POLICY ${self} vs POLICY ${champion}, the start (eval.champion is unset, so
 #     ${champion} is init_from's pinned actor, puffer-graph2/full@e3350#3355b5059503). e0 is the
 #     start's own weights, a mirror match: exactly 0.500, every board split between the seats.
-#   - f: POLICY ${self} vs F, the yardstick marco has watched. the start scores 95.8% [94.4, 96.9]
-#     on these 1000 games on the fixed engine (666b4c8, cpu: 8fdc24a3 in a scratch runs dir; also
-#     95.8 on ebf8ee6; 95.6% under the old rule), so e0's f row should read 95.8.
+#   - f: POLICY ${self} vs F, the yardstick marco has watched. on balanced dice the start scores
+#     96.3% [94.9, 97.3] on these 1000 games (engine 1777df8, cpu: 8a137f56 in a scratch runs dir;
+#     seats 0.966 / 0.960, 73.6 turns a game), so e0's f row should read about 96.3. on the
+#     friendly robber alone (fair dice, the old select-2p-fr boards) it scored 95.8% [94.4, 96.9]
+#     (8fdc24a3, engine 666b4c8; 95.6% under the old rule), and that row replays game for game on
+#     1777df8 (c128e164: all 1000 games identical, the same games digest), so the merged engine
+#     rolls fair dice exactly as before. balanced minus fair: +0.5 pp [-1.2, +2.2] (other boards,
+#     so unpaired): no detectable change in the start's strength vs F from the dice.
 #   - best follows champion (eval.select: {from: champion}). F is at its ceiling: near 96% a 1000-
 #     game row separates two checkpoints only if they differ by 2.0-2.9 pp vs F, which is 70-200
 #     elo at that level (and the ceiling leaves ~4 pp of room); the champion row separates 4.2-4.9
@@ -92,13 +118,20 @@
 #                                                (31 elo)                 (az-2p-2048 POLICY selects
 #                                                                         vs a fixed POLICY 0.218):
 #                                                                         mde 4.2-4.9 pp
-#     f            1000   +-1.25 pp at 95.8%     -                        discordant 0.05-0.11
+#     f            1000   +-1.2 pp at 96.3%      -                        discordant 0.05-0.11
 #                                                                         (puffer-graph2/full vs F:
 #                                                                         0.05 late, 0.11 at lr
 #                                                                         0.002-0.003): mde 2.0-2.9 pp
 #   best is the highest of 153 champion rows, so its own select score is inflated (the max of
 #   153 rows with se 1.6 pp sits ~2-4 pp above its true score if nothing changed). read the
 #   champion rows as a curve, and the finals for the answer.
+#   the champion caveat: the champion is the start, trained on fair dice and the normal robber, so
+#   it meets openhex's 1v1 rules untrained (no input for the dice at all, an untrained
+#   friendly_robber input). a gain vs the champion is partly the net re-fitting to these rules
+#   (the robber spots, the dice's rarer 7 streaks), not only "more training helps"; it says little
+#   about base-2p. F plays the new rules blind too (its value function knows neither), so the f
+#   rows don't separate the two either. the finals pair @best with the start on the same 5000
+#   games under the same rules, which is the answer marco asked for, read with that caveat.
 #   pairing two checkpoints: tools/search_probe.py --pair <select/champion/eval_id at eA> <at eB>.
 #   the start's friendly_robber input never trained: it is global feature 17, 0 for the whole of
 #   puffer-graph2/full's run (base-2p), so its column of backbone.global_projection.weight is
@@ -107,13 +140,18 @@
 #   argmax on 3.3% of 32,000 acting base-2p-fr rows (mean kl 0.05). as strength, a zero-flag copy
 #   of e3350 (that column zeroed, #d83c9f12) vs e3350, POLICY vs POLICY on the cpu: select-2p-fr
 #   1000 games 0.509 [0.478, 0.540] (engine ebf8ee6); heldout-2p-fr 5000 games 0.501 [0.487,
-#   0.515] (engine 666b4c8, 170b4db1 in a scratch runs dir; seats 0.523 / 0.478). so the shift
-#   costs the start nothing detectable, at most ~1.5 pp. training sets that column within the
-#   first epochs, so up to that much of a gain vs the champion can be this fix rather than "more
-#   training helps": read the champion curve from e50 on (a step at e50 and flat after is the
-#   bias fix), and row 5 net of the control (below). the deployed bot reads this input too: on
-#   openhex 1v1 bridge/openhex.py sets friendly_robber from robberMode, so it plays with the same
-#   (measured harmless) shift.
+#   0.515] (engine 666b4c8, 170b4db1 in a scratch runs dir; seats 0.523 / 0.478). those were on
+#   fair dice. on balanced dice, heldout-2p-fr as it is now (5000 games, engine 1777df8, cpu:
+#   ffcc5c1a in a scratch runs dir), the zero-flag copy scores 0.515 [0.502, 0.529] (wilson;
+#   2500 boards paired over both seat orders: [0.504, 0.526], p ~0.006; seats 0.530 / 0.501): on
+#   openhex's full 1v1 rules the untrained shift costs the start ~1.5 pp, detectably. against the
+#   fair-dice control that's +1.5 pp [-0.5, +3.4] (other boards, unpaired), so whether the dice
+#   made it bigger can't be told. training sets that column within the first epochs, so ~1.5 pp
+#   (up to ~2.5) of a gain vs the champion can be this fix rather than "more training helps":
+#   read the champion curve from e50 on (a step at e50 and flat after is the bias fix), and row 5
+#   net of the control (below). the deployed bot reads this input too: on openhex 1v1
+#   bridge/openhex.py sets friendly_robber from robberMode, so it plays with the same shift
+#   (~1.5 pp, measured above).
 #
 # finals, on heldout-2p-fr (heldout-2p's seed 67 on base-2p-fr, 2500 boards x 2 = 5000 games;
 # every row on the same 5000 game ids, so rows pair game by game with search_probe --pair):
@@ -128,8 +166,9 @@
 #      1000-game read is a subset of these games, not another eval.
 #   power: rows 1-4 +-0.55-0.6 pp at 95-96% (wilson); 1 vs 3 (and 2 vs 4) paired, discordant
 #   0.05-0.11: mde 0.9-1.3 pp. rows 5-6 +-1.4 pp at 50%, mde 2.0 pp against 50% (14 elo).
-#   row 5 net of the bias fix: row 5 minus (the control - 0.5) = row 5 - 0.001, the control on
-#   the same 5000 heldout-2p-fr games (above); treated as independent rows the difference has se
+#   row 5 net of the bias fix: row 5 minus (the control - 0.5) = row 5 - 0.015, the control on
+#   the same 5000 heldout-2p-fr games (ffcc5c1a, balanced dice, above; the fair-dice 170b4db1 was
+#   on other boards and no longer applies); treated as independent rows the difference has se
 #   ~1.0 pp (mde ~2.8 pp). row 6 has no control of its own (belief seats; the same input).
 #   where the records live: a record is stored with its slot-0 checkpoint's run, so rows 3-4
 #   (slot 0 = ${champion}) go to runs/puffer-graph2/full/evals/heldout-2p-fr/, the start's
@@ -143,8 +182,10 @@
 # cost (rtx 2070 super, alone):
 #   - training: puffer-graph2/full took 7.95 h of wall for 3786 epochs with its 76 selects (7.45 s
 #     median per epoch: collect 1.52, train 5.93; 17.7k agent steps/s), 7.56 s an epoch with
-#     everything. same batch shape here, so 7600 epochs ~ 15.9-16.0 h. the robber rule changes
-#     game length, not the cost of an agent step.
+#     everything. same batch shape here, so 7600 epochs ~ 15.9-16.0 h. the robber rule and the
+#     dice change game length, not the cost of an agent step (a balanced roll is a few integer ops
+#     on a 36-bit deck). not re-measured on the gpu, so the estimate stands; on the cpu the start's
+#     1000 games vs F took 191 s on balanced dice and 201 s on fair (73.6 vs 77.1 turns a game).
 #   - evals during training: per checkpoint, champion ~14-16 s (1000 policy-vs-policy games:
 #     the cpu-to-gpu ratio of the e3350 select replay, and ~13.8 s per 1000 games in the az runs'
 #     policy selects) + f ~8 s (5000 policy-vs-F games took 37.8 s, ff8528a4) = ~23 s x 153 =
@@ -176,31 +217,42 @@
 #     0.875, 0.969 x5. best moved e0 -> e3 (0.531, the epoch f fell to 0.875) -> e4 (0.563), each
 #     alias citing that epoch's champion record: best follows champion, not f. (first-epoch
 #     approx_kl 0.066 on 64-row minibatches; not a forecast of the real run's kl.)
-#   - validate_plan: no problems. ppo-2p-fr/full hashes 1efb94c8273c9789 (pinned in
+#   - validate_plan: no problems. ppo-2p-fr/full hashed 1efb94c8273c9789 on the friendly robber
+#     alone; with balanced dice it hashes fef9516cd5f164ff (re-pinned in
 #     tests/data/experiment_hashes.json); every other experiment hashes as pinned.
 #   - re-run on engine 666b4c8 (code id engine f25b07255da89819, catanrl 948205ccc476da20): the
 #     --smoke run finished with both monitors every epoch (champion 0.5, 0.5, 0, 0, 0), best at
 #     e0 (#3355b505), all six finals, rows 3-4 written under puffer-graph2/full/evals.
+#   - re-run on balanced dice (engine 1777df8, code ids catanrl 55ba5984c434c839, train
+#     555889338201588f, engine 77be2fb4afa85778; config hash afa2402598128b4b, schema 7): the
+#     --smoke run finished in 95 s with both monitors on select-2p-fr every epoch (champion 0.5,
+#     0.5, 0, 0.25, 0.25 vs puffer-graph2/full@e3350#3355b505 = ${init}; f 0.75, 1.0, 0.75, 0.75,
+#     0.75), best at e0 citing e0's champion record (f rose to 1.0 at e1 and best stayed: it follows
+#     champion), all six finals on heldout-2p-fr. every record's key holds dice_mode balanced, and
+#     the run's training env (its stored config, 8 envs, 3000 random steps) rolls balanced dice
+#     with the friendly robber in every game (13,920 distinct dice states).
 #
 # launch (from main, after "before launch"):
 #   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
 # W&B as meta below (the mirror tags it from:puffer-graph2/full).
 #
 # before launch:
-#   - the engine changed (wt/friendly: openhex's friendly robber, engine 666b4c8), and so did
-#     the training code (eval.monitor: code_id train 555889338201588f). base-2p-fr needs that
-#     engine: on main's current engine the rule is catanatron's (actual points < 3, which reads
-#     hidden vp cards). so this launches only after wt/friendly is merged into main and main's
+#   - the engine changed (engine 1777df8: wt/friendly's friendly robber 666b4c8 + wt/dice's
+#     balanced dice a7f0363), and so did the training code (eval.monitor: code_id train
+#     555889338201588f) and games.py (dice_mode: code_id catanrl 948205ccc476da20 ->
+#     55ba5984c434c839). base-2p-fr needs that engine: on main's current engine (e9f12af) the
+#     friendly rule is catanatron's (actual points < 3, which reads hidden vp cards) and there is
+#     no dice_mode. so this launches only after wt/integration is merged into main and main's
 #     engine is rebuilt (uv sync), and that waits until no run is live in main's checkout (a live
 #     run's evals re-hash the code on disk).
 #   - the critic refit (critic-refit-2p) has finished: this run needs the gpu alone.
 #   - `catanrl ls 'puffer-graph2/*'` still shows full's best at e3350 (the ref below carries
 #     #3355b5059503, so creation refuses any other best).
 #   - eval ids key the engine, so every row here is new on the rebuilt engine; nothing pairs
-#     with a record from the old build. after the rebuild, code_id('eval') in main should read
-#     catanrl 948205ccc476da20 and engine f25b07255da89819 (wt/friendly's build of 666b4c8;
-#     another id only means the build's bytes differ, not the rule), and cppanatron.build_info()
-#     git_sha 666b4c8, not dirty.
+#     with a record from the old build. after the rebuild, code_id('train') in main should read
+#     catanrl 55ba5984c434c839, train 555889338201588f, and engine 77be2fb4afa85778
+#     (wt/integration's build of 1777df8; another engine id only means the build's bytes differ,
+#     not the rule), and cppanatron.build_info() git_sha 1777df8, not dirty.
 name: ppo-2p-fr
 seed: 42                        # puffer-graph2's: the same map pool, and init/sample/rollout seeds
 env:

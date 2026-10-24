@@ -236,3 +236,44 @@ def test_validate_plan_flags_a_catanatron_final_on_balanced_dice(tmp_path):
     assert len(problems) == 1 and "fair dice" in problems[0] and "base-2p-balanced" in problems[0]
     path.write_text(yaml.safe_dump({**body, "eval": {"final": [final]}}))
     assert validate_plan(path) == []
+
+
+def test_no_row_feature_reads_the_dice():
+    """base-2p-fr (balanced dice) and its fair-dice twin, on the same map and seed, play the same
+    moves and the same rolls (a card the balanced deck draws, given to both): every graph-encoder
+    row (each level, each seat) and every legal set is equal at every position. The network has
+    no dice input, so balanced dice change what happens, never how a position reads."""
+    import random
+
+    import numpy as np
+
+    from catanrl.envs.encoding import make_encoder
+
+    game = load_game("base-2p-fr")
+    twin = dataclasses.replace(game, dice_mode="random")
+    assert game.dice_mode == "balanced" and twin.cppanatron_rules().dice_mode == cpp.DiceMode.RANDOM
+    dims = {"max_players": 2, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
+    encoders = [make_encoder(dims, level) for level in ("private", "public", "full")]
+    assert not [n for n in encoders[0].feature_names("global") if "dice" in n or "roll" in n]
+    rng = random.Random(7)
+    rolls = odds_differ = 0
+    for _ in range(3):
+        map_seed, seed = rng.randrange(10**6), rng.randrange(10**6)
+        a, b = game.cppanatron_game(map_seed, seed), twin.cppanatron_game(map_seed, seed)
+        for _step in range(400):
+            if a.winning_color is not None:
+                break
+            for encoder in encoders:
+                for seat in range(2):
+                    assert np.array_equal(np.asarray(encoder.encode(a, seat)), np.asarray(encoder.encode(b, seat)))
+            assert sorted(map(str, a.playable_actions)) == sorted(map(str, b.playable_actions))
+            action = rng.choice(a.playable_actions)
+            dice = {}
+            if action.action_type == cpp.ActionType.ROLL:
+                odds = a.roll_probabilities(a.next_roller)
+                odds_differ += odds != b.roll_probabilities(a.next_roller)
+                dice["dice"] = tuple(a.balanced_dice.card_for_total(rng.choices(range(2, 13), weights=odds)[0]))
+                rolls += 1
+            a.execute(action, **dice)
+            b.execute(action, **dice)
+    assert rolls > 100 and odds_differ > 0.9 * rolls  # the dice really were balanced
