@@ -700,15 +700,22 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   rustc). `build_bridge.sh --backend cuda` builds the same source on burn's
   CUDA backend, which batches the network on the GPU: another binary with
   `backend: cuda` in the key, picked by pointing `$CATANRL_CANOPY_DIR` at
-  its directory, so CPU-build records keep their keys and the two never
-  mix. It is not bit-reproducible (cubecl's kernel macro expands in hash
-  order; two builds played identically), so the installed build is kept.
+  its directory (or a plan's `runtime.canopy_dir`, which the runner sets as
+  that variable for its evals; relative to the runs root), so CPU-build
+  records keep their keys and the two never mix. It is not bit-reproducible (cubecl's kernel macro expands in hash
+  order; three builds played identically), so the installed build is kept:
+  the script installs only a build matching the committed manifest and never
+  overwrites a release directory holding another binary, and
+  `third_party/canopy/fingerprint.py` checks any build against what the
+  installed one answers on 64 fixed positions (raw, and 16 at 1600 sims).
   Its outputs do not depend on the batch (a position alone or among 7 to
   300 others, raw or at 1600 simulations, bit for bit) and repeat across
   runs, so rows depend on neither `num_envs` nor `procs`; the kernels are
   compiled at run time by NVRTC for the GPU found, so a GPU record's
-  segment execution adds `canopy` (GPU, driver, NVRTC, toolkit headers),
-  and a replay on another of those may differ in the last bits. Each
+  segment execution adds `canopy` (GPU, driver, NVRTC, toolkit headers;
+  the segment's `canopy_detail` adds the NVRTC file's full version and any
+  CUBECL_* variable or cubecl.toml), and a replay on another of those may
+  differ in the last bits. Each
   decision is serialized from the seat's view
   (the opponent's hand dealt from its tracker, its development cards as a
   count) and Canopy's choice is played as the engine's action with that

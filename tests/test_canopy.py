@@ -267,23 +267,38 @@ def test_own_purchases_this_turn_are_remembered(sample):
     assert bought > 0
 
 
-def _redealt(game: cpp.Game, seat: int, rng: random.Random) -> cpp.Game | None:
+def _redealt(game: cpp.Game, seat: int, rng: random.Random, *, vp_swap: bool = False) -> cpp.Game | None:
     """``game`` with the opponent's unplayed development cards swapped for another deal of the
-    unseen cards (same count, same victory point cards), or None if there is no other deal."""
+    unseen cards (same count, same victory point cards), or None if there is no other deal.
+    ``vp_swap``: instead swap one victory point card for one other card or the reverse (the
+    opponent's hidden total moves, kept below the win), so a leak of VP identities or totals shows."""
     opp = 1 - seat
     held = list(game.player(opp).development_cards)
-    if sum(held[:4]) == 0:
-        return None
     played = [sum(game.player(s).played_development_cards[k] for s in range(2)) for k in range(5)]
     unseen = [BASE_DECK[k] - game.player(seat).development_cards[k] - played[k] for k in range(5)]
-    pool = [k for k in range(4) for _ in range(unseen[k])]
-    for _ in range(50):
-        pick = rng.sample(pool, sum(held[:4]))
-        new = [pick.count(k) for k in range(4)] + [held[4]]
-        if new != held:
-            break
+    if vp_swap:
+        options = []
+        for k in range(4):
+            if held[4] > 0 and held[k] < unseen[k]:
+                options.append([*(held[i] + (i == k) for i in range(4)), held[4] - 1])
+            if held[k] > 0 and held[4] < unseen[4]:
+                options.append([*(held[i] - (i == k) for i in range(4)), held[4] + 1])
+        hidden_vp = game.player(opp).actual_victory_points - held[4]
+        options = [n for n in options if hidden_vp + n[4] < game.vps_to_win]
+        if not options:
+            return None
+        new = rng.choice(options)
     else:
-        return None
+        if sum(held[:4]) == 0:
+            return None
+        pool = [k for k in range(4) for _ in range(unseen[k])]
+        for _ in range(50):
+            pick = rng.sample(pool, sum(held[:4]))
+            new = [pick.count(k) for k in range(4)] + [held[4]]
+            if new != held:
+                break
+        else:
+            return None
     hands = []
     for s in range(2):
         p = game.player(s)
@@ -297,13 +312,15 @@ def _redealt(game: cpp.Game, seat: int, rng: random.Random) -> cpp.Game | None:
     return out
 
 
-def test_snapshot_never_reads_the_opponents_hidden_cards():
-    """Fairness: redeal the opponent's unplayed cards (and the deck and the random stream):
-    every snapshot keeps its bytes."""
+@pytest.mark.parametrize("vp_swap", [False, True], ids=["non-vp-redeal", "vp-swap"])
+def test_snapshot_never_reads_the_opponents_hidden_cards(vp_swap):
+    """Fairness: redeal the opponent's unplayed cards (and the deck and the random stream), as
+    another deal of the non-VP cards or with one VP card swapped in or out: every snapshot keeps
+    its bytes."""
     rng = random.Random(5)
     audited = 0
     for game, seat, tracker, history, board, _previous in positions(games=6, seed=3):
-        other = _redealt(game, seat, rng)
+        other = _redealt(game, seat, rng, vp_swap=vp_swap)
         if other is None:
             continue
         a = canon.canonical_json(_snap(game, seat, tracker, history, board, seed=9))
@@ -565,8 +582,9 @@ COMMITTED = {"cpu-ndarray": MANIFEST_NAME, "cuda": "canopy-bridge-cuda.manifest.
 
 def test_the_committed_patches_and_manifests_are_the_pinned_builds():
     """third_party/canopy holds the pinned patches and, per backend, the manifest of the build
-    they make (third_party/canopy/build_bridge.sh rebuilds it to the same binary): the same
-    source, patches and weights; another binary."""
+    they make: the same source, patches and weights; another binary. build_bridge.sh rebuilds
+    the cpu build to the same binary; the cuda build is not bit-reproducible (its installed copy
+    is the release, canopy-bridge-cuda.fingerprint.json what it answers)."""
     for name, sha in PATCHES:
         assert canon.sha256_file(THIRD_PARTY / "patches" / name) == sha, name
     assert sorted(p.name for p in (THIRD_PARTY / "patches").iterdir()) == sorted(name for name, _ in PATCHES)
@@ -579,6 +597,28 @@ def test_the_committed_patches_and_manifests_are_the_pinned_builds():
             (THIRD_PARTY / MANIFEST_NAME).read_text())["tree"]
         binaries.add(manifest["binary_sha256"])
     assert len(binaries) == len(COMMITTED)
+
+
+def _fingerprint_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("canopy_fingerprint", THIRD_PARTY / "fingerprint.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_cuda_fingerprint_is_the_pinned_cuda_builds():
+    """canopy-bridge-cuda.fingerprint.json: what the installed cuda build (the binary its
+    manifest pins) answers on the committed fixed positions, raw on 64 and at 1600 sims on 16."""
+    stored = json.loads((THIRD_PARTY / "canopy-bridge-cuda.fingerprint.json").read_text())
+    manifest = json.loads((THIRD_PARTY / COMMITTED["cuda"]).read_text())
+    assert stored["binary_sha256"] == manifest["binary_sha256"] and stored["backend"] == "cuda"
+    assert stored["states_sha256"] == canon.sha256_file(THIRD_PARTY / stored["states"])
+    fingerprint = _fingerprint_module()
+    assert stored["params"] == fingerprint.SEARCH and stored["format"] == fingerprint.FORMAT
+    for name, sims, n in fingerprint.PARTS:
+        assert (stored[name]["sims"], stored[name]["positions"], len(stored[name]["actions"])) == (sims, n, n)
 
 
 def _release_dir(path: Path, backend: str, binary: bytes) -> Path:
@@ -624,6 +664,129 @@ def test_a_gpu_build_records_its_execution_and_a_cpu_build_nothing_new(monkeypat
     assert results._canopy_execution([agent("cpu-ndarray"), agent(None), None]) == {}
     assert results._canopy_execution([agent(None), agent(None)]) == {}
     assert results._canopy_execution([agent("cuda"), agent(None), None]) == {"canopy": {"backend": "cuda", **runtime}}
+
+
+def test_a_gpu_build_records_its_finer_inputs_and_older_segments_resume(tmp_path, monkeypatch):
+    """A GPU build's segment also records ``canopy_detail`` (the resolved NVRTC file, CUBECL_*
+    variables, a cubecl.toml the bridges would read). A segment written before the field existed
+    (canopy-search-2p-gpu's, 96d94fab) compares by ``execution`` alone, so it resumes; one that has
+    it restarts when it differs."""
+    def agent(backend):
+        release = Release(directory=Path("."), binary=Path("b"), checkpoint=Path("c"), binary_sha256="ab" * 32,
+                          manifest={"backend": backend})
+        return canopy_agent.CanopyResolved(key="CANOPY", impl="catanrl.canopy", params=CanopyParams(),
+                                           checkpoint=None, fair=True, label="CANOPY", canonical="CANOPY",
+                                           release=release)
+
+    assert results._canopy_detail([agent("cpu-ndarray"), resolve("F"), None]) == {}
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path / "a" / "b")
+    for name in [k for k in os.environ if k.startswith("CUBECL_")]:
+        monkeypatch.delenv(name)
+    detail = results._canopy_detail([agent("cuda"), resolve("F")])
+    assert detail["cubecl_env"] == {} and detail["cubecl_toml"] is None
+    if detail["nvrtc_library"] is not None:  # a box with NVRTC: the real file, its full version
+        assert Path(detail["nvrtc_library"]).is_file() and ".so." in Path(detail["nvrtc_library"]).name
+    (tmp_path / "a" / "cubecl.toml").write_text("[autotune]\nlevel = 'full'\n")
+    monkeypatch.setenv("CUBECL_AUTOTUNE_LEVEL", "full")
+    changed = results._canopy_detail([agent("cuda"), resolve("F")])
+    assert changed["cubecl_toml"] == [str(tmp_path / "a" / "cubecl.toml"),
+                                      canon.sha256_file(tmp_path / "a" / "cubecl.toml")]
+    assert changed["cubecl_env"] == {"CUBECL_AUTOTUNE_LEVEL": "full"}
+    execution = {"device_class": "G", "canopy": {"backend": "cuda", "nvrtc": "13.2"}}
+    old = {"segment": 0, "execution": execution}  # before canopy_detail
+    assert not results._segment_differs(old, execution, detail)
+    assert results._segment_differs(old, {**execution, "device_class": "H"}, detail)
+    assert not results._segment_differs({**old, "canopy_detail": detail}, execution, detail)
+    assert results._segment_differs({**old, "canopy_detail": detail}, execution, changed)
+
+
+def test_runtime_canopy_dir_names_the_build_the_plans_evals_play(tmp_path, monkeypatch):
+    """``runtime.canopy_dir`` is $CATANRL_CANOPY_DIR while a plan's evals resolve and play (under
+    the runs root when relative), and only then; a variable naming another build is refused."""
+    from catanrl import runner
+    from catanrl.config import ConfigError
+
+    monkeypatch.setenv("CATANRL_RUNS_DIR", str(tmp_path / "runs"))
+    (tmp_path / "runs").mkdir()
+    cuda = _release_dir(tmp_path / "runs" / "_canopy-cuda", "cuda", b"cuda binary")
+    monkeypatch.setattr("catanrl.canopy.release.CHECKPOINT_SHA256", canon.sha256_file(cuda / "model_iter_315.mpk"))
+    monkeypatch.delenv("CATANRL_CANOPY_DIR", raising=False)
+    with runner.canopy_release({"canopy_dir": "_canopy-cuda"}) as path:
+        assert path == cuda.resolve() and os.environ["CATANRL_CANOPY_DIR"] == str(path)
+        assert load_release().manifest["backend"] == "cuda"
+    assert "CATANRL_CANOPY_DIR" not in os.environ
+    with runner.canopy_release({"canopy_dir": str(cuda)}) as path:  # absolute, as given
+        assert path == cuda.resolve()
+    with runner.canopy_release({"canopy_dir": None}) as path, runner.canopy_release(None) as other:
+        assert path is None and other is None and "CATANRL_CANOPY_DIR" not in os.environ
+    monkeypatch.setenv("CATANRL_CANOPY_DIR", str(cuda))  # the same build: fine, and kept after
+    with runner.canopy_release({"canopy_dir": "_canopy-cuda"}):
+        pass
+    assert os.environ["CATANRL_CANOPY_DIR"] == str(cuda)
+    monkeypatch.setenv("CATANRL_CANOPY_DIR", str(tmp_path / "elsewhere"))
+    with pytest.raises(ConfigError, match="unset one"), runner.canopy_release({"canopy_dir": "_canopy-cuda"}):
+        pass
+
+
+def test_final_evals_play_under_the_plans_canopy_dir(tmp_path, monkeypatch):
+    """The runner's evals see runtime.canopy_dir as $CATANRL_CANOPY_DIR, and it is no eval option."""
+    import types
+
+    from catanrl import runner
+
+    monkeypatch.setenv("CATANRL_RUNS_DIR", str(tmp_path))
+    monkeypatch.delenv("CATANRL_CANOPY_DIR", raising=False)
+    seen = []
+
+    def evaluate(lineup, suite, **options):
+        seen.append((os.environ.get("CATANRL_CANOPY_DIR"), options))
+        return types.SimpleNamespace(data={"specs": lineup, "suite": "s"}, summary={"score_rate": 0.5, "games": 2},
+                                     eval_id="e")
+
+    monkeypatch.setattr(runner, "bound_lineup", lambda run, lineup, **kw: list(lineup))
+    monkeypatch.setattr(results, "evaluate", evaluate)
+    runtime = {"device": "cpu", "num_envs": 1000, "threads": 2, "canopy_dir": "_canopy-cuda"}
+    plan = types.SimpleNamespace(config={"runtime": runtime, "eval": {"final": [
+        {"suite": "s", "lineup": ["CANOPY:sims=8", "F"]}, {"suite": "s", "lineup": ["CANOPY:sims=8", "R"]}]}})
+    assert len(runner.final_evals(types.SimpleNamespace(ref="x/main"), plan)) == 2
+    assert [d for d, _ in seen] == [str((tmp_path / "_canopy-cuda").resolve())] * 2
+    assert all("canopy_dir" not in o and o["num_envs"] == 1000 for _, o in seen)
+    assert "CATANRL_CANOPY_DIR" not in os.environ
+
+
+def test_the_gpu_bench_plays_one_canopy_and_its_rows_pair(monkeypatch):
+    """canopy-bench-2p-gpu: four 1000-game rows on heldout-2p's first 500 boards, one canopy
+    (the cuda build, named by runtime.canopy_dir) in slot 0 of every row, all games in flight;
+    every row keys the same schedule, code and slot 0, so results.paired pairs rows 1 and 2 (POLICY
+    and MCTS) on slot 1, and the execution knobs (procs, $CATANRL_CANOPY_PROCS, num_envs) are in
+    no key."""
+    from catanrl.config import load_plan
+    from catanrl.eval.suites import load_suite
+
+    release = Release(directory=Path("."), binary=Path("b"), checkpoint=Path("c"), binary_sha256="cd" * 32,
+                      manifest={"backend": "cuda"})
+    monkeypatch.setattr(canopy_agent, "load_release", lambda: release)
+    [variant] = load_plan("canopy-bench-2p-gpu").variants
+    cfg = variant.config
+    rows = cfg["eval"]["final"]
+    assert [r["suite"] for r in rows] == [{"name": "heldout-2p", "boards": 500}] * 4
+    assert len({r["lineup"][0] for r in rows}) == 1 and is_canopy_spec(rows[0]["lineup"][0])
+    # row 2 (MCTS) last: canopy-search-2p-gpu plays it as the same record, so it is found or waited for
+    assert [r["lineup"][1].split(":")[0] for r in rows] == ["POLICY", "BELIEF", "F", "MCTS"]
+    assert not any("sims=0" in r["lineup"][0] for r in rows)  # row 3 stays the cpu record (1c916131)
+    runtime = cfg["runtime"]
+    assert (runtime["device"], runtime["canopy_dir"]) == ("cuda", "_canopy-cuda") and runtime["num_envs"] >= 1000
+    suite = load_suite(rows[0]["suite"])
+    assert len(suite.schedule(2)) == 1000 <= runtime["num_envs"]
+    # Slot 0 keys alike in every row (the opponents need checkpoints this test has not: F stands in).
+    keys = [results.eval_key([resolve(r["lineup"][0], games=suite.games()), resolve("F")], suite, harness="native")
+            for r in rows]
+    assert all(k == keys[0] for k in keys) and keys[0]["lineup"][0]["canopy"]["backend"] == "cuda"
+    assert set(keys[0]["code"]) == {"catanrl", "engine", "canopy"}
+    monkeypatch.setenv("CATANRL_CANOPY_PROCS", "2")
+    one = resolve(rows[0]["lineup"][0].replace("procs=4", "procs=1"), games=suite.games())
+    assert results.eval_key([one, resolve("F")], suite, harness="native") == keys[0]
 
 
 @pytest.mark.parametrize("args,match", [(["--backend", "metal", "s", "o", "c"], "cpu or cuda"),
@@ -742,3 +905,18 @@ def test_real_bridge_is_deterministic_in_a_batch():
         assert [a["details"][0]["policy"] for a in alone] == [d["policy"] for d in batch["details"]]
     finally:
         process.close()
+
+
+def test_real_bridge_answers_the_cuda_fingerprint(capsys):
+    """Any build of the pinned source plays the fingerprint's moves (cpu and two cuda builds
+    did); the pinned cuda build on the GPU, driver and NVRTC it was taken on, its bits too."""
+    release = _real_release()
+    fingerprint = _fingerprint_module()
+    stored = json.loads((THIRD_PARTY / "canopy-bridge-cuda.fingerprint.json").read_text())
+    found = fingerprint.fingerprint(release.directory)
+    status = fingerprint.compare(found, stored)
+    assert status in (0, 2), capsys.readouterr().out
+    same_place = all(found.get("measured_on", {}).get(k) == stored["measured_on"][k]
+                     for k in ("gpu", "driver", "nvrtc_library"))
+    if found["binary_sha256"] == stored["binary_sha256"] and same_place:
+        assert status == 0, capsys.readouterr().out

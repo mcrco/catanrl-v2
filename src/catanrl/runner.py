@@ -11,6 +11,7 @@ does: open the run, train (``train.algo``), then play ``eval.final``.
 from __future__ import annotations
 
 import contextlib
+import os
 import signal
 import statistics
 import subprocess
@@ -79,18 +80,46 @@ def final_evals(run: Any, v: Variant) -> list:
     runtime = v.config.get("runtime") or {}
     options = {k: runtime[k] for k in ("device", "num_envs", "threads", "infer_rows") if k in runtime}
     records = []
-    for entry in v.config["eval"]["final"]:
-        try:
-            lineup = bound_lineup(run, entry["lineup"])
-        except Unbound as error:  # a control of another experiment, not finished: a later run plays it
-            print(f"{run.ref}: final deferred: {error}", flush=True)
-            continue
-        record = evaluate(lineup, entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native"),
-                          restart_partial=True, **options)
-        print(f"{run.ref}: {record.data['specs'][0]} on {record.data['suite']}: "
-              f"{record.summary['score_rate']:.3f} (n={record.summary['games']}) {record.eval_id}", flush=True)
-        records.append(record)
+    with canopy_release(runtime):
+        for entry in v.config["eval"]["final"]:
+            try:
+                lineup = bound_lineup(run, entry["lineup"])
+            except Unbound as error:  # a control of another experiment, not finished: a later run plays it
+                print(f"{run.ref}: final deferred: {error}", flush=True)
+                continue
+            record = evaluate(lineup, entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native"),
+                              restart_partial=True, **options)
+            print(f"{run.ref}: {record.data['specs'][0]} on {record.data['suite']}: "
+                  f"{record.summary['score_rate']:.3f} (n={record.summary['games']}) {record.eval_id}", flush=True)
+            records.append(record)
     return records
+
+
+@contextlib.contextmanager
+def canopy_release(runtime: Any):
+    """``runtime.canopy_dir``: the Canopy build (``catanrl.canopy.release``) this plan's CANOPY
+    agents play, as ``$CATANRL_CANOPY_DIR`` while its evals resolve and play; a relative path is
+    under the runs root, like the default ``_canopy``. The build is in every CANOPY record's key
+    (binary sha256 and backend), so naming it in the plan keeps a launch that forgot the variable
+    from playing (and keying) another build. Refused when ``$CATANRL_CANOPY_DIR`` names another
+    directory. Without it nothing changes."""
+    value = (runtime or {}).get("canopy_dir")
+    if not value:
+        yield None
+        return
+    path = Path(os.path.expanduser(str(value)))
+    path = (path if path.is_absolute() else runs_root() / path).resolve()
+    before = os.environ.get("CATANRL_CANOPY_DIR")
+    if before and Path(before).expanduser().resolve() != path:
+        raise ConfigError(f"runtime.canopy_dir is {path}, but CATANRL_CANOPY_DIR is {before}: unset one")
+    os.environ["CATANRL_CANOPY_DIR"] = str(path)
+    try:
+        yield path
+    finally:
+        if before is None:
+            os.environ.pop("CATANRL_CANOPY_DIR", None)
+        else:
+            os.environ["CATANRL_CANOPY_DIR"] = before
 
 
 def _missing_finals(run: Any, v: Variant) -> bool:
@@ -98,15 +127,17 @@ def _missing_finals(run: Any, v: Variant) -> bool:
     experiment (:class:`Unbound`) is not missing: nothing can play it now."""
     from catanrl.eval.results import find
 
-    for entry in v.config["eval"]["final"]:
-        try:
-            lineup = bound_lineup(run, entry["lineup"], pin=False)
-            if find(lineup, entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native")) is None:
+    with canopy_release(v.config.get("runtime")):
+        for entry in v.config["eval"]["final"]:
+            try:
+                lineup = bound_lineup(run, entry["lineup"], pin=False)
+                if find(lineup, entry["suite"], fill=entry.get("fill"),
+                        harness=entry.get("harness", "native")) is None:
+                    return True
+            except Unbound:
+                continue
+            except (RuntimeError, ValueError):  # unresolvable now: the child run reports why
                 return True
-        except Unbound:
-            continue
-        except (RuntimeError, ValueError):  # unresolvable now: the child run reports why
-            return True
     return False
 
 
@@ -223,8 +254,9 @@ def summarize(experiment: str) -> Path:
         finals = []
         for i, entry in enumerate(run.config["eval"]["final"]):
             try:
-                record = find([known.get(s) or expand_init(s, run.init_ref) for s in entry["lineup"]], entry["suite"],
-                              fill=entry.get("fill"), harness=entry.get("harness", "native"))
+                with canopy_release(run.config.get("runtime")):
+                    record = find([known.get(s) or expand_init(s, run.init_ref) for s in entry["lineup"]],
+                                  entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native"))
             except (RuntimeError, ValueError):
                 record = None
             if record is not None:

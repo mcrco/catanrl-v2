@@ -14,8 +14,10 @@ suite's determinism flags, and writes the record once. Each start appends a
 segment: its execution (device class, CPU capability, torch, numpy, and
 ``infer_rows`` on GPUs) and a provenance capture with patches. Resuming
 under another execution needs ``allow_mixed`` (the record is marked) or
-``restart_partial`` (the partial games are set aside). A forfeit makes the
-record ``valid: false``.
+``restart_partial`` (the partial games are set aside). A segment of a GPU
+Canopy build also records ``canopy_detail`` (the NVRTC file, CUBECL_*
+variables, a cubecl.toml), compared like the execution when the earlier
+segment has one. A forfeit makes the record ``valid: false``.
 
 ``harness="catanatron"`` plays the same schedule with Catanatron players
 (:mod:`catanrl.eval.catanatron`: the only harness for ``LLM`` agents); the
@@ -368,12 +370,68 @@ def _canopy_execution(agents: Sequence[Any]) -> dict:
     A CUDA bridge loads the driver's libcuda and the toolkit's NVRTC at run time and compiles its
     kernels there for the GPU it finds (headers from ``$CUDA_PATH``, else /usr/local/cuda or
     /opt/cuda, as cubecl looks), so besides the binary (in the key) its bits can move with the
-    GPU, the driver and NVRTC: those are recorded per segment like ``device_class``."""
-    backends = sorted({str(a.release.manifest.get("backend")) for a in agents
-                       if a is not None and getattr(a, "release", None) is not None} - {"cpu-ndarray"})
+    GPU, the driver and NVRTC: those are recorded per segment like ``device_class`` (finer
+    inputs, such as NVRTC's patch version, in the segment's ``canopy_detail``: :func:`_canopy_detail`)."""
+    backends = _gpu_canopy_backends(agents)
     if not backends:
         return {}
     return {"canopy": {"backend": backends if len(backends) > 1 else backends[0], **_cuda_runtime()}}
+
+
+def _gpu_canopy_backends(agents: Sequence[Any]) -> list[str]:
+    """The non-CPU backends of the Canopy builds the lineup's CANOPY agents play, sorted."""
+    return sorted({str(a.release.manifest.get("backend")) for a in agents
+                   if a is not None and getattr(a, "release", None) is not None} - {"cpu-ndarray"})
+
+
+def _canopy_detail(agents: Sequence[Any]) -> dict:
+    """``canopy_detail`` of a segment when a CANOPY agent of the lineup plays a GPU build, else
+    ``{}``: what else can move its compiled kernels, too fine for ``execution`` (which segments
+    written before this field existed compare by, so they resume as they were).
+
+    * ``nvrtc_library``: the NVRTC file the bridge loads, resolved (``libnvrtc.so``, cudarc's
+      first name, through the same dlopen search the bridge does), so its full version, not
+      just ``nvrtc``'s major.minor: a 13.2.x update can compile other kernels.
+    * ``cubecl_env``: every ``CUBECL_*`` variable (cubecl-runtime reads CUBECL_DEBUG_LOG,
+      CUBECL_DEBUG_OPTION and CUBECL_AUTOTUNE_LEVEL; the bridges inherit this environment).
+    * ``cubecl_toml``: the first ``cubecl.toml`` / ``CubeCL.toml`` from the working directory up
+      (the bridges inherit it; cubecl reads the first one it finds), as [path, sha256], or None.
+    """
+    if not _gpu_canopy_backends(agents):
+        return {}
+    toml = None
+    for folder in (Path.cwd(), *Path.cwd().parents):
+        found = next((folder / n for n in ("cubecl.toml", "CubeCL.toml") if (folder / n).is_file()), None)
+        if found is not None:
+            toml = [str(found), canon.sha256_file(found)]
+            break
+    return {"nvrtc_library": _nvrtc_library(), "cubecl_env": {k: v for k, v in sorted(os.environ.items())
+                                                               if k.startswith("CUBECL_")}, "cubecl_toml": toml}
+
+
+def _nvrtc_library() -> str | None:
+    """The file ``dlopen("libnvrtc.so")`` loads here (cudarc's first name, so the bridge's),
+    resolved through its symlinks: e.g. /opt/cuda/targets/x86_64-linux/lib/libnvrtc.so.13.2.78."""
+    import ctypes
+
+    try:
+        nvrtc = ctypes.CDLL("libnvrtc.so")
+
+        class _LinkMap(ctypes.Structure):
+            _fields_ = [("l_addr", ctypes.c_void_p), ("l_name", ctypes.c_char_p)]
+
+        link = ctypes.POINTER(_LinkMap)()
+        if ctypes.CDLL(None).dlinfo(ctypes.c_void_p(nvrtc._handle), 2, ctypes.byref(link)) == 0:  # RTLD_DI_LINKMAP
+            return os.path.realpath(link.contents.l_name.decode())
+    except (OSError, AttributeError, ValueError):
+        pass
+    return None
+
+
+def _segment_differs(segment: Mapping[str, Any], execution: dict, detail: dict) -> bool:
+    """``segment`` ran under another execution than ``execution`` (+ ``detail``, the
+    ``canopy_detail``): compared by ``canopy_detail`` too when the segment recorded one."""
+    return segment["execution"] != execution or ("canopy_detail" in segment and segment["canopy_detail"] != detail)
 
 
 def _cuda_runtime() -> dict:
@@ -469,7 +527,7 @@ def evaluate(lineup: Sequence[Any], suite: str | Mapping | Suite, *, fill: Any =
         os.close(lock)
 
 
-def _segment(path: Path, eval_id: str, segment: int, execution: dict) -> dict:
+def _segment(path: Path, eval_id: str, segment: int, execution: dict, detail: dict | None = None) -> dict:
     """Record this start: provenance (with patches and keep refs) in its own file, a small row."""
     from catanrl import provenance
 
@@ -483,6 +541,8 @@ def _segment(path: Path, eval_id: str, segment: int, execution: dict) -> dict:
     canon.write_once_json(folder / f"{name}.json", prov)
     row = {"segment": segment, "execution": execution, "time": time.time(), "dirty": provenance.any_dirty(prov),
            "git": prov["git"]["repos"]["catanrl-v2"]["head"], "provenance": f"provenance/{name}.json"}
+    if detail:
+        row["canopy_detail"] = detail
     canon.append_jsonl(path.with_suffix(".segments.jsonl"), row)
     return row
 
@@ -491,8 +551,9 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, harness="native", al
           num_envs, threads, infer_rows) -> EvalRecord:
     games_path, segments_path = path.with_suffix(".games.jsonl"), path.with_suffix(".segments.jsonl")
     execution = {**_execution(device, infer_rows), **_canopy_execution([*agents, fill_agent])}
+    detail = _canopy_detail([*agents, fill_agent])
     segments = canon.read_jsonl(segments_path)
-    if any(s["execution"] != execution for s in segments):
+    if any(_segment_differs(s, execution, detail) for s in segments):
         if restart_partial:  # nothing cites a partial record: set its games aside and start over
             stamp = int(time.time())
             for p in (games_path, segments_path):
@@ -500,10 +561,11 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, harness="native", al
                     p.rename(p.with_name(f"{p.name}.discarded-{stamp}"))
             segments = []
         elif not allow_mixed:
-            raise ExecutionMismatch(f"{eval_id} was started under {segments[0]['execution']}, now {execution}; "
+            raise ExecutionMismatch(f"{eval_id} was started under {segments[0]['execution']} "
+                                    f"{segments[0].get('canopy_detail') or ''}, now {execution} {detail or ''}; "
                                     "pass allow_mixed to finish it here (the record is marked mixed)")
     segment = len(segments)
-    _segment(path, eval_id, segment, execution)
+    _segment(path, eval_id, segment, execution, detail)
     schedule = suite.schedule(len(agents), fill=fill_agent is not None)
     done = _latest_rows(games_path)
     missing = [g for g in schedule if g.game_id not in done]
@@ -529,7 +591,8 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, harness="native", al
         "critics": [str(a.critic) if getattr(a, "critic", None) else None for a in agents],
         "fair": [a.fair for a in agents], "labels": labels,
         "allow_drift": any(bool(getattr(a.params, "allow_drift", False)) for a in agents),
-        "valid": summary["forfeits"] == 0, "mixed": len({canon.digest(s["execution"]) for s in segments}) > 1,
+        "valid": summary["forfeits"] == 0, "mixed": len({canon.digest(s["execution"]) for s in segments}) > 1 or len(
+            {canon.digest(s["canopy_detail"]) for s in segments if "canopy_detail" in s}) > 1,
         "games_sha256": canon.digest([_strip(r) for r in ordered], 64),
         "segments": segments, "created": time.time(),
     }

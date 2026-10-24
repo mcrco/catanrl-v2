@@ -33,3 +33,5 @@ runtime:                     # not hashed: how, not what
   compile: false
   time_limit_hours: null     # stop (status time_limit) after this long; a relaunch resumes
   allow_stale_build: false
+  canopy_dir: null           # the Canopy build CANOPY agents play ($CATANRL_CANOPY_DIR for the evals;
+                             # relative: under the runs root, as the default _canopy)
