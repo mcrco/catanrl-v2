@@ -34,8 +34,16 @@ RESOURCE_NAMES = ("wood", "brick", "sheep", "wheat", "ore")
 DIMS = {"max_players": 2, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
 
 
+def _fair(record):
+    """A recorded game as it was played: both records say ``diceMode: balanced``
+    but rolled fair dice (tests/test_dice_reference.py), so the tests here, which
+    are not about dice, replay them on fair dice (test_bridge_openhex_dice.py
+    replays them as recorded)."""
+    return {**record, "config": {**record["config"], "diceMode": "random"}}
+
+
 def _game():
-    return json.loads(FIXTURE.read_text())
+    return _fair(json.loads(FIXTURE.read_text()))
 
 
 def _redacted(events, color):
@@ -112,7 +120,7 @@ def test_a_roll_the_bank_cannot_cover_pays_what_the_game_paid(color):
     # full; the engine's rule pays nobody. The replay starts over on a bank
     # two cards larger and follows the game exactly (the checkpoint is the
     # public record's state after seq 379).
-    game = json.loads(OVERPAID.read_text())
+    game = _fair(json.loads(OVERPAID.read_text()))
     checkpoint = game["checkpoints"][0]
     seat = OpenHexSeat(_Never(), "fixture", game, color)
     seat.feed(_redacted([e for e in game["events"] if e["seq"] <= checkpoint["seq"]], color))
@@ -129,7 +137,7 @@ def test_a_roll_the_game_withheld_is_the_replays_known_limit(color):
     # pays. The engine's bank cannot be set from Python, so the replay keeps
     # the payout, counts the difference, and goes wrong at the next 7: blue,
     # three phantom cards over the limit, is asked to discard before red.
-    game = json.loads(OVERPAID.read_text())
+    game = _fair(json.loads(OVERPAID.read_text()))
     seat = OpenHexSeat(_Never(), "fixture", game, color)
     with pytest.raises(ReplayError, match="DISCARD_RESOURCE"):
         seat.feed(_redacted(game["events"], color))
@@ -345,7 +353,7 @@ def test_a_bank_short_re_replay_restarts_the_stream(color):
     drops its search (``dropped_over``) and its next decision is a first
     again (nothing to drop there, no stream error); the game goes on. (Blue's
     discard chains before it end their searches alike.)"""
-    game = json.loads(OVERPAID.read_text())
+    game = _fair(json.loads(OVERPAID.read_text()))
     checkpoint = game["checkpoints"][0]
     native = _mcts(reuse=True)
     log = _logged(native)

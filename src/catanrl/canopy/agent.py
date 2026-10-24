@@ -162,9 +162,10 @@ def resolve_canopy(spec: str | Mapping[str, Any], *, harness: str = "native", ga
     for game in (g if hasattr(g, "num_players") else load_game(g) for g in games):
         supply = (tuple(game.resource_bank), tuple(game.development_deck),
                   (game.roads_per_player, game.settlements_per_player, game.cities_per_player))
-        if game.num_players != 2 or supply != (BASE_BANK, BASE_DECK, BASE_PIECES) or game.friendly_robber:
-            raise SpecError(f"{CANOPY_KEY}: the released Canopy plays 2 players with the base supply and no "
-                            f"friendly robber; game {game.name} differs")
+        if game.num_players != 2 or supply != (BASE_BANK, BASE_DECK, BASE_PIECES) or game.friendly_robber \
+                or game.dice_mode != "random":
+            raise SpecError(f"{CANOPY_KEY}: the released Canopy plays 2 players with the base supply, no "
+                            f"friendly robber and fair dice; game {game.name} differs")
     try:
         release = load_release()
     except ReleaseError as error:

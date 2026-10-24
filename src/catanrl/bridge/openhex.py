@@ -20,6 +20,20 @@ own action). This module puts an OpenHex game into the bridge's terms:
   game it is matched into, and joins again.
 
 Nothing here reads hidden information: OpenHex sends each bot its own view.
+
+OpenHex's 1v1 rules roll balanced dice (``config.diceMode``): the replayed
+game rolls them too (``cppanatron.BalancedDice``), and every observed roll,
+replayed from the game's first event, moves its dice state as OpenHex's draw
+moved OpenHex's: every roll is public, so the state (the cards left, the last
+five totals, the sevens per seat and the streak) and the next roll's odds
+are public too, and the searches' chance nodes use them. A roll the state
+cannot give means OpenHex's dice are not the ones replayed (its recorded 1v1
+games of 2026-10-17 and -19 rolled fair dice, see
+``tests/test_dice_reference.py``): the seat replays the game again on fair
+dice and says so (``stats["dice_desync"]``, the index of that roll, and
+``stats["dice_desync_cause"]``, "refused"). So does a view whose deck size
+differs from the replay's for three polls running (cause "deck"): OpenHex's
+state was reset or lost, as when its older servers dropped it.
 """
 
 from __future__ import annotations
@@ -40,7 +54,7 @@ import cppanatron as cpp
 import numpy as np
 
 from catanrl.bridge.position import DEVELOPMENT_CARDS, RESOURCES
-from catanrl.bridge.replay import BankShort, Replay
+from catanrl.bridge.replay import BankShort, DiceRefused, Replay
 from catanrl.bridge.tracking import points_event, transition_events
 from catanrl.seeding import derive_seed
 
@@ -192,9 +206,20 @@ class Board:
         return {"x": x, "y": y, "z": z}
 
 
-def openhex_rules(config: Mapping[str, Any], bank_margin: Sequence[int] = (0, 0, 0, 0, 0)) -> cpp.GameRules:
+def balanced_dice(config: Mapping[str, Any]) -> bool:
+    """Whether the game rolls OpenHex's balanced dice (its 1v1 rules)."""
+    mode = str(config.get("diceMode") or "random").lower()
+    if mode not in ("random", "balanced"):
+        raise OpenHexError(f"unknown diceMode {config.get('diceMode')!r}")
+    return mode == "balanced"
+
+
+def openhex_rules(config: Mapping[str, Any], bank_margin: Sequence[int] = (0, 0, 0, 0, 0), *,
+                  fair_dice: bool = False) -> cpp.GameRules:
     """The game's rules; ``bank_margin`` is added to the bank (OpenHex pays
-    rolls in full past its bank, which the engine's rule never does)."""
+    rolls in full past its bank, which the engine's rule never does), and
+    ``fair_dice`` rolls two fair dice whatever ``diceMode`` says."""
+    balanced = balanced_dice(config) and not fair_dice
     return cpp.GameRules(
         vps_to_win=int(config.get("victoryPoints", 10)),
         discard_limit=int(config.get("discardLimit", 7)),
@@ -202,7 +227,8 @@ def openhex_rules(config: Mapping[str, Any], bank_margin: Sequence[int] = (0, 0,
         resource_bank=tuple(b + int(m) for b, m in zip(BANK, bank_margin)), development_deck=DECK,
         roads_per_player=int(config.get("maxRoads", 15)),
         settlements_per_player=int(config.get("maxSettlements", 5)),
-        cities_per_player=int(config.get("maxCities", 4)))
+        cities_per_player=int(config.get("maxCities", 4)),
+        dice_mode=cpp.DiceMode.BALANCED if balanced else cpp.DiceMode.RANDOM)
 
 
 def color_of(name: str) -> str:
@@ -442,7 +468,9 @@ class OpenHexSeat:
     The game replayed again on a larger bank (:class:`BankShort`) leaves the
     remembered game stale, so the stream restarts there, as it does after an
     error in the agent (which emptied its pool); :meth:`close` at the game's
-    end drops the searches and frees the slot.
+    end drops the searches and frees the slot. The game replayed again on fair
+    dice (a roll its balanced dice cannot give, or a lasting difference in the
+    deck size, see the module doc) restarts the stream the same way.
     """
 
     native: Any
@@ -466,6 +494,15 @@ class OpenHexSeat:
         self._counters = dict(getattr(self.native, "counters", {}))
         #: Added to the bank of the replayed game where OpenHex paid past it.
         self.bank_margin = [0] * 5
+        config = self.state.get("config") or {}
+        #: The replayed game rolls fair dice although OpenHex says balanced ones (see the module doc).
+        self.fair_dice = False
+        if balanced_dice(config) and int(config.get("numPlayers") or len(self.colors)) != len(self.colors):
+            # OpenHex balances the 7s over its configured players, the engine over the seats.
+            logger.warning("game %s: balanced dice over %s players with %d seats; replaying on fair dice",
+                           self.game_id, config.get("numPlayers"), len(self.colors))
+            self.fair_dice = True
+            self.stats["dice_desync"] = -1
         #: The entries replayed so far (replayed again on a larger bank).
         self.entries: list[Entry] = []
         self._build()
@@ -474,12 +511,14 @@ class OpenHexSeat:
         self.victim: str | None = None
         self.discarded_at: int | None = None
         self.waited = 0
+        #: The kinds of difference from OpenHex's state at the last poll, and the polls they have lasted.
+        self.lagging: tuple[list[str], int] = ([], 0)
         self.decisions = 0
         self.fallbacks = 0
 
     def _build(self) -> None:
-        """A fresh replay and tracker on the rules, with the bank margin."""
-        self.rules = openhex_rules(self.state.get("config") or {}, self.bank_margin)
+        """A fresh replay and tracker on the rules, with the bank margin (and fair dice once desynced)."""
+        self.rules = openhex_rules(self.state.get("config") or {}, self.bank_margin, fair_dice=self.fair_dice)
         self.replay = Replay({"colors": self.colors}, self.seat, self.rules, self.board.map)
         self.tracker = cpp.HandTracker(self.replay.game, self.seat)
 
@@ -501,22 +540,47 @@ class OpenHexSeat:
                 self._step(entry)
 
     def _step(self, entry: Entry) -> None:
-        try:
-            self._apply(entry)
-        except BankShort as short:
-            # OpenHex paid a roll its bank could not; the engine pays nobody
-            # then. The game replays on a bank that much larger: the hands
-            # and the tracker stay exact, the bank features scale by it.
-            self.bank_margin = [m + d for m, d in zip(self.bank_margin, short.deficit)]
-            self.stats["bank_short"] = self.stats.get("bank_short", 0) + 1
-            logger.info("game %s: the bank ran short by %s; replaying on a bank of %s", self.game_id,
-                        short.deficit, [b + m for b, m in zip(BANK, self.bank_margin)])
-            entries, self.entries = self.entries, []
-            self._build()
-            self._restart_stream()  # the agent's remembered game is the old bank's
-            for past in entries:
-                self._apply(past)
-            self._apply(entry)
+        handled: set[type] = set()
+        while True:
+            try:
+                self._apply(entry)
+                return
+            except BankShort as short:
+                if BankShort in handled:
+                    raise
+                handled.add(BankShort)
+                # OpenHex paid a roll its bank could not; the engine pays nobody
+                # then. The game replays on a bank that much larger: the hands
+                # and the tracker stay exact, the bank features scale by it.
+                self.bank_margin = [m + d for m, d in zip(self.bank_margin, short.deficit)]
+                self.stats["bank_short"] = self.stats.get("bank_short", 0) + 1
+                logger.info("game %s: the bank ran short by %s; replaying on a bank of %s", self.game_id,
+                            short.deficit, [b + m for b, m in zip(BANK, self.bank_margin)])
+            except DiceRefused as refused:
+                if self.fair_dice:
+                    raise
+                # OpenHex rolled what its balanced dice, as replayed, cannot: its
+                # dice state is not ours (or its dice are not balanced).
+                self._leave_balanced_dice(str(refused), "refused")
+            self._replay_again()
+
+    def _leave_balanced_dice(self, why: str, cause: str) -> None:
+        """OpenHex's dice state is not the replayed one, and nothing tells what
+        it is (a view shows the deck size only): the game is to replay on fair
+        dice from here on (the caller replays it again)."""
+        self.fair_dice = True
+        self.stats["dice_desync"] = sum(1 for e in self.entries if e.record[0][1] == "ROLL")
+        self.stats["dice_desync_cause"] = cause
+        logger.warning("game %s: roll %d: %s; replaying the game on fair dice", self.game_id,
+                       self.stats["dice_desync"], why)
+
+    def _replay_again(self) -> None:
+        """The game so far on the current rules (a larger bank, fair dice)."""
+        entries, self.entries = self.entries, []
+        self._build()
+        self._restart_stream()  # the agent's remembered game is the old rules'
+        for past in entries:
+            self._apply(past)
 
     def _apply(self, entry: Entry) -> None:
         sizes = None
@@ -588,7 +652,36 @@ class OpenHexSeat:
         robber = (state.get("board") or {}).get("robberHex") or (state.get("board") or {}).get("robber")
         if robber and tuple(game.board.robber_coordinate) != cube(robber):
             out.append(f"robber {tuple(game.board.robber_coordinate)} vs {cube(robber)}")
+        # A view shows the balanced dice's deck size only (the rest follows from the rolls).
+        dice, ours = state.get("balancedDice"), game.balanced_dice
+        if isinstance(dice, Mapping) and dice.get("remaining") is not None and ours is not None \
+                and int(dice["remaining"]) != ours.remaining:
+            out.append(f"dice deck {ours.remaining} cards vs {int(dice['remaining'])}")
         return out
+
+    def check(self, state: Mapping[str, Any]) -> list[str]:
+        """The differences from OpenHex's state (:meth:`mismatches`) that have
+        lasted three polls, at the poll they reach three (else none).
+
+        OpenHex's state lags its events (and sometimes steps back): a
+        difference counts once its kind has lasted three polls. A lasting
+        difference in the dice deck means OpenHex's dice state is not the
+        replayed one (reset or lost on its side): the game replays on fair dice
+        from here on, as after a roll the replayed dice refuse. A plan already
+        made stands (its moves are legal either way); the next decision
+        searches on fair dice.
+        """
+        problems = self.mismatches(state)
+        kinds = [p.split(" ")[0] for p in problems]
+        self.lagging = (kinds, self.lagging[1] + 1 if kinds == self.lagging[0] else 1)
+        if not problems or self.lagging[1] != 3:
+            return []
+        self.stats["mismatches"] = self.stats.get("mismatches", 0) + 1
+        dice = [p for p in problems if p.startswith("dice ")]
+        if dice and not self.fair_dice:
+            self._leave_balanced_dice(dice[0], "deck")
+            self._replay_again()
+        return problems
 
     # ------------------------------------------------------------ deciding
 
@@ -944,7 +1037,6 @@ class OpenHexBot:
         logger.info("%s: game %s as %s against %s", self.name, game_id, reply["your_color"],
                     [p.get("name") for p in reply["game"].get("players", [])])
         refused = 0
-        lagging: tuple[list[str], int] = ([], 0)  # (kinds of difference, polls they have lasted)
         try:
             while True:
                 seat.feed(self.client.events(game_id, seat.last_seq))
@@ -961,13 +1053,8 @@ class OpenHexBot:
                 if plan is None:
                     time.sleep(self.poll_s)
                     continue
-                problems = seat.mismatches(state)
-                # OpenHex's state lags its events (and sometimes steps back): a
-                # difference counts once its kind has lasted three polls.
-                kinds = [p.split(" ")[0] for p in problems]
-                lagging = (kinds, lagging[1] + 1 if kinds == lagging[0] else 1)
-                if problems and lagging[1] == 3:
-                    seat.stats["mismatches"] = seat.stats.get("mismatches", 0) + 1
+                problems = seat.check(state)  # (a lasting dice difference: fair dice from here on)
+                if problems:
                     logger.warning("%s: game %s: the replay differs from OpenHex: %s", self.name, game_id,
                                    "; ".join(problems[:3]))
                 started = time.monotonic()

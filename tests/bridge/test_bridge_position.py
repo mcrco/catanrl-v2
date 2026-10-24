@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 from bridge_games import GAMES, lockstep
 
+from catanrl import games
 from catanrl.bridge.position import (
     PROMPT_COVERAGE,
     Inexpressible,
@@ -76,6 +77,20 @@ def test_rules_refuse_a_supply_the_view_contradicts():
     with pytest.raises(ViewError):
         game_rules(view, "extension")
     assert game_rules(view, "base") == game_rules(view)
+
+
+def test_a_catanatron_view_refuses_balanced_dice():
+    # Catanatron rolls two fair dice: a balanced-dice supply or rule set is no Catanatron game's.
+    ls = lockstep("base-2p", 0)
+    view = ls.view(0)
+    balanced = games.GameConfig.from_dict({**ls.config.to_dict(), "dice_mode": "balanced"})
+    with pytest.raises(ViewError, match="fair dice"):
+        game_rules(view, balanced)
+    with pytest.raises(ViewError, match="fair dice"):
+        game_rules(view, balanced.cppanatron_rules())
+    with pytest.raises(ViewError, match="fair dice"):
+        SeatTracker(view, rules=balanced.cppanatron_rules())
+    assert game_rules(view, ls.config) == SeatTracker(view).rules
 
 
 def test_seat_view_reads_one_seat():

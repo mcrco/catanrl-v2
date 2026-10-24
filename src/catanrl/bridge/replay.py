@@ -45,6 +45,12 @@ game withheld, or a board the replay has wrong) is logged and counted in
 ``repairs["production"]``; the engine's payout stands, since its bank cannot
 be set from here.
 
+Under balanced dice (``GameRules.dice_mode``, OpenHex's 1v1 rules) every roll
+replayed updates the game's public dice state, as the game's own draw did. A
+roll that state cannot give (a card its deck no longer holds, or a total with
+no chance) raises :class:`DiceRefused` before anything changes: the game did
+not roll the dice the replay follows.
+
 Monopoly takes are public (every hand size is visible), but a log entry does
 not carry them: :meth:`Replay.step` takes the hand sizes after the entry when
 the caller has them (``sizes_after``, from the view after that step) and
@@ -108,6 +114,17 @@ class BankShort(ReplayError):
     def __init__(self, deficit: Sequence[int]) -> None:
         super().__init__(f"the game paid a roll its bank could not cover by {list(deficit)}")
         self.deficit = [int(d) for d in deficit]
+
+
+class DiceRefused(ReplayError):
+    """A roll the replay's balanced dice cannot give: the game's dice state is
+    not the one replayed (see the module doc)."""
+
+    def __init__(self, index: int, dice: Sequence[int], reason: str) -> None:
+        super().__init__(f"entry {index}: balanced dice cannot roll {tuple(dice)}: {reason}")
+        self.index = int(index)
+        self.dice = tuple(int(d) for d in dice)
+        self.reason = reason
 
 
 def _cards(kind_counts: Mapping[int, int]) -> list[int]:
@@ -227,6 +244,7 @@ class Replay:
 
         if kind == "ROLL":
             forced["dice"] = tuple(int(d) for d in result)
+            self._check_roll(index, player, forced["dice"])
         elif kind == "BUY_DEVELOPMENT_CARD":
             if not mine:
                 self._ensure_resources(player, COSTS[kind])
@@ -284,6 +302,21 @@ class Replay:
         self.entries.append(entry)
         return Transition(index=index, entry=entry, player=player, kind=kind, action=action,
                           before=before, after=after, **extra)
+
+    def _check_roll(self, index: int, player: int, dice: tuple[int, ...]) -> None:
+        """Balanced dice: refuse (:class:`DiceRefused`) a roll the public dice
+        state cannot give ``player``; random dice take any faces."""
+        game = self.game
+        if game.dice_mode != cpp.DiceMode.BALANCED:
+            return
+        state = game.balanced_dice
+        if len(dice) != 2 or not all(1 <= d <= 6 for d in dice):
+            raise ReplayError(f"entry {index}: a roll of {dice!r}")
+        if not state.can_draw(dice):
+            raise DiceRefused(index, dice, f"the deck ({state.remaining} cards left) no longer holds it")
+        if game.roll_probabilities(player)[sum(dice) - 2] <= 0.0:
+            raise DiceRefused(index, dice, f"a total of {sum(dice)} has no chance (recent totals {state.recent}, "
+                                           f"sevens {state.sevens})")
 
     def _prepare(self, player: int, kind: str, value: Any) -> None:
         """Make another seat's public move playable on the placeholders."""
