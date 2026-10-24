@@ -1,11 +1,17 @@
-# base-2p under OpenHex's 1v1 rules (its queue hard-codes them: game_manager.py
-# create_game): two players on BASE, 15 VP to win, discard limit 9 (discard at 10+
-# cards), and the friendly robber (robberMode "friendly", engine.py
-# _validate_robber_placement): a tile is shielded when an opponent of the mover with
-# at most 2 public VP (buildings, Longest Road, Largest Army; never hidden VP cards)
-# has a building on it, and shielded tiles are off limits unless every tile but the
-# robber's is shielded, when all are open. OpenHex's 1v1 also deals balanced dice;
-# the engine rolls fair random dice.
+# base-2p under OpenHex's 1v1 rules. OpenHex's code defaults (openhex/state.py GameConfig)
+# are 4 players, 10 VP, discard limit 7, the normal robber and random dice; its queue
+# overrides them per mode (services/game_manager.py create_game): "1v1" is two players,
+# 15 VP to win, discard limit 9 (discard at 10+ cards), the friendly robber and balanced
+# dice; every other mode is the defaults (our base-4p).
+# The friendly robber (robberMode "friendly", engine.py _validate_robber_placement and
+# _friendly_robber_shields): a tile is shielded when an opponent of the mover with at
+# most 2 public VP (settlements, cities x2, Longest Road, Largest Army; never hidden VP
+# cards) has a building on it, and shielded tiles are off limits unless every tile but
+# the robber's is shielded, when all are open. A knight's tile is validated before the
+# knight's Largest Army award (execute_action: validate, execute, then _check_awards), so
+# a seat that knight takes the award from keeps its 2 points for that robber move (the
+# engine's Game.largest_army_taken_from). The steal targets are not filtered.
+# Not here: OpenHex's balanced dice (openhex/dice.py); the engine rolls fair random dice.
 name: base-2p-fr
 num_players: 2
 map: {type: BASE}

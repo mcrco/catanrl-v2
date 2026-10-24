@@ -570,9 +570,9 @@ class MctsAgent(NativeAgent):
         ``dets >= 1`` (``oracle`` is refused on views) ``SearchPool.advance`` refuses
         every child that could depend on hidden cards: a drawn outcome (a roll, a
         purchase, a steal, even the only possible one), another player's decision, a
-        monopoly, the friendly-robber prompt, and worlds that disagree on the new root's
-        public state or options. Every world kept is thus a fair world plus the seat's
-        own move, and nothing hidden reaches the next decision through the tree.
+        monopoly, and worlds that disagree on the new root's public state or options.
+        Every world kept is thus a fair world plus the seat's own move, and nothing
+        hidden reaches the next decision through the tree.
         """
         seat = prev.current_player_index
 

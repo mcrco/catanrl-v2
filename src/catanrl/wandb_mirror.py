@@ -516,8 +516,12 @@ class Mirror:
         through = self._wb.summary.get(THROUGH_KEY)
         self._through = -1 if through is None else int(through)
         # Rows an earlier launch made without a mirror (or a reopened finished run) replay
-        # through the live path, so their select rows fall into place the same way.
-        for row in self.run.metrics():
+        # through the live path, so their select rows fall into place the same way. Every
+        # record a stored monitor row cites is marked first: a step's first monitor row must
+        # not log the record of a second monitor whose row comes after it.
+        rows = self.run.metrics()
+        self._monitored |= monitored(rows)
+        for row in rows:
             self._handle(("log", row, int(row.get("step", -1))))
 
     def _handle(self, item: tuple) -> None:
@@ -529,8 +533,9 @@ class Mirror:
             if is_monitor_row(row):
                 # A monitor's row: logged like a select record, at its checkpoint's step and
                 # without moving past it, so the epoch row at that step still lands (and
-                # after it, the monitor joins it).
-                self._sync_selects(limit=steps)  # never raises: a bad select must not cost this row
+                # after it, the monitor joins it). This step's select records wait for a
+                # later row: another monitor's row, which marks its record, may still be queued.
+                self._sync_selects(limit=steps - 1)  # never raises: a bad select must not cost this row
                 if steps >= self._through:
                     self._wb.log(history_row(row), step=steps)
                 return

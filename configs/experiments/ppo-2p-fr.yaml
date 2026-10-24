@@ -6,10 +6,13 @@
 # continued ppo training of our 1v1 ppo model (with friendly robber on if it's default in openehx)
 # for another ~1B steps, seeing if it still improves against chamption"
 #
-# yes for 1v1: openhex's queue hard-codes its 1v1 rules (game_manager.py create_game: 15 vp,
-# discard 9, robber friendly, dice balanced), and base-2p-fr is that game minus the balanced dice
-# (the engine rolls fair dice; balanced dice are marco's call). its 4p mode is our base-4p (normal
-# robber, random dice), so only 2p moves to the friendly robber.
+# yes for 1v1: openhex's code defaults are 4 players, 10 vp, discard 7, the normal robber and
+# random dice (openhex/state.py GameConfig), and its queue overrides them per mode
+# (game_manager.py create_game): 1v1 is 15 vp, discard 9, robber friendly, dice balanced.
+# base-2p-fr is that game minus the balanced dice (the engine rolls fair dice; balanced dice are
+# marco's call). its 4p mode is the defaults, our base-4p, so only 2p moves to the friendly robber.
+# the engine plays openhex's friendly robber exactly (engine 666b4c8: public points, and a
+# knight's tile judged on the points before its largest army award; base-2p-fr's comment).
 #
 # what this run is: the deployed 1v1 net, puffer-graph2/full@best (e3350, #3355b5059503, obs.level
 # full, deploy/openhex.yaml plays it through BELIEF worlds=16 and MCTS 1024), trained on for
@@ -73,9 +76,9 @@
 #   - champion: POLICY ${self} vs POLICY ${champion}, the start (eval.champion is unset, so
 #     ${champion} is init_from's pinned actor, puffer-graph2/full@e3350#3355b5059503). e0 is the
 #     start's own weights, a mirror match: exactly 0.500, every board split between the seats.
-#   - f: POLICY ${self} vs F, the yardstick marco has watched. the start scores 95.8% on these
-#     1000 games on the fixed engine (rules phase, cpu: b30d8dec in the scratch runs dir; 95.6%
-#     under the old rule), so e0's f row should read 95.8.
+#   - f: POLICY ${self} vs F, the yardstick marco has watched. the start scores 95.8% [94.4, 96.9]
+#     on these 1000 games on the fixed engine (666b4c8, cpu: 8fdc24a3 in a scratch runs dir; also
+#     95.8 on ebf8ee6; 95.6% under the old rule), so e0's f row should read 95.8.
 #   - best follows champion (eval.select: {from: champion}). F is at its ceiling: near 96% a 1000-
 #     game row separates two checkpoints only if they differ by 2.0-2.9 pp vs F, which is 70-200
 #     elo at that level (and the ceiling leaves ~4 pp of room); the champion row separates 4.2-4.9
@@ -97,6 +100,20 @@
 #   153 rows with se 1.6 pp sits ~2-4 pp above its true score if nothing changed). read the
 #   champion rows as a curve, and the finals for the answer.
 #   pairing two checkpoints: tools/search_probe.py --pair <select/champion/eval_id at eA> <at eB>.
+#   the start's friendly_robber input never trained: it is global feature 17, 0 for the whole of
+#   puffer-graph2/full's run (base-2p), so its column of backbone.global_projection.weight is
+#   bit-identical at e0 and e3350 (the random init, norm 0.588; the median trained column 0.692).
+#   on base-2p-fr it is a constant 1, an untrained bias shift: zeroing it changes the start's
+#   argmax on 3.3% of 32,000 acting base-2p-fr rows (mean kl 0.05). as strength, a zero-flag copy
+#   of e3350 (that column zeroed, #d83c9f12) vs e3350, POLICY vs POLICY on the cpu: select-2p-fr
+#   1000 games 0.509 [0.478, 0.540] (engine ebf8ee6); heldout-2p-fr 5000 games 0.501 [0.487,
+#   0.515] (engine 666b4c8, 170b4db1 in a scratch runs dir; seats 0.523 / 0.478). so the shift
+#   costs the start nothing detectable, at most ~1.5 pp. training sets that column within the
+#   first epochs, so up to that much of a gain vs the champion can be this fix rather than "more
+#   training helps": read the champion curve from e50 on (a step at e50 and flat after is the
+#   bias fix), and row 5 net of the control (below). the deployed bot reads this input too: on
+#   openhex 1v1 bridge/openhex.py sets friendly_robber from robberMode, so it plays with the same
+#   (measured harmless) shift.
 #
 # finals, on heldout-2p-fr (heldout-2p's seed 67 on base-2p-fr, 2500 boards x 2 = 5000 games;
 # every row on the same 5000 game ids, so rows pair game by game with search_probe --pair):
@@ -111,6 +128,15 @@
 #      1000-game read is a subset of these games, not another eval.
 #   power: rows 1-4 +-0.55-0.6 pp at 95-96% (wilson); 1 vs 3 (and 2 vs 4) paired, discordant
 #   0.05-0.11: mde 0.9-1.3 pp. rows 5-6 +-1.4 pp at 50%, mde 2.0 pp against 50% (14 elo).
+#   row 5 net of the bias fix: row 5 minus (the control - 0.5) = row 5 - 0.001, the control on
+#   the same 5000 heldout-2p-fr games (above); treated as independent rows the difference has se
+#   ~1.0 pp (mde ~2.8 pp). row 6 has no control of its own (belief seats; the same input).
+#   where the records live: a record is stored with its slot-0 checkpoint's run, so rows 3-4
+#   (slot 0 = ${champion}) go to runs/puffer-graph2/full/evals/heldout-2p-fr/, the start's
+#   directory, not this run's. `catanrl summarize ppo-2p-fr` finds them (find() on the run's
+#   eval.final entries), but this run's w&b finals summary and table hold rows 1, 2, 5 and 6
+#   only, and a later w&b backfill of puffer-graph2/full would list rows 3-4 among its finals
+#   (they are evals of its e3350, on the new rule).
 #   mcts rows (the deployed search) aren't here: ~8 h per 500 games at 1024 sims on the gpu
 #   (2aaf2eb7: 8.0 h). they can be added to eval.final later (unhashed for a train run).
 #
@@ -126,9 +152,11 @@
 #   - total ~17 h of wall, then the finals: rows 1 and 3 ~40 s each (ff8528a4), rows 2 and 4 ~6.5
 #     min each (67869e7a: 386 s), row 5 ~75 s, row 6 ~13 min (two belief seats, not measured):
 #     ~30 min.
-#   - gpu memory: puffer-graph2/full peaked at 4.74 GiB allocated (1.27 GiB of it rollout), 4.5 GB
-#     on the card with expandable_segments; the same here. it needs the card alone: the critic
-#     refit has finished by then, and two runs at max_minibatch_size 4096 don't fit 8 GB.
+#   - gpu memory: puffer-graph2/full peaked at 4.74 GiB allocated by torch (memory/peak_GiB; 1.27
+#     GiB of it rollout), so about 5.2-5.5 GiB on the card with the cuda context and allocator
+#     reserve (an estimate, with expandable_segments); the same here. it fits the 8 GB card alone,
+#     not beside another run: the critic refit has finished by then, and two runs at
+#     max_minibatch_size 4096 don't fit 8 GB.
 #
 # smoke (cpu, scratch runs dir with only e3350 linked in, WANDB_MODE=disabled):
 #   - `catanrl run configs/experiments/ppo-2p-fr.yaml --smoke` (4 epochs of adam on 16 rows,
@@ -150,13 +178,16 @@
 #     approx_kl 0.066 on 64-row minibatches; not a forecast of the real run's kl.)
 #   - validate_plan: no problems. ppo-2p-fr/full hashes 1efb94c8273c9789 (pinned in
 #     tests/data/experiment_hashes.json); every other experiment hashes as pinned.
+#   - re-run on engine 666b4c8 (code id engine f25b07255da89819, catanrl 948205ccc476da20): the
+#     --smoke run finished with both monitors every epoch (champion 0.5, 0.5, 0, 0, 0), best at
+#     e0 (#3355b505), all six finals, rows 3-4 written under puffer-graph2/full/evals.
 #
 # launch (from main, after "before launch"):
 #   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
 # W&B as meta below (the mirror tags it from:puffer-graph2/full).
 #
 # before launch:
-#   - the engine changed (wt/friendly: openhex's friendly robber, engine ebf8ee6), and so did
+#   - the engine changed (wt/friendly: openhex's friendly robber, engine 666b4c8), and so did
 #     the training code (eval.monitor: code_id train 555889338201588f). base-2p-fr needs that
 #     engine: on main's current engine the rule is catanatron's (actual points < 3, which reads
 #     hidden vp cards). so this launches only after wt/friendly is merged into main and main's
@@ -166,7 +197,10 @@
 #   - `catanrl ls 'puffer-graph2/*'` still shows full's best at e3350 (the ref below carries
 #     #3355b5059503, so creation refuses any other best).
 #   - eval ids key the engine, so every row here is new on the rebuilt engine; nothing pairs
-#     with a record from the old build.
+#     with a record from the old build. after the rebuild, code_id('eval') in main should read
+#     catanrl 948205ccc476da20 and engine f25b07255da89819 (wt/friendly's build of 666b4c8;
+#     another id only means the build's bytes differ, not the rule), and cppanatron.build_info()
+#     git_sha 666b4c8, not dirty.
 name: ppo-2p-fr
 seed: 42                        # puffer-graph2's: the same map pool, and init/sample/rollout seeds
 env:
@@ -198,7 +232,7 @@ train:
   max_grad_norm: 2.0
   bptt_horizon: 64
   minibatch_size: 16384
-  max_minibatch_size: 4096      # 4.5 GB on the 8 GB card alone
+  max_minibatch_size: 4096      # the start peaked at 4.74 GiB allocated: the 8 GB card alone
   prio_alpha: 0.8
   prio_beta0: 0.2
   vtrace_rho_clip: 1.0
