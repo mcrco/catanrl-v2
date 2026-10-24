@@ -91,7 +91,7 @@ catanrl run configs/experiments/puffer-graph2.yaml --only public
 - *identity.* the merge moved the code ids every record is keyed under (catanrl `55ba5984`, engine `a9b40d9c`, train `55588933`), so new rows pair with older records only through `tools/search_probe.py --pair` (old-rule games are bit-identical).
 - *the champion eval (marco).* ppo stagnation has been read from the win rate vs F, which sits near its 95% ceiling. every select now also plays the current checkpoint against a champion (here the start), 1,000 games on the same boards each time: ±3.1 pp, paired game by game across checkpoints. the finals include the start under the new rules, since it never trained on them. at e0 the champion row reads 50.0 (`fa6ea360`), as it must.
 
-*progress (2026-10-24 13:30, e1250 of \~7,576).* champion row by blocks of five selects (5,000 games each): 48.8, 50.3, 49.9, 52.8, 50.6%; vs F 96.1 → 97.0–97.2%. the net dips below its start for the first \~200 epochs on the new rules, then edges above it. the trainer's best is e750 (54.7, `71cf79d7`), the highest of many noisy rows, so it is biased up; the heldout finals give the unbiased number.
+*progress (2026-10-24 16:50, e2750 of \~7,576).* champion row by blocks of five selects (5,000 games each): 48.8, 50.3, 49.9, 52.8, 50.6, 51.8, 53.1, 52.2, 54.6, 54.2, 53.7%; vs F 96.1 → 97.2–97.7%. the net dips below its start for the first \~200 epochs on the new rules, then climbs to about 54% against it by e2000. the trainer's best is the highest of many noisy rows (now e2750, 56.7), so it is biased up; the heldout finals give the unbiased number.
 
 *result.* running.
 
