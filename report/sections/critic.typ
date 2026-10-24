@@ -51,7 +51,7 @@ marco's idea: during multi-agent ppo the critic chases a policy that keeps chang
   owner: "marco",
   config: "configs/experiments/critic-refit-2p.yaml",
   wandb: (("critic-refit-2p-main-790938cd", "critic-refit-2p/main"), ("az-2p-2048-soft-main-8105fbb1", "az-2p-2048-soft (baseline 856a0421)"), ("gumbel-edge-2p-main-efda50ac", "gumbel-edge-2p, eval only (baseline 831eea84)")),
-  records: ("576848d8", "856a0421", "831eea84"),
+  records: ("576848d8", "f841ca86", "856a0421", "831eea84"),
 )
 #tldr[the policy stays bit-identical while a separate copy of the critic trains on the outcomes of \~400k of the frozen policy's games. paused at e266 for the canopy search row, it resumed on 2026-10-24. the critic's seat sum went from 0.936 to 1.000 by e50; the search rows at e500 decide the result.]
 
@@ -75,7 +75,12 @@ marco's idea: during multi-agent ppo the critic chases a policy that keeps chang
   caption: [the two rows that decide `critic-refit-2p`, and the rows they pair with.],
 )
 
-*result.* pending. the main arm was paused at e266 of 500 to free the gpu for the canopy search row (@sec:canopy; the two don't fit in 8 gb together) and resumed on 2026-10-24 00:54. by e50 the critic's two seats' values summed to 1.000, against the start's 0.936.
+*result so far.* the main arm was paused at e266 for the canopy search row (@sec:canopy; the two don't fit in 8 gb together) and resumed on 2026-10-24 00:54; training ended at 03:00.
+- *held-out critic* (2,048 games on boards outside the training pool, 330k decisions, game-clustered cis, paired per decision): cross-entropy against the outcome went from 0.3634 at e0 to *0.3460* at e500, −0.0174 nats #ci[−0.0212][−0.0134]. ranking within a turn did not move (auc 0.9010 → 0.9016). a calibration-only fix of the start, platt scaling by turn, reaches 0.3470, so the refit beats it by only −0.0011 #ci[−0.0023][+0.0002]; normalizing the start's two seats, v/(v0+v1), already gets 0.3499. converged: e500 is within 0.0001 of e450 (the rule was 0.002), and the curve is flat from about e100.
+- *512-sim search* (the 1,000 games of `select-2p-500`): e500 scores *59.5* #ci[56.4][62.5] (`f841ca86`) against the start's 57.4 (`856a0421`) on the same games, paired +2.1 pp, 105 games won only by e500 against 84 only by the start, mcnemar p = 0.15. not significant at the holm threshold (0.025 for the smaller p).
+- *2048-sim search*: running.
+
+*reading so far.* the refit fixed what the probe said was wrong, the discount, and nothing else: the critic is now calibrated but ranks positions no better, and almost all of the gain is available for free by rescaling the start's values. by e50 the critic's two seats' values summed to 1.000, against the start's 0.936.
 
 #repro(```sh
 catanrl run configs/experiments/critic-refit-2p.yaml --only main   # resumes from e266 in the same runs dir
