@@ -255,7 +255,8 @@ def summarize(experiment: str) -> Path:
         for i, entry in enumerate(run.config["eval"]["final"]):
             try:
                 with canopy_release(run.config.get("runtime")):
-                    record = find([known.get(s) or expand_init(s, run.init_ref) for s in entry["lineup"]],
+                    record = find([known.get(s) or expand_init(s, run.init_ref, run.champion_ref)
+                                   for s in entry["lineup"]],
                                   entry["suite"], fill=entry.get("fill"), harness=entry.get("harness", "native"))
             except (RuntimeError, ValueError):
                 record = None
@@ -281,5 +282,8 @@ def summarize(experiment: str) -> Path:
 
 
 def _lineup_label(lineup: list[str]) -> str:
-    """``MCTS vs POLICY(init)``: each slot's key, marking the run's start."""
-    return " vs ".join(str(s).split(":")[0] + ("(init)" if "${init}" in str(s) else "") for s in lineup)
+    """``MCTS vs POLICY(init)``: each slot's key, marking the run's start and its champion."""
+    def mark(spec: str) -> str:
+        return "(init)" if "${init}" in spec else "(champion)" if "${champion}" in spec else ""
+
+    return " vs ".join(str(s).split(":")[0] + mark(str(s)) for s in lineup)

@@ -203,6 +203,8 @@ def _declare(game) -> dict:
                "completed_turns": game.completed_turns, "longest_road": holder("has_road"),
                "largest_army": holder("has_army"), "prompt": game.current_prompt.name,
                "free_roads": int(game.free_roads_available)}
+    if game.largest_army_taken_from is not None:  # a friendly-robber knight's robber prompt
+        options["largest_army_taken_from"] = int(game.largest_army_taken_from)
     return {"players": players, "options": options}
 
 

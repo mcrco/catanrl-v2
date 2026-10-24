@@ -25,6 +25,7 @@ def _play(name: str, index: int, *, every: int = 1, friendly_robber: bool | None
     the trackers are compared at every sync. Returns the trackers' stats."""
     ls = lockstep(name, index, friendly_robber=friendly_robber)
     n = len(ls.colors)
+    stats: Counter = Counter()
     bridged = [SeatTracker(view) for view in ls.views()]
     native = [cpp.HandTracker(ls.native, seat) for seat in range(n)]
     for step in range(MAX_STEPS):
@@ -43,7 +44,14 @@ def _play(name: str, index: int, *, every: int = 1, friendly_robber: bool | None
             tracker.sync(views[seat], game_over=over)
             if not over and ls.current_seat == seat:
                 # What the seat is offered (natively applied at every transition to it).
-                tracker.options([from_catanatron_action(a) for a in ls.truth.playable_actions])
+                offered = [from_catanatron_action(a) for a in ls.truth.playable_actions]
+                tracker.options(offered)
+                if ls.native.current_prompt == cpp.ActionPrompt.MOVE_ROBBER:
+                    # The replay's placeholders never change the robber moves (public points).
+                    assert sorted(map(repr, tracker.game.playable_actions)) == sorted(map(repr, offered))
+                    tiles = {tuple(a.value[0]) for a in offered}
+                    stats["robber_prompts"] += 1
+                    stats["shielded_robber_prompts"] += len(tiles) < len(ls.truth.state.board.map.land_tiles) - 1
             assert not tracker.mismatches, tracker.mismatches  # re-anchored if it had to
             tracker.tracker.check_public(tracker.game)
             if tracker.stats["tracker_resets"] or tracker.stats["reanchored"]:
@@ -52,7 +60,6 @@ def _play(name: str, index: int, *, every: int = 1, friendly_robber: bool | None
                     assert tracker.tracker.consistent_with(ls.native), (name, index, step, seat)
             else:
                 assert tracker.tracker == native[seat], (name, index, step, seat)
-    stats: Counter = Counter()
     for tracker in bridged:
         stats.update(tracker.stats)
         stats.update({f"repair:{k}": v for k, v in tracker.replay.repairs.items()})
@@ -70,13 +77,16 @@ def test_tracker_equals_the_native_tracker(name):
 
 
 def test_tracker_equals_the_native_tracker_with_the_friendly_robber():
-    """The seat's robber options bound the others' victory point cards, and
-    the replay's placeholders are redealt to offer the same options."""
+    """The friendly robber (OpenHex's rule, the truth re-ruled alike: see
+    bridge_games) reads public points: the seat's robber options reveal no
+    victory point cards, and the replay offers the truth's robber moves
+    whatever its placeholders hold, so it follows without a repair."""
     stats = Counter()
-    for name, index in (("base-3p", 1), ("base-4p", 0), ("extension-5p", 1)):
+    for name, index in (("base-2p", 2), ("base-3p", 1), ("base-4p", 0), ("extension-5p", 1)):
         stats += _play(name, index, friendly_robber=True)
-    assert stats["robber_options_redealt"] > 0
-    assert not stats["broken"] and not stats["tracker_resets"]
+    assert stats["robber_prompts"] > 20 and stats["shielded_robber_prompts"] > 5
+    assert not stats["broken"] and not stats["tracker_resets"] and not stats["mismatched_syncs"]
+    assert not stats["reanchored"]
 
 
 def test_monopolies_between_sparse_views_come_from_hand_sizes():

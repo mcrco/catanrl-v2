@@ -418,6 +418,99 @@ def test_a_select_of_a_checkpoint_newer_than_the_row_waits_for_its_row(monkeypat
     assert wb.history[1][1]["select/select-2p vs F/score_rate"] == 0.5 and wb.history[1][1]["x"] == 2.0
 
 
+def monitor_row(ref, record, name="champ"):
+    """A monitor's metrics row as catanrl.train.select writes it."""
+    rate = record.summary["score_rate"]
+    return {"epoch": ref.epoch, "agent_steps": ref.agent_steps, f"select/{name}/score_rate": rate,
+            f"select/{name}/wilson_low": rate - 0.1, f"select/{name}/wilson_high": rate + 0.1,
+            f"select/{name}/games": 4, f"select/{name}/eval_id": record.eval_id}
+
+
+@pytest.mark.parametrize("monitors", [1, 2])
+@pytest.mark.parametrize("order", ["before", "after"])
+def test_monitor_rows_join_their_checkpoints_row(monkeypatch, order, monitors):
+    """A monitor's row lands at its checkpoint's step whether it comes before that step's epoch
+    row (PPO checkpoints inside the epoch) or after it (imitation and AlphaZero log, then
+    checkpoint), neither drops the other, and the record it cites is not logged again under
+    its suite-and-opponents name (with eval.select.from, best cites that record); the backfill's
+    timeline is the same. With a second monitor, its record is on disk while its row is still
+    to come when the mirror handles the first monitor's row (a mirror running behind): the
+    first must not log it."""
+    mod = stub_wandb(monkeypatch)
+    monkeypatch.setenv("CATANRL_WANDB_PROJECT", "p")
+    champ, guard = ("POLICY:champ@e9",), ("AB",)
+    with RunWriter.open(make_variant(), argv=["t"]) as w:
+        model = tiny()
+        e0 = commit(w, model, 0)
+        c0 = write_record(w, e0, suite="select-2p", purpose="select", rate=0.5, opponents=champ)
+        g0 = monitors == 2 and write_record(w, e0, suite="select-2p", purpose="select", rate=0.8, opponents=guard)
+        w.log(monitor_row(e0, c0), 0)
+        if g0:
+            w.log(monitor_row(e0, g0, "guard"), 0)
+        f0 = write_record(w, e0, suite="select-2p", purpose="select", rate=0.2)
+        w.set_alias("best", e0, record=f0)
+        w.log({"epoch": 1, "agent_steps": 10, "losses/entropy": 1.0}, 10)
+        e2 = commit(w, model, 2)
+        epoch2 = {"epoch": 2, "agent_steps": 20, "losses/entropy": 0.5}
+        if order == "after":
+            w.log(epoch2, 20)
+        c2 = write_record(w, e2, suite="select-2p", purpose="select", rate=0.7, opponents=champ)
+        g2 = monitors == 2 and write_record(w, e2, suite="select-2p", purpose="select", rate=0.9, opponents=guard)
+        w.log(monitor_row(e2, c2), 20)
+        if g2:
+            w.log(monitor_row(e2, g2, "guard"), 20)
+        w.set_alias("best", e2, record=c2)  # select.from: the select's record is the monitor's
+        if order == "before":
+            w.log(epoch2, 20)
+        w.log({"epoch": 3, "agent_steps": 30, "losses/entropy": 0.4}, 30)
+        w.finish("finished")
+    run = load_experiment("exp/v")
+    (wb,) = mod.runs
+    assert wb.dropped == [] and wb.summary[THROUGH_KEY] == 30 and wb.summary["best/metric"] == 0.7
+    rows = dict(wb.history)
+    assert list(rows) == [0, 10, 20, 30]
+    assert rows[0]["select/champ/score_rate"] == 0.5 and rows[0]["select/select-2p vs F/score_rate"] == 0.2
+    assert rows[20]["select/champ/score_rate"] == 0.7 and rows[20]["losses/entropy"] == 0.5
+    assert rows[20]["select/champ/games"] == 4 and "select/champ/eval_id" not in rows[20]  # strings stay out
+    assert not [k for row in rows.values() for k in row if "POLICY:champ" in k or " vs AB/" in k]
+    if monitors == 2:
+        assert rows[0]["select/guard/score_rate"] == 0.8 and rows[20]["select/guard/score_rate"] == 0.9
+    assert dict(wm.timeline(run)) == rows
+    assert len(run.metrics()) == 3 + 2 * monitors
+    assert [r["epoch"] for r in run.metrics() if "losses/entropy" in r] == [1, 2, 3]
+
+
+def test_two_monitors_replayed_by_a_later_launch(monkeypatch):
+    """Rows a launch made without a mirror replay through the next launch's mirror: a step's
+    second monitor record is not logged under its suite-and-opponents name by the first
+    monitor's row (every stored monitor row's record is marked before the replay)."""
+    mod = stub_wandb(monkeypatch)
+    champ = ("POLICY:champ@e9",)
+    v = make_variant()
+    with RunWriter.open(v, argv=["t"]) as w:  # no project: no mirror
+        model = tiny()
+        for epoch in (0, 2):
+            ref = commit(w, model, epoch)
+            c = write_record(w, ref, suite="select-2p", purpose="select", rate=0.5 + epoch / 10, opponents=champ)
+            f = write_record(w, ref, suite="select-2p", purpose="select", rate=0.9)
+            w.log(monitor_row(ref, c), ref.agent_steps)
+            w.log(monitor_row(ref, f, "f"), ref.agent_steps)
+            w.set_alias("best", ref, record=c)
+            w.log({"epoch": epoch + 1, "agent_steps": 10 * (epoch + 1), "losses/entropy": 1.0}, 10 * (epoch + 1))
+        w.request_stop()
+    assert mod.runs == []
+    monkeypatch.setenv("CATANRL_WANDB_PROJECT", "p")
+    with RunWriter.open(v, argv=["t"]) as w:
+        w.log({"epoch": 4, "agent_steps": 40, "losses/entropy": 0.4}, 40)
+        w.finish("finished")
+    (wb,) = mod.runs
+    rows = dict(wb.history)
+    assert list(rows) == [0, 10, 20, 30, 40] and wb.dropped == []
+    assert not [k for row in rows.values() for k in row if " vs " in k]
+    assert rows[0]["select/f/score_rate"] == 0.9 and rows[20]["select/champ/score_rate"] == 0.7
+    assert dict(wm.timeline(load_experiment("exp/v"))) == rows
+
+
 # ---------------------------------------------------------------- backfill
 
 

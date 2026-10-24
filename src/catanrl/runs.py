@@ -8,15 +8,17 @@ name from any cwd or worktree.
       run.json         trainer-owned, atomic: status, launches, committed checkpoints
       aliases.jsonl    append-only: best (cites its select eval), pins
       bindings.jsonl   append-only: refs to other runs pinned after creation
-      metrics.jsonl    one row per epoch (rows a resume rolled back are hidden)
+      metrics.jsonl    one row per epoch, one per monitor eval (select/<name>/...);
+                       rows a resume rolled back are hidden
       provenance/      launch<n>.json and a patch per dirty repo
       checkpoints/     e000600.pt ...; orphaned/launch<n>/ after a crash
       trainer_state.pt the commit point
       evals/<suite>/   <eval_id>.json + .games.jsonl
 
 At a checkpoint the trainer writes the ``.pt``, then ``trainer_state.pt``
-(the commit), then ``run.json``; then the select eval runs and ``best``
-moves. A resume moves any ``.pt`` newer than the trainer state to
+(the commit), then ``run.json``; then the monitor evals (``eval.monitor``) run,
+each logging a metrics row of its own at the checkpoint's step, and the select
+eval runs and ``best`` moves. A resume moves any ``.pt`` newer than the trainer state to
 ``orphaned/``, so it is never ``latest`` nor an epoch ref.
 
 When the experiment's ``meta.wandb.project`` (or ``CATANRL_WANDB_PROJECT``)
@@ -66,6 +68,10 @@ LOCK_WAIT_S = 2.0
 #: Statuses another run may be used from: a dependent stage starts, a final's ref to a run
 #: of another experiment is pinned (a time_limit run pins its epoch).
 USABLE = ("finished", "time_limit")
+#: Keys of a monitor's metrics row (catanrl.train.select): ``select/<name>/<field>``, at the
+#: step of the checkpoint it scored, beside the bookkeeping ones.
+MONITOR_PREFIX = "select/"
+ROW_KEYS = ("launch", "step", "epoch", "agent_steps")
 
 
 class RunError(RuntimeError):
@@ -251,6 +257,12 @@ class Run:
         """The checkpoint ``init_from`` loaded the actor from, as pinned at creation: ``${init}``."""
         return ((self.manifest.get("resolved") or {}).get("init_from") or {}).get("actor")
 
+    @property
+    def champion_ref(self) -> str | None:
+        """``eval.champion`` as pinned at creation: ``${champion}`` (None when the config sets
+        none: its ``${champion}`` was resolved to ``${init}``)."""
+        return (self.manifest.get("resolved") or {}).get("champion")
+
     def bindings(self) -> dict[str, str]:
         """Specs naming other runs, as pinned (at creation, or when a later final eval first ran)."""
         out = dict((self.manifest.get("resolved") or {}).get("specs") or {})
@@ -402,7 +414,10 @@ def fork(ref: str, *, as_: str, overrides: Sequence[str] = ()) -> Variant:
                            f"{'nothing' if state is None else 'e' + str(state['epoch'])}, not e{target.epoch}: "
                            "a fork continues the latest commit")
         raw = merge(_rebase(parent.config, parent.ref, f"{experiment}/{name}"), parse_overrides(overrides))
-        raw["eval"] = expand_init(raw["eval"], parent.init_ref)  # a continuation plays the parent's start
+        # A continuation plays the parent's start and champion, as the parent pinned them.
+        raw["eval"] = expand_init(raw["eval"], parent.init_ref, parent.champion_ref)
+        if parent.champion_ref is not None:
+            raw["eval"]["champion"] = parent.champion_ref
         raw["init_from"] = {"ckpt": str(target), "parts": ["actor", "critic"], "restore": "weights+optimizer"}
         cfg = resolve(raw, experiment=experiment, variant=name)
         variant = Variant(experiment=experiment, name=name, stage=None, labels={"fork": parent.ref}, config=cfg,
@@ -444,7 +459,7 @@ def _missing_selects(run: Run) -> list[CheckpointRef]:
     from catanrl.eval.results import find
 
     every = int(select.get("every", 1))
-    lineup = expand_init(select["lineup"], run.init_ref)
+    lineup = expand_init(select["lineup"], run.init_ref, run.champion_ref)
     return [ref for ref in run.checkpoints() if ref.epoch % every == 0
             and find([str(s).replace("${self}", str(ref)) for s in lineup], select["suite"],
                      fill=select.get("fill")) is None]
@@ -469,18 +484,38 @@ def check_runs(pattern: str = "*") -> list[dict]:
 # ---------------------------------------------------------------- binding refs
 
 
-def expand_init(value: Any, init: str | None) -> Any:
+def expand_init(value: Any, init: str | None, champion: str | None = None) -> Any:
     """``value`` (a spec, a lineup, an eval section) with ``${init}`` as ``init``, the pinned
-    checkpoint a run's actor started from (:attr:`Run.init_ref`)."""
+    checkpoint a run's actor started from (:attr:`Run.init_ref`), and ``${champion}`` as
+    ``champion``, the pinned ``eval.champion`` (:attr:`Run.champion_ref`)."""
     if isinstance(value, Mapping):
-        return {k: expand_init(v, init) for k, v in value.items()}
+        return {k: expand_init(v, init, champion) for k, v in value.items()}
     if isinstance(value, list):
-        return [expand_init(v, init) for v in value]
-    if not isinstance(value, str) or "${init}" not in value:
+        return [expand_init(v, init, champion) for v in value]
+    if not isinstance(value, str):
+        return value
+    if "${champion}" in value:
+        if champion is None:
+            raise RunError(f"{value}: ${{champion}} is eval.champion as pinned when the run was created, "
+                           "and there is none")
+        value = value.replace("${champion}", champion)
+    if "${init}" not in value:
         return value
     if init is None:
         raise RunError(f"{value}: ${{init}} is the checkpoint init_from loads the actor from, and there is none")
     return value.replace("${init}", init)
+
+
+def monitor_evals(row: Mapping[str, Any]) -> dict[str, str]:
+    """``{monitor name: eval_id}`` of the monitor results a metrics row holds."""
+    head, tail = MONITOR_PREFIX, "/eval_id"
+    return {key[len(head):-len(tail)]: value for key, value in row.items()
+            if key.startswith(head) and key.endswith(tail) and isinstance(value, str)}
+
+
+def is_monitor_row(row: Mapping[str, Any]) -> bool:
+    """Whether a metrics row is a monitor's (its own row at a checkpoint's step), not an epoch's."""
+    return bool(monitor_evals(row)) and all(k in ROW_KEYS or k.startswith(MONITOR_PREFIX) for k in row)
 
 
 def _model_spec(spec: str) -> bool:
@@ -554,6 +589,9 @@ def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
         ckpt = init["ckpt"]
         out["init_from"] = {part: str(load_checkpoint(ckpt[part] if isinstance(ckpt, Mapping) else ckpt).ref)
                             for part in init_parts(init)}
+    champion = (cfg.get("eval") or {}).get("champion")
+    if champion is not None:  # absent before eval.champion existed: older manifests stay as they are
+        out["champion"] = str(load_checkpoint(champion).ref)
     start = (out.get("init_from") or {}).get("actor")
     experiment = own.partition("/")[0] if own else None
     out["specs"] = {}
@@ -562,7 +600,7 @@ def bind_refs(cfg: Mapping[str, Any], own: str | None = None) -> dict:
             others = foreign_runs(spec, experiment) if experiment is not None else []
             if any(run_status(other) not in USABLE for other in others):
                 continue
-            bound = bind_spec(expand_init(spec, start), own)
+            bound = bind_spec(expand_init(spec, start, out.get("champion")), own)
             if bound is not None:
                 out["specs"][spec] = bound
     return out
@@ -582,7 +620,7 @@ def bound_lineup(run: Run, lineup: Sequence[str], *, pin: bool = True) -> list[s
                 if status not in USABLE:
                     raise Unbound(f"{spec} waits for {other}, which is {status or 'not there yet'}; "
                                   "the final is played once it is finished")
-            expanded = expand_init(spec, run.init_ref)
+            expanded = expand_init(spec, run.init_ref, run.champion_ref)
             bound = bind_spec(expanded, run.ref)
             if bound is None:  # a bot, ``${...}`` or the run itself: resolved when the eval runs
                 bound = expanded
@@ -827,6 +865,22 @@ class RunWriter(Run):
         canon.atomic_write_json(self.path / "run.json", run)
         return state
 
+    def pending_monitors(self, monitors: Sequence[Mapping[str, Any]]) -> list[tuple[CheckpointRef, list[str]]]:
+        """Committed checkpoints at a monitor's cadence whose row for it is not in metrics.jsonl
+        (a crash cut its eval or its row off; a new run's e0 before its monitors ran), with the
+        names of the monitors each still owes."""
+        ckpts = self.checkpoints() if monitors else []
+        if not ckpts:
+            return []
+        logged = {(row.get("epoch"), name) for row in self.metrics() for name in monitor_evals(row)}
+        out = []
+        for ref in ckpts:
+            names = [str(m["name"]) for m in monitors if ref.epoch % int(m.get("every", 1)) == 0
+                     and (ref.epoch, str(m["name"])) not in logged]
+            if names:
+                out.append((ref, names))
+        return out
+
     def pending_selects(self) -> list[CheckpointRef]:
         """Committed checkpoints whose select eval is missing, plus the last one
         (its select ran after the commit, so its alias decision may be lost)."""
@@ -867,9 +921,14 @@ class RunWriter(Run):
 
 def _bound_variant(variant: Variant, resolved: Mapping[str, Any]) -> Variant:
     init = variant.config.get("init_from")
-    if not init or "init_from" not in resolved:
+    bound_init = bool(init) and "init_from" in resolved
+    champion = resolved.get("champion")
+    if not bound_init and champion is None:
         return variant
     cfg = dict(variant.config)
-    cfg["init_from"] = {**init, "ckpt": dict(resolved["init_from"]), "parts": list(resolved["init_from"])}
-    cfg["eval"] = expand_init(cfg["eval"], resolved["init_from"].get("actor"))  # the trainer's select lineup
+    actor = None
+    if bound_init:
+        cfg["init_from"] = {**init, "ckpt": dict(resolved["init_from"]), "parts": list(resolved["init_from"])}
+        actor = resolved["init_from"].get("actor")
+    cfg["eval"] = expand_init(cfg["eval"], actor, champion)  # the trainer's select and monitor lineups
     return dataclasses.replace(variant, config=cfg)

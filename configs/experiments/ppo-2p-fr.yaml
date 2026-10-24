@@ -1,0 +1,266 @@
+# marco (2026-10-24): "is friendly robber on by default in openhex? if so, we should do all
+# trainign going forward on friendly robber, and retrain our 1v1 ppo bot on friendly robber. also,
+# i think for trainign ppo, we've been measuring stagnation by winrate against F, but we should
+# definitely still have a winrate vs champion eval as well. also, i think your experiment list
+# makes sernse, critic refit defintiely most important, with training for friendly robber and a
+# continued ppo training of our 1v1 ppo model (with friendly robber on if it's default in openehx)
+# for another ~1B steps, seeing if it still improves against chamption"
+#
+# yes for 1v1: openhex's code defaults are 4 players, 10 vp, discard 7, the normal robber and
+# random dice (openhex/state.py GameConfig), and its queue overrides them per mode
+# (game_manager.py create_game): 1v1 is 15 vp, discard 9, robber friendly, dice balanced.
+# base-2p-fr is that game minus the balanced dice (the engine rolls fair dice; balanced dice are
+# marco's call). its 4p mode is the defaults, our base-4p, so only 2p moves to the friendly robber.
+# the engine plays openhex's friendly robber exactly (engine 666b4c8: public points, and a
+# knight's tile judged on the points before its largest army award; base-2p-fr's comment).
+#
+# what this run is: the deployed 1v1 net, puffer-graph2/full@best (e3350, #3355b5059503, obs.level
+# full, deploy/openhex.yaml plays it through BELIEF worlds=16 and MCTS 1024), trained on for
+# 1.004B more agent steps (7600 epochs) on base-2p-fr, judged against itself as it is now (the
+# champion). the recipe is puffer-graph2's full variant key for key (graph-s, one shared trunk,
+# muon, v-trace critic as pinned there, gamma 0.999, 1032 games x 2 rows x 64 steps, 16384-row
+# minibatches as 4 x 4096, prio 0.8 / 0.2, vf 2.0, clip 2.0, ent 0.005, the same seed 42 and so
+# the same 4096 training boards, turn limit 1000), pinned by
+# tests/test_experiment_configs.py::test_ppo_2p_fr_is_puffer_graph2_full_continued. the changes:
+#   - env: base-2p-fr. the map pool is the start's own 4096 boards (a map's seed and hash don't
+#     depend on the rules); the pool's digest does (it holds the rules), so it's a new pool record.
+#   - init_from: the start's actor and critic (the shared trunk, both heads), weights only.
+#   - total_timesteps: 7600 x 132,096 = 1,003,929,600. a multiple of 50 epochs, so the last epoch
+#     is a select epoch and the cosine's T_max (total // batch) ends exactly on it.
+#   - learning_rate 0.0025, cosine (anneal_lr) to 0.1x = 0.00025, no warmup (below).
+#   - evals: the champion monitor and the vs-F monitor on select-2p-fr; best follows the champion.
+#
+# init_from, not fork. catanrl fork continues a run's latest commit only: puffer-graph2/full's is
+# e3786, not best (e3350). it would also copy the trainer state: the epoch and step counters
+# (500M already spent), the scheduler (T_max 3785, and the periodic cosine climbs back toward
+# 5e-3 past it), and the map pool digest, which holds the rules, so a fork onto base-2p-fr is
+# refused at its first resume ("the map pool changed since the run started"). init_from starts
+# a new run from e3350's weights with this file's schedule and budget, and pins the start at
+# creation (config.json resolved.init_from), which is ${init} and so ${champion}.
+# the optimizer starts fresh (restore: weights, the default). nothing is lost: .pt checkpoints
+# hold weights only, so e3350's optimizer state no longer exists (trainer_state.pt holds e3786's,
+# and restore: weights+optimizer is only made by fork), and muon's whole state is one momentum
+# buffer per tensor (heavyball momentum 0.95: ~20 optimizer steps of memory, ~1.3 epochs at 16
+# steps an epoch), which rebuilds itself in the first epochs. the prio beta anneal restarts with
+# the run (0.2 -> 0.84 over the 7600 epochs), as it would in a fork.
+#
+# the learning rate. the original cosine ran 0.005 -> 0.0005 over 3785 epochs: 0.00065 at e3350.
+# vs F (400 games a row) it reached ~0.92 by e1550 (lr 0.0034) and hovered at 0.90-0.93 to e2400
+# (lr 0.0018; approx_kl 0.009-0.018 an epoch, clipfrac 0.05 -> 0.03), gained its last ~3 pp from
+# e2400 to e2700 as the lr fell to 0.00135, and sat at ~0.95 from there to the end (lr 0.00135 ->
+# 0.0005, kl 0.0015-0.006): the anneal bought the end of the curve. muon orthogonalizes every
+# update, so a step's size is set by the lr, not by the gradient: a converged net doesn't take
+# smaller steps by itself, it sits at a noise floor the lr sets.
+#   - not 0.005: a full re-warm moves every weight matrix 7.7x as far per step as at e3350, the
+#     regime the original spent its first half in, and would mostly re-run that first half.
+#   - not the floor (0.0005, or 0.00065 annealed down): the original's last 1000 epochs sat
+#     there and didn't move vs F; 1B more steps at that lr tests a longer tail, not "does more
+#     training help", and leaves little room to re-fit the robber decisions the rule changes.
+#   - 0.0025 = half the original's peak, the lr it had at e2030 (268M steps), a regime it trained
+#     stably in (kl ~0.01, clipfrac ~0.04) and annealed out of into its last ~3 pp; the floor
+#     0.00025 is half the original's. so this is the original's schedule at half height and twice
+#     the length: 3.9x e3350's lr to start, below 0.0014 (where the original reached its plateau)
+#     from e3747 on, i.e. the last 509M steps, as many as the whole original run, and below the
+#     original's floor for the last 1644 epochs (217M steps).
+#   - no warmup: the trainer has none (the cosine starts at its peak; a warmup would be a new
+#     train key), and the original started at its 0.005 peak from random weights without one.
+#     muon's step size doesn't depend on its momentum buffer, so a fresh optimizer doesn't take
+#     an oversized first step; and the clip (0.2) bounds each update's policy change. the
+#     champion rows may dip below 50% early and recover as the lr falls (the jump from 0.00065
+#     adds noise before it adds skill); that would be the re-warm, not a failure. approx_kl and
+#     clipfrac are logged every epoch.
+#
+# evals during training (every 50 epochs: e0, e50, ..., e7600, 153 checkpoints; select-2p-fr is
+# select-2p's seed 123 on base-2p-fr, 500 boards x both seat orders = 1000 games, turn limit
+# 500, strict):
+#   - champion: POLICY ${self} vs POLICY ${champion}, the start (eval.champion is unset, so
+#     ${champion} is init_from's pinned actor, puffer-graph2/full@e3350#3355b5059503). e0 is the
+#     start's own weights, a mirror match: exactly 0.500, every board split between the seats.
+#   - f: POLICY ${self} vs F, the yardstick marco has watched. the start scores 95.8% [94.4, 96.9]
+#     on these 1000 games on the fixed engine (666b4c8, cpu: 8fdc24a3 in a scratch runs dir; also
+#     95.8 on ebf8ee6; 95.6% under the old rule), so e0's f row should read 95.8.
+#   - best follows champion (eval.select: {from: champion}). F is at its ceiling: near 96% a 1000-
+#     game row separates two checkpoints only if they differ by 2.0-2.9 pp vs F, which is 70-200
+#     elo at that level (and the ceiling leaves ~4 pp of room); the champion row separates 4.2-4.9
+#     pp at 50%, ~30 elo. so the champion row sees 2-7x smaller strength changes, and it's the
+#     question marco asked. the f rows stay as the guard against beating the start by exploiting its quirks
+#     (the finals check that too).
+#   power (wilson 95%; mde = the gap found 80% of the time at two-sided 5%, 2.8 se; paired se =
+#   sqrt(discordant share / games), discordant shares from stored records of 50-epoch neighbours):
+#     row          games  ci at its level        one checkpoint vs        two checkpoints, paired
+#     champion     1000   +-3.1 pp at 50%        the start: mde 4.4 pp    discordant 0.22-0.30
+#                                                (31 elo)                 (az-2p-2048 POLICY selects
+#                                                                         vs a fixed POLICY 0.218):
+#                                                                         mde 4.2-4.9 pp
+#     f            1000   +-1.25 pp at 95.8%     -                        discordant 0.05-0.11
+#                                                                         (puffer-graph2/full vs F:
+#                                                                         0.05 late, 0.11 at lr
+#                                                                         0.002-0.003): mde 2.0-2.9 pp
+#   best is the highest of 153 champion rows, so its own select score is inflated (the max of
+#   153 rows with se 1.6 pp sits ~2-4 pp above its true score if nothing changed). read the
+#   champion rows as a curve, and the finals for the answer.
+#   pairing two checkpoints: tools/search_probe.py --pair <select/champion/eval_id at eA> <at eB>.
+#   the start's friendly_robber input never trained: it is global feature 17, 0 for the whole of
+#   puffer-graph2/full's run (base-2p), so its column of backbone.global_projection.weight is
+#   bit-identical at e0 and e3350 (the random init, norm 0.588; the median trained column 0.692).
+#   on base-2p-fr it is a constant 1, an untrained bias shift: zeroing it changes the start's
+#   argmax on 3.3% of 32,000 acting base-2p-fr rows (mean kl 0.05). as strength, a zero-flag copy
+#   of e3350 (that column zeroed, #d83c9f12) vs e3350, POLICY vs POLICY on the cpu: select-2p-fr
+#   1000 games 0.509 [0.478, 0.540] (engine ebf8ee6); heldout-2p-fr 5000 games 0.501 [0.487,
+#   0.515] (engine 666b4c8, 170b4db1 in a scratch runs dir; seats 0.523 / 0.478). so the shift
+#   costs the start nothing detectable, at most ~1.5 pp. training sets that column within the
+#   first epochs, so up to that much of a gain vs the champion can be this fix rather than "more
+#   training helps": read the champion curve from e50 on (a step at e50 and flat after is the
+#   bias fix), and row 5 net of the control (below). the deployed bot reads this input too: on
+#   openhex 1v1 bridge/openhex.py sets friendly_robber from robberMode, so it plays with the same
+#   (measured harmless) shift.
+#
+# finals, on heldout-2p-fr (heldout-2p's seed 67 on base-2p-fr, 2500 boards x 2 = 5000 games;
+# every row on the same 5000 game ids, so rows pair game by game with search_probe --pair):
+#   1. POLICY @best vs F and 2. BELIEF @best worlds=16 vs F: the yardstick, policy (an oracle at
+#      obs.level full: it sees F's dev cards) and fair.
+#   3. POLICY start vs F and 4. BELIEF start vs F: the baselines on the new rule (the start
+#      never trained with it; on heldout-2p it scored 95.16 / 95.06). 1 vs 3 and 2 vs 4 pair.
+#   5. POLICY @best vs POLICY start and 6. BELIEF @best vs BELIEF start (worlds=16 both): the
+#      answer to "does it still improve against the champion", raw and as deployed (belief).
+#      5000 games rather than 1000: they cost 1-15 min (below), and at 1000 games a true +3 pp
+#      is found about half the time. the first 500 boards are a prefix of this schedule, so a
+#      1000-game read is a subset of these games, not another eval.
+#   power: rows 1-4 +-0.55-0.6 pp at 95-96% (wilson); 1 vs 3 (and 2 vs 4) paired, discordant
+#   0.05-0.11: mde 0.9-1.3 pp. rows 5-6 +-1.4 pp at 50%, mde 2.0 pp against 50% (14 elo).
+#   row 5 net of the bias fix: row 5 minus (the control - 0.5) = row 5 - 0.001, the control on
+#   the same 5000 heldout-2p-fr games (above); treated as independent rows the difference has se
+#   ~1.0 pp (mde ~2.8 pp). row 6 has no control of its own (belief seats; the same input).
+#   where the records live: a record is stored with its slot-0 checkpoint's run, so rows 3-4
+#   (slot 0 = ${champion}) go to runs/puffer-graph2/full/evals/heldout-2p-fr/, the start's
+#   directory, not this run's. `catanrl summarize ppo-2p-fr` finds them (find() on the run's
+#   eval.final entries), but this run's w&b finals summary and table hold rows 1, 2, 5 and 6
+#   only, and a later w&b backfill of puffer-graph2/full would list rows 3-4 among its finals
+#   (they are evals of its e3350, on the new rule).
+#   mcts rows (the deployed search) aren't here: ~8 h per 500 games at 1024 sims on the gpu
+#   (2aaf2eb7: 8.0 h). they can be added to eval.final later (unhashed for a train run).
+#
+# cost (rtx 2070 super, alone):
+#   - training: puffer-graph2/full took 7.95 h of wall for 3786 epochs with its 76 selects (7.45 s
+#     median per epoch: collect 1.52, train 5.93; 17.7k agent steps/s), 7.56 s an epoch with
+#     everything. same batch shape here, so 7600 epochs ~ 15.9-16.0 h. the robber rule changes
+#     game length, not the cost of an agent step.
+#   - evals during training: per checkpoint, champion ~14-16 s (1000 policy-vs-policy games:
+#     the cpu-to-gpu ratio of the e3350 select replay, and ~13.8 s per 1000 games in the az runs'
+#     policy selects) + f ~8 s (5000 policy-vs-F games took 37.8 s, ff8528a4) = ~23 s x 153 =
+#     ~1.0 h (the original's 400-game selects, ~0.1 h, are already inside its 7.95 h).
+#   - total ~17 h of wall, then the finals: rows 1 and 3 ~40 s each (ff8528a4), rows 2 and 4 ~6.5
+#     min each (67869e7a: 386 s), row 5 ~75 s, row 6 ~13 min (two belief seats, not measured):
+#     ~30 min.
+#   - gpu memory: puffer-graph2/full peaked at 4.74 GiB allocated by torch (memory/peak_GiB; 1.27
+#     GiB of it rollout), so about 5.2-5.5 GiB on the card with the cuda context and allocator
+#     reserve (an estimate, with expandable_segments); the same here. it fits the 8 GB card alone,
+#     not beside another run: the critic refit has finished by then, and two runs at
+#     max_minibatch_size 4096 don't fit 8 GB.
+#
+# smoke (cpu, scratch runs dir with only e3350 linked in, WANDB_MODE=disabled):
+#   - `catanrl run configs/experiments/ppo-2p-fr.yaml --smoke` (4 epochs of adam on 16 rows,
+#     every eval on 2 boards) finished with every monitor, select and final row. best stayed at
+#     e0: the smoke's adam wrecks the policy (champion 0.5, 0.5, 0, 0, 0), and nothing beat the
+#     start.
+#   - e0 is the start bit for bit: weights #3355b505 (e3350's), all 105 tensors equal, identical
+#     policy and value logits on 16 base-2p-fr rows; the champion row at e0 is 0.500 (each seat
+#     0.5), the mirror.
+#   - friendly_robber is 1 on every acting training row (300 steps of 8 games; the only zeros are
+#     waiting rows, which are all zero) and 0 on base-2p rows.
+#   - the pool is the start's 4096 map hashes (digest 0d6dd31e against the start's 4e0f60b0: the
+#     rules), and none of select-2p-fr's 500 or heldout-2p-fr's 2500 boards is in it.
+#   - this recipe on the cpu (a scratch copy of this file at smoke sizes: muon at the real lr, 8
+#     games in flight, 8 epochs of 128 agent steps, both monitors on 16 boards = 32 games every
+#     epoch): champion 0.500, 0.438, 0.406, 0.531, 0.563, 0.500, 0.500, 0.531, 0.469; f 0.906 x3,
+#     0.875, 0.969 x5. best moved e0 -> e3 (0.531, the epoch f fell to 0.875) -> e4 (0.563), each
+#     alias citing that epoch's champion record: best follows champion, not f. (first-epoch
+#     approx_kl 0.066 on 64-row minibatches; not a forecast of the real run's kl.)
+#   - validate_plan: no problems. ppo-2p-fr/full hashes 1efb94c8273c9789 (pinned in
+#     tests/data/experiment_hashes.json); every other experiment hashes as pinned.
+#   - re-run on engine 666b4c8 (code id engine f25b07255da89819, catanrl 948205ccc476da20): the
+#     --smoke run finished with both monitors every epoch (champion 0.5, 0.5, 0, 0, 0), best at
+#     e0 (#3355b505), all six finals, rows 3-4 written under puffer-graph2/full/evals.
+#
+# launch (from main, after "before launch"):
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
+# W&B as meta below (the mirror tags it from:puffer-graph2/full).
+#
+# before launch:
+#   - the engine changed (wt/friendly: openhex's friendly robber, engine 666b4c8), and so did
+#     the training code (eval.monitor: code_id train 555889338201588f). base-2p-fr needs that
+#     engine: on main's current engine the rule is catanatron's (actual points < 3, which reads
+#     hidden vp cards). so this launches only after wt/friendly is merged into main and main's
+#     engine is rebuilt (uv sync), and that waits until no run is live in main's checkout (a live
+#     run's evals re-hash the code on disk).
+#   - the critic refit (critic-refit-2p) has finished: this run needs the gpu alone.
+#   - `catanrl ls 'puffer-graph2/*'` still shows full's best at e3350 (the ref below carries
+#     #3355b5059503, so creation refuses any other best).
+#   - eval ids key the engine, so every row here is new on the rebuilt engine; nothing pairs
+#     with a record from the old build. after the rebuild, code_id('eval') in main should read
+#     catanrl 948205ccc476da20 and engine f25b07255da89819 (wt/friendly's build of 666b4c8;
+#     another id only means the build's bytes differ, not the rule), and cppanatron.build_info()
+#     git_sha 666b4c8, not dirty.
+name: ppo-2p-fr
+seed: 42                        # puffer-graph2's: the same map pool, and init/sample/rollout seeds
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+model: {preset: graph-s, args: {shared: true}}
+# @best is e3350 (#3355b5059503), pinned at creation in config.json resolved.init_from; the #sha
+# makes creation refuse any other best. weights only (restore: weights); the start's actor and
+# critic: the shared trunk and both heads.
+init_from: {ckpt: "puffer-graph2/full@best#3355b5059503", parts: [actor, critic]}
+train:
+  algo: ppo
+  total_timesteps: 1_003_929_600  # 7600 epochs x 132,096 agent steps (both seats' rows): ~1B more
+  optimizer: muon               # heavyball ForeachMuon(heavyball_momentum=True), as the start
+  learning_rate: 0.0025         # half the start's peak, 3.9x its lr at e3350 (header)
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true               # cosine over the 7600 epochs ...
+  min_lr_ratio: 0.1             # ... to 0.00025
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2             # not read (per-seat value loss)
+  ent_coef: 0.005
+  max_grad_norm: 2.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 4096      # the start peaked at 4.74 GiB allocated: the 8 GB card alone
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  critic_targets: vtrace        # the start's critic targets (puffer-graph2 pinned them), not the lambda default
+  critic_gamma: null
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+eval:
+  select: {from: champion}      # best follows the champion row (header)
+  monitor:
+    - {name: champion, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"], every: 50,
+       metric: score_rate}
+    - {name: f, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
+sweep:
+  axes:
+    obs:
+      full:                     # the start's level (an oracle row; BELIEF is its fair number)
+        obs.level: full
+        eval.final:
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: heldout-2p-fr, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${champion}", F]}
+          - {suite: heldout-2p-fr, lineup: ["BELIEF:ckpt=${champion}:worlds=16", F]}
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${champion}"]}
+          - {suite: heldout-2p-fr, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", "BELIEF:ckpt=${champion}:worlds=16"]}
+  name: "{obs}"
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

@@ -33,6 +33,13 @@ is still a replay of its row at the current code, paired through
 ``results.paired``.
 
     uv run python tools/search_probe.py --pair 90a1f06c <the reuse=true row's eval id>
+
+A training run's monitor (``eval.monitor``, catanrl.train.select) against a fixed
+opponent, such as ``${champion}``, plays the same suite schedule at every
+checkpoint, so two checkpoints' records of it pair game for game. Their eval ids
+are in the run's metrics rows, ``select/<name>/eval_id`` at the two epochs:
+
+    uv run python tools/search_probe.py --pair <eval id at eA> <eval id at eB>
 """
 
 from __future__ import annotations

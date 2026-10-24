@@ -9,6 +9,15 @@ forcing every outcome the log shows. Both engines follow the same rules
 (cppanatron's differential tests), so the replay reaches exactly the view's
 public state at every prompt, and every transition it passes through is
 what the seat's hand tracker learns from (:mod:`catanrl.bridge.tracking`).
+The one exception is the friendly robber: the engine plays OpenHex's rule
+(public points, so no placeholder changes the legal robber moves, and a
+knight's tile judged on the points before its Largest Army award), stock
+Catanatron counts hidden victory point cards and awards first, and a
+Catanatron game under it may rob a seat the replay shields (the step then
+fails like any move the replay cannot follow). A Catanatron server that turns
+the friendly robber on (the house's 1v1 table does not) needs its Catanatron
+re-ruled as OpenHex's first (tests/bridge/bridge_games.py does it for the
+tests).
 
 The other seats' hidden cards are placeholders. They start as the fresh
 game's (empty hands) and change only by public moves and by placeholder
@@ -16,9 +25,9 @@ outcomes the seat cannot see: a hidden steal takes a card the victim's
 placeholder hand holds, a hidden purchase draws a card the placeholder deck
 holds (not a victory point card while another kind is left). When a public
 move needs cards a placeholder hand lacks (a build, a discard, a trade, a
-played card, a monopoly's exact take, a friendly-robber target), the hidden
-cards of the other seats are re-dealt first (``Game.redeal_hidden_cards``)
-with the fewest changes: per resource the cards those seats hold together
+played card, a monopoly's exact take), the hidden cards of the other seats
+are re-dealt first (``Game.redeal_hidden_cards``) with the fewest changes:
+per resource the cards those seats hold together
 (public, from the bank) and every hand size stay as they are, and the unseen
 development cards stay the deck plus their hands. No placeholder ever comes
 from hidden information, and none can make a seat win the replay that has
@@ -234,8 +243,6 @@ class Replay:
             forced["development_card"] = cpp.DevelopmentCard[card]
         elif kind == "MOVE_ROBBER":
             victim_color = value[1]
-            if self.rules.friendly_robber and action not in self.game.playable_actions:
-                self._allow_robber(player, action)
             if victim_color is not None:
                 victim = self.colors.index(victim_color)
                 extra["victim"] = victim
@@ -479,24 +486,6 @@ class Replay:
             self._redeal(playable={seat: card})
             self.repairs["playable"] += 1
 
-    def _allow_robber(self, player: int, action: cpp.Action) -> None:
-        """Friendly robber: give the seats on the robber's target tile the
-        hidden victory point cards that put them at 3 points (the real move
-        shows they have them)."""
-        coordinate = tuple(action.value[0])
-        tile = self.game.board.map.tile_at(coordinate)
-        lower: dict[int, dict[int, int]] = {}
-        for node in tile.nodes:
-            owner = self.game.board.buildings.get(node)
-            if owner is None:
-                continue
-            s = self.colors.index(owner[0].name)
-            points = self.game.player(s).victory_points
-            if s not in (player, self.seat) and points < 3:
-                lower[s] = {VICTORY_POINT: 3 - points}
-        if lower:
-            self._redeal_cards(lower=lower, margin=0)
-
     def _guard_points(self, action: cpp.Action, forced: Mapping[str, Any]) -> None:
         """No move may make a seat win the replay on placeholder victory
         point cards: try a move that adds public points (a build, a knight,
@@ -562,13 +551,3 @@ class Replay:
             raise ReplayError("no deal of the unseen development cards fits the public moves")
         self._redeal(cards={s: deal[s] for s in self.others})
         self.repairs["cards"] += 1
-
-    def match_points(self, floors: Mapping[int, int], caps: Mapping[int, int]) -> None:
-        """Give the other seats between ``floors`` and ``caps`` victory point
-        cards (what the seat's tracker knows), so the replay protects the
-        tiles the friendly robber protects."""
-        held = {s: self.game.player(s).development_cards[VICTORY_POINT] for s in self.others}
-        if all(floors.get(s, 0) <= held[s] <= caps.get(s, held[s]) for s in self.others):
-            return
-        self._redeal_cards(lower={s: {VICTORY_POINT: int(v)} for s, v in floors.items() if v},
-                           caps=caps, margin=0)

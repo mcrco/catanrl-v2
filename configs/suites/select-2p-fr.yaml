@@ -1,0 +1,7 @@
+# select-2p's seed on base-2p-fr, 500 boards (1000 games: a head-to-head is +-3.1 pp).
+# The scenario hash includes the rules, so its boards are not select-2p's.
+purpose: select
+seed: 123
+boards: 500               # each played in every seat rotation
+scenarios: [{game: base-2p-fr}]
+turn_limit: 500

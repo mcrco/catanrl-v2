@@ -147,10 +147,11 @@ class CatanPuffeRL(pufferl.PuffeRL):
 
     def __init__(self, config: dict, vecenv: Any, policy: PufferPolicy, *, writer: Any,
                  select: Mapping[str, Any] | None = None, eval_runtime: Mapping[str, Any] | None = None,
-                 lr_schedule: Mapping[str, Any] | None = None, muon_exclude: Sequence[str] = (),
-                 muon_exclude_lr: float | None = None, frozen: Sequence[str] = ()) -> None:
+                 monitors: Sequence[Mapping[str, Any]] | None = None, lr_schedule: Mapping[str, Any] | None = None,
+                 muon_exclude: Sequence[str] = (), muon_exclude_lr: float | None = None,
+                 frozen: Sequence[str] = ()) -> None:
         self.writer = writer
-        self.selector = Selector(select, writer, eval_runtime or {})
+        self.selector = Selector(select, writer, eval_runtime or {}, monitors=monitors)
         self.lr_schedule = dict(lr_schedule or {"kind": "constant"})
         self.decisions = 0
         self.saved_epoch: int | None = None
@@ -229,7 +230,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
     # ------------------------------------------------------------ checkpoints
 
     def save_checkpoint(self) -> str:
-        """Weights (the .pt), then trainer state (the commit), then the select eval.
+        """Weights (the .pt), then trainer state (the commit), then the monitor and select evals.
 
         PuffeRL calls this from inside train(); step_epoch defers that call until
         the epoch's learning-rate adaptation is applied, so the committed state
@@ -535,8 +536,10 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
         raise ValueError(f"the rollout buffer needs {buffer / 2**30:.1f} GiB: lower env.num_envs or "
                          "train.bptt_horizon")
     select = (cfg.get("eval") or {}).get("select")
+    monitors = (cfg.get("eval") or {}).get("monitor")
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
-    trainer = CatanPuffeRL(config, vecenv, policy, writer=writer, select=select, eval_runtime=eval_runtime,
+    trainer = CatanPuffeRL(config, vecenv, policy, writer=writer, select=select, monitors=monitors,
+                           eval_runtime=eval_runtime,
                            lr_schedule=_lr_schedule(train), muon_exclude=train["muon_exclude"],
                            muon_exclude_lr=train["muon_exclude_lr"], frozen=frozen)
     status = "finished"
@@ -554,8 +557,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
             check_frozen_init(model, cfg.get("init_from"), frozen)
         if state is None:
             trainer.save_checkpoint()  # e000000
-        for ref in writer.pending_selects():
-            trainer.selector.run(ref, model)
+        trainer.selector.catch_up(model)
 
         while trainer.global_step < config["total_timesteps"]:
             if writer.should_stop():
