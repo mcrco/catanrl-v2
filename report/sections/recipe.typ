@@ -121,6 +121,26 @@ catanrl run configs/experiments/puffer-graph2.yaml --only public
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
 ```)
 
+=== the same net, another \~1b steps from e7600 #chip("running") <exp:recipe-2p-openhex-2>
+#meta(
+  dates: "2026-10-25 14:03 onward",
+  owner: "marco",
+  config: "configs/experiments/ppo-2p-fr2.yaml",
+  wandb: (("ppo-2p-fr2-full-0b305e27", "ppo-2p-fr2/full"),),
+  records: (),
+)
+#tldr[@exp:recipe-2p-openhex was still improving against its start when its learning rate hit the floor, so marco asked for another billion steps. same recipe and rules, started from its last checkpoint e7600, which is also the new champion.]
+
+*question.* does the 1v1 net keep improving on openhex's 1v1 rules past 2b total steps?
+
+*setup.* `ppo-2p-fr` exactly, initialized from `ppo-2p-fr/full@e7600` with a fresh optimizer and a fresh cosine (0.0025 → 0.00025 over 7,600 epochs). the champion row plays every 50th checkpoint against e7600 (1,000 games, ±3.1 pp, paired across checkpoints); vs F alongside. finals on `heldout-2p-fr`, 5,000 games each: `@best` vs F, `@best` vs e7600, and `@best` vs the original deployed net `puffer-graph2/full@e3350`, as POLICY and as BELIEF. e0 reads 50.0 vs the champion and 98.8 vs F, as expected. \~17.5 h.
+
+*result.* running.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr2.yaml
+```)
+
 == four players
 
 === 4p specialist: `ppo-4p/main` #chip("done") <exp:recipe-4p>
