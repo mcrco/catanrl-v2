@@ -12,7 +12,7 @@ most experiments are a config under `configs/experiments/`. a number without an 
   *measured.* the raw policy is at 95% vs F (@sec:recipe). the search edge is 53.4–55.2% with our default PUCT search and 62.4% with gumbel alphazero's root at 2048 sims (@sec:search).
 ]
 
-*in flight (24 october 2026).* the 1v1 bot continued for \~1b steps on openhex's 1v1 rules (friendly robber, balanced dice), judged against its start (@sec:recipe). the critic refit came back null (@sec:critic). canopy's search lost to our search 33.0 to 67.0 over 1,000 games (@sec:canopy).
+*latest (25 october 2026).* the deployed 1v1 net, continued for 1b steps on openhex's 1v1 rules (friendly robber, balanced dice), beats its start 63.2% and F 98.8% (@sec:recipe). the critic refit came back null (@sec:critic). canopy's search lost to our search 33.0 to 67.0 over 1,000 games (@sec:canopy).
 
 == current best bots
 
@@ -24,6 +24,9 @@ most experiments are a config under `configs/experiments/`. a number without an 
     table.cell(colspan: 5)[*2 players, BASE, 15 vp*],
     [raw policy at the `public` level (`puffer-graph2/public@e3600`): the fair raw bot, @sec:recipe], [F], [5,000], [*94.96* #ci[94.3][95.5]], [`dc8a611a`],
     [`full` net, belief-averaged (`BELIEF`, 16 worlds, `puffer-graph2/full@e3350`): the deployed 1v1 bot], [F], [5,000], [*95.06* #ci[94.42][95.63]], [`67869e7a`],
+    table.cell(colspan: 5)[*2 players, openhex's 1v1 rules (friendly robber, balanced dice)*],
+    [`ppo-2p-fr/full@e7600`, raw (`full` net continued 1b steps, @sec:recipe)], [F], [5,000], [*98.84* #ci[98.50][99.10]], [`e435b80e`],
+    [the same, raw], [its start, `puffer-graph2/full@e3350`], [5,000], [*63.2* #ci[61.8][64.5]], [`36bd2384`],
     [`full` net, raw (unfair: sees F's dev cards)], [F], [5,000], [95.16 #ci[94.53][95.72]], [`ff8528a4`],
     [2048-sim gumbel MCTS, one world, on `puffer-graph2/public@e3600` (@sec:search)], [its own raw policy], [1,000], [*62.4* #ci[59.4][65.3]], [`831eea84`],
     [released canopy's raw network (@sec:canopy)], [our raw `public` policy], [1,000], [30.5 #ci[27.7][33.4]], [`1c916131`],

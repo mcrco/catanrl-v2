@@ -74,15 +74,15 @@ catanrl run configs/experiments/puffer-graph2.yaml --only full
 catanrl run configs/experiments/puffer-graph2.yaml --only public
 ```)
 
-=== the 1v1 bot on openhex's 1v1 rules, \~1b more steps, judged against its start #chip("running") <exp:recipe-2p-openhex>
+=== the 1v1 bot on openhex's 1v1 rules, \~1b more steps, judged against its start #chip("done") <exp:recipe-2p-openhex>
 #meta(
-  dates: "2026-10-24 10:46 onward",
+  dates: "2026-10-24 10:46 – 2026-10-25 03:56",
   owner: "marco",
   config: "configs/experiments/ppo-2p-fr.yaml",
   wandb: (("ppo-2p-fr-full-fef9516c", "ppo-2p-fr/full"),),
-  records: ("fa6ea360", "2bfef46d", "8a137f56", "ffcc5c1a"),
+  records: ("e435b80e", "6c4f23cb", "3cd19d23", "fa618736", "36bd2384", "db519a9e", "8a137f56", "ffcc5c1a"),
 )
-#tldr[openhex's 1v1 queue plays friendly robber and balanced dice; our 2p bots trained on neither. marco: train on friendly robber from now on, continue the deployed 1v1 net for \~1b more steps on it, and judge it against its start (the champion) as well as F. running since 2026-10-24 10:46, \~17.5 h.]
+#tldr[openhex's 1v1 queue plays friendly robber and balanced dice; our 2p bots trained on neither. marco: train on friendly robber from now on, continue the deployed 1v1 net for \~1b more steps on it, and judge it against its start (the champion) as well as F. result: 63.2% head to head against its start (\~61.7% after correcting for the start's untrained friendly-robber input), 98.8% vs F against the start's 97.3%, still improving at the end.]
 
 *setup.*
 - *the rules.* from openhex's source: its 1v1 queue is 15 vp, discard above 9, friendly robber, balanced dice; its 4p queue is 10 vp, discard above 7, normal robber, random dice, which is our 4p setup already. openhex's friendly robber shields an opponent with *public* points ≤ 2. our engine used *actual* points < 3, which counts hidden victory point cards (a mismatch, and the legal moves leak whether the opponent holds one), so the engine now uses openhex's rule (a knight is judged on the points before it takes largest army, as openhex does). balanced dice are in the engine too (marco: "do balanced dice before 1v1 retrain"), following openhex's code: a 36-card deck refilled when 13 or fewer are left, a recency penalty on totals seen in the last 5 rolls, and per-player seven balancing; search chance nodes use the state's own odds. `base-2p-fr` is openhex's 1v1 exactly: 15 vp, discard above 9, friendly robber, balanced dice. random-dice, normal-robber games play bit-identically to the old engine. the network gets no dice-state input, so the policy plays the dice blind and only the search reads them. the two recorded openhex games say balanced dice but were played on fair dice (an openhex bug, since fixed); the bridge falls back to fair dice if a roll is impossible under the balanced deck.
@@ -91,9 +91,31 @@ catanrl run configs/experiments/puffer-graph2.yaml --only public
 - *identity.* the merge moved the code ids every record is keyed under (catanrl `55ba5984`, engine `a9b40d9c`, train `55588933`), so new rows pair with older records only through `tools/search_probe.py --pair` (old-rule games are bit-identical).
 - *the champion eval (marco).* ppo stagnation has been read from the win rate vs F, which sits near its 95% ceiling. every select now also plays the current checkpoint against a champion (here the start), 1,000 games on the same boards each time: ±3.1 pp, paired game by game across checkpoints. the finals include the start under the new rules, since it never trained on them. at e0 the champion row reads 50.0 (`fa6ea360`), as it must.
 
-*progress (2026-10-24 21:15, e4750 of \~7,576).* champion row by blocks of five selects (5,000 games each): 48.8, 50.3, 49.9, 52.8, 50.6, 51.8, 53.1, 52.2, 54.6, 54.2, 53.7, 55.4, 56.1, 56.1, 58.2, 58.0, 58.1, 57.6, 59.1%; vs F 96.1 → 98.0–98.4%. the net dips below its start for the first \~200 epochs on the new rules, then climbs steadily, about 58–59% against its start by e3500–4700, still rising as the learning rate anneals. the trainer's best is the highest of many noisy rows (now e4150, 60.0), so it is biased up; the heldout finals give the unbiased number.
+*result.* trained 2026-10-24 10:46 to 2026-10-25 \~03:25 (7,600 epochs, 1.0b agent steps at \~17.8k/s), finals by 03:56. the champion row climbed the whole way and was still rising at the end; best is the last checkpoint, e7600.
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, right, right, right),
+    header: ([epochs], [0–450], [1000–1450], [2000–2450], [3000–3450], [4000–4450], [5000–5450], [6000–6450]),
+    [vs the start], [49.5], [51.2], [54.4], [56.1], [57.9], [60.5], [61.9],
+    [vs F], [96.5], [97.2], [97.3], [97.6], [98.2], [98.0], [98.2],
+  ),
+  caption: [the monitors during training, `select-2p-fr`, mean of ten selects (10,000 games) per block. the last block, e7000–7600, reads 63.2–64.4 vs the start and 98.4–98.6 vs F.],
+)
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, left),
+    header: ([final on `heldout-2p-fr` (5,000 games each)], [e7600], [the start], [paired]),
+    [POLICY vs F], [*98.84* #ci[98.50][99.10] (`e435b80e`)], [97.32 #ci[96.83][97.73] (`3cd19d23`)], [+1.52 pp, 126 vs 50, p ≈ 1e-8],
+    [BELIEF (16 worlds) vs F], [*98.76* #ci[98.41][99.03] (`6c4f23cb`)], [97.30 #ci[96.81][97.71] (`fa618736`)], [+1.46 pp, 127 vs 54, p ≈ 6e-8],
+    [POLICY, e7600 vs the start], [*63.2* #ci[61.8][64.5] (`36bd2384`)], [—], [≈ 61.7 after the 1.5 pp input correction],
+    [BELIEF, e7600 vs the start], [*62.2* #ci[60.9][63.5] (`db519a9e`)], [—], [≈ 60.7 after the correction],
+  ),
+  caption: [the finals. the start is `puffer-graph2/full@e3350`, the deployed 1v1 net, on the same rules and boards.],
+)
 
-*result.* running.
+*reading.* another billion steps on openhex's 1v1 rules made the deployed 1v1 net clearly stronger: about 62% head to head against its own start after correcting for the start's never-trained friendly-robber input (roughly +85 elo), and its losses to F more than halved (2.7% → 1.2%). the champion row was still rising when the learning rate reached its floor, so the net had not stopped improving; another continuation would likely gain more. none of this is measured inside the search yet: the deployed openhex bots run MCTS-1024 and BELIEF on the old engine and the old net.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
