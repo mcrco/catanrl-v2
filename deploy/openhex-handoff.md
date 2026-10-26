@@ -24,6 +24,177 @@ seat, see its module doc); the CLI is `catanrl openhex deploy/openhex.yaml`.
 The keys live only in `/etc/catanrl/openhex.env` on the OCI VM (root-readable,
 `sudo cat`). Copy that file; never commit it or print it into a log.
 
+## Versioning
+
+A registration cannot change (name and description are fixed at `POST
+/api/bots`; there is no endpoint to rename, edit or delete one) and its Elo,
+record and head-to-head belong to it. So **each model we deploy is a new
+registration, a version**, and `deploy/openhex.yaml` keeps every version ever
+registered. Retired versions stay in the file, marked `retired: true`, for the
+record and for `stats`; the runner skips them. The code lives in
+`src/catanrl/bridge/openhex_deploy.py` (the file, the pins, the git check, the
+key check, the stamps) and `src/catanrl/bridge/openhex_stats.py`.
+
+**Scheme.** Names are `catanrl-<line>-v<N>`, where the line is `1v1`,
+`1v1-search` or `4p`, and the version string is `<line>-v<N>`. The three bots
+registered in October are v1 and keep their names: `catanrl-1v1` is `1v1-v1`,
+`catanrl-1v1-search` is `1v1-search-v1`, `catanrl-4p` is `4p-v1`. A version
+is one pinned agent spec under one registration. Never change a registered
+version's spec: a different checkpoint, or different agent params
+(`worlds`, `sims`, ...), is a new version. Bridge fixes may land under a
+running version. Each game line records the commit that played it (below).
+
+**An entry** (unknown keys are refused, so a typo cannot fall back to a default):
+
+```yaml
+bots:
+  - name: catanrl-1v1-v2          # 3-32 characters, unique in the file
+    mode: 1v1                     # 1v1 or 4p
+    version: 1v1-v2               # required
+    spec: BELIEF:ckpt=puffer-graph2/full@e3350#3355b5059503:worlds=16   # every ckpt pinned by #sha
+    key_env: OPENHEX_KEY_1V1_V2   # unique among the entries that run
+    bot_id: 0123456789abcdef      # optional: OpenHex's id once registered (checked against the key)
+    tag: openhex-1v1-v2           # optional: the git tag it runs from
+    evidence: [4b223fd273477fcf]  # optional: eval record ids that justified it
+    deployed: 2026-10-26          # optional, free-form
+    retired: false                # optional, default false
+    retired_at: 2026-11-02        # optional, free-form; only with retired: true
+```
+
+**What the runner checks before it queues** (`catanrl openhex deploy/openhex.yaml`):
+
+1. The file is valid.
+2. Every checkpoint of every entry that runs is pinned by `#sha`. An unpinned
+   ref (`@best`, or `@e3350` without `#`) is refused with the pinned ref it
+   resolves to now and the whole spec, ready to paste. `--allow-unpinned`
+   turns the refusal into a warning, for emergencies only. A pin whose sha is
+   not the weights on disk fails when the spec resolves
+   (`catanrl.runs.Run.resolve`, `Checkpoint.load`).
+3. The checkout's play source (tracked files under `src/`, `engine/` and
+   `third_party/`, with a submodule that is dirty or off its recorded commit
+   counting as dirty) is clean, and the cppanatron build is
+   `engine/cppanatron`'s HEAD. For an entry with a `tag`, HEAD's play source
+   must be the tag's. A commit on top of the tag that touches only `deploy/`,
+   `report/` or other files outside the play source is fine. Changes to
+   `deploy/`, `runs/`, `report/`, `transcripts/`, `README.md` and untracked
+   files are ignored. `--allow-dirty` runs anyway and stamps those bots
+   `dirty: true`. The service user must be able to run git in the checkout
+   (`git config --global --add safe.directory /opt/catanrl-v2` for that user).
+   Otherwise the check fails like a dirty tree.
+4. Every key variable is set, and `GET /api/bots/me` with each key returns
+   that entry's name and mode, plus its id when `bot_id` is set. A key pasted
+   under the wrong variable would otherwise play one model under another bot's
+   name. Keys are never printed.
+5. Only then do the agents load, and each bot writes its **stamp**.
+
+**Stamps.** At startup each bot logs one line (`<bot>: version 1v1-v2,
+provenance <id>: <spec> [<ckpt refs>] at <git describe>`) and appends its full
+stamp to `<state>/<bot>/deploys.jsonl`, with the time and `provenance_id`. The
+stamp holds:
+
+- the version, and the spec as configured and as resolved (`canonical`);
+- each checkpoint it loads (pinned ref and full `weights_sha256`);
+- git: `commit`, `describe`, `dirty`, `tag`, `tag_commit`;
+- `code_id` (`provenance.code_id("eval")`: the models, agents, search and envs
+  code plus the engine, the same id eval records are keyed on);
+- the engine build.
+
+The bridge itself is outside `code_id`; the commit and `dirty` cover it. Every
+line of `<state>/<bot>/games.jsonl` now carries `version`, `spec` and
+`provenance_id`. `provenance_id` is a 12-hex hash of the stamp, so a restart on
+the same code, spec and weights keeps it, and `grep <id> deploys.jsonl` gives
+the full stamp of any game.
+
+**Deploying a new version** (example: `catanrl-1v1-v2`):
+
+1. Pick the checkpoint and the eval records that justify it.
+2. Add the entry to `deploy/openhex.yaml`: name, mode, `version`, `key_env:
+   OPENHEX_KEY_1V1_V2`, `tag: openhex-1v1-v2`, `evidence`, `deployed`, and no
+   `bot_id` yet. To pin the spec, write it with `@best` and run `--check`,
+   which refuses it and prints the pinned spec to paste. `catanrl ls` also
+   shows the epoch.
+3. Commit and tag: `git tag openhex-1v1-v2`, then push the branch and the tag
+   (`git push origin main openhex-1v1-v2`; submodule branches first if they moved).
+4. On the bot machine: `git fetch --tags && git checkout openhex-1v1-v2`, then
+   `git submodule update` and `uv sync` if the engine or PufferLib moved.
+5. `catanrl openhex deploy/openhex.yaml --check`. It loads every agent that
+   runs, runs the git check, says `set`/`unset` per key, prints a row per bot
+   (name, version, mode, spec, weights sha, tag, retired, key) and exits 0 or 1.
+   It contacts nobody. Expect one problem only: the new key is unset.
+6. Register by hand:
+   `catanrl openhex deploy/openhex.yaml --describe catanrl-1v1-v2 > /tmp/body.json`
+   prints the `POST /api/bots` body (name, mode, `coordinateFormat:
+   "coordinates"`, and a description of at most 280 characters naming the
+   version, the pinned spec, the commit and the repo; it contacts no one). Then
+   `curl -sS -X POST https://open-hex.web.app/api/bots -H 'Content-Type: application/json' -d @/tmp/body.json`.
+   The reply's `api_key` is shown once. Put `OPENHEX_KEY_1V1_V2=<key>` in
+   `/etc/catanrl/openhex.env` yourself (root, mode 600), never in the repo or a
+   log. Then add the reply's `bot.id` as `bot_id` (`deploy/` changes do not
+   trip the git check; commit them on main).
+7. `--check` again (`ok`), then restart the service between games (see
+   "Operating"). The journal shows the new bot's stamp line, then `game ...
+   as ...` when it is matched.
+
+**The overlap.** The old version is not retired when the new one starts. Both
+stay queued for a few days, until the new one has enough finished games to
+compare. The 95% interval of a win rate near 50% is about ±10 points at 100
+games and ±7 at 200 (`stats` prints it). This is worth it for four reasons:
+
+- **Same days, same opponents.** The two records cover the same days against
+  the same pool. Matchmaking is by availability, the pool changes from day to
+  day, and the `ar-*` bots learn, so the old version's record from earlier
+  weeks is not a fair baseline. Compare per opponent: `stats` prints that.
+- **Direct games.** With both queued, OpenHex pairs them now and then.
+  `stats` counts those games apart, as head-to-head between our versions.
+- **Elo needs games.** A new registration starts at Elo 1500 and needs games
+  before its rating means much.
+- **Easy rollback.** While the old version still plays, rolling back is
+  flipping one flag.
+
+The costs: CPU (each search bot uses about 40% of a core while it plays), and
+games between our own versions, which move both ratings.
+
+**Code during an overlap.** One process runs from one checkout. If the new tag
+changed nothing in the play source (a new checkpoint only, the usual case), the
+old entry's tag still holds and both run together. If the play source changed,
+the runner refuses the old entry, because its tag is not the running code. Then
+either:
+
+- set the old entry's `tag` to the new tag, so it plays the new code. The
+  overlap then compares the two models on the same bridge, and `deploys.jsonl`
+  records the switch.
+- or run it from its own checkout of its old tag, as a second service with
+  `--only <old names>` (comma-separated; the same `--state` root is fine, one
+  dir per bot).
+
+`--allow-dirty` also works, but it stamps the old bot dirty.
+
+**Retiring.** Set `retired: true` and `retired_at` on the old entry, restart
+between games, and take it off OpenHex's queue, because a stopped bot that
+stays queued gets matched and loses on time:
+`curl -sS -X POST https://open-hex.web.app/api/queue/leave -H "Authorization: Bearer $OPENHEX_KEY_1V1" -H 'Content-Type: application/json' -d '{"mode": "1v1"}'`
+(with the env file loaded). Keep its key in the env file; you need it to roll back.
+
+**Rolling back.** The registrations and keys are permanent, so a rollback only
+flips flags. Set the bad version `retired: true` and leave its queue. If the
+old version was already retired, set it `retired: false` again and drop its
+`retired_at`. Check its `tag` holds the running code (or move it), then
+`--check` and restart. Never point an existing registration at a different
+spec instead: its record would mix two models.
+
+**Stats.** `catanrl openhex stats deploy/openhex.yaml` reads OpenHex's public
+Firestore only. It needs no key, contacts no API, and includes retired
+entries. It finds each bot by `bot_id`, or by name and mode in the public
+`bots` collection when the entry has none. It prints a row per version:
+finished games, wins, win rate with its Wilson 95% interval, aborted and
+ongoing games, current Elo, and first and last game. Then it lists each
+version's opponents (games, wins), then the games between our own versions.
+Finished means `completed` or `aborted`. When a seat misses its 60 s deadline,
+OpenHex gives the game to the best other seat and rates it like any other, so
+the ladder's own record counts aborted games too; `stats` notes any
+disagreement with that record. Games still `active` are only counted as
+ongoing.
+
 ## What the new machine needs
 
 1. **The repo with submodules.** `git clone --recurse-submodules
@@ -48,8 +219,10 @@ The keys live only in `/etc/catanrl/openhex.env` on the OCI VM (root-readable,
    per bot: `games.jsonl`, `boards/`). Adjust paths and user; keep
    `OMP_NUM_THREADS=1` unless you want the search to use more cores (the MCTS
    spec also takes `threads=N`).
-5. **Check before enabling:** `pytest tests/bridge/test_bridge_openhex.py`, then
-   run one bot in the foreground with the env loaded:
+5. **Check before enabling:** `pytest tests/bridge/test_bridge_openhex.py
+   tests/bridge/test_bridge_openhex_deploy.py` and `catanrl openhex
+   deploy/openhex.yaml --check` (see "Versioning"), then run one bot in the
+   foreground with the env loaded:
    `catanrl openhex deploy/openhex.yaml --only catanrl-1v1-search --state /tmp/openhex-test`.
    It logs `game <id> as <color> against [...]` when matched and a JSON record
    when the game ends. Stop it with Ctrl-C (the queue entry is left behind: see
