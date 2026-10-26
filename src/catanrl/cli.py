@@ -22,6 +22,8 @@
     catanrl openhex deploy/openhex.yaml --check --keys       # ... and ask OpenHex whose each key is (before a restart)
     catanrl openhex deploy/openhex.yaml --describe NAME      # the registration body for a new version
     catanrl openhex stats deploy/openhex.yaml [--since DATE] # every version's record (OpenHex's public data)
+    catanrl openhex release deploy/openhex.yaml TAG [--out DIR]  # the tag's checkpoints as release assets
+    catanrl openhex fetch deploy/openhex.yaml [--runs DIR]   # ... downloaded into the runs root (deploy machine)
 """
 
 from __future__ import annotations
@@ -31,6 +33,9 @@ import json
 import os
 import sys
 from pathlib import Path
+
+#: ``catanrl openhex ACTION ...``: each action's operands (without one, CONFIG alone: run or check the bots).
+OPENHEX_ACTIONS = {"stats": ("CONFIG",), "release": ("CONFIG", "TAG"), "fetch": ("CONFIG",)}
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -146,11 +151,13 @@ def _parser() -> argparse.ArgumentParser:
     house.add_argument("--device", default="cpu")
 
     oh = sub.add_parser("openhex", help="keep our bots queued on OpenHex (open-hex.web.app)",
-                        description="catanrl openhex CONFIG [--check | --describe NAME], or catanrl openhex stats "
-                                    "CONFIG (see catanrl.bridge.openhex_deploy for the file)")
-    oh.add_argument("config", help="a YAML file: bots (name, mode, version, spec, key_env, ...), optional api; "
-                                   "or 'stats' and the file")
-    oh.add_argument("stats_config", nargs="?", help=argparse.SUPPRESS)
+                        description="catanrl openhex CONFIG [--check | --describe NAME], catanrl openhex stats "
+                                    "CONFIG, catanrl openhex release CONFIG TAG, or catanrl openhex fetch CONFIG "
+                                    "(see catanrl.bridge.openhex_deploy for the file, catanrl.bridge.openhex_release "
+                                    "for releases)")
+    oh.add_argument("config", help="a YAML file: bots (name, mode, version, spec, key_env, ...), optional api and "
+                                   "releases; or 'stats', 'release' or 'fetch' and the file (release: and the tag)")
+    oh.add_argument("operands", nargs="*", help=argparse.SUPPRESS)
     oh.add_argument("--state", default="openhex", help="games.jsonl and deploys.jsonl go here, one dir per bot")
     oh.add_argument("--device", default="cpu")
     oh.add_argument("--only", help="run just these bots (comma-separated names)")
@@ -164,6 +171,10 @@ def _parser() -> argparse.ArgumentParser:
     oh.add_argument("--until", metavar="DATE",
                     help="stats: count games created up to DATE (UTC; a date includes its whole day)")
     oh.add_argument("--describe", metavar="NAME", help="print the POST /api/bots body for this bot and exit")
+    oh.add_argument("--out", metavar="DIR", help="release: write the assets here (default: a new temporary directory)")
+    oh.add_argument("--runs", metavar="DIR",
+                    help="fetch: the runs root to fill (default: the runner's, CATANRL_RUNS_DIR or the checkout's runs/)")
+    oh.add_argument("--base-url", help=argparse.SUPPRESS)  # fetch, for tests: BASE/<tag>/<file> instead of GitHub
     oh.add_argument("--allow-unpinned", action="store_true",
                     help="run specs whose checkpoints are not pinned by #sha (a warning instead of a refusal)")
     oh.add_argument("--allow-dirty", action="store_true",
@@ -314,12 +325,32 @@ def _cmd_openhex(args) -> int:
     from catanrl.bridge import openhex_deploy as deploy
     from catanrl.bridge.openhex import API, OpenHexBot, OpenHexClient
 
-    if args.config == "stats":
-        if not args.stats_config:
-            raise SystemExit("error: catanrl openhex stats CONFIG")
-        return _openhex_stats(args.stats_config, args.since, args.until)
-    if args.stats_config:
-        raise SystemExit(f"error: unexpected {args.stats_config!r} (catanrl openhex CONFIG, or catanrl openhex stats CONFIG)")
+    action = args.config if args.config in OPENHEX_ACTIONS else None
+    want = OPENHEX_ACTIONS.get(action, ())
+    if len(args.operands) != len(want):
+        extra = args.operands[len(want):]
+        raise SystemExit(f"error: catanrl openhex {' '.join([action, *want]) if action else 'CONFIG'}"
+                         + (f" (unexpected {' '.join(extra)!r})" if extra else ""))
+    for option, value, where in (("--out", args.out, "release"), ("--runs", args.runs, "fetch"),
+                                 ("--base-url", args.base_url, "fetch")):
+        if value and action != where:
+            raise SystemExit(f"error: {option} is for catanrl openhex {where}")
+    if action in ("release", "fetch"):
+        others = [option for option, value in (
+            ("--check", args.check), ("--keys", args.keys), ("--describe", args.describe), ("--since", args.since),
+            ("--until", args.until), ("--allow-unpinned", args.allow_unpinned), ("--allow-dirty", args.allow_dirty),
+            ("--only", args.only and action == "release")) if value]
+        if others:
+            raise SystemExit(f"error: catanrl openhex {action} does not take {', '.join(others)}")
+    if action == "release":
+        from catanrl.bridge import openhex_release as release
+
+        print(release.format_release(release.release(args.operands[0], args.operands[1], args.out)))
+        return 0
+    if action == "fetch":
+        return _openhex_fetch(args)
+    if action == "stats":
+        return _openhex_stats(args.operands[0], args.since, args.until)
     if args.since or args.until:
         raise SystemExit("error: --since and --until are for catanrl openhex stats")
     if args.keys and not args.check:
@@ -432,6 +463,20 @@ def _openhex_describe(args, entries) -> int:
         print(f"warning: {warning}", file=sys.stderr)
     print(json.dumps(deploy.registration(entry, deploy.entry_commit(deploy.checkout_root(), entry)), indent=2))
     return 0
+
+
+def _openhex_fetch(args) -> int:
+    """``fetch``: the checkpoints of the bots that run, from their tags' GitHub releases."""
+    from catanrl.bridge import openhex_release as release
+    from catanrl.runs import RunError, runs_root
+
+    result = release.fetch(args.operands[0], runs=args.runs, only=args.only, base=args.base_url)
+    try:
+        default = str(runs_root())
+    except RunError:
+        default = None
+    print(release.format_fetch(result, default))
+    return 0 if result["ok"] else 1
 
 
 def _openhex_stats(config: str, since: str | None = None, until: str | None = None) -> int:

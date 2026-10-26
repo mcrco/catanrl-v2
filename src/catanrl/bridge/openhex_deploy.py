@@ -48,8 +48,9 @@ MODES = ("1v1", "4p")
 #: The keys of a bot entry; any other is refused (a typo would otherwise be a silent default).
 REQUIRED = ("name", "mode", "spec", "key_env", "version")
 OPTIONAL = ("bot_id", "tag", "evidence", "retired", "deployed", "retired_at")
-#: The keys of the file.
-SETTINGS = ("bots", "api")
+#: The keys of the file: ``releases`` names the GitHub repository whose releases ship the
+#: checkpoints (``catanrl.bridge.openhex_release``; default :data:`REPO_URL`'s).
+SETTINGS = ("bots", "api", "releases")
 #: Tracked source that decides play (submodules included): the checkout must match its
 #: commit, and the tag's, here. Everything else (deploy/, report/, runs/, transcripts/,
 #: README.md, untracked files) may differ.
@@ -64,6 +65,7 @@ KEY_RE = re.compile(r"[0-9a-f]{32}")
 #: A ``#sha`` pin: the run-ref rule (``catanrl.runs.REF_RE``), for ``.pt`` paths too.
 PIN_RE = re.compile(r"[0-9a-f]{6,64}")
 ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 
 
 class DeployError(RuntimeError):
@@ -97,8 +99,9 @@ class DeployEntry:
 
 
 def load_deploy(path: str | Path) -> tuple[dict, list[DeployEntry]]:
-    """(settings, entries) from a deploy file: ``bots`` (see :class:`DeployEntry`) and an
-    optional ``api`` (OpenHex's API base)."""
+    """(settings, entries) from a deploy file: ``bots`` (see :class:`DeployEntry`), an
+    optional ``api`` (OpenHex's API base) and an optional ``releases`` (``owner/name``: the
+    GitHub repository whose releases ship the checkpoints)."""
     import yaml
 
     return parse_deploy(yaml.safe_load(Path(path).read_text()), str(path))
@@ -111,6 +114,8 @@ def parse_deploy(data: Any, source: str = "deploy file") -> tuple[dict, list[Dep
     problems = [f"unknown key {key!r} (keys: {', '.join(SETTINGS)})" for key in data if key not in SETTINGS]
     if "api" in data and not isinstance(data["api"], str):
         problems.append(f"api must be a URL, not {data['api']!r}")
+    if "releases" in data and not (isinstance(data["releases"], str) and REPO_RE.fullmatch(data["releases"])):
+        problems.append(f"releases must be a GitHub repository (owner/name), not {data['releases']!r}")
     entries = []
     for i, raw in enumerate(data["bots"]):
         named = isinstance(raw, Mapping) and isinstance(raw.get("name"), str)
