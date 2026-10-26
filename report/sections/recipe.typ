@@ -121,27 +121,49 @@ catanrl run configs/experiments/puffer-graph2.yaml --only public
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
 ```)
 
-=== the same net, another \~1b steps from e7600 #chip("running") <exp:recipe-2p-openhex-2>
+=== the same net, another \~1b steps from e7600 at the floor learning rate #chip("running") <exp:recipe-2p-openhex-3>
 #meta(
-  dates: "2026-10-25 14:03 onward",
+  dates: "2026-10-25 18:49 onward",
+  owner: "marco",
+  config: "configs/experiments/ppo-2p-fr3.yaml",
+  wandb: (("ppo-2p-fr3-full-e95ea1db", "ppo-2p-fr3/full"),),
+  records: (),
+)
+#tldr[@exp:recipe-2p-openhex was still improving against its start when its learning rate hit the floor, so marco asked for another billion steps. the first try restarted the learning rate at its peak and went backwards (@exp:recipe-2p-openhex-2), so this run simply carries on at the floor, constant 0.00025, from e7600.]
+
+*question.* does the 1v1 net keep improving on openhex's 1v1 rules if training just continues where `ppo-2p-fr` ended?
+
+*setup.* `ppo-2p-fr` exactly, initialized from `ppo-2p-fr/full@e7600` with a fresh optimizer. the learning rate is held at `ppo-2p-fr`'s floor, 0.00025, for 7,600 epochs (\~1b agent steps); there is no cosine. the champion row plays every 50th checkpoint against e7600 (1,000 games, ±3.1 pp, paired across checkpoints; ±1 pp per 10-checkpoint block). vs F is measured alongside. finals on `heldout-2p-fr`, 5,000 games each: `@best` vs F, `@best` vs e7600, and `@best` vs the original deployed net `puffer-graph2/full@e3350`, each as POLICY and as BELIEF. at e0 it reads 50.0 vs the champion and 98.8 vs F, and the first updates run at kl 0.0006–0.0009, where `ppo-2p-fr` ended. \~17 h.
+
+*result.* running.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr3.yaml
+```)
+
+=== the first try: a fresh cosine from the peak learning rate #chip("stopped") <exp:recipe-2p-openhex-2>
+#meta(
+  dates: "2026-10-25 14:03 – 18:48 (stopped at e2010)",
   owner: "marco",
   config: "configs/experiments/ppo-2p-fr2.yaml",
   wandb: (("ppo-2p-fr2-full-0b305e27", "ppo-2p-fr2/full"),),
   records: (),
 )
-#tldr[@exp:recipe-2p-openhex was still improving against its start when its learning rate hit the floor, so marco asked for another billion steps. same recipe and rules, started from its last checkpoint e7600, which is also the new champion.]
+#tldr[the continuation restarted the learning rate at its peak, 0.0025, and fell to 40–43% against its own start within 50 epochs. it stayed there through e2000, so marco stopped it and restarted at the floor (@exp:recipe-2p-openhex-3).]
 
-*question.* does the 1v1 net keep improving on openhex's 1v1 rules past 2b total steps?
+*question.* the same as @exp:recipe-2p-openhex-3.
 
-*setup.* `ppo-2p-fr` exactly, initialized from `ppo-2p-fr/full@e7600` with a fresh optimizer and a fresh cosine (0.0025 → 0.00025 over 7,600 epochs). the champion row plays every 50th checkpoint against e7600 (1,000 games, ±3.1 pp, paired across checkpoints); vs F alongside. finals on `heldout-2p-fr`, 5,000 games each: `@best` vs F, `@best` vs e7600, and `@best` vs the original deployed net `puffer-graph2/full@e3350`, as POLICY and as BELIEF. e0 reads 50.0 vs the champion and 98.8 vs F, as expected. \~17.5 h.
+*setup.* `ppo-2p-fr` exactly, initialized from `ppo-2p-fr/full@e7600`, with a fresh optimizer and a fresh cosine (0.0025 → 0.00025 over 7,600 epochs), as `ppo-2p-fr` had done from its own start. the monitors and planned finals were the same as @exp:recipe-2p-openhex-3.
 
-*result.* running. so far it is worse than its start. at e2000 (26% of the run), the champion row fell to 43.5 by e50 and has stayed at 40–43 since. the 10-checkpoint block means are 43.3, 41.2, 40.6, 42.1 and 40.0, each over 10,000 games (±1 pp). vs F fell from 98.8 to \~97.7. the likely cause is the learning-rate restart, not the extra steps:
+*result.* stopped at e2010 (26%), before any finals. the champion row fell to 43.5 by e50 and stayed at 40–43. the 10-checkpoint block means are 43.3, 41.2, 40.6, 42.1 and 40.0, each over 10,000 games (±1 pp). vs F fell from 98.8 to \~97.7.
+
+*reading.* the learning-rate restart caused this, not the extra steps:
 
 - e7600 ended at the floor learning rate (0.00025): kl 0.001 per update, entropy 0.048.
 - the restart at 0.0025 pushed kl to 0.02–0.03 at once, about 20 times larger.
 - `ppo-2p-fr`'s own restart from e3350 (entropy 0.084, a broader policy) ran at kl 0.015 and stayed at 48–51 early.
 
-the cosine brings the learning rate back to the floor by e7600, so the end of this run tests a warm restart, not plain continued training. a cleaner test of "does it keep improving" is to restart from e7600 at the floor learning rate (constant 0.00025) (my suggestion, not queued).
+a sharp policy that ended at a low learning rate loses \~8–10 pp head to head if the learning rate jumps back to the peak. the cosine would have returned to the floor by e7600, so this run's end would have tested a warm restart, not plain continued training. lesson: set a continuation's learning rate from its start's final kl and entropy.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr2.yaml
