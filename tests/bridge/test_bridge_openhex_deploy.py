@@ -1,8 +1,10 @@
-"""Versioned OpenHex deploys (catanrl.bridge.openhex_deploy): the deploy file refuses
-typos, clashes and unpinned checkpoints (naming the pinned ref to paste), the runner
-skips retired versions, refuses play source that is not clean or not its tag's, and a
-key that belongs to another bot; every game line names its version, spec and deploy
-stamp; and the registration body fits OpenHex's 280 characters."""
+"""Versioned OpenHex deploys (catanrl.bridge.openhex_deploy, catanrl.bridge.openhex_stats):
+the deploy file refuses typos, clashes and unpinned checkpoints (naming the pinned ref
+to paste), the runner skips retired versions, refuses play source that is not clean
+or not its tag's, and a key that belongs to another bot; every game line names its
+version, spec and deploy stamp; the registration body fits OpenHex's 280 characters;
+and the stats count a trimmed public record per version, per opponent and between
+our own versions."""
 
 from __future__ import annotations
 
@@ -19,17 +21,20 @@ from catanatron.registry import SpecError
 
 from catanrl.bridge import openhex as openhex_module
 from catanrl.bridge import openhex_deploy as deploy
+from catanrl.bridge import openhex_stats as stats
 from catanrl.bridge.openhex import OpenHexBot, OpenHexClient, OpenHexHTTPError
 from catanrl.bridge.openhex_deploy import DeployEntry, DeployError
 from catanrl.checkpoint import CheckpointRef
 from catanrl.config import Variant, config_hash, resolve
 from catanrl.envs.encoding import action_size, dims_for, row_layout
+from catanrl.eval.stats import wilson_interval
 from catanrl.models import build_model
 from catanrl.runs import RunWriter
 
+FIXTURE = Path(__file__).parent.parent / "fixtures" / "openhex" / "stats.json"
 SHA = "3355b5059503541c228d3dd863fc01f9b6f213c099a2d006f32d6bddbd4fbba4"
-#: An OpenHex id (catanrl-1v1's).
-PLAIN = "05c4a25c6c0e46e1"
+#: Our three registrations in the fixture (OpenHex's public record of 2026-10-26).
+PLAIN, SEARCH, FOURP = "05c4a25c6c0e46e1", "b8334c08b8d34a19", "068460ec188f4a2c"
 
 
 def _bot(**fields) -> dict:
@@ -484,3 +489,108 @@ def test_describe_and_check_contact_no_one(tmp_path, monkeypatch, capsys):
     assert "secret-key-123" not in out
     monkeypatch.setenv("OPENHEX_KEY_4P", "another-key")
     assert cli.main(["openhex", str(path), "--check"]) == 0 and capsys.readouterr().out.rstrip().endswith("ok")
+
+
+# ---------------------------------------------------------------- stats
+
+
+def _fixture():
+    return json.loads(FIXTURE.read_text())
+
+
+class _Records:
+    """OpenHex's public records, served from the fixture."""
+
+    def __init__(self):
+        data = _fixture()
+        self.bots = {doc["name"].rsplit("/", 1)[1]: stats.document(doc) for doc in data["bots"]}
+        self.rows = data["games"]
+
+    def bot(self, bot_id):
+        return self.bots.get(bot_id)
+
+    def find_bot(self, name, mode):
+        return next((b for b in self.bots.values() if b["name"] == name and b["mode"] == mode), None)
+
+    def games(self, bot_id):
+        return [stats.document(row["document"]) for row in self.rows.get(bot_id, [])]
+
+
+def _v1_entries():
+    return _parse(
+        _bot(name="catanrl-1v1", version="1v1-v1", key_env="OPENHEX_KEY_1V1", bot_id=PLAIN),
+        _bot(name="catanrl-4p", mode="4p", version="4p-v1", key_env="OPENHEX_KEY_4P", bot_id=FOURP),
+        _bot(name="catanrl-1v1-search", version="1v1-search-v1", key_env="OPENHEX_KEY_1V1_SEARCH"),  # no bot_id
+        _bot(name="catanrl-1v1-v9", version="1v1-v9", key_env="OPENHEX_KEY_V9", retired=True),  # never registered
+    )[1]
+
+
+def test_firestore_values_decode():
+    doc = {"name": "projects/open-hex/databases/(default)/documents/games/abc",
+           "fields": {"n": {"integerValue": "3"}, "x": {"doubleValue": 1.5}, "s": {"stringValue": "a"},
+                      "z": {"nullValue": None}, "b": {"booleanValue": True},
+                      "l": {"arrayValue": {"values": [{"stringValue": "p"}, {"mapValue": {"fields": {"k": {"integerValue": "1"}}}}]}},
+                      "e": {"arrayValue": {}}}}
+    assert stats.document(doc) == {"id": "abc", "n": 3, "x": 1.5, "s": "a", "z": None, "b": True, "l": ["p", {"k": 1}],
+                                   "e": []}
+
+
+def test_stats_count_versions_opponents_and_our_meetings():
+    entries = _v1_entries()
+    bots, games = stats.gather(entries, _Records())
+    assert bots["catanrl-1v1-search"]["id"] == SEARCH and bots["catanrl-1v1-v9"] is None  # found by name and mode
+    games[SEARCH].append({"id": "live", "mode": "1v1", "status": "active", "winnerBotId": None,
+                          "createdAt": "2026-10-26T00:00:00+00:00", "players": [{"botId": SEARCH, "name": "x"},
+                                                                                {"botId": "f" * 16, "name": "y"}]})
+    summary = stats.summarize(entries, bots, games)
+    plain, fourp, search, never = summary["versions"]
+    assert {k: plain[k] for k in ("games", "wins", "aborted", "ongoing", "first", "last")} == {
+        "games": 8, "wins": 2, "aborted": 2, "ongoing": 0,
+        "first": "2026-10-17T18:49:02.863543+00:00", "last": "2026-10-20T07:02:59.377650+00:00"}
+    assert plain["wilson"] == wilson_interval(2, 8) and plain["rate"] == 0.25
+    assert round(plain["elo"]) == 1388 and plain["ladder"] == {"games": 109, "wins": 54}
+    assert {k: search[k] for k in ("games", "wins", "aborted", "ongoing")} == {"games": 7, "wins": 4, "aborted": 1,
+                                                                                 "ongoing": 1}
+    assert search["first"][:10] == "2026-10-20" and search["last"][:10] == "2026-10-23"
+    assert fourp["found"] and fourp["games"] == 0 and fourp["rate"] is None and fourp["elo"] == 1500
+    assert not never["found"] and never["retired"]
+    assert summary["opponents"]["catanrl-1v1-search"][:2] == [
+        {"opponent": "hexn-4d.0", "bot_id": "aa627d8cbafb4011", "games": 3, "wins": 0},
+        {"opponent": "catanrl-1v1", "bot_id": PLAIN, "games": 2, "wins": 2}]
+    assert {o["opponent"]: (o["games"], o["wins"]) for o in summary["opponents"]["catanrl-1v1"]} == {
+        "rehex-2.11": (2, 1), "catanrl-1v1-search": (2, 0), "colonist-ai-r66": (1, 1), "ar-PX_2": (1, 0),
+        "ar-PXns-a": (1, 0), "ar-PX_b0": (1, 0)}
+    assert summary["head_to_head"] == [{"a": "catanrl-1v1", "b": "catanrl-1v1-search", "games": 2, "a_wins": 0,
+                                        "b_wins": 2, "other_wins": 0}]  # each meeting once, from both sides
+    text = stats.format_summary(summary)
+    assert "catanrl-1v1 (1v1-v1) vs catanrl-1v1-search (1v1-search-v1): 2 games, 0-2" in text
+    assert "not on OpenHex" in text and "note: catanrl-1v1: OpenHex's own record says 109 games, 54 wins" in text
+    low, high = wilson_interval(2, 8)
+    assert f"[{100 * low:.1f}, {100 * high:.1f}]" in text
+
+
+def test_public_records_page_through_a_bots_games(monkeypatch):
+    rows = _fixture()["games"][SEARCH]
+    asked = []
+
+    def fetch(self, url, body=None):
+        asked.append((url, body))
+        if body is None:  # bots/<id>, or the bots list
+            if "/bots/" in url:
+                return next(b for b in _fixture()["bots"] if b["name"].endswith(url.rsplit("/", 1)[1]))
+            return {"documents": [{"name": b["name"], "fields": {k: b["fields"][k] for k in ("name", "mode")}}
+                                  for b in _fixture()["bots"]]}
+        query = body["structuredQuery"]
+        assert query["where"]["fieldFilter"]["value"] == {"stringValue": SEARCH}
+        after = (query.get("startAt") or {"values": [{"referenceValue": ""}]})["values"][0]["referenceValue"]
+        rest = [r for r in rows if r["document"]["name"] > after]
+        return [{"readTime": "t", **r} for r in rest[: query["limit"]]] or [{"readTime": "t"}]
+
+    monkeypatch.setattr(stats, "PAGE", 3)
+    monkeypatch.setattr(stats.PublicRecords, "_fetch", fetch)
+    records = stats.PublicRecords()
+    games = records.games(SEARCH)
+    assert [g["id"] for g in games] == [r["document"]["name"].rsplit("/", 1)[1] for r in rows]
+    assert len([a for a in asked if a[1] is not None]) == 3  # 3 + 3 + 1 of 7
+    assert records.find_bot("catanrl-1v1-search", "1v1")["games1v1"] == 274
+    assert records.find_bot("catanrl-1v1-search", "4p") is None

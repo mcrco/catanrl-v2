@@ -20,6 +20,7 @@
     catanrl openhex deploy/openhex.yaml                      # play our bots on open-hex.web.app
     catanrl openhex deploy/openhex.yaml --check              # check the file, pins, code and keys; plays nothing
     catanrl openhex deploy/openhex.yaml --describe NAME      # the registration body for a new version
+    catanrl openhex stats deploy/openhex.yaml                # every version's record (OpenHex's public data)
 """
 
 from __future__ import annotations
@@ -144,9 +145,11 @@ def _parser() -> argparse.ArgumentParser:
     house.add_argument("--device", default="cpu")
 
     oh = sub.add_parser("openhex", help="keep our bots queued on OpenHex (open-hex.web.app)",
-                        description="catanrl openhex CONFIG [--check | --describe NAME] (see "
-                                    "catanrl.bridge.openhex_deploy for the file)")
-    oh.add_argument("config", help="a YAML file: bots (name, mode, version, spec, key_env, ...), optional api")
+                        description="catanrl openhex CONFIG [--check | --describe NAME], or catanrl openhex stats "
+                                    "CONFIG (see catanrl.bridge.openhex_deploy for the file)")
+    oh.add_argument("config", help="a YAML file: bots (name, mode, version, spec, key_env, ...), optional api; "
+                                   "or 'stats' and the file")
+    oh.add_argument("stats_config", nargs="?", help=argparse.SUPPRESS)
     oh.add_argument("--state", default="openhex", help="games.jsonl and deploys.jsonl go here, one dir per bot")
     oh.add_argument("--device", default="cpu")
     oh.add_argument("--only", help="run just these bots (comma-separated names)")
@@ -304,6 +307,12 @@ def _cmd_openhex(args) -> int:
     from catanrl.bridge import openhex_deploy as deploy
     from catanrl.bridge.openhex import API, OpenHexBot, OpenHexClient
 
+    if args.config == "stats":
+        if not args.stats_config:
+            raise SystemExit("error: catanrl openhex stats CONFIG")
+        return _openhex_stats(args.stats_config)
+    if args.stats_config:
+        raise SystemExit(f"error: unexpected {args.stats_config!r} (catanrl openhex CONFIG, or catanrl openhex stats CONFIG)")
     settings, entries = deploy.load_deploy(args.config)
     if args.describe:
         return _openhex_describe(args, entries)
@@ -402,6 +411,16 @@ def _openhex_describe(args, entries) -> int:
     for warning in deploy.check_pins([entry], allow_unpinned=args.allow_unpinned):
         print(f"warning: {warning}", file=sys.stderr)
     print(json.dumps(deploy.registration(entry, deploy.entry_commit(deploy.checkout_root(), entry)), indent=2))
+    return 0
+
+
+def _openhex_stats(config: str) -> int:
+    from catanrl.bridge.openhex_deploy import load_deploy
+    from catanrl.bridge.openhex_stats import PublicRecords, format_summary, gather, summarize
+
+    _, entries = load_deploy(config)
+    bots, games = gather(entries, PublicRecords())
+    print(format_summary(summarize(entries, bots, games)))
     return 0
 
 
