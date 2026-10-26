@@ -35,6 +35,8 @@ FIXTURE = Path(__file__).parent.parent / "fixtures" / "openhex" / "stats.json"
 SHA = "3355b5059503541c228d3dd863fc01f9b6f213c099a2d006f32d6bddbd4fbba4"
 #: Our three registrations in the fixture (OpenHex's public record of 2026-10-26).
 PLAIN, SEARCH, FOURP = "05c4a25c6c0e46e1", "b8334c08b8d34a19", "068460ec188f4a2c"
+#: Made-up API keys of OpenHex's shape (uuid4().hex).
+KEY, KEY_4P = "0123456789abcdef" * 2, "fedcba9876543210" * 2
 
 
 def _bot(**fields) -> dict:
@@ -112,7 +114,6 @@ def test_the_cli_runner_plays_only_versions_that_are_not_retired(tmp_path, monke
     """``catanrl openhex FILE`` end to end with OpenHex, the agents and git faked: the retired
     version is never resolved, keyed or started; each bot checks its key and gets its stamp."""
     from catanrl import cli, provenance
-    from catanrl.agents import spec as spec_module
 
     path = tmp_path / "openhex.yaml"
     path.write_text(json.dumps({"bots": [
@@ -120,22 +121,43 @@ def test_the_cli_runner_plays_only_versions_that_are_not_retired(tmp_path, monke
         _bot(name="catanrl-1v1", version="1v1-v1", key_env="OPENHEX_KEY_1V1", retired=True,
              spec="BELIEF:ckpt=puffer-graph2/full@best:worlds=16"),  # retired: never pinned, never run
     ]}))
-    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", "key-of-v2")
+    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", KEY)
     monkeypatch.delenv("OPENHEX_KEY_1V1", raising=False)
-    started, asked = [], []
+    fake = _fake_openhex(monkeypatch)
+    monkeypatch.setattr(provenance, "code_id", lambda kind: {"catanrl": "a" * 16, "engine": "b" * 16})
+    monkeypatch.setattr(provenance, "engine_info", lambda: {"so_sha256": "d" * 64})
+    assert cli.main(["openhex", str(path), "--state", str(tmp_path / "state")]) == 0
+    assert [b.name for b in fake.started] == ["catanrl-1v1-v2"] and fake.asked == [KEY]
+    assert fake.started[0].announced and fake.started[0].stamp["version"] == "1v1-v2"
+    assert fake.started[0].stamp["code_id"] == {"catanrl": "a" * 16, "engine": "b" * 16}
+    assert (tmp_path / "state" / "catanrl-1v1-v2" / "lock").exists() and fake.left == []
+
+
+def _fake_openhex(monkeypatch, *, git_problem=None, me=None):
+    """OpenHex's client, the bots, the agents and the engine build faked for ``cli.main``; git
+    too, as the real ``git_stamps`` behaves: with ``git_problem``, it raises unless allowed
+    dirty, and stamps dirty then. ``me``: the ``GET /api/bots/me`` reply per key."""
+    from catanrl import cli
+    from catanrl.agents import spec as spec_module
+
+    fake = SimpleNamespace(started=[], asked=[], left=[])
+    me = me or {KEY: {"id": "0123456789abcdef", "name": "catanrl-1v1-v2", "mode": "1v1"}}
 
     class Client:
         def __init__(self, key, base):
             self.key = key
 
         def me(self):
-            asked.append(self.key)
-            return {"id": "0123456789abcdef", "name": "catanrl-1v1-v2", "mode": "1v1"}
+            fake.asked.append(self.key)
+            return me[self.key]
+
+        def leave(self, mode):
+            fake.left.append((self.key, mode))
 
     class Bot:
         def __init__(self, spec, key, mode, *, name, stamp, **_):
             self.name, self.stamp = name, stamp
-            started.append(self)
+            fake.started.append(self)
 
         def announce(self):
             self.announced = True
@@ -143,20 +165,83 @@ def test_the_cli_runner_plays_only_versions_that_are_not_retired(tmp_path, monke
         def run(self):
             return None
 
+    def git_stamps(root, entries, *, allow_dirty=False, **_):
+        if git_problem and not allow_dirty:
+            raise DeployError(git_problem)
+        dirty = bool(git_problem)
+        return ({e.name: {"commit": "c" * 40, "describe": "openhex-1v1-v2" + "-dirty" * dirty, "dirty": dirty,
+                          "tag": None, "tag_commit": None} for e in entries}, [git_problem] if git_problem else [])
+
     resolved = SimpleNamespace(canonical="BELIEF:ckpt=...", checkpoints=(_ref(),))
     monkeypatch.setattr(openhex_module, "OpenHexClient", Client)
     monkeypatch.setattr(openhex_module, "OpenHexBot", Bot)
+    monkeypatch.setattr(openhex_module, "native_for", lambda agent, device: (object(), "x"))
     monkeypatch.setattr(spec_module, "resolve_agent", lambda spec, harness: resolved)
-    monkeypatch.setattr(deploy, "git_stamps", lambda root, entries, **_: (
-        {e.name: {"commit": "c" * 40, "describe": "openhex-1v1-v2", "dirty": False, "tag": None, "tag_commit": None}
-         for e in entries}, []))
+    monkeypatch.setattr(deploy, "git_stamps", git_stamps)
     monkeypatch.setattr(cli, "_engine_build", dict)
-    monkeypatch.setattr(provenance, "code_id", lambda kind: {"catanrl": "a" * 16, "engine": "b" * 16})
-    monkeypatch.setattr(provenance, "engine_info", lambda: {"so_sha256": "d" * 64})
-    assert cli.main(["openhex", str(path), "--state", str(tmp_path / "state")]) == 0
-    assert [b.name for b in started] == ["catanrl-1v1-v2"] and asked == ["key-of-v2"]
-    assert started[0].announced and started[0].stamp["version"] == "1v1-v2"
-    assert started[0].stamp["code_id"] == {"catanrl": "a" * 16, "engine": "b" * 16}
+    return fake
+
+
+def test_the_cli_runner_refuses_an_unpinned_spec_a_dirty_checkout_and_a_malformed_key(tmp_path, monkeypatch,
+                                                                                     capsys):
+    """The runner's own refusals, end to end: each stops it (exit 2) before OpenHex is asked
+    anything; --allow-dirty runs a dirty checkout, stamped dirty; a malformed key is not shown."""
+    from catanrl import cli, provenance
+
+    monkeypatch.setattr(provenance, "code_id", lambda kind: {"catanrl": "a" * 16})
+    monkeypatch.setattr(provenance, "engine_info", dict)
+    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", KEY)
+    path = tmp_path / "openhex.yaml"
+    state = ["--state", str(tmp_path / "state")]
+
+    path.write_text(json.dumps({"bots": [_bot(spec="BELIEF:ckpt=puffer-graph2/full@best:worlds=16")]}))
+    fake = _fake_openhex(monkeypatch)
+    assert cli.main(["openhex", str(path), *state]) == 2
+    assert "not pinned by #sha" in capsys.readouterr().err and fake.asked == [] and fake.started == []
+
+    path.write_text(json.dumps({"bots": [_bot()]}))
+    fake = _fake_openhex(monkeypatch, git_problem="the play source differs from HEAD cccccccccccc: src/x.py")
+    assert cli.main(["openhex", str(path), *state]) == 2
+    assert "the play source differs" in capsys.readouterr().err and fake.asked == [] and fake.started == []
+    assert cli.main(["openhex", str(path), *state, "--allow-dirty"]) == 0
+    assert fake.asked == [KEY] and fake.started[0].stamp["git"]["dirty"]
+
+    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", f"{KEY}\n{KEY_4P}")  # say, a grep that matched two variables
+    fake = _fake_openhex(monkeypatch)
+    assert cli.main(["openhex", str(path), *state]) == 2
+    err = capsys.readouterr().err
+    assert "OPENHEX_KEY_1V1_V2 (the API key of catanrl-1v1-v2) is not an OpenHex key" in err
+    assert KEY not in err and KEY_4P not in err and fake.asked == []
+
+
+def test_a_refused_key_stops_the_runner_and_takes_the_other_bots_off_the_queue(tmp_path, monkeypatch, capsys):
+    """A restart whose key check fails would leave the last process's queue entries behind:
+    the bots whose keys passed leave the queue, so OpenHex matches none of them to no one."""
+    from catanrl import cli
+
+    path = tmp_path / "openhex.yaml"
+    path.write_text(json.dumps({"bots": [_bot(), _bot(name="catanrl-4p", mode="4p", key_env="OPENHEX_KEY_4P")]}))
+    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", KEY)
+    monkeypatch.setenv("OPENHEX_KEY_4P", KEY_4P)
+    fake = _fake_openhex(monkeypatch, me={KEY: {"id": "0123456789abcdef", "name": "catanrl-1v1-v2", "mode": "1v1"},
+                                          KEY_4P: {"id": PLAIN, "name": "catanrl-1v1", "mode": "1v1"}})
+    assert cli.main(["openhex", str(path), "--state", str(tmp_path / "state")]) == 2
+    err = capsys.readouterr().err
+    assert "OPENHEX_KEY_4P is the key of 'catanrl-1v1'" in err and "took catanrl-1v1-v2 off the queue" in err
+    assert fake.asked == [KEY, KEY_4P] and fake.left == [(KEY, "1v1")] and fake.started == []
+    assert KEY not in err and KEY_4P not in err
+
+
+def test_one_bot_runs_in_one_process(tmp_path):
+    """Two processes with one key would both play its games: the second is refused."""
+    _, entries = _parse(_bot(), _bot(name="catanrl-4p", mode="4p", key_env="K4"))
+    held = deploy.lock_bots(tmp_path, entries[1:])
+    with pytest.raises(DeployError, match="catanrl-4p already runs from"):
+        deploy.lock_bots(tmp_path, entries)
+    first = deploy.lock_bots(tmp_path, entries[:1])  # the refused call let go of what it had taken
+    for file in held + first:
+        file.close()
+    assert len(deploy.lock_bots(tmp_path, entries)) == 2
 
 
 # ---------------------------------------------------------------- pinned checkpoints
@@ -214,6 +299,20 @@ def test_a_pin_that_is_not_the_weights_on_disk_fails_in_the_resolver(run):
     shutil.copyfile(run.first.path, run.best.path)  # e3's file replaced by other (valid) weights
     with pytest.raises(SpecError, match=f"differ from the pinned {sha}"):
         resolve_agent(f"BELIEF:ckpt=exp/v@e3#{sha}", harness="server")
+
+
+def test_an_empty_or_short_pin_pins_nothing(run):
+    """``x.pt#`` checks no sha and ``x.pt#3`` one digit (``load_checkpoint`` takes any prefix of
+    a path's sha): a pin is 6-64 hex digits, the run-ref rule."""
+    sha = run.best.weights_sha256
+    pinned = deploy.pinned_ref(str(run.best.path))
+    assert pinned.endswith(f"#{sha[:12]}")
+    for ref in (f"{run.best.path}#", f"{run.best.path}#{sha[0]}", f"exp/v@e3#{sha[:5]}"):
+        problems = deploy.pin_problems(_parse(_bot(spec=f"POLICY:ckpt={ref}"))[1][0])
+        assert len(problems) == 1 and "not pinned by #sha" in problems[0], ref
+        assert f"{ref} resolves to " in problems[0] and "does not resolve" not in problems[0]
+    for ref in (f"{run.best.path}#{sha[:12]}", f"exp/v@e3#{sha[:6]}", f"exp/v@e3#{sha}"):
+        assert deploy.pin_problems(_parse(_bot(spec=f"POLICY:ckpt={ref}"))[1][0]) == [], ref
 
 
 # ---------------------------------------------------------------- provenance
@@ -344,7 +443,17 @@ def test_changes_outside_the_play_source_are_ignored(repo):
     (repo.sub / "untracked.txt").write_text("u\n")
     stamps, problems = deploy.git_stamps(repo.root, _entries("v1"))
     assert problems == [] and not stamps["bot-0"]["dirty"]
-    assert stamps["bot-0"]["describe"] == "v1-dirty"  # git's own view counts every tracked file
+    assert stamps["bot-0"]["describe"] == "v1"  # not git's --dirty, which counts every tracked file
+
+
+def test_editing_the_deploy_file_in_place_changes_no_stamp(repo):
+    """Adding a bot_id or retiring a version edits deploy/openhex.yaml on the bot machine: the
+    bots that keep running keep their provenance_id across the restart."""
+    entry = _parse(_bot(tag="v1"))[1][0]
+    before = deploy.provenance_id(_stamp(entry, **deploy.git_stamps(repo.root, [entry])[0][entry.name]))
+    (repo.root / "deploy" / "openhex.yaml").write_text("bots: [{retired: true}]\n")
+    after = deploy.git_stamps(repo.root, [entry])[0][entry.name]
+    assert after["describe"] == "v1" and deploy.provenance_id(_stamp(entry, **after)) == before
 
 
 def test_a_dirty_play_source_is_refused_unless_allowed(repo):
@@ -352,7 +461,7 @@ def test_a_dirty_play_source_is_refused_unless_allowed(repo):
     with pytest.raises(DeployError, match="the play source differs from HEAD .*src/catanrl/a.py"):
         deploy.git_stamps(repo.root, _entries(None))
     stamps, problems = deploy.git_stamps(repo.root, _entries(None), allow_dirty=True)
-    assert stamps["bot-0"]["dirty"] and len(problems) == 1
+    assert stamps["bot-0"]["dirty"] and stamps["bot-0"]["describe"] == "v1-dirty" and len(problems) == 1
 
 
 @pytest.mark.parametrize("change", ["moved", "modified"])
@@ -380,6 +489,7 @@ def test_the_tag_must_hold_the_code_that_plays(repo):
     repo.git("tag", "v2")
     stamps, problems = deploy.git_stamps(repo.root, _entries("v1", "v2"), allow_dirty=True)
     assert len(problems) == 1 and stamps["bot-0"]["dirty"] and not stamps["bot-1"]["dirty"]
+    assert (stamps["bot-0"]["describe"], stamps["bot-1"]["describe"]) == ("v2-dirty", "v2")
 
 
 def test_a_checkout_that_cannot_be_read_and_a_stale_engine_build(tmp_path, repo):
@@ -435,6 +545,66 @@ def test_verify_key_asks_bots_me_and_never_shows_the_key(monkeypatch):
     assert "secret-key-123" not in str(error.value)
 
 
+def test_a_key_http_client_refuses_is_never_shown(monkeypatch):
+    """http.client refuses a header with a newline by quoting it whole (``Invalid header value
+    b'Bearer <key>'``): verify_key names the error's type only. Nothing is sent (the header is
+    refused before any connection; a connection here fails the test)."""
+    import socket
+
+    def no_connection(*args, **kwargs):
+        raise AssertionError("connected")
+
+    monkeypatch.setattr(socket, "create_connection", no_connection)
+    entry = _parse(_bot())[1][0]
+    client = OpenHexClient(f"{KEY}\n{KEY_4P}", "http://127.0.0.1:9/api")
+    with pytest.raises(ValueError, match=f"Invalid header value .*{KEY_4P}"):
+        client.me()  # what verify_key's message used to quote
+    with pytest.raises(DeployError, match="could not be checked: ValueError") as error:
+        deploy.verify_key(entry, client)
+    assert KEY not in str(error.value) and KEY_4P not in str(error.value)
+
+
+def test_read_key_refuses_an_unset_or_malformed_key_naming_only_its_variable():
+    entry = _parse(_bot())[1][0]
+    assert deploy.read_key(entry, {"OPENHEX_KEY_1V1_V2": f" {KEY}\n"}) == KEY
+    assert deploy.key_state(entry, {"OPENHEX_KEY_1V1_V2": KEY}) == "set"
+    for value, says, state in (("", "is not set", "unset"), (f"{KEY}\n{KEY_4P}", "is not an OpenHex key", "malformed"),
+                               (KEY.upper(), "is not an OpenHex key", "malformed")):
+        with pytest.raises(DeployError, match=says) as error:
+            deploy.read_key(entry, {"OPENHEX_KEY_1V1_V2": value})
+        assert "OPENHEX_KEY_1V1_V2" in str(error.value) and KEY not in str(error.value).lower()
+        assert deploy.key_state(entry, {"OPENHEX_KEY_1V1_V2": value}) == state
+
+
+def test_verify_keys_checks_every_key_and_says_when_a_bot_could_not_leave_the_queue():
+    _, entries = _parse(_bot(), _bot(name="catanrl-4p", mode="4p", key_env="K4"),
+                        _bot(name="catanrl-1v1-v3", key_env="K3"))
+
+    class Client:
+        def __init__(self, me, leave_fails=False):
+            self.reply, self.leave_fails, self.left = me, leave_fails, []
+
+        def me(self):
+            return self.reply
+
+        def leave(self, mode):
+            if self.leave_fails:
+                raise OSError("unreachable")
+            self.left.append(mode)
+
+    good = {e.name: Client({"name": e.name, "mode": e.mode, "id": "0" * 16}) for e in entries}
+    assert set(deploy.verify_keys(entries, good)) == {e.name for e in entries}
+    assert all(c.left == [] for c in good.values())  # all passed: nobody leaves
+    clients = {**good, "catanrl-4p": Client({"name": "catanrl-1v1", "mode": "1v1"}),
+               "catanrl-1v1-v3": Client(good["catanrl-1v1-v3"].reply, leave_fails=True)}
+    with pytest.raises(DeployError) as error:
+        deploy.verify_keys(entries, clients)
+    text = str(error.value)
+    assert "K4 is the key of 'catanrl-1v1'" in text and "took catanrl-1v1-v2 off the queue" in text
+    assert "catanrl-1v1-v3: could not leave the queue (OSError): leave it by hand" in text
+    assert clients["catanrl-1v1-v2"].left == ["1v1"] and clients["catanrl-4p"].left == []
+
+
 # ---------------------------------------------------------------- check and describe
 
 
@@ -456,7 +626,6 @@ def test_the_registration_body_fits_280_characters():
 
 def test_describe_and_check_contact_no_one(tmp_path, monkeypatch, capsys):
     from catanrl import cli
-    from catanrl.agents import spec as spec_module
 
     def offline(*args, **kwargs):
         raise AssertionError("contacted the network")
@@ -472,23 +641,76 @@ def test_describe_and_check_contact_no_one(tmp_path, monkeypatch, capsys):
     body = json.loads(capsys.readouterr().out)
     assert body["name"] == "catanrl-1v1-v2" and len(body["description"]) <= 280
 
-    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", "secret-key-123")
+    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", KEY)
     monkeypatch.delenv("OPENHEX_KEY_4P", raising=False)
-    resolved = SimpleNamespace(canonical="x", checkpoints=(_ref(),))
-    monkeypatch.setattr(spec_module, "resolve_agent", lambda spec, harness: resolved)
-    monkeypatch.setattr(openhex_module, "native_for", lambda agent, device: (object(), "x"))
-    monkeypatch.setattr(deploy, "git_stamps", lambda root, entries, **_: (
-        {e.name: {"commit": "c" * 40, "describe": "openhex-1v1-v2", "dirty": False} for e in entries}, []))
-    monkeypatch.setattr(cli, "_engine_build", dict)
+    fake = _fake_openhex(monkeypatch)
     assert cli.main(["openhex", str(path), "--check"]) == 1
     out = capsys.readouterr().out
     rows = {line.split()[0]: line.split() for line in out.splitlines() if line.startswith("catanrl-")}
     assert rows["catanrl-1v1-v2"][-1] == "set" and rows["catanrl-4p"][-1] == "unset"
     assert rows["catanrl-1v1"][-2:] == ["yes", "(unset)"] and SHA[:12] in rows["catanrl-1v1-v2"]
     assert "problem: OPENHEX_KEY_4P (catanrl-4p's key) is not set" in out and "1 problem(s)" in out
-    assert "secret-key-123" not in out
-    monkeypatch.setenv("OPENHEX_KEY_4P", "another-key")
+    assert KEY not in out
+    monkeypatch.setenv("OPENHEX_KEY_4P", f"{KEY_4P}\n{KEY}")  # two keys a grep joined
+    assert cli.main(["openhex", str(path), "--check"]) == 1
+    out = capsys.readouterr().out
+    assert "problem: OPENHEX_KEY_4P (catanrl-4p's key) is not an OpenHex key" in out and KEY_4P not in out
+    monkeypatch.setenv("OPENHEX_KEY_4P", KEY_4P)
     assert cli.main(["openhex", str(path), "--check"]) == 0 and capsys.readouterr().out.rstrip().endswith("ok")
+    assert fake.asked == [] and fake.left == []  # --check asks OpenHex nothing (without --keys)
+
+
+def test_check_refuses_an_unpinned_spec_with_its_pinned_ref_unless_allowed(run, tmp_path, monkeypatch, capsys):
+    from catanrl import cli
+
+    pinned = f"exp/v@e3#{run.best.weights_sha256[:12]}"
+    path = tmp_path / "openhex.yaml"
+    path.write_text(json.dumps({"bots": [_bot(spec="BELIEF:ckpt=exp/v@best:worlds=16")]}))
+    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", KEY)
+    _fake_openhex(monkeypatch)
+    assert cli.main(["openhex", str(path), "--check"]) == 1
+    out = capsys.readouterr().out
+    assert f"problem: catanrl-1v1-v2: not pinned by #sha: exp/v@best resolves to {pinned} now" in out
+    assert f"spec: BELIEF:ckpt={pinned}:worlds=16" in out and out.rstrip().endswith("1 problem(s)")
+    assert cli.main(["openhex", str(path), "--check", "--allow-unpinned"]) == 0
+    out = capsys.readouterr().out
+    assert f"warning: catanrl-1v1-v2: not pinned by #sha: exp/v@best resolves to {pinned} now" in out
+    assert out.rstrip().endswith("ok")
+
+
+def test_check_refuses_a_dirty_checkout_unless_allowed(tmp_path, monkeypatch, capsys):
+    from catanrl import cli
+
+    path = tmp_path / "openhex.yaml"
+    path.write_text(json.dumps({"bots": [_bot()]}))
+    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", KEY)
+    _fake_openhex(monkeypatch, git_problem="the play source differs from HEAD cccccccccccc: src/x.py")
+    assert cli.main(["openhex", str(path), "--check"]) == 1
+    assert "problem: the play source differs" in capsys.readouterr().out
+    assert cli.main(["openhex", str(path), "--check", "--allow-dirty"]) == 0
+    out = capsys.readouterr().out
+    assert "warning: the play source differs" in out and out.rstrip().endswith("ok")
+
+
+def test_check_keys_asks_openhex_whose_each_key_is_and_queues_nothing(tmp_path, monkeypatch, capsys):
+    from catanrl import cli
+
+    path = tmp_path / "openhex.yaml"
+    path.write_text(json.dumps({"bots": [_bot(), _bot(name="catanrl-4p", mode="4p", key_env="OPENHEX_KEY_4P"),
+                                         _bot(name="catanrl-1v1", key_env="OPENHEX_KEY_1V1", retired=True)]}))
+    monkeypatch.setenv("OPENHEX_KEY_1V1_V2", KEY)
+    monkeypatch.setenv("OPENHEX_KEY_4P", KEY_4P)
+    fake = _fake_openhex(monkeypatch, me={KEY: {"id": "0123456789abcdef", "name": "catanrl-1v1-v2", "mode": "1v1"},
+                                          KEY_4P: {"id": PLAIN, "name": "catanrl-1v1", "mode": "1v1"}})
+    assert cli.main(["openhex", str(path), "--check", "--keys"]) == 1
+    out = capsys.readouterr().out
+    rows = {line.split()[0]: line.split() for line in out.splitlines() if line.startswith("catanrl-")}
+    assert rows["catanrl-1v1-v2"][-1] == "verified" and rows["catanrl-4p"][-1] == "REFUSED"
+    assert "problem: OPENHEX_KEY_4P is the key of 'catanrl-1v1'" in out
+    assert fake.asked == [KEY, KEY_4P] and fake.left == [] and fake.started == []  # the retired one is not asked
+    assert KEY not in out and KEY_4P not in out
+    with pytest.raises(SystemExit, match="--keys goes with --check"):
+        cli.main(["openhex", str(path), "--keys"])
 
 
 # ---------------------------------------------------------------- stats
@@ -594,3 +816,4 @@ def test_public_records_page_through_a_bots_games(monkeypatch):
     assert len([a for a in asked if a[1] is not None]) == 3  # 3 + 3 + 1 of 7
     assert records.find_bot("catanrl-1v1-search", "1v1")["games1v1"] == 274
     assert records.find_bot("catanrl-1v1-search", "4p") is None
+

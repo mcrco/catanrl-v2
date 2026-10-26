@@ -25,12 +25,15 @@ the tag's or not clean (:func:`git_stamps`) and a key that is another bot's
 game line names its stamp by :func:`provenance_id`, and
 ``<state>/<bot>/deploys.jsonl`` keeps the full stamps.
 
-Nothing here contacts OpenHex but :func:`verify_key` (``GET /api/bots/me``).
+Nothing here contacts OpenHex but :func:`verify_key` (``GET /api/bots/me``) and
+:func:`verify_keys`, which also takes the bots whose keys passed off the queue
+when another key is refused.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 import subprocess
 from collections import Counter
@@ -56,6 +59,10 @@ REPO_URL = "https://github.com/mcrco/catanrl-v2"
 NAME_LENGTH = (3, 32)
 DESCRIPTION_LENGTH = 280
 BOT_ID_RE = re.compile(r"[0-9a-f]{16}")
+#: OpenHex's API keys are ``uuid4().hex`` (upstream main.py, POST /api/bots).
+KEY_RE = re.compile(r"[0-9a-f]{32}")
+#: A ``#sha`` pin: the run-ref rule (``catanrl.runs.REF_RE``), for ``.pt`` paths too.
+PIN_RE = re.compile(r"[0-9a-f]{6,64}")
 ENV_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -196,17 +203,20 @@ def selected(entries: Sequence[DeployEntry], only: str | None = None) -> list[De
 
 
 def unpinned_refs(spec: str) -> list[str]:
-    """The checkpoint refs of ``spec`` not pinned by their weights' sha (``#sha``)."""
+    """The checkpoint refs of ``spec`` not pinned by their weights' sha: no ``#sha`` of
+    6-64 hex digits (a ``.pt`` path's ``#`` or ``#3`` would pin nothing, or a digit)."""
     from catanrl.agents.spec import spec_ckpts
 
-    return [ref for ref in spec_ckpts(spec) if "#" not in ref]
+    return [ref for ref in spec_ckpts(spec) if not PIN_RE.fullmatch(ref.partition("#")[2])]
 
 
 def pinned_ref(ref: str) -> str:
     """``ref`` as it resolves now, pinned: ``run@eN#sha`` (an alias such as ``best``
-    moves; an epoch's file could be replaced), or ``/abs/path.pt#sha``."""
+    moves; an epoch's file could be replaced), or ``/abs/path.pt#sha``. A short or
+    empty pin on ``ref`` is dropped first."""
     from catanrl.runs import load_experiment, parse_ref
 
+    ref = ref.partition("#")[0]
     if ref.endswith(".pt"):
         from catanrl.checkpoint import Checkpoint
 
@@ -260,16 +270,17 @@ def _git(root: Path, *args: str) -> str:
 
 
 def code_state(root: str | Path) -> dict:
-    """The checkout at ``root``: HEAD, ``git describe --tags --always --dirty``, and the
-    tracked play source (:data:`PLAY_PATHS`) that differs from HEAD: a modified file, or a
-    submodule moved off its recorded commit or with modified files (untracked files,
-    in a submodule too, do not count)."""
+    """The checkout at ``root``: HEAD, ``git describe --tags --always`` (without git's
+    ``--dirty``, which counts every tracked file: :func:`git_stamps` adds ``-dirty`` from
+    the play source), and the tracked play source (:data:`PLAY_PATHS`) that differs from
+    HEAD: a modified file, or a submodule moved off its recorded commit or with modified
+    files (untracked files, in a submodule too, do not count)."""
     root = Path(root)
     status = _git(root, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked",
                   "--", *PLAY_PATHS)
     changed = [line[3:] for line in status.splitlines() if line.strip()]
     return {"root": str(root), "commit": _git(root, "rev-parse", "HEAD").strip(),
-            "describe": _git(root, "describe", "--tags", "--always", "--dirty").strip(), "changed": changed}
+            "describe": _git(root, "describe", "--tags", "--always").strip(), "changed": changed}
 
 
 def tag_state(root: str | Path, tag: str, commit: str) -> dict:
@@ -291,7 +302,9 @@ def git_stamps(root: str | Path, entries: Sequence[DeployEntry], *, allow_dirty:
     the engine was built from another tree than the checkout's. Raises :class:`DeployError`
     on a problem unless ``allow_dirty``, in which case the entries it concerns are stamped
     ``dirty: true`` (``dirty``: the code that plays is not exactly the declared code, the
-    tag's or else HEAD's)."""
+    tag's or else HEAD's; ``describe`` ends in ``-dirty`` exactly then, so an edit outside
+    the play source, such as the deploy file's, changes no stamp). A problem stops every
+    entry, not only the one it concerns: one process runs one checkout."""
     problems, stamps = [], {}
     try:
         state = code_state(root)
@@ -323,6 +336,8 @@ def git_stamps(root: str | Path, entries: Sequence[DeployEntry], *, allow_dirty:
                     problems.append(f"{entry.name}: HEAD {state['commit'][:12]} does not play the code of {entry.tag} "
                                     f"({found['tag_commit'][:12]}): {_paths(found['differs'])} differ")
                     git["dirty"] = True
+        if git["dirty"]:
+            git["describe"] += "-dirty"
         stamps[entry.name] = git
     if stale is not None:
         problems.insert(0, stale)
@@ -354,6 +369,25 @@ def _paths(paths: Sequence[str], n: int = 6) -> str:
 # ---------------------------------------------------------------- the key
 
 
+def read_key(entry: DeployEntry, environ: Mapping[str, str] = os.environ) -> str:
+    """``entry``'s API key from its variable. Refuses an unset one, and one that is not an
+    OpenHex key (:data:`KEY_RE`), say several keys a grep joined by newlines, which an HTTP
+    library would quote whole in its error; the refusal names the variable only."""
+    key = environ.get(entry.key_env, "").strip()
+    if not key:
+        raise DeployError(f"{entry.key_env} (the API key of {entry.name}) is not set")
+    if not KEY_RE.fullmatch(key):
+        raise DeployError(f"{entry.key_env} (the API key of {entry.name}) is not an OpenHex key "
+                          "(32 lowercase hex digits; the value is not shown)")
+    return key
+
+
+def key_state(entry: DeployEntry, environ: Mapping[str, str] = os.environ) -> str:
+    """``set``, ``unset`` or ``malformed`` (:func:`read_key`), for ``--check``."""
+    key = environ.get(entry.key_env, "").strip()
+    return "unset" if not key else "set" if KEY_RE.fullmatch(key) else "malformed"
+
+
 def check_identity(entry: DeployEntry, me: Mapping[str, Any]) -> None:
     """Refuse a key (``GET /api/bots/me``'s reply ``me``) that is not ``entry``'s registration:
     a key under the wrong variable would play this entry's model under another bot's name."""
@@ -374,12 +408,64 @@ def verify_key(entry: DeployEntry, client: Any) -> dict:
     except OpenHexHTTPError as error:
         raise DeployError(f"{entry.key_env} ({entry.name}'s key): OpenHex refused it (HTTP {error.status}: "
                           f"{error.detail[:200]})") from None
-    except (OSError, ValueError) as error:  # unreachable, or not JSON
+    except OSError as error:  # unreachable
         raise DeployError(f"{entry.key_env} ({entry.name}'s key) could not be checked: {error}") from None
+    except ValueError as error:  # not JSON; or a key http.client refuses, whose message quotes the header, key and all
+        raise DeployError(f"{entry.key_env} ({entry.name}'s key) could not be checked: "
+                          f"{type(error).__name__}") from None
     if not isinstance(me, Mapping):
         raise DeployError(f"{entry.key_env} ({entry.name}'s key): GET /api/bots/me sent {str(me)[:200]!r}")
     check_identity(entry, me)
     return dict(me)
+
+
+def verify_keys(entries: Sequence[DeployEntry], clients: Mapping[str, Any]) -> dict[str, dict]:
+    """:func:`verify_key` for every entry (``clients`` by entry name); each one's reply. On a
+    refusal, the entries whose keys passed leave OpenHex's queue before this raises: a
+    restart that stops here leaves the last process's queue entries behind, and OpenHex
+    would match bots that nothing runs (``POST /api/queue/leave`` only deletes the entry)."""
+    replies, refused = {}, []
+    for entry in entries:
+        try:
+            replies[entry.name] = verify_key(entry, clients[entry.name])
+        except DeployError as error:
+            refused.append(str(error))
+    if not refused:
+        return replies
+    left = []
+    for entry in entries:
+        if entry.name not in replies:
+            continue
+        try:
+            clients[entry.name].leave(entry.mode)
+            left.append(entry.name)
+        except Exception as error:  # noqa: BLE001 - say so and go on: the refusal is what matters
+            refused.append(f"{entry.name}: could not leave the queue ({type(error).__name__}): leave it by hand")
+    raise DeployError("\n".join(refused) + (f"\n(took {', '.join(left)} off the queue; " if left else "\n(") +
+                      "a bot whose key was refused may still be queued from the last run: leave its queue by hand)")
+
+
+def lock_bots(state: str | Path, entries: Sequence[DeployEntry]) -> list:
+    """Hold ``<state>/<bot>/lock`` for each entry while this process runs (keep the list): a
+    second process running one of them from the same state root is refused. Two processes
+    with one key would both play its games and both append to its games.jsonl."""
+    import fcntl
+
+    held = []
+    for entry in entries:
+        where = Path(state) / entry.name
+        where.mkdir(parents=True, exist_ok=True)
+        file = open(where / "lock", "a")  # noqa: SIM115 (held while the process runs: the caller keeps it)
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            file.close()
+            for other in held:
+                other.close()
+            raise DeployError(f"{entry.name} already runs from {state} in another process (one bot, one process: "
+                              "run each from one service, with --only)") from None
+        held.append(file)
+    return held
 
 
 # ---------------------------------------------------------------- provenance
@@ -403,7 +489,7 @@ def stamp(entry: DeployEntry, resolved: Any, git: Mapping[str, Any], *, code: Ma
 
 def provenance_id(stamp: Mapping[str, Any]) -> str:
     """A short id of a stamp: equal stamps (whatever their key order) share it, so a restart
-    on the same code, spec and weights keeps it."""
+    at the same commit (edits outside the play source do not count), spec and weights keeps it."""
     return digest(stamp, 12)
 
 

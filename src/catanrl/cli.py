@@ -19,6 +19,7 @@
     catanrl house deploy/house.yaml [--server wss://HOST]   # keep tables open for people
     catanrl openhex deploy/openhex.yaml                      # play our bots on open-hex.web.app
     catanrl openhex deploy/openhex.yaml --check              # check the file, pins, code and keys; plays nothing
+    catanrl openhex deploy/openhex.yaml --check --keys       # ... and ask OpenHex whose each key is (before a restart)
     catanrl openhex deploy/openhex.yaml --describe NAME      # the registration body for a new version
     catanrl openhex stats deploy/openhex.yaml                # every version's record (OpenHex's public data)
 """
@@ -156,6 +157,8 @@ def _parser() -> argparse.ArgumentParser:
     oh.add_argument("--check", action="store_true",
                     help="check the file, pins, agents, code and keys (set or not), print a row per bot, exit "
                          "0 or 1; contacts no one")
+    oh.add_argument("--keys", action="store_true",
+                    help="with --check: also ask OpenHex (GET /api/bots/me) whose each key is; queues nothing")
     oh.add_argument("--describe", metavar="NAME", help="print the POST /api/bots body for this bot and exit")
     oh.add_argument("--allow-unpinned", action="store_true",
                     help="run specs whose checkpoints are not pinned by #sha (a warning instead of a refusal)")
@@ -313,6 +316,8 @@ def _cmd_openhex(args) -> int:
         return _openhex_stats(args.stats_config)
     if args.stats_config:
         raise SystemExit(f"error: unexpected {args.stats_config!r} (catanrl openhex CONFIG, or catanrl openhex stats CONFIG)")
+    if args.keys and not args.check:
+        raise SystemExit("error: --keys goes with --check")
     settings, entries = deploy.load_deploy(args.config)
     if args.describe:
         return _openhex_describe(args, entries)
@@ -323,20 +328,18 @@ def _cmd_openhex(args) -> int:
     running = deploy.selected(entries, args.only)
     if not running:
         raise SystemExit("error: no bots to run")
+    locks = deploy.lock_bots(args.state, running)  # held until the process ends
     for warning in deploy.check_pins(running, allow_unpinned=args.allow_unpinned):
         log.warning("%s", warning)
     gits, problems = deploy.git_stamps(deploy.checkout_root(), running, allow_dirty=args.allow_dirty,
                                        engine_build=_engine_build())
     for problem in problems:
         log.warning("running anyway (--allow-dirty): %s", problem)
-    keys = {}
-    for entry in running:
-        keys[entry.name] = os.environ.get(entry.key_env, "").strip()
-        if not keys[entry.name]:
-            raise SystemExit(f"error: {entry.key_env} (the API key of {entry.name}) is not set")
+    keys = {entry.name: deploy.read_key(entry) for entry in running}
     api = settings.get("api", API)
-    for entry in running:  # before any agent loads: a key that is another bot's stops everything
-        deploy.verify_key(entry, OpenHexClient(keys[entry.name], api))
+    # Before any agent loads: a key that is another bot's stops everything (and takes the
+    # bots whose keys passed off the queue, where the last process left them).
+    deploy.verify_keys(running, {entry.name: OpenHexClient(keys[entry.name], api) for entry in running})
     resolved = {entry.name: resolve_agent(entry.spec, harness="server") for entry in running}
     stamps = deploy.build_stamps(running, resolved, gits)
     bots = [OpenHexBot(resolved[entry.name], keys[entry.name], entry.mode, base=api, device=args.device,
@@ -349,14 +352,16 @@ def _cmd_openhex(args) -> int:
         thread.start()
     for thread in threads:
         thread.join()
+    del locks  # (the bot threads run until the process ends; the locks with them)
     return 0
 
 
 def _openhex_check(args, settings, entries) -> int:
-    """``--check``: everything the runner checks before it queues, except OpenHex itself."""
+    """``--check``: everything the runner checks before it queues, except OpenHex itself
+    (with ``--keys``, OpenHex's ``GET /api/bots/me`` too: never the queue)."""
     from catanrl.agents.spec import resolve_agent
     from catanrl.bridge import openhex_deploy as deploy
-    from catanrl.bridge.openhex import native_for
+    from catanrl.bridge.openhex import API, OpenHexClient, native_for
 
     problems, warnings = [], []
     running = deploy.selected(entries, args.only)
@@ -376,9 +381,18 @@ def _openhex_check(args, settings, entries) -> int:
             except Exception as error:  # noqa: BLE001 - report every bot's failure, not the first
                 problems.append(f"{entry.name}: the agent does not load: {type(error).__name__}: {error}")
                 weights = "FAILED"
-        key = "set" if os.environ.get(entry.key_env, "").strip() else "unset"
+        key = deploy.key_state(entry)
         if key == "unset" and entry in running:
             problems.append(f"{entry.key_env} ({entry.name}'s key) is not set")
+        elif key == "malformed" and entry in running:
+            problems.append(f"{entry.key_env} ({entry.name}'s key) is not an OpenHex key (32 lowercase hex digits)")
+        elif key == "set" and entry in running and args.keys:
+            try:
+                deploy.verify_key(entry, OpenHexClient(deploy.read_key(entry), settings.get("api", API)))
+                key = "verified"
+            except deploy.DeployError as error:
+                problems.append(str(error))
+                key = "REFUSED"
         rows.append((entry.name, entry.version, entry.mode, entry.spec, weights, entry.tag or "-",
                      "yes" if entry.retired else "no", key if not entry.retired else f"({key})"))
     widths = [max(len(str(r[i])) for r in [head, *rows]) for i in range(len(head))]
