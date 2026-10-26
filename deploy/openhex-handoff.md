@@ -133,17 +133,25 @@ the code that plays did not change.
    `bot_id` yet. To pin the spec, write it with `@best` and run `--check`,
    which refuses it and prints the pinned spec to paste. `catanrl ls` also
    shows the epoch.
-3. Commit and tag: `git tag openhex-1v1-v2`, then push the branch and the tag
-   (`git push origin main openhex-1v1-v2`; submodule branches first if they moved).
-4. Release the checkpoints, here, where the runs are:
+3. Commit, then build the release here, where the runs are, **before tagging**:
    `catanrl openhex release deploy/openhex.yaml openhex-1v1-v2` packs each
    checkpoint the tag's bots pin into a `.tar.gz` of about 2 MB, with
    `manifest.json` and `release-notes.md`, in a temp dir (or `--out DIR`), and
-   publishes nothing. It refuses a secret in any file it packs (naming the file
-   and line, never the value) and lists the absolute home paths that become
-   public (each run's `config.json` names its experiment YAML). Read that, then
-   run the `cd ... && gh release create ...` it prints. Releases are public, on
-   mcrco/catanrl-v2 (a top-level `releases: owner/name` names another repo).
+   publishes nothing. It refuses refs a fetched run cannot resolve, which
+   `--check` lets through (`@best#sha`, `exp@eN#sha`, a `.pt` path; it says
+   to pin `exp/variant@eN#sha`), and a secret in any file it packs (naming
+   the file and line, never the value). It lists the absolute home
+   paths that become public (each run's `config.json` names its experiment
+   YAML), and warns that the tag does not exist yet: `manifest.json` names HEAD.
+   Fix, commit and rebuild until it is clean.
+4. Tag that HEAD and push the branch and the tag (`git tag openhex-1v1-v2`,
+   `git push origin main openhex-1v1-v2`; submodule branches first if they
+   moved). Then run the `cd ... && gh release create ... --verify-tag ...` the
+   build printed. `--verify-tag` makes gh refuse a tag that is not on GitHub
+   instead of creating it at the default branch's head. If you committed after
+   the build, build again (the assets come out byte-identical; the manifest
+   names the new commit). Releases are public, on mcrco/catanrl-v2 (a
+   top-level `releases: owner/name` names another repo).
 5. On the bot machine: `git fetch --tags && git checkout openhex-1v1-v2`, then
    `git submodule update` and `uv sync` if the engine or PufferLib moved, then
    `catanrl openhex fetch deploy/openhex.yaml` (see "Releases" below).
@@ -183,7 +191,9 @@ request. It reads `manifest.json` from
 no token) and checks each asset's sha256, members and weights before it writes
 anything. It never overwrites a different file and extends only a `run.json` a
 fetch wrote. A training run that lacks the checkpoint is refused: fetch into
-another `--runs DIR` and run with `CATANRL_RUNS_DIR=DIR`. Checkpoints load with
+another `--runs DIR` and run with `CATANRL_RUNS_DIR=DIR`. An asset unpacks to
+at most 128 MiB (a release refuses a bigger checkpoint), and anything wrong
+with a download is a one-line refusal. Checkpoints load with
 `torch.load(weights_only=True)`. (`--base-url` is for tests.)
 
 **The overlap.** The old version is not retired when the new one starts. Both
