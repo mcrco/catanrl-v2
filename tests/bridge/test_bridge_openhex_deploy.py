@@ -817,3 +817,93 @@ def test_public_records_page_through_a_bots_games(monkeypatch):
     assert records.find_bot("catanrl-1v1-search", "1v1")["games1v1"] == 274
     assert records.find_bot("catanrl-1v1-search", "4p") is None
 
+
+def _game(game_id, me, other, name, created, winner, status="completed"):
+    return {"id": game_id, "mode": "1v1", "status": status, "winnerBotId": winner, "createdAt": created,
+            "completedAt": created, "players": [{"botId": me, "name": "us"}, {"botId": other, "name": name}],
+            "playerBotIds": [me, other]}
+
+
+def test_stats_count_a_window_of_days_only():
+    entries = _v1_entries()
+    bots, games = stats.gather(entries, _Records())
+    since = stats.parse_when("2026-10-20")
+    assert since == datetime.datetime(2026, 10, 20, tzinfo=datetime.UTC)
+    assert stats.parse_when("2026-10-18", end=True) == datetime.datetime(2026, 10, 19, tzinfo=datetime.UTC)
+    assert stats.parse_when("2026-10-20T06:30+02:00").utcoffset() == datetime.timedelta(hours=2)
+    summary = stats.summarize(entries, bots, games, since=since)
+    plain, _, search, _ = summary["versions"]
+    assert (plain["games"], plain["wins"], plain["first"][:10]) == (2, 0, "2026-10-20")  # its meetings with search
+    assert search["games"] == 7 and summary["opponents"]["catanrl-1v1"] == [
+        {"opponent": "catanrl-1v1-search", "bot_id": SEARCH, "games": 2, "wins": 0}]
+    early = stats.summarize(entries, bots, games, until=stats.parse_when("2026-10-18", end=True))
+    assert early["versions"][0]["games"] == 6 and early["versions"][2]["games"] == 0 and early["head_to_head"] == []
+    text = stats.format_summary(summary)
+    assert text.startswith("games created from 2026-10-20 00:00 UTC only")
+    assert "OpenHex's own record says" not in text  # the ladder's record is all-time: no window to compare
+
+
+def test_stats_compare_overlapping_versions_per_opponent_over_the_overlap_alone():
+    """The overlap is what the two versions' records share: the later one's first game to the
+    earlier one's last, our own meetings left out (they are head-to-head)."""
+    entries = _v1_entries()
+    bots, games = stats.gather(entries, _Records())
+    summary = stats.summarize(entries, bots, games)
+    (overlap,) = summary["overlaps"]  # the 4p bot never played; the retired one is not on OpenHex
+    assert (overlap["a"], overlap["b"], overlap["opponents"]) == ("catanrl-1v1", "catanrl-1v1-search", [])
+    assert overlap["start"].startswith("2026-10-20T06:13:00") and overlap["end"].startswith("2026-10-20T06:49:01")
+    assert "no games against other bots in the overlap" in stats.format_summary(summary)
+    rehex, hexn = "dcc6de42b64b4b78", "aa627d8cbafb4011"
+    games[PLAIN] += [_game("p1", PLAIN, rehex, "rehex-2.11", "2026-10-20T06:30:00+00:00", PLAIN),
+                     _game("p2", PLAIN, rehex, "rehex-2.11", "2026-10-20T06:35:00+00:00", rehex, "aborted")]
+    games[SEARCH] += [_game("s1", SEARCH, rehex, "rehex-2.11", "2026-10-20T06:40:00+00:00", SEARCH),
+                      _game("s2", SEARCH, hexn, "hexn-4d.0", "2026-10-20T06:20:00+00:00", hexn),
+                      _game("s3", SEARCH, rehex, "rehex-2.11", "2026-10-20T06:55:00+00:00", SEARCH)]  # after v1's last
+    (overlap,) = stats.summarize(entries, bots, games)["overlaps"]
+    assert overlap["opponents"] == [
+        {"opponent": "rehex-2.11", "bot_id": rehex, "a_games": 2, "a_wins": 1, "b_games": 1, "b_wins": 1},
+        {"opponent": "hexn-4d.0", "bot_id": hexn, "a_games": 0, "a_wins": 0, "b_games": 1, "b_wins": 0}]
+    text = stats.format_summary(stats.summarize(entries, bots, games))
+    assert ("overlap of catanrl-1v1 (1v1-v1) and catanrl-1v1-search (1v1-search-v1), 2026-10-20 06:13 to "
+            "2026-10-20 06:49 UTC") in text
+    assert "\n  opponent    catanrl-1v1  catanrl-1v1-search\n  rehex-2.11  1 of 2       1 of 1\n  hexn-4d.0   -            0 of 1" in text
+
+
+def test_stats_refuse_a_bot_id_that_is_another_registration():
+    entries = _parse(_bot(name="catanrl-1v1", version="1v1-v1", key_env="K1", bot_id=SEARCH, retired=True),
+                     _bot(name="catanrl-4p", mode="1v1", version="4p-v1", key_env="K4", bot_id=FOURP))[1]
+    bots, games = stats.gather(entries, _Records())
+    summary = stats.summarize(entries, bots, games)
+    assert [v["found"] for v in summary["versions"]] == [False, False] and summary["head_to_head"] == []
+    text = stats.format_summary(summary)
+    assert (f"note: catanrl-1v1: bot_id {SEARCH} is 'catanrl-1v1-search' (1v1) on OpenHex, not this entry: "
+            "not counted") in text
+    assert f"note: catanrl-4p: bot_id {FOURP} is 'catanrl-4p' (4p) on OpenHex" in text  # a mode that is not ours
+
+
+def test_stats_escape_names_from_openhex():
+    """Anyone may register a bot, so an opponent's name can hold a terminal escape (here OSC 52,
+    a clipboard write): it is printed escaped."""
+    entries = _v1_entries()
+    bots, games = stats.gather(entries, _Records())
+    evil = "\x1b]52;c;cm0gLXJmIH4K\x07x"
+    games[PLAIN].append(_game("e1", PLAIN, "e" * 16, evil, "2026-10-19T00:00:00+00:00", PLAIN))
+    text = stats.format_summary(stats.summarize(entries, bots, games))
+    assert "\x1b" not in text and "\x07" not in text and "\\x1b]52;c;cm0gLXJmIH4K\\x07x" in text
+
+
+def test_the_stats_cli_takes_a_window(tmp_path, monkeypatch, capsys):
+    from catanrl import cli
+
+    monkeypatch.setattr(stats, "PublicRecords", _Records)
+    path = tmp_path / "openhex.yaml"
+    path.write_text(json.dumps({"bots": [_bot(name="catanrl-1v1", version="1v1-v1", key_env="K1", bot_id=PLAIN)]}))
+    assert cli.main(["openhex", "stats", str(path), "--since", "2026-10-20"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("games created from 2026-10-20 00:00 UTC only")
+    row = next(line.split() for line in out.splitlines() if line.startswith("1v1-v1"))
+    assert row[3:5] == ["2", "0"]
+    with pytest.raises(SystemExit, match="--since 'soon'"):
+        cli.main(["openhex", "stats", str(path), "--since", "soon"])
+    with pytest.raises(SystemExit, match="--since and --until are for catanrl openhex stats"):
+        cli.main(["openhex", str(path), "--check", "--until", "2026-10-20"])

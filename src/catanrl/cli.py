@@ -21,7 +21,7 @@
     catanrl openhex deploy/openhex.yaml --check              # check the file, pins, code and keys; plays nothing
     catanrl openhex deploy/openhex.yaml --check --keys       # ... and ask OpenHex whose each key is (before a restart)
     catanrl openhex deploy/openhex.yaml --describe NAME      # the registration body for a new version
-    catanrl openhex stats deploy/openhex.yaml                # every version's record (OpenHex's public data)
+    catanrl openhex stats deploy/openhex.yaml [--since DATE] # every version's record (OpenHex's public data)
 """
 
 from __future__ import annotations
@@ -159,6 +159,10 @@ def _parser() -> argparse.ArgumentParser:
                          "0 or 1; contacts no one")
     oh.add_argument("--keys", action="store_true",
                     help="with --check: also ask OpenHex (GET /api/bots/me) whose each key is; queues nothing")
+    oh.add_argument("--since", metavar="DATE",
+                    help="stats: count games created from DATE (UTC; 2026-10-20 or an ISO time)")
+    oh.add_argument("--until", metavar="DATE",
+                    help="stats: count games created up to DATE (UTC; a date includes its whole day)")
     oh.add_argument("--describe", metavar="NAME", help="print the POST /api/bots body for this bot and exit")
     oh.add_argument("--allow-unpinned", action="store_true",
                     help="run specs whose checkpoints are not pinned by #sha (a warning instead of a refusal)")
@@ -313,9 +317,11 @@ def _cmd_openhex(args) -> int:
     if args.config == "stats":
         if not args.stats_config:
             raise SystemExit("error: catanrl openhex stats CONFIG")
-        return _openhex_stats(args.stats_config)
+        return _openhex_stats(args.stats_config, args.since, args.until)
     if args.stats_config:
         raise SystemExit(f"error: unexpected {args.stats_config!r} (catanrl openhex CONFIG, or catanrl openhex stats CONFIG)")
+    if args.since or args.until:
+        raise SystemExit("error: --since and --until are for catanrl openhex stats")
     if args.keys and not args.check:
         raise SystemExit("error: --keys goes with --check")
     settings, entries = deploy.load_deploy(args.config)
@@ -428,13 +434,20 @@ def _openhex_describe(args, entries) -> int:
     return 0
 
 
-def _openhex_stats(config: str) -> int:
+def _openhex_stats(config: str, since: str | None = None, until: str | None = None) -> int:
+    from catanrl.bridge import openhex_stats as stats
     from catanrl.bridge.openhex_deploy import load_deploy
-    from catanrl.bridge.openhex_stats import PublicRecords, format_summary, gather, summarize
 
+    window = {}
+    for option, text, end in (("since", since, False), ("until", until, True)):
+        if text:
+            try:
+                window[option] = stats.parse_when(text, end=end)
+            except ValueError:
+                raise SystemExit(f"error: --{option} {text!r}: a date (2026-10-20) or an ISO time") from None
     _, entries = load_deploy(config)
-    bots, games = gather(entries, PublicRecords())
-    print(format_summary(summarize(entries, bots, games)))
+    bots, games = stats.gather(entries, stats.PublicRecords())
+    print(stats.format_summary(stats.summarize(entries, bots, games, **window)))
     return 0
 
 
