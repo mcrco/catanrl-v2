@@ -20,7 +20,10 @@ trainer state. A fetched run resolves only the epochs it holds: ``@best`` is "no
 form ``exp/variant@eN#sha`` only (it says which to paste). The tarball is deterministic
 (sorted members, mtime 0, owner 0, mode 644, gzip mtime 0): one checkpoint packs to the
 same bytes in every release. ``manifest.json`` lists the release's bots and its assets
-with their sha256; ``release-notes.md`` is the release's text.
+with their sha256; ``release-notes.md`` is the release's text. A tag whose bots pin no
+checkpoint has nothing to release and is refused. The printed ``gh release create`` passes
+``--verify-tag``: gh refuses a tag that is not on GitHub instead of creating it at the
+default branch's head (which the manifest's ``commit`` would not name).
 
 Before packing, every file that goes in is scanned for secrets (:data:`SECRETS`); a hit
 refuses the release, naming the file and line (byte offset in a checkpoint), never the
@@ -31,10 +34,12 @@ notes: a run's config.json names the YAML it was made from, and it becomes publi
 pinned checkpoint already resolves in the runs root needs nothing (no request at all).
 For the others it reads ``manifest.json`` of their tag's release, checks it (schema, tag,
 repository, every pinned ref served by an asset), downloads each asset it needs (size
-capped, redirects only to https), checks its sha256, reads its members (regular files
-only, exactly ``config.json``, ``run.json`` and ``checkpoints/eNNNNNN.pt`` under the
-asset's ``runs/<exp>/<variant>/``; nothing absolute, no ``..``, no links) and the
-checkpoint's weights against the manifest, all before writing anything. Then it merges
+capped, redirects only to https), checks its sha256, inflates it within
+:data:`ASSET_BYTES` (a tar header cannot claim more memory than that), reads its members
+(regular files only, exactly ``config.json``, ``run.json`` and ``checkpoints/eNNNNNN.pt``
+under the asset's ``runs/<exp>/<variant>/``; nothing absolute, no ``..``, no links) and
+the checkpoint's weights against the manifest, all before writing anything. Whatever a
+download holds, a fetch refuses it with one message, never a traceback. Then it merges
 each run into the runs root, all or nothing:
 
 - ``config.json``: written if missing, else it must be the same JSON (another run of that
@@ -98,8 +103,11 @@ EPOCH_RE = re.compile(r"e?\d+")
 ROW_KEYS = ("agent_steps", "epoch", "file", "weights_sha256")
 TIMEOUT = 60.0
 MANIFEST_BYTES = 1 << 20
-#: An asset, and the files in it together (a checkpoint is about 2.3 MB).
-ASSET_BYTES = 512 << 20
+#: An asset, and the tar inside it (a 1v1 bot's checkpoint is about 2.3 MB; the largest
+#: in runs/ today, arch-ablation/cnn's, is 67 MB). A release refuses a bigger one.
+ASSET_BYTES = 128 << 20
+#: Room for the tar's headers and padding (3 members) when a release checks its files.
+TAR_SLACK = 1 << 20
 USER_AGENT = "catanrl-openhex-fetch/1"
 
 #: What refuses a release, by name; matched on every file that goes in (bytes, so a
@@ -245,7 +253,7 @@ def release_commit(root: str | Path, tag: str) -> tuple[str | None, list[str]]:
     except DeployError as error:
         return None, [f"there is no tag {tag} and no HEAD to name instead ({error})"]
     return head, [(f"there is no tag {tag} in {root}: manifest.json names HEAD {head[:12]}. Tag that commit and push "
-                   "the tag before publishing (gh release create would tag the default branch's head)")]
+                   "the tag before publishing (gh release create --verify-tag refuses a tag that is not on GitHub)")]
 
 
 def release(config: str | Path, tag: str, out: str | Path | None = None, *,
@@ -263,9 +271,15 @@ def release(config: str | Path, tag: str, out: str | Path | None = None, *,
         tags = sorted({e.tag for e in entries if e.tag})
         raise DeployError(f"no bot in {config} has tag {tag} (tags: {', '.join(tags) or 'none'})")
     items = checkpoints_of(chosen)
+    if not items:
+        raise DeployError(f"the bots tagged {tag} ({', '.join(e.name for e in chosen)}) pin no checkpoint: "
+                          "nothing to release")
     bundles, hits, homes = [], [], {}
     for item in items:
         files = bundle(item)
+        size = sum(len(data) for data, _ in files.values())
+        if size + TAR_SLACK > ASSET_BYTES:
+            raise DeployError(f"{item['ref']}: {size} bytes, more than a fetch unpacks ({ASSET_BYTES - TAR_SLACK})")
         for name, (data, source) in files.items():
             hits += scan(data, source)
             if found := home_paths(data):
@@ -297,7 +311,8 @@ def release(config: str | Path, tag: str, out: str | Path | None = None, *,
             homes[name] = found
     files = [MANIFEST, *(a["file"] for a in manifest["assets"])]
     command = f"cd {shlex.quote(str(out))} && " + shlex.join(
-        ["gh", "release", "create", tag, *files, "--repo", repo, "--title", tag, "--notes-file", NOTES])
+        ["gh", "release", "create", tag, *files, "--repo", repo, "--verify-tag", "--title", tag,
+         "--notes-file", NOTES])
     return {"out": str(out), "manifest": manifest, "scanned": sum(len(files) for _, files in bundles),
             "homes": homes, "warnings": warnings, "command": command}
 
@@ -494,43 +509,54 @@ def _member_problem(member: tarfile.TarInfo, base: str, expected: set[str], seen
         return f"not a file an asset holds ({', '.join(sorted(e.removeprefix(base) for e in expected))})"
     if name in seen:
         return "listed twice"
-    if member.size > ASSET_BYTES:
-        return "too large"
     return None
+
+
+def inflate(data: bytes, file: str) -> bytes:
+    """The tar inside the gzip ``data``: one complete gzip stream of at most
+    :data:`ASSET_BYTES`, inflated with that bound (so a tar header that claims gigabytes,
+    as a pax header can, never gets them)."""
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)  # gzip
+    try:
+        raw = inflater.decompress(data, ASSET_BYTES + 1)
+    except zlib.error as error:
+        raise DeployError(f"{file}: not a readable tar.gz ({error})") from None
+    if len(raw) > ASSET_BYTES or inflater.unconsumed_tail:
+        raise DeployError(f"{file}: more than {ASSET_BYTES} bytes unpacked")
+    if not inflater.eof or inflater.unused_data:
+        raise DeployError(f"{file}: not a readable tar.gz (not one complete gzip stream)")
+    return raw
 
 
 def unpack(data: bytes, asset: Mapping[str, Any]) -> dict[str, bytes]:
     """The files of a downloaded asset (its sha256 already checked) by path under the runs
-    root (``exp/variant/...``). Every member must be a regular file at one of the three
-    paths of its run and epoch (``runs/<exp>/<variant>/`` config.json, run.json,
-    checkpoints/eNNNNNN.pt), all three there, together under :data:`ASSET_BYTES`; the
-    config must be the run's and the run.json must list the checkpoint with the manifest's
-    weights. Reads only: nothing is written."""
+    root (``exp/variant/...``). The tar is :func:`inflate`'s (at most :data:`ASSET_BYTES`);
+    every member must be a regular file at one of the three paths of its run and epoch
+    (``runs/<exp>/<variant>/`` config.json, run.json, checkpoints/eNNNNNN.pt), all three
+    there; the config must be the run's and the run.json must list the checkpoint with the
+    manifest's weights. Reads only: nothing is written."""
     run, epoch, file = asset["run"], asset["epoch"], asset["file"]
     base = f"runs/{run}/"
     ckpt = f"checkpoints/e{epoch:06d}.pt"
     expected = {f"{base}config.json", f"{base}run.json", f"{base}{ckpt}"}
     files: dict[str, bytes] = {}
-    total = 0
+    raw = inflate(data, file)
     try:
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as tar:
             for member in tar:
                 problem = _member_problem(member, base, expected, files)
                 if problem:  # stop here: nothing after a bad member is read
                     raise DeployError(f"{file}: member {member.name!r}: {problem}")
-                total += member.size
-                if total > ASSET_BYTES:
-                    raise DeployError(f"{file}: more than {ASSET_BYTES} bytes unpacked")
                 files[member.name] = tar.extractfile(member).read()
-    except (tarfile.TarError, EOFError, zlib.error, OSError) as error:
-        raise DeployError(f"{file}: not a readable tar.gz ({error})") from None
+    except (tarfile.TarError, EOFError, OSError, RecursionError) as error:  # RecursionError: chained pax headers
+        raise DeployError(f"{file}: not a readable tar ({type(error).__name__}: {error})") from None
     if missing := sorted(expected - set(files)):
         raise DeployError(f"{file}: {', '.join(missing)} missing")
     try:
         config = json.loads(files[f"{base}config.json"])
         shipped = json.loads(files[f"{base}run.json"])
-    except ValueError as error:
-        raise DeployError(f"{file}: config.json or run.json is not JSON ({error})") from None
+    except (ValueError, RecursionError) as error:  # RecursionError: nested too deep
+        raise DeployError(f"{file}: config.json or run.json is not JSON ({type(error).__name__}: {error})") from None
     if not isinstance(config, Mapping) or f"{config.get('experiment')}/{config.get('variant')}" != run:
         raise DeployError(f"{file}: its config.json is not run {run}'s")
     rows = shipped.get("checkpoints") if isinstance(shipped, Mapping) else None
@@ -557,8 +583,8 @@ def check_weights(files: Mapping[str, bytes], asset: Mapping[str, Any]) -> None:
                             weights_sha256=asset["weights_sha256"])
         try:
             Checkpoint.load(path, ref=ref)
-        except RuntimeError as error:  # CheckpointError
-            raise DeployError(f"{asset['file']}: {error}") from None
+        except Exception as error:  # noqa: BLE001 - CheckpointError, or a header missing a key: refused all the same
+            raise DeployError(f"{asset['file']}: {type(error).__name__}: {error}") from None
 
 
 def _json_of(path: Path) -> bytes | None:
@@ -666,8 +692,8 @@ def fetch(config: str | Path, *, runs: str | Path | None = None, only: str | Non
         url = f"{base}/{urllib.parse.quote(tag)}/{MANIFEST}"
         try:
             manifest = json.loads(download(url, MANIFEST_BYTES, timeout))
-        except ValueError as error:
-            raise DeployError(f"GET {url}: not JSON ({error})") from None
+        except (ValueError, RecursionError) as error:  # RecursionError: nested too deep
+            raise DeployError(f"GET {url}: not JSON ({type(error).__name__}: {error})") from None
         assets = check_manifest(manifest, tag, repo)
         for e, ref in wanted:
             if e.tag != tag:

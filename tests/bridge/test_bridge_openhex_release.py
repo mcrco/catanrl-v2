@@ -8,6 +8,7 @@ nothing."""
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -28,6 +29,7 @@ from catanatron.registry import SpecError
 from catanrl.bridge import openhex_deploy as deploy
 from catanrl.bridge import openhex_release as release
 from catanrl.bridge.openhex_deploy import DeployError
+from catanrl.checkpoint import CKPT_SCHEMA, FORMAT
 from catanrl.config import Variant, config_hash, resolve
 from catanrl.envs.encoding import action_size, dims_for, row_layout
 from catanrl.models import build_model
@@ -167,14 +169,16 @@ def test_a_release_packs_each_pinned_checkpoint_once_with_what_resolving_it_need
     assert EVIDENCE in notes and "catanrl-1v1-search-v2" in notes and e3["sha256"] in notes
     assert f"catanrl openhex fetch {released.config}" in notes and "git checkout t1" in notes
     assert result["command"] == (f"cd {released.out} && gh release create t1 manifest.json {e0['file']} {e3['file']} "
-                                 "--repo mcrco/catanrl-v2 --title t1 --notes-file release-notes.md")
+                                 "--repo mcrco/catanrl-v2 --verify-tag --title t1 --notes-file release-notes.md")
     assert result["scanned"] == 6
 
 
 def test_a_release_is_deterministic(released, tmp_path):
     again = release.release(released.config, "t1", tmp_path / "again", root=released.checkout.root)
     for asset in released.result["manifest"]["assets"]:
-        assert (tmp_path / "again" / asset["file"]).read_bytes() == (released.out / asset["file"]).read_bytes()
+        data = (released.out / asset["file"]).read_bytes()
+        assert (tmp_path / "again" / asset["file"]).read_bytes() == data
+        assert data[:2] == b"\x1f\x8b" and data[4:8] == b"\0\0\0\0"  # gzip's mtime: 0, not the second it was built
     assert again["manifest"] == released.result["manifest"]
     assert (tmp_path / "again" / "manifest.json").read_bytes() == (released.out / "manifest.json").read_bytes()
     assert (tmp_path / "again" / "release-notes.md").read_bytes() == (released.out / "release-notes.md").read_bytes()
@@ -210,6 +214,7 @@ def test_the_deploy_file_names_the_releases_repository(run, checkout, tmp_path):
     ("BELIEF:ckpt=exp/v@e3#000000000000", "t1", "does not resolve"),
     ("BELIEF:ckpt={pt}#{sha}", "t1", "is a file: a release ships run checkpoints"),
     ("BELIEF:ckpt=exp/v@e3#{sha}", "t/1", "a release tag is"),
+    ("F", "t1", "the bots tagged t1 \\(catanrl-1v1-v2\\) pin no checkpoint: nothing to release"),
 ])
 def test_a_release_refuses(run, checkout, tmp_path, spec, tag, message):
     sha = run.best.weights_sha256[:12]
@@ -223,6 +228,13 @@ def test_a_release_refuses(run, checkout, tmp_path, spec, tag, message):
 def test_a_release_refuses_an_out_dir_that_is_not_empty(released, tmp_path):
     with pytest.raises(DeployError, match="is not empty"):
         release.release(released.config, "t1", released.out, root=released.checkout.root)
+
+
+def test_a_release_refuses_a_checkpoint_a_fetch_would_not_unpack(released, tmp_path, monkeypatch):
+    monkeypatch.setattr(release, "ASSET_BYTES", release.TAR_SLACK + 1000)
+    with pytest.raises(DeployError, match=f"{released.run.e0[:-13]}.*bytes, more than a fetch unpacks \\(1000\\)"):
+        release.release(released.config, "t1", tmp_path / "out2", root=released.checkout.root)
+    assert not (tmp_path / "out2").exists()
 
 
 @pytest.mark.parametrize("value, what", [
@@ -390,15 +402,10 @@ def _flip_a_byte(server, out, asset):
     server.files[path] = bytes(data)
 
 
-def _evil(*members):
-    """Replace e3's asset by a tar.gz of ``members`` (TarInfo, bytes), the manifest updated to match."""
+def _replace(make):
+    """Replace e3's asset by ``make(out, its file)`` (bytes), the manifest's sha256 and size updated to match."""
     def tamper(server, out, asset):
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-            for info, data in members:
-                info.size = len(data) if info.isreg() else 0
-                tar.addfile(info, io.BytesIO(data) if info.isreg() else None)
-        data = buffer.getvalue()
+        data = make(out, out / asset["file"])
         server.files[f"/storage/t1/{asset['file']}"] = data
         manifest = json.loads(server.files["/t1/manifest.json"])
         for a in manifest["assets"]:
@@ -406,6 +413,54 @@ def _evil(*members):
                 a["sha256"], a["size"] = hashlib.sha256(data).hexdigest(), len(data)
         server.files["/t1/manifest.json"] = json.dumps(manifest).encode()
     return tamper
+
+
+def _targz(members) -> bytes:
+    """A tar.gz of ``members`` (TarInfo, bytes), in that order."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for info, data in members:
+            info.size = len(data) if info.isreg() else 0
+            tar.addfile(info, io.BytesIO(data) if info.isreg() else None)
+    return buffer.getvalue()
+
+
+def _evil(*members):
+    """Replace e3's asset by a tar.gz of ``members`` (TarInfo, bytes), the manifest updated to match."""
+    return _replace(lambda out, path: _targz(members))
+
+
+def _edit(name, change):
+    """Replace e3's asset by itself with member ``runs/exp/v/<name>`` as ``change(its bytes, out)``."""
+    def make(out, path):
+        files = {n: _read(path, n) for n in _members(path)}
+        files[f"runs/exp/v/{name}"] = change(files[f"runs/exp/v/{name}"], out)
+        return _targz([(tarfile.TarInfo(n), data) for n, data in sorted(files.items())])
+    return _replace(make)
+
+
+def _json_edit(**fields):
+    return lambda data, out: json.dumps({**json.loads(data), **fields}).encode()
+
+
+def _e0_weights(data, out):
+    """e0's checkpoint, from the release's other asset."""
+    (e0,) = out.glob("exp--v--e000000-*.tar.gz")
+    return _read(e0, "runs/exp/v/checkpoints/e000000.pt")
+
+
+def _headless_checkpoint(data, out):
+    """A catanrl checkpoint dict that lacks its weights' sha256 and epoch."""
+    buffer = io.BytesIO()
+    torch.save({"format": FORMAT, "schema": CKPT_SCHEMA, "state_dict": {}}, buffer)
+    return buffer.getvalue()
+
+
+def _pax_chain(n=5000) -> bytes:
+    """``n`` empty pax headers in a row: tarfile reads them recursively."""
+    info = tarfile.TarInfo("././@PaxHeader")
+    info.type = tarfile.XHDTYPE
+    return gzip.compress(info.tobuf(tarfile.USTAR_FORMAT) * n + bytes(1024), mtime=0)
 
 
 def _member(name, kind=tarfile.REGTYPE, link=""):
@@ -429,6 +484,15 @@ def _member(name, kind=tarfile.REGTYPE, link=""):
     (_evil((_member("runs/other/v/config.json"), b"{}")), "outside runs/exp/v/"),
     (_evil((_member("runs/exp/v/aliases.jsonl"), b"{}")), "not a file an asset holds"),
     (_evil((_member("runs/exp/v/config.json"), b"{}")), "checkpoints/e000003.pt, runs/exp/v/run.json missing"),
+    (_edit("checkpoints/e000003.pt", _e0_weights), "e000003.pt: weights .* differ from the pinned"),
+    (_edit("checkpoints/e000003.pt", _headless_checkpoint), "KeyError"),
+    (_edit("config.json", _json_edit(experiment="other")), "its config.json is not run exp/v's"),
+    (_edit("config.json", lambda data, out: b"[" * 100_000), "config.json or run.json is not JSON \\(RecursionError"),
+    (_edit("run.json", _json_edit(status="finished")), "its run.json is not a release's run.json listing e3"),
+    (_replace(lambda out, path: _pax_chain()), "not a readable tar \\(RecursionError"),
+    (_replace(lambda out, path: path.read_bytes() + gzip.compress(b"more", mtime=0)), "not one complete gzip stream"),
+    (lambda server, out, asset: server.files.update({"/t1/manifest.json": b"[" * 100_000}),
+     "manifest.json: not JSON \\(RecursionError"),
 ])
 def test_a_fetch_refuses_and_writes_nothing(released, server, tmp_path, tamper, message):
     _publish(server, released.out, "t1")
@@ -438,6 +502,21 @@ def test_a_fetch_refuses_and_writes_nothing(released, server, tmp_path, tamper, 
     with pytest.raises(DeployError, match=message):
         release.fetch(released.config, runs=fresh, base=server.base)
     assert _files(fresh) == [] and not (tmp_path / "evil").exists()
+
+
+def test_an_asset_inflates_within_the_cap(released, monkeypatch):
+    """A pax header that claims more than the cap never gets the memory: the inflate stops at the cap."""
+    monkeypatch.setattr(release, "ASSET_BYTES", 1 << 20)
+    info = tarfile.TarInfo("././@PaxHeader")
+    info.type, info.size = tarfile.XHDTYPE, 4 << 20
+    bomb = gzip.compress(info.tobuf(tarfile.USTAR_FORMAT) + bytes(4 << 20) + bytes(1024), mtime=0)
+    assert len(bomb) < 10_000
+    asset = {"run": "exp/v", "epoch": 3, "file": "bomb.tar.gz", "weights_sha256": "0" * 64}
+    with pytest.raises(DeployError, match="bomb.tar.gz: more than 1048576 bytes unpacked"):
+        release.unpack(bomb, asset)
+    e3 = released.result["manifest"]["assets"][1]
+    data = (released.out / e3["file"]).read_bytes()
+    assert sorted(release.unpack(data, e3)) == ["exp/v/checkpoints/e000003.pt", "exp/v/config.json", "exp/v/run.json"]
 
 
 def test_a_fetch_never_overwrites_a_file_with_other_content(released, server, tmp_path):
@@ -511,6 +590,7 @@ def test_the_cli_releases_and_fetches(released, server, tmp_path, monkeypatch, c
     assert cli.main(["openhex", "release", str(released.config), "t1", "--out", str(out)]) == 0
     text = capsys.readouterr().out
     assert f"cd {out} && gh release create t1 manifest.json" in text and "secret scan: 6 files" in text
+    assert "--repo mcrco/catanrl-v2 --verify-tag" in text
     _publish(server, out, "t1")
     fresh = tmp_path / "fresh"
     assert cli.main(["openhex", "fetch", str(released.config), "--runs", str(fresh), "--base-url", server.base]) == 0
