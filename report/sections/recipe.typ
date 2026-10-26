@@ -135,7 +135,13 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 *setup.* `ppo-2p-fr` exactly, initialized from `ppo-2p-fr/full@e7600` with a fresh optimizer and a fresh cosine (0.0025 → 0.00025 over 7,600 epochs). the champion row plays every 50th checkpoint against e7600 (1,000 games, ±3.1 pp, paired across checkpoints); vs F alongside. finals on `heldout-2p-fr`, 5,000 games each: `@best` vs F, `@best` vs e7600, and `@best` vs the original deployed net `puffer-graph2/full@e3350`, as POLICY and as BELIEF. e0 reads 50.0 vs the champion and 98.8 vs F, as expected. \~17.5 h.
 
-*result.* running.
+*result.* running. so far it is worse than its start. at e2000 (26% of the run), the champion row fell to 43.5 by e50 and has stayed at 40–43 since. the 10-checkpoint block means are 43.3, 41.2, 40.6, 42.1 and 40.0, each over 10,000 games (±1 pp). vs F fell from 98.8 to \~97.7. the likely cause is the learning-rate restart, not the extra steps:
+
+- e7600 ended at the floor learning rate (0.00025): kl 0.001 per update, entropy 0.048.
+- the restart at 0.0025 pushed kl to 0.02–0.03 at once, about 20 times larger.
+- `ppo-2p-fr`'s own restart from e3350 (entropy 0.084, a broader policy) ran at kl 0.015 and stayed at 48–51 early.
+
+the cosine brings the learning rate back to the floor by e7600, so the end of this run tests a warm restart, not plain continued training. a cleaner test of "does it keep improving" is to restart from e7600 at the floor learning rate (constant 0.00025) (my suggestion, not queued).
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr2.yaml
