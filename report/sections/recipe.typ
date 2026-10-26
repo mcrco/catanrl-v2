@@ -86,7 +86,7 @@ catanrl run configs/experiments/puffer-graph2.yaml --only public
 
 *setup.*
 - *the rules.* from openhex's source: its 1v1 queue is 15 vp, discard above 9, friendly robber, balanced dice; its 4p queue is 10 vp, discard above 7, normal robber, random dice, which is our 4p setup already. openhex's friendly robber shields an opponent with *public* points ≤ 2. our engine used *actual* points < 3, which counts hidden victory point cards (a mismatch, and the legal moves leak whether the opponent holds one), so the engine now uses openhex's rule (a knight is judged on the points before it takes largest army, as openhex does). balanced dice are in the engine too (marco: "do balanced dice before 1v1 retrain"), following openhex's code: a 36-card deck refilled when 13 or fewer are left, a recency penalty on totals seen in the last 5 rolls, and per-player seven balancing; search chance nodes use the state's own odds. `base-2p-fr` is openhex's 1v1 exactly: 15 vp, discard above 9, friendly robber, balanced dice. random-dice, normal-robber games play bit-identically to the old engine. the network gets no dice-state input, so the policy plays the dice blind and only the search reads them. the two recorded openhex games say balanced dice but were played on fair dice (an openhex bug, since fixed); the bridge falls back to fair dice if a roll is impossible under the balanced deck.
-- *the run.* `puffer-graph2/full@best` (e3350, the deployed 1v1 net) continued on `base-2p-fr` for \~1b agent steps, the recipe otherwise unchanged, at \~17.8k agent steps/s (\~17.5 h with monitors and finals).
+- *the run.* `puffer-graph2/full@best` (e3350, the deployed 1v1 net) continued on `base-2p-fr` for \~1b agent steps, the recipe otherwise unchanged (including its discounted v-trace critic, γ = 0.999, kept to match the start; not the undiscounted default since @exp:recipe-critic-fix, a choice i made without asking. the two continuations below kept it too), at \~17.8k agent steps/s (\~17.5 h with monitors and finals).
 - *baselines.* the start vs F on `select-2p-fr`: *96.3* #ci[94.9][97.3] (`8a137f56`). its friendly-robber input was never on in training: a copy with that input zeroed beats it *51.5* #ci[50.2][52.9] over 5,000 games (`ffcc5c1a`), so part of any gain over the start is just learning to ignore that input; the final head to head subtracts 1.5 pp for it.
 - *identity.* the merge moved the code ids every record is keyed under (catanrl `55ba5984`, engine `a9b40d9c`, train `55588933`), so new rows pair with older records only through `tools/search_probe.py --pair` (old-rule games are bit-identical).
 - *the champion eval (marco).* ppo stagnation has been read from the win rate vs F, which sits near its 95% ceiling. every select now also plays the current checkpoint against a champion (here the start), 1,000 games on the same boards each time: ±3.1 pp, paired game by game across checkpoints. the finals include the start under the new rules, since it never trained on them. at e0 the champion row reads 50.0 (`fa6ea360`), as it must.
@@ -316,4 +316,34 @@ catanrl run configs/experiments/ppo-4p-critic-fix.yaml
 
 #repro(```sh
 catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
+```)
+
+== the discount
+
+=== discount vs no discount, from scratch #chip("running") <exp:recipe-discount>
+#meta(
+  dates: "2026-10-26 13:08 onward",
+  owner: "marco",
+  config: "configs/experiments/discount-2p.yaml",
+  wandb: (("discount-2p-g999-s42-5057ed5a", "discount-2p/g999-s42"),),
+  records: (),
+)
+#tldr[every ppo run so far discounts the policy at γ = 0.999 per decision, inherited from v1. marco asked whether training without the discount does better. two arms, γ = 0.999 vs γ = 1 for both the policy and the critic, trained from scratch on openhex's 1v1 rules with two seeds each.]
+
+*question.* does dropping the discount change what the 1v1 net learns, and does it play better?
+
+*why it might.* catan needs no discount: every game ends, the only reward is the win at the end, and gae's λ = 0.95 already does most of the variance reduction. but γ < 1 changes the objective from p(win) to E[γ#super[T] · win]. a win is worth more the sooner it comes (\~0.85 at the opening of a 160-decision game), which may push the policy towards faster, riskier wins. the only earlier test was 100 epochs of 4p fine-tuning (`lambda-g1` in @exp:recipe-critic-fix: the same game length and the same select score), far too short to say what training from scratch does.
+
+*setup.*
+- *arms.* `g999`: γ = 0.999 for the policy and the critic. `g1`: γ = 1 for both. the critic targets are lambda returns in both (the default), so only the discount differs.
+- *recipe.* `puffer-graph2`'s, from scratch on `base-2p-fr` (15 vp, discard above 9, friendly robber, balanced dice), `full` level, 500m agent steps (3,800 epochs, cosine 0.005 → 0.0005).
+- *seeds.* 42 and 43 for each arm; the seed also draws the 4,096 training boards. two seeds of this recipe have never been compared, so the spread between seeds is unknown; an arm difference counts only if both seeds agree in sign and the pooled head to head clears it.
+- *monitors* every 50 epochs on `select-2p-fr` (1,000 games, ±3.1 pp at 50%): vs F, and vs a fixed reference, `ppo-2p-fr3/full@e4350`, so all four curves share one yardstick.
+- *finals* on `heldout-2p-fr`, 5,000 games each, on each cell's *last* checkpoint (chosen before the run, so no winner's curse): vs F (±0.3 pp near 98) and vs the reference (±1.4 pp at 50%). once all four cells are done, a separate eval plays `g1` against `g999` within each seed (5,000 games, paired mde \~2 pp at 80%) and compares game lengths.
+- *cost.* \~8.4 h per cell, \~34 h in all, in the order s42-`g999`, s42-`g1`, s43-`g999`, s43-`g1`.
+
+*result.* running.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/discount-2p.yaml
 ```)

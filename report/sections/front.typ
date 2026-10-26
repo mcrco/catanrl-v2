@@ -12,7 +12,7 @@ most experiments are a config under `configs/experiments/`. a number without an 
   *measured.* the raw policy is at 95% vs F (@sec:recipe). the search edge is 53.4–55.2% with our default PUCT search and 62.4% with gumbel alphazero's root at 2048 sims (@sec:search).
 ]
 
-*latest (26 october 2026).* the deployed 1v1 net, continued for 1b steps on openhex's 1v1 rules (friendly robber, balanced dice), beats its start 63.2% and F 98.8%; a second 1b steps at its final, lowest learning rate gained little: the best checkpoint is level with it on held-out boards (51.0% head to head, 98.9% vs F), so the net has roughly leveled off. a try that restarted the learning rate at its peak fell to \~41% against its start and was stopped (@sec:recipe). the critic refit came back null (@sec:critic). canopy's search lost to our search 33.0 to 67.0 over 1,000 games (@sec:canopy).
+*latest (26 october 2026).* the deployed 1v1 net, continued for 1b steps on openhex's 1v1 rules (friendly robber, balanced dice), beats its start 63.2% and F 98.8%; a second 1b steps at its final, lowest learning rate gained little: the best checkpoint is level with it on held-out boards (51.0% head to head, 98.9% vs F), so the net has roughly leveled off. a try that restarted the learning rate at its peak fell to \~41% against its start and was stopped (@sec:recipe). the critic refit came back null (@sec:critic). running now: discount vs no discount from scratch, two seeds per arm (@exp:recipe-discount). canopy's search lost to our search 33.0 to 67.0 over 1,000 games (@sec:canopy).
 
 == current best bots
 
