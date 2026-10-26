@@ -17,7 +17,9 @@ own action). This module puts an OpenHex game into the bridge's terms:
   native agent (POLICY, BELIEF, MCTS, a reusing MCTS on the seat's own
   stream) on the replayed game and answers with OpenHex actions;
 * :class:`OpenHexBot`: the API client, which joins the queue, plays every
-  game it is matched into, and joins again.
+  game it is matched into, and joins again. Each game line it records names
+  the bot's version, spec and deploy stamp (``provenance_id``; the stamps are
+  in ``deploys.jsonl``, see :mod:`catanrl.bridge.openhex_deploy`).
 
 Nothing here reads hidden information: OpenHex sends each bot its own view.
 
@@ -950,6 +952,10 @@ class OpenHexClient:
             raise OpenHexHTTPError(200, str(reply.get("error") or reply)[:500])
         return reply
 
+    def me(self) -> dict:
+        """The registration this key belongs to (``id``, ``name``, ``mode``, ``description``, Elo)."""
+        return self.request("GET", "/bots/me")
+
     def join(self, mode: str) -> Any:
         return self.request("POST", "/queue/join", {"mode": mode})
 
@@ -968,10 +974,18 @@ class OpenHexHTTPError(OpenHexError):
 
 
 class OpenHexBot:
-    """One registered bot: keep it queued, play every game it gets."""
+    """One registered bot: keep it queued, play every game it gets.
+
+    ``stamp`` (:func:`catanrl.bridge.openhex_deploy.stamp`) is what the bot plays
+    with: its version and spec go on every game line with the stamp's
+    :func:`~catanrl.bridge.openhex_deploy.provenance_id`, and :meth:`announce`
+    keeps the whole stamp in ``deploys.jsonl``."""
 
     def __init__(self, spec: Any, api_key: str, mode: str, *, base: str = API, device: str = "cpu",
-                 state_dir: str | Path = "openhex", poll_s: float = 1.0, name: str | None = None) -> None:
+                 state_dir: str | Path = "openhex", poll_s: float = 1.0, name: str | None = None,
+                 stamp: Mapping[str, Any] | None = None) -> None:
+        from catanrl.bridge.openhex_deploy import provenance_id
+
         self.native, self.label = native_for(spec, device=device)
         self.client = OpenHexClient(api_key, base)
         self.mode = mode
@@ -979,6 +993,23 @@ class OpenHexBot:
         self.name = name or self.label
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.stamp = dict(stamp) if stamp is not None else None
+        self.version = self.stamp["version"] if self.stamp else None
+        #: The spec as configured (a resolved agent's canonical spec when there is no stamp).
+        self.spec = self.stamp["spec"] if self.stamp else str(getattr(spec, "canonical", spec))
+        self.provenance_id = provenance_id(self.stamp) if self.stamp else None
+
+    def announce(self) -> None:
+        """Log the bot's stamp in one line and append it, with the time and its
+        ``provenance_id``, to ``deploys.jsonl``: what maps a game line to its full stamp."""
+        if self.stamp is None:
+            return
+        git = self.stamp.get("git") or {}
+        refs = ", ".join(c["ref"] for c in self.stamp.get("checkpoints", []))
+        logger.info("%s: version %s, provenance %s: %s [%s] at %s%s", self.name, self.version, self.provenance_id,
+                    self.spec, refs, git.get("describe") or git.get("commit"), " (dirty)" if git.get("dirty") else "")
+        with open(self.state_dir / "deploys.jsonl", "a") as file:
+            file.write(json.dumps({"time": time.time(), "provenance_id": self.provenance_id, **self.stamp}) + "\n")
 
     def run(self) -> None:
         backoff = 5.0
@@ -1079,7 +1110,8 @@ class OpenHexBot:
 
     def _record(self, game_id: str, seat: OpenHexSeat, info: Mapping[str, Any]) -> dict:
         (self.state_dir / "boards" / f"{game_id}.json").unlink(missing_ok=True)
-        line = {"time": time.time(), "game_id": game_id, "mode": self.mode, "color": seat.colors[seat.seat],
+        line = {"time": time.time(), "game_id": game_id, "mode": self.mode, "version": self.version,
+                "spec": self.spec, "provenance_id": self.provenance_id, "color": seat.colors[seat.seat],
                 "status": info.get("status"), "winner": info.get("winner"),
                 "players": [p.get("name") for p in info.get("players", [])],
                 "decisions": seat.decisions, "fallbacks": seat.fallbacks, **seat.stats}
