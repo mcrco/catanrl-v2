@@ -1,0 +1,93 @@
+# discount vs no discount (marco, 2026-10-26: "we should do an experiment for discount vs no discount
+# next then actually"; design approved: "okayingit").
+#
+# every ppo run so far discounts the policy's advantages at gamma 0.999 per decision, inherited from
+# v1. catan does not need it (every game ends; the only reward is the win at the end; gae lambda 0.95
+# already cuts variance), but it changes the objective from p(win) to E[gamma^T win]: a sooner win is
+# worth more (0.999^160 ~ 0.85 over a 2p game), so it may favour faster, riskier wins. the only test
+# so far was 100 epochs of fine-tuning in 4p (ppo-4p-critic-fix/lambda-g1: same game length, same
+# select score), far too short to say what training from scratch does.
+#
+# design: puffer-graph2's recipe from scratch on openhex's 1v1 rules (base-2p-fr: 15 vp, discard
+# above 9, friendly robber, balanced dice), obs level full, 500M agent steps (3,800 epochs). only the
+# discount differs between the arms; the critic targets are lambda returns in both (the default
+# since 2026-10-19), so the critic's discount follows the policy's:
+#   g999: gamma 0.999 for the policy and the critic ("discount")
+#   g1:   gamma 1.0 for both ("no discount")
+# two seeds per arm (42, 43). the seed also draws the 4096 training boards, so the second seed checks
+# the result on another map pool too. cells run in order s42-g999, s42-g1, s43-g999, s43-g1.
+#
+# monitors every 50 epochs on select-2p-fr (1,000 games each, +-3.1 pp at 50%): vs F, and vs a fixed
+# reference, ppo-2p-fr3/full@e4350 (the strongest 1v1 net; eval.champion), so the four curves share
+# one yardstick. finals on heldout-2p-fr, 5,000 games each, on @latest (the last checkpoint, chosen
+# before the run, so no pick of the noisiest-high select row): vs F (+-0.3 pp near 98) and vs the
+# reference (+-1.4 pp at 50%). the arms' head to head (g1 vs g999 within a seed, 5,000 games, +-1.4
+# pp, paired MDE ~2 pp at 80%) and game lengths are a separate eval config once all four cells are
+# done (a final here could not name a cell that has not run yet).
+#
+# power: one seed pair resolves ~2 pp of game noise; seed-to-seed spread of this recipe has never
+# been measured, which is why there are two seeds per arm. a difference between the arms counts if
+# both seeds agree in sign and the pooled head to head clears it.
+# cost: ~7.9 h of training per cell at ~17.7k agent steps/s + ~0.5 h of monitors + ~10 min of
+# finals: ~34 h for the four cells, the 8 gb card alone.
+#
+# launch (main, no other run live):
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/discount-2p.yaml
+name: discount-2p
+seed: 42                        # the seed axis below sets it per cell
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+model: {preset: graph-s, args: {shared: true}}
+obs: {level: full}
+train:
+  algo: ppo
+  total_timesteps: 500_000_000  # puffer-graph2's: 3,800 epochs x 132,096 agent steps (both seats' rows)
+  optimizer: muon               # heavyball ForeachMuon(heavyball_momentum=True), as puffer-graph2
+  learning_rate: 0.005          # puffer-graph2's peak, cosine to 0.0005
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 0.999                  # set per arm (sweep)
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2             # not read (per-seat value loss)
+  ent_coef: 0.005
+  max_grad_norm: 2.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 4096      # 4.5 GB: the 8 gb card alone
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  critic_targets: lambda        # the default since 2026-10-19 (ppo-4p-critic-fix)
+  critic_gamma: 0.999           # set per arm (sweep), equal to the policy's gamma
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+eval:
+  champion: "ppo-2p-fr3/full@e4350#43eca7ffdd41"   # the fixed reference (header)
+  select: {from: champion}
+  monitor:
+    - {name: champion, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"], every: 50,
+       metric: score_rate}
+    - {name: f, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
+  final:
+    - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", F]}
+    - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=${champion}"]}
+sweep:
+  axes:
+    seed: [42, 43]
+    gamma:
+      g999: {train.gamma: 0.999, train.critic_gamma: 0.999}
+      g1: {train.gamma: 1.0, train.critic_gamma: 1.0}
+  name: "{gamma}-s{seed}"
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
