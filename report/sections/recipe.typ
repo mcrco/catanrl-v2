@@ -115,27 +115,55 @@ catanrl run configs/experiments/puffer-graph2.yaml --only public
   caption: [the finals. the start is `puffer-graph2/full@e3350`, the deployed 1v1 net, on the same rules and boards.],
 )
 
-*reading.* another billion steps on openhex's 1v1 rules made the deployed 1v1 net clearly stronger: about 62% head to head against its own start after correcting for the start's never-trained friendly-robber input (roughly +85 elo), and its losses to F more than halved (2.7% → 1.2%). the champion row was still rising when the learning rate reached its floor, so the net had not stopped improving; another continuation would likely gain more. none of this is measured inside the search yet: the deployed openhex bots run MCTS-1024 and BELIEF on the old engine and the old net.
+*reading.* another billion steps on openhex's 1v1 rules made the deployed 1v1 net clearly stronger: about 62% head to head against its own start after correcting for the start's never-trained friendly-robber input (roughly +85 elo), and its losses to F more than halved (2.7% → 1.2%). the champion row was still rising when the learning rate reached its floor. a second billion steps at that learning rate gained little more (@exp:recipe-2p-openhex-3). none of this is measured inside the search yet: the deployed openhex bots run MCTS-1024 and BELIEF on the old engine and the old net.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
 ```)
 
-=== the same net, another \~1b steps from e7600 at the floor learning rate #chip("running") <exp:recipe-2p-openhex-3>
+=== the same net, another \~1b steps from e7600 at the floor learning rate #chip("done") <exp:recipe-2p-openhex-3>
 #meta(
-  dates: "2026-10-25 18:49 onward",
+  dates: "2026-10-25 18:49 – 2026-10-26 11:59",
   owner: "marco",
   config: "configs/experiments/ppo-2p-fr3.yaml",
   wandb: (("ppo-2p-fr3-full-e95ea1db", "ppo-2p-fr3/full"),),
-  records: (),
+  records: ("507970d7", "cbba2d10", "7c0d2f67", "b38e49dc", "32d82b76", "f2f3858d"),
 )
-#tldr[@exp:recipe-2p-openhex was still improving against its start when its learning rate hit the floor, so marco asked for another billion steps. the first try restarted the learning rate at its peak and went backwards (@exp:recipe-2p-openhex-2), so this run simply carries on at the floor, constant 0.00025, from e7600.]
+#tldr[a second billion steps, continued at `ppo-2p-fr`'s final learning rate, barely moved the 1v1 net. the curve against e7600 was flat for 4,000 epochs, then rose slowly to \~52–53. the checkpoint picked as best, e4350, is level with e7600 on held-out boards: 51.0 #ci[49.6][52.4] head to head, 98.9 vs 98.8 against F.]
 
 *question.* does the 1v1 net keep improving on openhex's 1v1 rules if training just continues where `ppo-2p-fr` ended?
 
 *setup.* `ppo-2p-fr` exactly, initialized from `ppo-2p-fr/full@e7600` with a fresh optimizer. the learning rate is held at `ppo-2p-fr`'s floor, 0.00025, for 7,600 epochs (\~1b agent steps); there is no cosine. the champion row plays every 50th checkpoint against e7600 (1,000 games, ±3.1 pp, paired across checkpoints; ±1 pp per 10-checkpoint block). vs F is measured alongside. finals on `heldout-2p-fr`, 5,000 games each: `@best` vs F, `@best` vs e7600, and `@best` vs the original deployed net `puffer-graph2/full@e3350`, each as POLICY and as BELIEF. at e0 it reads 50.0 vs the champion and 98.8 vs F, and the first updates run at kl 0.0006–0.0009, where `ppo-2p-fr` ended. \~17 h.
 
-*result.* running. at e4000 (53%) the curve is still flat. the champion row's 10-checkpoint block means are 50.1, 50.7, 50.0, 48.4, 49.1, 50.2, 49.9 and 50.1 (each over 10,000 games, ±1 pp), and e4000 alone reads 50.0. as elo against e7600, the slope over all 80 checkpoints is −0.4 ± 0.9 per 1,000 epochs. `ppo-2p-fr` gained +10 to +17 per 1,000 epochs against its own start throughout, and +10 ± 3 over its last 1,600 epochs, near the same learning rate. vs F holds at 98.3–99.0. so far, more training at the floor learning rate neither helps nor hurts: e7600 looks like where this recipe levels off.
+*result.*
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, right, right, right, right),
+    header: ([epochs], [0–450], [1000–1450], [2000–2450], [3000–3450], [4000–4450], [5000–5450], [6000–6450], [7000–7450]),
+    [vs e7600], [50.1], [50.0], [49.1], [49.9], [51.2], [51.9], [52.0], [52.8],
+    [vs F], [98.5], [98.7], [98.3], [98.5], [98.7], [98.6], [98.9], [98.7],
+  ),
+  caption: [the monitors during training, `select-2p-fr`, mean of ten selects (10,000 games, ±1 pp) per block. the blocks in between read the same; the last three checkpoints, e7500–7600, read 51.1. as elo against e7600 the slope is −0.4 ± 0.9 per 1,000 epochs over e0–4000 and +3.5 ± 0.4 over the whole run. `ppo-2p-fr` gained +10 to +17 per 1,000 epochs against its start throughout.],
+)
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, left),
+    header: ([final on `heldout-2p-fr` (5,000 games each)], [e4350 (this run's best)], [e7600 (its start)], [paired]),
+    [POLICY vs F], [*98.92* #ci[98.59][99.17] (`507970d7`)], [98.84 (`e435b80e`)], [+0.08 pp, 48 vs 44, p = 0.75],
+    [BELIEF (16 worlds) vs F], [*98.94* #ci[98.62][99.19] (`cbba2d10`)], [98.76 (`6c4f23cb`)], [+0.18 pp, 53 vs 44, p = 0.42],
+    [POLICY vs `puffer-graph2/full@e3350`], [*64.7* #ci[63.3][66.0] (`32d82b76`)], [63.2 (`36bd2384`)], [+1.5 pp, 779 vs 704, p = 0.055],
+    [BELIEF vs `puffer-graph2/full@e3350`], [*63.5* #ci[62.2][64.8] (`f2f3858d`)], [62.2 (`db519a9e`)], [+1.3 pp, 810 vs 744, p = 0.099],
+    [POLICY, e4350 vs e7600], [*51.0* #ci[49.6][52.4] (`7c0d2f67`)], [—], [p = 0.16],
+    [BELIEF, e4350 vs e7600], [*51.2* #ci[49.8][52.6] (`b38e49dc`)], [—], [p = 0.098],
+  ),
+  caption: [the finals. `puffer-graph2/full@e3350` is the deployed 1v1 net, which `ppo-2p-fr` started from; the rows against it pair game for game with `ppo-2p-fr`'s finals on the same boards.],
+)
+
+*reading.* the second billion steps bought little. for the first 4,000 epochs the net did not move at all against e7600. it then rose slowly to \~52–53 by e6000–7000, which is \~15–20 elo, about a fifth of what the first billion bought (\~+100 elo against its start). every final points the same way: e4350 is ahead of e7600 by 1.0–1.5 pp head to head and against the old net, and by 0.1–0.2 pp against F. none of these is significant on its own. so e7600 is roughly where this recipe levels off on openhex's 1v1 rules, and e4350 is at most a little better.
+
+e4350 was picked as best because its one select row read 55.5, the highest of 153 rows of ±3.1 pp each. picking the maximum favours a lucky row, and on held-out boards e4350 reads 51.0, about the mean of its block. the checkpoints from e6000–7000 averaged 52–53 on select, but none of them has a held-out final. picking best from the block means instead of the single highest row would avoid this (my suggestion, not queued).
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr3.yaml
