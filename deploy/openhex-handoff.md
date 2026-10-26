@@ -33,7 +33,8 @@ registration, a version**, and `deploy/openhex.yaml` keeps every version ever
 registered. Retired versions stay in the file, marked `retired: true`, for the
 record and for `stats`; the runner skips them. The code lives in
 `src/catanrl/bridge/openhex_deploy.py` (the file, the pins, the git check, the
-key check, the stamps) and `src/catanrl/bridge/openhex_stats.py`.
+key check, the stamps), `src/catanrl/bridge/openhex_stats.py` and
+`src/catanrl/bridge/openhex_release.py` (the checkpoints as GitHub release assets).
 
 **Scheme.** Names are `catanrl-<line>-v<N>`, where the line is `1v1`,
 `1v1-search` or `4p`, and the version string is `<line>-v<N>`. The three bots
@@ -134,14 +135,24 @@ the code that plays did not change.
    shows the epoch.
 3. Commit and tag: `git tag openhex-1v1-v2`, then push the branch and the tag
    (`git push origin main openhex-1v1-v2`; submodule branches first if they moved).
-4. On the bot machine: `git fetch --tags && git checkout openhex-1v1-v2`, then
-   `git submodule update` and `uv sync` if the engine or PufferLib moved.
-5. `catanrl openhex deploy/openhex.yaml --check`. It loads every agent that
+4. Release the checkpoints, here, where the runs are:
+   `catanrl openhex release deploy/openhex.yaml openhex-1v1-v2` packs each
+   checkpoint the tag's bots pin into a `.tar.gz` of about 2 MB, with
+   `manifest.json` and `release-notes.md`, in a temp dir (or `--out DIR`), and
+   publishes nothing. It refuses a secret in any file it packs (naming the file
+   and line, never the value) and lists the absolute home paths that become
+   public (each run's `config.json` names its experiment YAML). Read that, then
+   run the `cd ... && gh release create ...` it prints. Releases are public, on
+   mcrco/catanrl-v2 (a top-level `releases: owner/name` names another repo).
+5. On the bot machine: `git fetch --tags && git checkout openhex-1v1-v2`, then
+   `git submodule update` and `uv sync` if the engine or PufferLib moved, then
+   `catanrl openhex fetch deploy/openhex.yaml` (see "Releases" below).
+6. `catanrl openhex deploy/openhex.yaml --check`. It loads every agent that
    runs, runs the git check, says `set`/`unset` per key, prints a row per bot
    (name, version, mode, spec, weights sha, tag, retired, key) and exits 0 or 1.
    It contacts nobody. Expect one problem only: the new key is unset. (It
    prints `malformed` for a value that is not an OpenHex key.)
-6. Register by hand:
+7. Register by hand:
    `catanrl openhex deploy/openhex.yaml --describe catanrl-1v1-v2 > /tmp/body.json`
    prints the `POST /api/bots` body (name, mode, `coordinateFormat:
    "coordinates"`, and a description of at most 280 characters naming the
@@ -151,7 +162,7 @@ the code that plays did not change.
    `/etc/catanrl/openhex.env` yourself (root, mode 600), never in the repo or a
    log. Then add the reply's `bot.id` as `bot_id` (`deploy/` changes do not
    trip the git check; commit them on main).
-7. `--check --keys` with the env file loaded, from `/opt/catanrl-v2`:
+8. `--check --keys` with the env file loaded, from `/opt/catanrl-v2`:
    `sudo bash -c 'set -a; . /etc/catanrl/openhex.env; exec .venv/bin/catanrl openhex deploy/openhex.yaml --check --keys'`.
    This also asks OpenHex whose each key is (`GET /api/bots/me`; it queues
    nothing), so it prints `verified` per key and `ok`. Plain `--check` cannot
@@ -159,6 +170,21 @@ the code that plays did not change.
    it and stop every bot. Then restart the service between games (see
    "Operating"). The journal shows the new bot's stamp line, then `game ...
    as ...` when it is matched.
+
+**Releases.** An asset is one checkpoint as `runs/<exp>/<variant>/`:
+`config.json`, `checkpoints/eNNNNNN.pt` and a `run.json` listing that
+checkpoint alone (`status: released`), which is all the resolver needs for
+`exp/variant@eN#sha`. There is no `aliases.jsonl`, so `@best` does not resolve
+in a fetched run: a release takes `@eN#sha` refs only and says which to paste.
+`fetch [--runs DIR] [--only NAMES]` takes the running bots that have a tag and
+skips any checkpoint that already resolves, so a second fetch makes no
+request. It reads `manifest.json` from
+`https://github.com/mcrco/catanrl-v2/releases/download/<tag>/` (plain HTTPS,
+no token) and checks each asset's sha256, members and weights before it writes
+anything. It never overwrites a different file and extends only a `run.json` a
+fetch wrote. A training run that lacks the checkpoint is refused: fetch into
+another `--runs DIR` and run with `CATANRL_RUNS_DIR=DIR`. Checkpoints load with
+`torch.load(weights_only=True)`. (`--base-url` is for tests.)
 
 **The overlap.** The old version is not retired when the new one starts. Both
 stay queued for a few days, until the new one has enough finished games to
@@ -261,11 +287,12 @@ record. Games still `active` are only counted as ongoing. Names from OpenHex
    `.../whl/cpu`, re-resolve (`uv lock`), and `uv sync`. The VM did exactly
    this and marked pyproject.toml/uv.lock skip-worktree so pulls do not clobber
    it. The bots run on `--device cpu` (the default).
-3. **The two checkpoint directories**, about 10 MB each, under the runs root:
-   `runs/puffer-graph2/full` (keep `aliases.jsonl`, `config.json`, `run.json`,
-   `checkpoints/e003350.pt`; `best` resolves to e3350, weights sha256
-   3355b505...) and `runs/ppo-4p/main` (`checkpoints/e003650.pt`). The runs
-   root is found through git; if the checkout is not a git repo for the service
+3. **The checkpoints.** From the checkout of the tag, `catanrl openhex fetch
+   deploy/openhex.yaml` downloads every checkpoint the running bots pin from
+   their tags' GitHub releases into the runs root (see "Versioning",
+   "Releases"). A bot with no `tag` (the v1 entries today) has no release: tag
+   and release it, or copy its run dir by hand (`config.json`, `run.json`,
+   `checkpoints/eNNNNNN.pt`). The runs root is found through git; if the checkout is not a git repo for the service
    user (or git complains about ownership), set `CATANRL_RUNS_DIR=<checkout>/runs`.
    The runner now runs git itself too (the code check, "Versioning"), so fix
    the ownership as well: `sudo git config --system --add safe.directory /opt/catanrl-v2`.
@@ -276,7 +303,7 @@ record. Games still `active` are only counted as ongoing. Names from OpenHex
    `OMP_NUM_THREADS=1` unless you want the search to use more cores (the MCTS
    spec also takes `threads=N`).
 5. **Check before enabling:** `pytest tests/bridge/test_bridge_openhex.py
-   tests/bridge/test_bridge_openhex_deploy.py` and `catanrl openhex
+   tests/bridge/test_bridge_openhex_deploy.py tests/bridge/test_bridge_openhex_release.py` and `catanrl openhex
    deploy/openhex.yaml --check --keys` with the env loaded (see
    "Versioning"), then run one bot in the foreground with the env loaded:
    `catanrl openhex deploy/openhex.yaml --only catanrl-1v1-search --state /tmp/openhex-test`.
