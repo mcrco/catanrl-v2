@@ -1,0 +1,89 @@
+# ppo-2p-fr continued from e7600 at the floor learning rate, constant (marco, 2026-10-25: "stop and
+# start from the low constant lr").
+#
+# ppo-2p-fr2 (the same continuation with a fresh cosine from the peak, 0.0025) went backwards at once:
+# its champion row (vs e7600) fell to 43.5 by e50 and sat at 40-43 through e2000 (10-checkpoint blocks
+# 43.3, 41.2, 40.6, 42.1, 40.0), vs F 98.8 -> ~97.7. e7600 ended at the floor (0.00025, kl 0.001 per
+# update, entropy 0.048); the restart at 0.0025 took kl to 0.02-0.03, 20x. ppo-2p-fr's own restart from
+# e3350 (entropy 0.084) ran at kl 0.015 and held 48-51 early. so ppo-2p-fr2 was stopped at e2010 and
+# this run asks the plain question: does the 1v1 net keep improving if training simply continues where
+# ppo-2p-fr ended?
+#
+# everything is ppo-2p-fr2's (same rules, recipe, monitors, finals, 7600 epochs ~1B agent steps,
+# init_from ppo-2p-fr/full@e7600, champion e7600), except the learning rate: constant 0.00025,
+# ppo-2p-fr's floor (anneal_lr: false; min_lr_ratio is then not read). the optimizer is fresh (muon
+# momentum restarts), which at this learning rate is a small step.
+#
+# power: the champion monitor is 1000 games on select-2p-fr every 50 epochs, +-3.1 pp at 50%; two
+# checkpoints pair game for game against the same champion, MDE ~4.2-4.9 pp (80%, two-sided 5%); a
+# 10-checkpoint block is 10,000 games, +-1 pp. finals on heldout-2p-fr, 5000 games each: vs F +-0.3 pp
+# near 98.8 (paired MDE ~0.6-0.9 pp against e7600's e435b80e/6c4f23cb, which the cache reuses), head to
+# head +-1.4 pp at 50% (MDE ~2 pp).
+# cost: ~16 h training at ~17.8k agent steps/s + ~1 h monitors + ~40 min finals, the 8 gb card alone.
+#
+# launch (main, no other run live):
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr3.yaml
+name: ppo-2p-fr3
+seed: 42                        # puffer-graph2's: the same map pool, and init/sample/rollout seeds
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+model: {preset: graph-s, args: {shared: true}}
+# ppo-2p-fr's last checkpoint e7600 (its best), pinned by the #sha. weights only (restore: weights);
+# the start's actor and critic: the shared trunk and both heads.
+init_from: {ckpt: "ppo-2p-fr/full@e7600#7c7b43b099c0", parts: [actor, critic]}
+train:
+  algo: ppo
+  total_timesteps: 1_003_929_600  # 7600 epochs x 132,096 agent steps (both seats' rows): ~1B more
+  optimizer: muon               # heavyball ForeachMuon(heavyball_momentum=True), as the start
+  learning_rate: 0.00025        # ppo-2p-fr's floor, held constant (header)
+  lr_schedule: constant         # catanrl's KL schedule off
+  anneal_lr: false              # no cosine: the learning rate stays 0.00025
+  min_lr_ratio: 0.1             # not read with anneal_lr: false
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2             # not read (per-seat value loss)
+  ent_coef: 0.005
+  max_grad_norm: 2.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 4096      # the start peaked at 4.74 GiB allocated: the 8 GB card alone
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  critic_targets: vtrace        # the start's critic targets (puffer-graph2 pinned them), not the lambda default
+  critic_gamma: null
+  precision: float32
+  amp: false
+  checkpoint_interval: 50
+eval:
+  select: {from: champion}      # best follows the champion row (header)
+  monitor:
+    - {name: champion, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"], every: 50,
+       metric: score_rate}
+    - {name: f, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
+sweep:
+  axes:
+    obs:
+      full:                     # the start's level (an oracle row; BELIEF is its fair number)
+        obs.level: full
+        eval.final:
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@best", F]}
+          - {suite: heldout-2p-fr, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", F]}
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${champion}", F]}
+          - {suite: heldout-2p-fr, lineup: ["BELIEF:ckpt=${champion}:worlds=16", F]}
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=${champion}"]}
+          - {suite: heldout-2p-fr, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", "BELIEF:ckpt=${champion}:worlds=16"]}
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@best", "POLICY:ckpt=puffer-graph2/full@e3350#3355b5059503"]}
+          - {suite: heldout-2p-fr, lineup: ["BELIEF:ckpt=${run}@best:worlds=16", "BELIEF:ckpt=puffer-graph2/full@e3350#3355b5059503:worlds=16"]}
+  name: "{obs}"
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
