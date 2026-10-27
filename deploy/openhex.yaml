@@ -47,6 +47,8 @@ bots:
     version: 1v1-v2
     spec: BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16
     key_env: OPENHEX_KEY_1V1_V2
+    bot_id: 9f7c562318324853
+    deployed: 2026-10-27
     tag: openhex-1v1-v2.1
     evidence: [cbba2d1098a7be6c, b38e49dc2f3a95b3, 507970d71e8d6566, 7c0d2f67135e7aad, 32d82b766f6b9526]
     retired: false
