@@ -1,0 +1,23 @@
+# Does the friendly-robber net (ppo-2p-fr3/full@e4350, trained on OpenHex's 1v1 rules)
+# beat the site's current 1v1 bot (puffer-graph2/full@e3350) on catan.marcoya.ng's rules?
+# The site's server offers no friendly robber and no balanced dice, so its 1v1 room is
+# base-2p: 15 VP, discard above 9, the normal robber, random dice. Marco: measure before
+# swapping the site's table. 5,000 games each (+-1.4 pp at 50%). Row 1 pairs game for game
+# with ff8528a4 (POLICY puffer-graph2/full@e3350 vs F on the same suite):
+#   tools/search_probe.py --pair <row 1 record> runs/puffer-graph2/full/evals/heldout-2p/ff8528a4....json
+# On the CPU while discount-2p holds the GPU.
+name: site-rules-2p
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p}
+      lineup:
+        - "POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41"
+        - "F"
+    - suite: {name: heldout-2p}
+      lineup:
+        - "POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41"
+        - "POLICY:ckpt=puffer-graph2/full@e3350#3355b5059503"
+runtime: {device: cpu, threads: 4, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
