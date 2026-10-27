@@ -325,8 +325,8 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
   dates: "2026-10-26 13:08 onward",
   owner: "marco",
   config: "configs/experiments/discount-2p.yaml",
-  wandb: (("discount-2p-g999-s42-5057ed5a", "discount-2p/g999-s42"),),
-  records: (),
+  wandb: (("discount-2p-g999-s42-5057ed5a", "discount-2p/g999-s42"), ("discount-2p-g1-s42-5f1a556d", "discount-2p/g1-s42")),
+  records: ("57d449b3", "31ead730"),
 )
 #tldr[every ppo run so far discounts the policy at γ = 0.999 per decision, inherited from v1. marco asked whether training without the discount does better. two arms, γ = 0.999 vs γ = 1 for both the policy and the critic, trained from scratch on openhex's 1v1 rules with two seeds each.]
 
@@ -342,7 +342,21 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
 - *finals* on `heldout-2p-fr`, 5,000 games each, on each cell's *last* checkpoint (chosen before the run, so no winner's curse): vs F (±0.3 pp near 98) and vs the reference (±1.4 pp at 50%). once all four cells are done, a separate eval plays `g1` against `g999` within each seed (5,000 games, paired mde \~2 pp at 80%) and compares game lengths.
 - *cost.* \~8.4 h per cell, \~34 h in all, in the order s42-`g999`, s42-`g1`, s43-`g999`, s43-`g1`.
 
-*result.* running.
+*result so far (1 of 4 cells).*
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, 1fr),
+    align: (left, left, left, left, left),
+    header: ([cell], [γ], [vs F], [vs `ppo-2p-fr3/full@e4350`], [`environment/length`, last 200 epochs]),
+    [`g999-s42`], [0.999], [98.56 #ci(98.19, 98.85)], [43.38 #ci(42.01, 44.76)], [77.7],
+    [`g1-s42`], [1], [running], [], [],
+    [`g999-s43`], [0.999], [queued], [], [],
+    [`g1-s43`], [1], [queued], [], [],
+  ),
+  caption: [finals on `heldout-2p-fr`, 5,000 games each, each cell's last checkpoint (`g999-s42`: e3786). records `57d449b3` (vs F) and `31ead730` (vs the reference).],
+)
+
+the monitors for `g999-s42` (`select-2p-fr`, mean of each 500 epochs) were still climbing at the end: vs the reference 9.8, 22.4, 27.4, 31.0, 35.0, 39.2, 40.9, 42.1; vs F 72.9, 92.6, 94.5, 96.0, 96.8, 97.2, 97.9, 98.3. for scale, the reference has about 2b steps behind it (500m on the old rules, then 1.5b on these), against this cell's 500m. no reading until both seeds of both arms are in.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/discount-2p.yaml
