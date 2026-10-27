@@ -136,13 +136,15 @@ pytest tests/bridge/test_bridge_site_rules.py tests/test_catanatron_site_rules.p
 
 === openhex v2: the friendly-robber net #chip("running") <exp:deploy-openhex-v2>
 #meta(
-  dates: "2026-10-27 (released; registration on yang pending)",
+  dates: "2026-10-27 (released; catanrl-1v1-v2 live on yang; the search bot not yet registered)",
   owner: "marco",
   config: "deploy/openhex.yaml at tag openhex-1v1-v2",
   wandb: (("ppo-2p-fr3-full-e95ea1db", "ppo-2p-fr3/full"),),
   records: ("cbba2d10", "b38e49dc", "507970d7", "7c0d2f67", "32d82b76"),
 )
 #tldr[two new openhex registrations on `ppo-2p-fr3/full@e4350`, the net continued on openhex's own 1v1 rules: `catanrl-1v1-v2` (BELIEF, 16 worlds) and `catanrl-1v1-search-v2` (MCTS with 2#super[16] sims, marco's pick). the checkpoints are a public github release, #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v2")[`openhex-1v1-v2`]. marco runs the bots on yang, his other pc, with the three v1 bots alongside for a few days of comparison.]
+
+*status.* marco registered `catanrl-1v1-v2` from yang on 27 october (bot `9f7c562318324853`), serving from tag `openhex-1v1-v2.1`: the release tag merged with yang's own work (gpu search, the fused graph kernels, `deploy/openhex.sh`). `catanrl-1v1-search-v2` is in `deploy/openhex.yaml` but not registered yet.
 
 *why this net.* on `heldout-2p-fr` (5,000 games each) its policy beats F 98.92% and v1's net 64.66%, and is level with the end of the first friendly-robber run: 51.0 #ci[49.6][52.4] against `ppo-2p-fr/full@e7600` (@exp:recipe-2p-openhex-3). BELIEF reads the same: 98.94% vs F, 51.18% vs e7600.
 
