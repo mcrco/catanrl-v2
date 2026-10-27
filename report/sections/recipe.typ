@@ -74,29 +74,127 @@ catanrl run configs/experiments/puffer-graph2.yaml --only full
 catanrl run configs/experiments/puffer-graph2.yaml --only public
 ```)
 
-=== the 1v1 bot on openhex's 1v1 rules, \~1b more steps, judged against its start #chip("running") <exp:recipe-2p-openhex>
+=== the 1v1 bot on openhex's 1v1 rules, \~1b more steps, judged against its start #chip("done") <exp:recipe-2p-openhex>
 #meta(
-  dates: "2026-10-24 10:46 onward",
+  dates: "2026-10-24 10:46 – 2026-10-25 03:56",
   owner: "marco",
   config: "configs/experiments/ppo-2p-fr.yaml",
   wandb: (("ppo-2p-fr-full-fef9516c", "ppo-2p-fr/full"),),
-  records: ("fa6ea360", "2bfef46d", "8a137f56", "ffcc5c1a"),
+  records: ("e435b80e", "6c4f23cb", "3cd19d23", "fa618736", "36bd2384", "db519a9e", "8a137f56", "ffcc5c1a"),
 )
-#tldr[openhex's 1v1 queue plays friendly robber and balanced dice; our 2p bots trained on neither. marco: train on friendly robber from now on, continue the deployed 1v1 net for \~1b more steps on it, and judge it against its start (the champion) as well as F. running since 2026-10-24 10:46, \~17.5 h.]
+#tldr[openhex's 1v1 queue plays friendly robber and balanced dice; our 2p bots trained on neither. marco: train on friendly robber from now on, continue the deployed 1v1 net for \~1b more steps on it, and judge it against its start (the champion) as well as F. result: 63.2% head to head against its start (\~61.7% after correcting for the start's untrained friendly-robber input), 98.8% vs F against the start's 97.3%, still improving at the end.]
 
 *setup.*
 - *the rules.* from openhex's source: its 1v1 queue is 15 vp, discard above 9, friendly robber, balanced dice; its 4p queue is 10 vp, discard above 7, normal robber, random dice, which is our 4p setup already. openhex's friendly robber shields an opponent with *public* points ≤ 2. our engine used *actual* points < 3, which counts hidden victory point cards (a mismatch, and the legal moves leak whether the opponent holds one), so the engine now uses openhex's rule (a knight is judged on the points before it takes largest army, as openhex does). balanced dice are in the engine too (marco: "do balanced dice before 1v1 retrain"), following openhex's code: a 36-card deck refilled when 13 or fewer are left, a recency penalty on totals seen in the last 5 rolls, and per-player seven balancing; search chance nodes use the state's own odds. `base-2p-fr` is openhex's 1v1 exactly: 15 vp, discard above 9, friendly robber, balanced dice. random-dice, normal-robber games play bit-identically to the old engine. the network gets no dice-state input, so the policy plays the dice blind and only the search reads them. the two recorded openhex games say balanced dice but were played on fair dice (an openhex bug, since fixed); the bridge falls back to fair dice if a roll is impossible under the balanced deck.
-- *the run.* `puffer-graph2/full@best` (e3350, the deployed 1v1 net) continued on `base-2p-fr` for \~1b agent steps, the recipe otherwise unchanged, at \~17.8k agent steps/s (\~17.5 h with monitors and finals).
+- *the run.* `puffer-graph2/full@best` (e3350, the deployed 1v1 net) continued on `base-2p-fr` for \~1b agent steps, the recipe otherwise unchanged (including its discounted v-trace critic, γ = 0.999, kept to match the start; not the undiscounted default since @exp:recipe-critic-fix, a choice i made without asking. the two continuations below kept it too), at \~17.8k agent steps/s (\~17.5 h with monitors and finals).
 - *baselines.* the start vs F on `select-2p-fr`: *96.3* #ci[94.9][97.3] (`8a137f56`). its friendly-robber input was never on in training: a copy with that input zeroed beats it *51.5* #ci[50.2][52.9] over 5,000 games (`ffcc5c1a`), so part of any gain over the start is just learning to ignore that input; the final head to head subtracts 1.5 pp for it.
 - *identity.* the merge moved the code ids every record is keyed under (catanrl `55ba5984`, engine `a9b40d9c`, train `55588933`), so new rows pair with older records only through `tools/search_probe.py --pair` (old-rule games are bit-identical).
 - *the champion eval (marco).* ppo stagnation has been read from the win rate vs F, which sits near its 95% ceiling. every select now also plays the current checkpoint against a champion (here the start), 1,000 games on the same boards each time: ±3.1 pp, paired game by game across checkpoints. the finals include the start under the new rules, since it never trained on them. at e0 the champion row reads 50.0 (`fa6ea360`), as it must.
 
-*progress (2026-10-24 13:30, e1250 of \~7,576).* champion row by blocks of five selects (5,000 games each): 48.8, 50.3, 49.9, 52.8, 50.6%; vs F 96.1 → 97.0–97.2%. the net dips below its start for the first \~200 epochs on the new rules, then edges above it. the trainer's best is e750 (54.7, `71cf79d7`), the highest of many noisy rows, so it is biased up; the heldout finals give the unbiased number.
+*result.* trained 2026-10-24 10:46 to 2026-10-25 \~03:25 (7,600 epochs, 1.0b agent steps at \~17.8k/s), finals by 03:56. the champion row climbed the whole way and was still rising at the end; best is the last checkpoint, e7600.
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, right, right, right),
+    header: ([epochs], [0–450], [1000–1450], [2000–2450], [3000–3450], [4000–4450], [5000–5450], [6000–6450]),
+    [vs the start], [49.5], [51.2], [54.4], [56.1], [57.9], [60.5], [61.9],
+    [vs F], [96.5], [97.2], [97.3], [97.6], [98.2], [98.0], [98.2],
+  ),
+  caption: [the monitors during training, `select-2p-fr`, mean of ten selects (10,000 games) per block. the last block, e7000–7600, reads 63.2–64.4 vs the start and 98.4–98.6 vs F.],
+)
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, left),
+    header: ([final on `heldout-2p-fr` (5,000 games each)], [e7600], [the start], [paired]),
+    [POLICY vs F], [*98.84* #ci[98.50][99.10] (`e435b80e`)], [97.32 #ci[96.83][97.73] (`3cd19d23`)], [+1.52 pp, 126 vs 50, p ≈ 1e-8],
+    [BELIEF (16 worlds) vs F], [*98.76* #ci[98.41][99.03] (`6c4f23cb`)], [97.30 #ci[96.81][97.71] (`fa618736`)], [+1.46 pp, 127 vs 54, p ≈ 6e-8],
+    [POLICY, e7600 vs the start], [*63.2* #ci[61.8][64.5] (`36bd2384`)], [—], [≈ 61.7 after the 1.5 pp input correction],
+    [BELIEF, e7600 vs the start], [*62.2* #ci[60.9][63.5] (`db519a9e`)], [—], [≈ 60.7 after the correction],
+  ),
+  caption: [the finals. the start is `puffer-graph2/full@e3350`, the deployed 1v1 net, on the same rules and boards.],
+)
 
-*result.* running.
+*reading.* another billion steps on openhex's 1v1 rules made the deployed 1v1 net clearly stronger: about 62% head to head against its own start after correcting for the start's never-trained friendly-robber input (roughly +85 elo), and its losses to F more than halved (2.7% → 1.2%). the champion row was still rising when the learning rate reached its floor. a second billion steps at that learning rate gained little more (@exp:recipe-2p-openhex-3). none of this is measured inside the search yet: the deployed openhex bots run MCTS-1024 and BELIEF on the old engine and the old net.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr.yaml
+```)
+
+=== the same net, another \~1b steps from e7600 at the floor learning rate #chip("done") <exp:recipe-2p-openhex-3>
+#meta(
+  dates: "2026-10-25 18:49 – 2026-10-26 11:59",
+  owner: "marco",
+  config: "configs/experiments/ppo-2p-fr3.yaml",
+  wandb: (("ppo-2p-fr3-full-e95ea1db", "ppo-2p-fr3/full"),),
+  records: ("507970d7", "cbba2d10", "7c0d2f67", "b38e49dc", "32d82b76", "f2f3858d"),
+)
+#tldr[a second billion steps, continued at `ppo-2p-fr`'s final learning rate, barely moved the 1v1 net. the curve against e7600 was flat for 4,000 epochs, then rose slowly to \~52–53. the checkpoint picked as best, e4350, is level with e7600 on held-out boards: 51.0 #ci[49.6][52.4] head to head, 98.9 vs 98.8 against F.]
+
+*question.* does the 1v1 net keep improving on openhex's 1v1 rules if training just continues where `ppo-2p-fr` ended?
+
+*setup.* `ppo-2p-fr` exactly, initialized from `ppo-2p-fr/full@e7600` with a fresh optimizer. the learning rate is held at `ppo-2p-fr`'s floor, 0.00025, for 7,600 epochs (\~1b agent steps); there is no cosine. the champion row plays every 50th checkpoint against e7600 (1,000 games, ±3.1 pp, paired across checkpoints; ±1 pp per 10-checkpoint block). vs F is measured alongside. finals on `heldout-2p-fr`, 5,000 games each: `@best` vs F, `@best` vs e7600, and `@best` vs the original deployed net `puffer-graph2/full@e3350`, each as POLICY and as BELIEF. at e0 it reads 50.0 vs the champion and 98.8 vs F, and the first updates run at kl 0.0006–0.0009, where `ppo-2p-fr` ended. \~17 h.
+
+*result.*
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, right, right, right, right),
+    header: ([epochs], [0–450], [1000–1450], [2000–2450], [3000–3450], [4000–4450], [5000–5450], [6000–6450], [7000–7450]),
+    [vs e7600], [50.1], [50.0], [49.1], [49.9], [51.2], [51.9], [52.0], [52.8],
+    [vs F], [98.5], [98.7], [98.3], [98.5], [98.7], [98.6], [98.9], [98.7],
+  ),
+  caption: [the monitors during training, `select-2p-fr`, mean of ten selects (10,000 games, ±1 pp) per block. the blocks in between read the same; the last three checkpoints, e7500–7600, read 51.1. as elo against e7600 the slope is −0.4 ± 0.9 per 1,000 epochs over e0–4000 and +3.5 ± 0.4 over the whole run. `ppo-2p-fr` gained +10 to +17 per 1,000 epochs against its start throughout.],
+)
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, left),
+    header: ([final on `heldout-2p-fr` (5,000 games each)], [e4350 (this run's best)], [e7600 (its start)], [paired]),
+    [POLICY vs F], [*98.92* #ci[98.59][99.17] (`507970d7`)], [98.84 (`e435b80e`)], [+0.08 pp, 48 vs 44, p = 0.75],
+    [BELIEF (16 worlds) vs F], [*98.94* #ci[98.62][99.19] (`cbba2d10`)], [98.76 (`6c4f23cb`)], [+0.18 pp, 53 vs 44, p = 0.42],
+    [POLICY vs `puffer-graph2/full@e3350`], [*64.7* #ci[63.3][66.0] (`32d82b76`)], [63.2 (`36bd2384`)], [+1.5 pp, 779 vs 704, p = 0.055],
+    [BELIEF vs `puffer-graph2/full@e3350`], [*63.5* #ci[62.2][64.8] (`f2f3858d`)], [62.2 (`db519a9e`)], [+1.3 pp, 810 vs 744, p = 0.099],
+    [POLICY, e4350 vs e7600], [*51.0* #ci[49.6][52.4] (`7c0d2f67`)], [—], [p = 0.16],
+    [BELIEF, e4350 vs e7600], [*51.2* #ci[49.8][52.6] (`b38e49dc`)], [—], [p = 0.098],
+  ),
+  caption: [the finals. `puffer-graph2/full@e3350` is the deployed 1v1 net, which `ppo-2p-fr` started from; the rows against it pair game for game with `ppo-2p-fr`'s finals on the same boards.],
+)
+
+*reading.* the second billion steps bought little. for the first 4,000 epochs the net did not move at all against e7600. it then rose slowly to \~52–53 by e6000–7000, which is \~15–20 elo, about a fifth of what the first billion bought (\~+100 elo against its start). every final points the same way: e4350 is ahead of e7600 by 1.0–1.5 pp head to head and against the old net, and by 0.1–0.2 pp against F. none of these is significant on its own. so e7600 is roughly where this recipe levels off on openhex's 1v1 rules, and e4350 is at most a little better.
+
+e4350 was picked as best because its one select row read 55.5, the highest of 153 rows of ±3.1 pp each. picking the maximum favours a lucky row, and on held-out boards e4350 reads 51.0, about the mean of its block. the checkpoints from e6000–7000 averaged 52–53 on select, but none of them has a held-out final. picking best from the block means instead of the single highest row would avoid this (my suggestion, not queued).
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr3.yaml
+```)
+
+=== the first try: a fresh cosine from the peak learning rate #chip("stopped") <exp:recipe-2p-openhex-2>
+#meta(
+  dates: "2026-10-25 14:03 – 18:48 (stopped at e2010)",
+  owner: "marco",
+  config: "configs/experiments/ppo-2p-fr2.yaml",
+  wandb: (("ppo-2p-fr2-full-0b305e27", "ppo-2p-fr2/full"),),
+  records: (),
+)
+#tldr[the continuation restarted the learning rate at its peak, 0.0025, and fell to 40–43% against its own start within 50 epochs. it stayed there through e2000, so marco stopped it and restarted at the floor (@exp:recipe-2p-openhex-3).]
+
+*question.* the same as @exp:recipe-2p-openhex-3.
+
+*setup.* `ppo-2p-fr` exactly, initialized from `ppo-2p-fr/full@e7600`, with a fresh optimizer and a fresh cosine (0.0025 → 0.00025 over 7,600 epochs), as `ppo-2p-fr` had done from its own start. the monitors and planned finals were the same as @exp:recipe-2p-openhex-3.
+
+*result.* stopped at e2010 (26%), before any finals. the champion row fell to 43.5 by e50 and stayed at 40–43. the 10-checkpoint block means are 43.3, 41.2, 40.6, 42.1 and 40.0, each over 10,000 games (±1 pp). vs F fell from 98.8 to \~97.7.
+
+*reading.* the learning-rate restart caused this, not the extra steps:
+
+- e7600 ended at the floor learning rate (0.00025): kl 0.001 per update, entropy 0.048.
+- the restart at 0.0025 pushed kl to 0.02–0.03 at once, about 20 times larger.
+- `ppo-2p-fr`'s own restart from e3350 (entropy 0.084, a broader policy) ran at kl 0.015 and stayed at 48–51 early.
+
+a sharp policy that ended at a low learning rate loses \~8–10 pp head to head if the learning rate jumps back to the peak. the cosine would have returned to the floor by e7600, so this run's end would have tested a warm restart, not plain continued training. lesson: set a continuation's learning rate from its start's final kl and entropy.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/ppo-2p-fr2.yaml
 ```)
 
 == four players
@@ -218,4 +316,51 @@ catanrl run configs/experiments/ppo-4p-critic-fix.yaml
 
 #repro(```sh
 catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
+```)
+
+== the discount
+
+=== discount vs no discount, from scratch #chip("running") <exp:recipe-discount>
+#meta(
+  dates: "2026-10-26 13:08 onward",
+  owner: "marco",
+  config: "configs/experiments/discount-2p.yaml",
+  wandb: (("discount-2p-g999-s42-5057ed5a", "discount-2p/g999-s42"), ("discount-2p-g1-s42-5f1a556d", "discount-2p/g1-s42"), ("discount-2p-g999-s43-77e69c7e", "discount-2p/g999-s43")),
+  records: ("57d449b3", "31ead730", "2109921e", "312910df"),
+)
+#tldr[every ppo run so far discounts the policy at γ = 0.999 per decision, inherited from v1. marco asked whether training without the discount does better. two arms, γ = 0.999 vs γ = 1 for both the policy and the critic, trained from scratch on openhex's 1v1 rules with two seeds each.]
+
+*question.* marco's main question: does the discount make games end faster? second: does dropping it play better?
+
+*why it might.* catan needs no discount: every game ends, the only reward is the win at the end, and gae's λ = 0.95 already does most of the variance reduction. but γ < 1 changes the objective from p(win) to E[γ#super[T] · win]. a win is worth more the sooner it comes (\~0.85 at the opening of a 160-decision game), which may push the policy towards faster, riskier wins. the only earlier test was 100 epochs of 4p fine-tuning (`lambda-g1` in @exp:recipe-critic-fix: the same game length and the same select score), far too short to say what training from scratch does.
+
+*setup.*
+- *arms.* `g999`: γ = 0.999 for the policy and the critic. `g1`: γ = 1 for both. the critic targets are lambda returns in both (the default), so only the discount differs.
+- *recipe.* `puffer-graph2`'s, from scratch on `base-2p-fr` (15 vp, discard above 9, friendly robber, balanced dice), `full` level, 500m agent steps (3,800 epochs, cosine 0.005 → 0.0005).
+- *seeds.* 42 and 43 for each arm; the seed also draws the 4,096 training boards. two seeds of this recipe have never been compared, so the spread between seeds is unknown; an arm difference counts only if both seeds agree in sign and the pooled head to head clears it.
+- *monitors* every 50 epochs on `select-2p-fr` (1,000 games, ±3.1 pp at 50%): vs F, and vs a fixed reference, `ppo-2p-fr3/full@e4350`, so all four curves share one yardstick.
+- *finals* on `heldout-2p-fr`, 5,000 games each, on each cell's *last* checkpoint (chosen before the run, so no winner's curse): vs F (±0.3 pp near 98) and vs the reference (±1.4 pp at 50%). once all four cells are done, a separate eval plays `g1` against `g999` within each seed (5,000 games, paired mde \~2 pp at 80%) and compares game lengths.
+- *game length* (the main readout, marco). every cell's finals play the same 5,000 game ids (board, seats and game seed), so turns per game pair up game by game between the two arms of a seed: vs F, which the net beats 98–99% of the time, this is how fast it closes out a won game; vs the reference it is the length of a close game. from `g999-s42`'s finals (sd 11.5 turns vs F), the paired difference within a seed resolves to about ±0.45 turns (95%) even if games on one board are uncorrelated; the gap between the two seeds of one arm is the real yardstick. the self-play episode length logged in training (`environment/length`) gives the same comparison epoch by epoch.
+- *cost.* \~8.4 h per cell, \~34 h in all, in the order s42-`g999`, s42-`g1`, s43-`g999`, s43-`g1`.
+
+*result so far (2 of 4 cells).*
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto, auto, 1fr),
+    align: (left, left, left, left, left, left, left),
+    header: ([cell], [γ], [vs F], [vs ref], [turns vs F], [turns vs ref], [self-play length, last 200 epochs]),
+    [`g999-s42`], [0.999], [98.56 #ci(98.19, 98.85)], [43.38 #ci(42.01, 44.76)], [70.85], [77.42], [77.7],
+    [`g1-s42`], [1], [98.60 #ci(98.24, 98.89)], [44.20 #ci(42.83, 45.58)], [75.48], [79.07], [81.0],
+    [`g999-s43`], [0.999], [running], [], [], [], [],
+    [`g1-s43`], [1], [queued], [], [], [], [],
+  ),
+  caption: [finals on `heldout-2p-fr`, 5,000 games each, each cell's last checkpoint (e3786); ref = `ppo-2p-fr3/full@e4350`. turns are the mean per game over all 5,000 (sd 11.5 vs F, 13.3 vs ref). self-play length is `environment/length` from training. records `57d449b3` and `31ead730` (`g999-s42`), `2109921e` and `312910df` (`g1-s42`), vs F and vs the reference.],
+)
+
+the monitors for `g999-s42` (`select-2p-fr`, mean of each 500 epochs) were still climbing at the end: vs the reference 9.8, 22.4, 27.4, 31.0, 35.0, 39.2, 40.9, 42.1; vs F 72.9, 92.6, 94.5, 96.0, 96.8, 97.2, 97.9, 98.3. for scale, the reference has about 2b steps behind it (500m on the old rules, then 1.5b on these), against this cell's 500m. `g1-s42`'s monitors climbed the same way: 9.1, 22.5, 27.9, 30.8, 35.4, 39.7, 42.0, 43.3 vs the reference.
+
+*game length, seed 42.* without the discount, games run longer. paired game by game on the same 5,000 finals, `g1-s42` takes 4.64 ± 0.35 turns (95%) more than `g999-s42` against F, 75.5 against 70.9; on the 4,867 games both won it is the same, +4.65 ± 0.35. against the reference the gap is +1.64 ± 0.43 (+2.68 ± 0.82 on the 1,237 games both won). self-play shows it from the start: `environment/length`, mean of each 500 epochs, runs 105.6, 83.0, 82.2, 80.6, 79.5, 78.2, 77.3, 77.5 for `g999` against 107.4, 85.5, 84.6, 84.2, 82.6, 82.5, 82.1, 81.0 for `g1`, longer in every block. strength is level so far: 98.60 against 98.56 vs F, 44.2 against 43.4 vs the reference, inside each row's interval. this is one seed; it counts only if seed 43 shows the same sign.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/discount-2p.yaml
 ```)

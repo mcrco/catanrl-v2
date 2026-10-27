@@ -33,7 +33,7 @@
   #v(-0.5em)
   #text(size: 13pt)[experiment log]
   #v(0.1em)
-  #text(size: 9pt, fill: muted)[living document · last updated 24 october 2026 · #link("https://github.com/mcrco/catanrl-v2")[github] · #link(wandb-project)[wandb]]
+  #text(size: 9pt, fill: muted)[living document · last updated 27 october 2026 · #link("https://github.com/mcrco/catanrl-v2")[github] · #link(wandb-project)[wandb]]
 ]
 #v(0.4em)
 

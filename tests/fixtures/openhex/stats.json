@@ -1,0 +1,1100 @@
+{
+ "_about": "OpenHex's public Firestore records (projects/open-hex), fetched 2026-10-26 read-only and trimmed to the fields catanrl.bridge.openhex_stats reads: bot docs (GET documents/bots/<id>) and, per bot, a few of its games as documents:runQuery rows (ARRAY_CONTAINS on playerBotIds); players keep botId and name only.",
+ "bots": [
+  {
+   "name": "projects/open-hex/databases/(default)/documents/bots/05c4a25c6c0e46e1",
+   "fields": {
+    "elo4p": {
+     "doubleValue": 1500
+    },
+    "mode": {
+     "stringValue": "1v1"
+    },
+    "wins1v1": {
+     "integerValue": "54"
+    },
+    "elo1v1": {
+     "doubleValue": 1387.792716869628
+    },
+    "wins4p": {
+     "integerValue": "0"
+    },
+    "games4p": {
+     "integerValue": "0"
+    },
+    "games1v1": {
+     "integerValue": "109"
+    },
+    "createdAt": {
+     "stringValue": "2026-10-17T18:48:25.956407+00:00"
+    },
+    "name": {
+     "stringValue": "catanrl-1v1"
+    }
+   }
+  },
+  {
+   "name": "projects/open-hex/databases/(default)/documents/bots/b8334c08b8d34a19",
+   "fields": {
+    "wins4p": {
+     "integerValue": "0"
+    },
+    "wins1v1": {
+     "integerValue": "137"
+    },
+    "createdAt": {
+     "stringValue": "2026-10-17T23:16:13.145330+00:00"
+    },
+    "mode": {
+     "stringValue": "1v1"
+    },
+    "elo4p": {
+     "doubleValue": 1500
+    },
+    "games4p": {
+     "integerValue": "0"
+    },
+    "name": {
+     "stringValue": "catanrl-1v1-search"
+    },
+    "elo1v1": {
+     "doubleValue": 1640.5460998391102
+    },
+    "games1v1": {
+     "integerValue": "274"
+    }
+   }
+  },
+  {
+   "name": "projects/open-hex/databases/(default)/documents/bots/068460ec188f4a2c",
+   "fields": {
+    "wins1v1": {
+     "integerValue": "0"
+    },
+    "games1v1": {
+     "integerValue": "0"
+    },
+    "elo4p": {
+     "doubleValue": 1500
+    },
+    "wins4p": {
+     "integerValue": "0"
+    },
+    "createdAt": {
+     "stringValue": "2026-10-17T18:48:26.237378+00:00"
+    },
+    "games4p": {
+     "integerValue": "0"
+    },
+    "name": {
+     "stringValue": "catanrl-4p"
+    },
+    "mode": {
+     "stringValue": "4p"
+    },
+    "elo1v1": {
+     "doubleValue": 1500
+    }
+   }
+  },
+  {
+   "name": "projects/open-hex/databases/(default)/documents/bots/dcc6de42b64b4b78",
+   "fields": {
+    "games1v1": {
+     "integerValue": "371"
+    },
+    "name": {
+     "stringValue": "rehex-2.11"
+    },
+    "elo4p": {
+     "doubleValue": 1500
+    },
+    "wins1v1": {
+     "integerValue": "148"
+    },
+    "createdAt": {
+     "stringValue": "2026-10-17T15:47:52.268907+00:00"
+    },
+    "mode": {
+     "stringValue": "1v1"
+    },
+    "elo1v1": {
+     "doubleValue": 1360.8547325322434
+    },
+    "wins4p": {
+     "integerValue": "0"
+    },
+    "games4p": {
+     "integerValue": "0"
+    }
+   }
+  }
+ ],
+ "games": {
+  "05c4a25c6c0e46e1": [
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/0521979f290347b2",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "05c4a25c6c0e46e1"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-18T01:18:01.714312+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-18T01:30:50.656865+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "453e1243e5d84d8e"
+         },
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "453e1243e5d84d8e"
+            },
+            "name": {
+             "stringValue": "colonist-ai-r66"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/09adb967a5ff4a48",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "19bc1c0daabe497c"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-17T21:34:04.731863+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-17T21:40:43.429399+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "19bc1c0daabe497c"
+         },
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "19bc1c0daabe497c"
+            },
+            "name": {
+             "stringValue": "ar-PX_2"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/09d48905994447d9",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "05c4a25c6c0e46e1"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-18T02:14:03.626243+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-18T02:18:38.707749+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "dcc6de42b64b4b78"
+         },
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "dcc6de42b64b4b78"
+            },
+            "name": {
+             "stringValue": "rehex-2.11"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/109cd8be1e4d4ad2",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "dcc6de42b64b4b78"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-17T22:23:08.504606+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-17T22:28:24.514861+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "dcc6de42b64b4b78"
+         },
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "dcc6de42b64b4b78"
+            },
+            "name": {
+             "stringValue": "rehex-2.11"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/14a05c2803274e17",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "aborted"
+      },
+      "winnerBotId": {
+       "stringValue": "332d094f858b4d12"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-17T18:49:02.863543+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-17T18:51:02.360284+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "332d094f858b4d12"
+         },
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "332d094f858b4d12"
+            },
+            "name": {
+             "stringValue": "ar-PXns-a"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/2be97037aae74b7e",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "aborted"
+      },
+      "winnerBotId": {
+       "stringValue": "6fd5e545c14d4fa8"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-17T18:52:03.622033+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-17T18:59:09.361591+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         },
+         {
+          "stringValue": "6fd5e545c14d4fa8"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "6fd5e545c14d4fa8"
+            },
+            "name": {
+             "stringValue": "ar-PX_b0"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/5f2ddc8e45784d54",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "b8334c08b8d34a19"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-20T06:13:00.846197+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-20T06:25:19.212631+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "b8334c08b8d34a19"
+         },
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/7957ce9b73ed4e7d",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "b8334c08b8d34a19"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-20T06:49:01.711784+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-20T07:02:59.377650+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         },
+         {
+          "stringValue": "b8334c08b8d34a19"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   }
+  ],
+  "b8334c08b8d34a19": [
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/0013ad36acb748db",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "aborted"
+      },
+      "winnerBotId": {
+       "stringValue": "aa627d8cbafb4011"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-23T04:53:02.017682+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-23T05:02:02.407087+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "b8334c08b8d34a19"
+         },
+         {
+          "stringValue": "aa627d8cbafb4011"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "aa627d8cbafb4011"
+            },
+            "name": {
+             "stringValue": "hexn-4d.0"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/00320b199a214381",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "b8334c08b8d34a19"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-21T09:55:05.374198+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-21T10:14:22.157707+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "b8334c08b8d34a19"
+         },
+         {
+          "stringValue": "453e1243e5d84d8e"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "453e1243e5d84d8e"
+            },
+            "name": {
+             "stringValue": "colonist-ai-r66"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/007e519a1ae34f93",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "b8334c08b8d34a19"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-23T16:13:01.265750+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-23T16:23:51.215775+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "dcc6de42b64b4b78"
+         },
+         {
+          "stringValue": "b8334c08b8d34a19"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "dcc6de42b64b4b78"
+            },
+            "name": {
+             "stringValue": "rehex-2.11"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/01be07a79dd94795",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "aa627d8cbafb4011"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-23T17:16:00.892086+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-23T17:30:46.346613+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "b8334c08b8d34a19"
+         },
+         {
+          "stringValue": "aa627d8cbafb4011"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "aa627d8cbafb4011"
+            },
+            "name": {
+             "stringValue": "hexn-4d.0"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/03f72e1cb0e44a59",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "aa627d8cbafb4011"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-23T08:05:05.386709+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-23T08:17:40.007300+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "b8334c08b8d34a19"
+         },
+         {
+          "stringValue": "aa627d8cbafb4011"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "aa627d8cbafb4011"
+            },
+            "name": {
+             "stringValue": "hexn-4d.0"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/5f2ddc8e45784d54",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "b8334c08b8d34a19"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-20T06:13:00.846197+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-20T06:25:19.212631+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "b8334c08b8d34a19"
+         },
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   },
+   {
+    "document": {
+     "name": "projects/open-hex/databases/(default)/documents/games/7957ce9b73ed4e7d",
+     "fields": {
+      "mode": {
+       "stringValue": "1v1"
+      },
+      "status": {
+       "stringValue": "completed"
+      },
+      "winnerBotId": {
+       "stringValue": "b8334c08b8d34a19"
+      },
+      "createdAt": {
+       "stringValue": "2026-10-20T06:49:01.711784+00:00"
+      },
+      "completedAt": {
+       "stringValue": "2026-10-20T07:02:59.377650+00:00"
+      },
+      "playerBotIds": {
+       "arrayValue": {
+        "values": [
+         {
+          "stringValue": "05c4a25c6c0e46e1"
+         },
+         {
+          "stringValue": "b8334c08b8d34a19"
+         }
+        ]
+       }
+      },
+      "players": {
+       "arrayValue": {
+        "values": [
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "05c4a25c6c0e46e1"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1"
+            }
+           }
+          }
+         },
+         {
+          "mapValue": {
+           "fields": {
+            "botId": {
+             "stringValue": "b8334c08b8d34a19"
+            },
+            "name": {
+             "stringValue": "catanrl-1v1-search"
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   }
+  ],
+  "068460ec188f4a2c": []
+ }
+}
