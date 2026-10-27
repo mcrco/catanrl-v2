@@ -1,15 +1,62 @@
-# Our bots on OpenHex (https://open-hex.web.app): one registration per game
-# mode, each with its API key in the environment (/etc/catanrl/openhex.env).
+# Our bots on OpenHex (https://open-hex.web.app). A registration is permanent (its
+# name, description, Elo and record are fixed to it; OpenHex cannot rename, edit or
+# delete one), so each model we deploy is a new registration, a *version*, and this
+# file keeps every version ever registered: retired ones stay (retired: true) for the
+# record and `catanrl openhex stats`; the runner skips them. Every ckpt is pinned by
+# its weights' #sha. API keys: one per registration, in /etc/catanrl/openhex.env.
+# Procedure (pin, tag, --check, --describe, register, overlap, retire): see
+# deploy/openhex-handoff.md, "Versioning".
 bots:
+  # v1: the first three registrations (2026-10-17), deployed before versioning; their
+  # specs pinned to what @best resolved to when they played.
   - name: catanrl-1v1
     mode: 1v1
-    spec: BELIEF:ckpt=puffer-graph2/full@best:worlds=16
+    version: 1v1-v1
+    spec: BELIEF:ckpt=puffer-graph2/full@e3350#3355b5059503:worlds=16
     key_env: OPENHEX_KEY_1V1
+    bot_id: 05c4a25c6c0e46e1
+    deployed: 2026-10-17
+    tag: openhex-1v1-v2.1
+    retired: false
   - name: catanrl-4p
     mode: 4p
-    spec: POLICY:ckpt=ppo-4p/main@best
+    version: 4p-v1
+    spec: POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f
     key_env: OPENHEX_KEY_4P
+    bot_id: 068460ec188f4a2c
+    deployed: 2026-10-17
+    tag: openhex-1v1-v2.1
+    retired: false
   - name: catanrl-1v1-search
     mode: 1v1
-    spec: MCTS:ckpt=puffer-graph2/full@best:sims=65536:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused   # ~4 s a move on yang's GTX 1080 (OpenHex allows 60 s)
+    version: 1v1-search-v1
+    # sims=1024 on the OCI VM's CPU (2026-10-20); on yang's GTX 1080 since 2026-10-24 at 2^16
+    # sims (~4 s a move; OpenHex allows 60 s), the spec it runs now.
+    spec: MCTS:ckpt=puffer-graph2/full@e3350#3355b5059503:sims=65536:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused
     key_env: OPENHEX_KEY_1V1_SEARCH
+    bot_id: b8334c08b8d34a19
+    deployed: 2026-10-20
+    tag: openhex-1v1-v2.1
+    retired: false
+  # v2 (2026-10-27): ppo-2p-fr3/full@e4350, v1's net (puffer-graph2/full@e3350) continued for
+  # ~1.57b steps on OpenHex's 1v1 rules (friendly robber, balanced dice). heldout-2p-fr, 5,000
+  # games each: POLICY 98.92 vs F, 64.66 vs v1's net, 51.0 vs ppo-2p-fr/full@e7600; BELIEF
+  # 98.94 vs F, 51.18 vs e7600.
+  - name: catanrl-1v1-v2
+    mode: 1v1
+    version: 1v1-v2
+    spec: BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16
+    key_env: OPENHEX_KEY_1V1_V2
+    tag: openhex-1v1-v2.1
+    evidence: [cbba2d1098a7be6c, b38e49dc2f3a95b3, 507970d71e8d6566, 7c0d2f67135e7aad, 32d82b766f6b9526]
+    retired: false
+  # 2^16 sims (Marco). Time it on the serving machine before registering:
+  # tools/move_time.py SPEC --moves 20 must stay under OpenHex's 60 s per move.
+  - name: catanrl-1v1-search-v2
+    mode: 1v1
+    version: 1v1-search-v2
+    spec: MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=65536:dets=1
+    key_env: OPENHEX_KEY_1V1_SEARCH_V2
+    tag: openhex-1v1-v2.1
+    evidence: [cbba2d1098a7be6c, 507970d71e8d6566, 7c0d2f67135e7aad]
+    retired: false

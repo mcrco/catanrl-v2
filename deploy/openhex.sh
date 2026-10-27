@@ -9,7 +9,8 @@
 #   deploy/openhex.sh leave                 # only leave the queues (after a crash or SIGKILL)
 #
 # Keys: $OPENHEX_ENV (default ~/.config/catanrl/openhex.env, mode 600) with
-# OPENHEX_KEY_1V1, OPENHEX_KEY_1V1_SEARCH, OPENHEX_KEY_4P (deploy/openhex.yaml).
+# one key_env per running entry of deploy/openhex.yaml (OPENHEX_KEY_1V1, ...).
+# start's options go to the runner: --only NAME,NAME runs those entries alone.
 # Device: $OPENHEX_DEVICE (default cuda; cpu where there is no GPU).
 # Records: $OPENHEX_STATE (default ~/.local/state/catanrl/openhex): one dir per
 # bot with games.jsonl and boards/, and openhex.log, the session's output.
