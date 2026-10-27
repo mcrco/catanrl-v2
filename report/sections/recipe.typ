@@ -330,7 +330,7 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
 )
 #tldr[every ppo run so far discounts the policy at γ = 0.999 per decision, inherited from v1. marco asked whether training without the discount does better. two arms, γ = 0.999 vs γ = 1 for both the policy and the critic, trained from scratch on openhex's 1v1 rules with two seeds each.]
 
-*question.* does dropping the discount change what the 1v1 net learns, and does it play better?
+*question.* marco's main question: does the discount make games end faster? second: does dropping it play better?
 
 *why it might.* catan needs no discount: every game ends, the only reward is the win at the end, and gae's λ = 0.95 already does most of the variance reduction. but γ < 1 changes the objective from p(win) to E[γ#super[T] · win]. a win is worth more the sooner it comes (\~0.85 at the opening of a 160-decision game), which may push the policy towards faster, riskier wins. the only earlier test was 100 epochs of 4p fine-tuning (`lambda-g1` in @exp:recipe-critic-fix: the same game length and the same select score), far too short to say what training from scratch does.
 
@@ -340,20 +340,21 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
 - *seeds.* 42 and 43 for each arm; the seed also draws the 4,096 training boards. two seeds of this recipe have never been compared, so the spread between seeds is unknown; an arm difference counts only if both seeds agree in sign and the pooled head to head clears it.
 - *monitors* every 50 epochs on `select-2p-fr` (1,000 games, ±3.1 pp at 50%): vs F, and vs a fixed reference, `ppo-2p-fr3/full@e4350`, so all four curves share one yardstick.
 - *finals* on `heldout-2p-fr`, 5,000 games each, on each cell's *last* checkpoint (chosen before the run, so no winner's curse): vs F (±0.3 pp near 98) and vs the reference (±1.4 pp at 50%). once all four cells are done, a separate eval plays `g1` against `g999` within each seed (5,000 games, paired mde \~2 pp at 80%) and compares game lengths.
+- *game length* (the main readout, marco). every cell's finals play the same 5,000 game ids (board, seats and game seed), so turns per game pair up game by game between the two arms of a seed: vs F, which the net beats 98–99% of the time, this is how fast it closes out a won game; vs the reference it is the length of a close game. from `g999-s42`'s finals (sd 11.5 turns vs F), the paired difference within a seed resolves to about ±0.45 turns (95%) even if games on one board are uncorrelated; the gap between the two seeds of one arm is the real yardstick. the self-play episode length logged in training (`environment/length`) gives the same comparison epoch by epoch.
 - *cost.* \~8.4 h per cell, \~34 h in all, in the order s42-`g999`, s42-`g1`, s43-`g999`, s43-`g1`.
 
 *result so far (1 of 4 cells).*
 #figure(
   btable(
-    columns: (auto, auto, auto, auto, 1fr),
-    align: (left, left, left, left, left),
-    header: ([cell], [γ], [vs F], [vs `ppo-2p-fr3/full@e4350`], [`environment/length`, last 200 epochs]),
-    [`g999-s42`], [0.999], [98.56 #ci(98.19, 98.85)], [43.38 #ci(42.01, 44.76)], [77.7],
-    [`g1-s42`], [1], [running], [], [],
-    [`g999-s43`], [0.999], [queued], [], [],
-    [`g1-s43`], [1], [queued], [], [],
+    columns: (auto, auto, auto, auto, auto, auto, 1fr),
+    align: (left, left, left, left, left, left, left),
+    header: ([cell], [γ], [vs F], [vs ref], [turns vs F], [turns vs ref], [self-play length, last 200 epochs]),
+    [`g999-s42`], [0.999], [98.56 #ci(98.19, 98.85)], [43.38 #ci(42.01, 44.76)], [70.85], [77.42], [77.7],
+    [`g1-s42`], [1], [running], [], [], [], [],
+    [`g999-s43`], [0.999], [queued], [], [], [], [],
+    [`g1-s43`], [1], [queued], [], [], [], [],
   ),
-  caption: [finals on `heldout-2p-fr`, 5,000 games each, each cell's last checkpoint (`g999-s42`: e3786). records `57d449b3` (vs F) and `31ead730` (vs the reference).],
+  caption: [finals on `heldout-2p-fr`, 5,000 games each, each cell's last checkpoint (`g999-s42`: e3786); ref = `ppo-2p-fr3/full@e4350`. turns are the mean per game over all 5,000 (sd 11.5 vs F, 13.3 vs ref). self-play length is `environment/length` from training. records `57d449b3` (vs F) and `31ead730` (vs the reference).],
 )
 
 the monitors for `g999-s42` (`select-2p-fr`, mean of each 500 epochs) were still climbing at the end: vs the reference 9.8, 22.4, 27.4, 31.0, 35.0, 39.2, 40.9, 42.1; vs F 72.9, 92.6, 94.5, 96.0, 96.8, 97.2, 97.9, 98.3. for scale, the reference has about 2b steps behind it (500m on the old rules, then 1.5b on these), against this cell's 500m. no reading until both seeds of both arms are in.
