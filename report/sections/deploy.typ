@@ -58,6 +58,80 @@ catanrl eval "POLICY:ckpt=ppo-mixed-blob/main@e7600" F F F --suite heldout-rando
 catanrl house deploy/house.yaml   # on the bot vm: keeps the three tables open
 ```)
 
+=== the friendly-robber net on the site's rules #chip("done") <exp:deploy-site-rules-2p>
+#meta(
+  dates: "2026-10-27 03:41–04:20 utc",
+  owner: "marco",
+  config: "configs/experiments/site-rules-2p.yaml",
+  wandb: (("site-rules-2p-main-f1663977", "site-rules-2p"),),
+  records: ("b692e3b3", "fc9ab6e1"),
+)
+#tldr[on the site's own 1v1 rules (the normal robber, two fair dice), `ppo-2p-fr3/full@e4350` beats the site's 1v1 bot 55.8% head to head, and beats F 96.52% against its 95.16%, a paired +1.36 points (p = 0.0002). the net last trained on openhex's rules is the stronger 1v1 bot on both rule sets.]
+
+*question.* marco wants the friendly-robber net on the site's 1v1 table, but measured first: the site's server offered neither the friendly robber nor balanced dice, so its 1v1 room plays `base-2p`, the rules fr3's last run did not train on.
+
+*setup.* `heldout-2p` (15 vp, discard above 9, the normal robber, two fair dice), 5,000 games a row, `POLICY` on both sides, on the cpu next to discount-2p. row 1 pairs game for game with `puffer-graph2`'s own row against F (`ff8528a4`, same schedule; the records' code ids differ).
+
+*result.*
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, left),
+    header: ([row], [score], [record]),
+    [`ppo-2p-fr3/full@e4350` vs F], [*96.52* #ci[95.98][96.99]], [`b692e3b3`],
+    [`puffer-graph2/full@e3350` vs F (earlier)], [95.16 #ci[94.53][95.72]], [`ff8528a4`],
+    [`ppo-2p-fr3/full@e4350` vs `puffer-graph2/full@e3350`], [*55.80* #ci[54.42][57.17]], [`fc9ab6e1`],
+  ),
+  caption: [the friendly-robber net against the site's 1v1 bot, on the site's rules; 5,000 games a row. paired on the same games against F, fr3 wins 194 that `puffer-graph2` loses and loses 126 it wins (+1.36 points, p = 0.0002). games run 75.2 turns on average against F and 79.0 head to head.],
+) <tab:deploy-site-rules-2p>
+
+*reading.* fr3 can take the site's 1v1 table on either rule set. with openhex's rules now on the site's server (@exp:deploy-site-openhex-rules), the table can play the rules fr3 trained on.
+
+#repro(```sh
+catanrl run configs/experiments/site-rules-2p.yaml
+python tools/search_probe.py --pair runs/ppo-2p-fr3/full/evals/heldout-2p/b692e3b3c4738378.json \
+  runs/puffer-graph2/full/evals/heldout-2p/ff8528a4939c421a.json
+```)
+
+=== openhex's 1v1 rules on the site's server #chip("running") <exp:deploy-site-openhex-rules>
+#meta(
+  dates: "2026-10-27 11:52 utc (server live; the 1v1 table waits on the house machine)",
+  owner: "marco",
+  config: "deploy/house.yaml (draft: table ppo-2p-fr3)",
+  wandb: (),
+  records: (),
+)
+#tldr[catan.marcoya.ng's server now offers openhex's 1v1 rules as two room options: `robber_mode: friendly_public` (the friendly robber, counting public points only) and `dice_mode: balanced`. they follow cppanatron exactly, and old rooms and transcripts are unchanged. the 1v1 table moves to `ppo-2p-fr3` on these rules once the house machine runs the new catanatron.]
+
+*question.* marco: train new 1v1 bots on openhex's rules, and add both rules to the site so its 1v1 table plays them too. the server refused catanatron's own friendly robber, which counts hidden victory point cards (so a legal robber move would reveal them), and had no balanced dice.
+
+*setup.* catanatron `da239a6` (branch `v2`) adds two room keys. both are left out of a config at their defaults, so old configs keep their canonical form.
+- `robber_mode: friendly_public`: a tile with an opponent at 2 public points or fewer is off limits, unless every tile is. a knight's tile is judged on the points before its largest army award, as openhex does. catanatron's own `friendly_robber` is still refused.
+- `dice_mode: balanced`: openhex's 36-card deck with recency and seven balancing, with cppanatron's integer weights. the dice state is public in every view, and the verifier replays the rolls from the revealed seeds.
+the bridge reads both from the view, so a house seat's mirror plays the same rules.
+
+*result.*
+- *parity.* 60 `base-2p-fr` games in lockstep with cppanatron: every step's legal actions are equal (about 30,000 rolls and 5,500 robber prompts), and so is the dice state for every roller.
+- *old games.* games under the old modes give the same document digests as before, and a transcript recorded on the old code verifies.
+- *tests.* 222 catanatron tests on the new code pass, as does catanrl's fast suite (873 tests).
+- *smoke.* a local server running the draft table, `BELIEF` on fr3 against F: 4 games, all 8 transcripts verify, no desync in the seat's mirror.
+- *deploy.* the wheel went onto the gcp server at 11:52 utc with no game in progress. the server key (`36da19…`) and app.js are unchanged, and the three house tables reconnected.
+
+*loose ends.* not changed, since each changes a code id (marco's call): catanrl's catanatron harness still builds catanatron's hidden-vp robber for friendly-robber configs, and `CatanrlPlayer`'s mirror rolls fair dice. no record is affected, since the harness refuses balanced dice and every friendly-robber config has them.
+
+*next.* on the house machine: install catanatron `da239a6` (the client verifies each transcript with its own catanatron, and an old one refuses the new keys), the three bridge files and the fr3 checkpoint, then swap the 1v1 table for `ppo-2p-fr3` (room "1v1 OpenHex rules vs ppo-2p-fr3").
+
+#repro(```sh
+cd third_party/catanatron && uv build --wheel
+gcloud compute scp dist/catanatron-3.3.0-py3-none-any.whl catanatron:/tmp/ --project catanatron-261015 --zone us-west1-b
+# on the server: check /api/rooms for games in progress, then
+sudo /opt/catanatron/bin/pip install --force-reinstall --no-deps /tmp/catanatron-3.3.0-py3-none-any.whl
+sudo systemctl restart catanatron
+# tests
+pytest tests/bridge/test_bridge_site_rules.py tests/test_catanatron_site_rules.py \
+  third_party/catanatron/tests/test_balanced_dice.py third_party/catanatron/tests/test_friendly_public_robber.py
+```)
+
 == openhex versions
 
 === openhex v2: the friendly-robber net #chip("running") <exp:deploy-openhex-v2>
