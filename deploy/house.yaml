@@ -1,19 +1,27 @@
-# The tables catan.marcoya.ng keeps open (catanrl house, on the OCI VM).
-# max_games counts the waiting room too: at most max_games - 1 in play.
+# The tables catan.marcoya.ng keeps open: `catanrl house` on the OCI VM (systemd catanrl-house).
+# The OpenHex bots no longer run there. max_games counts the waiting room too: at most
+# max_games - 1 in play. The 1v1 table's robber_mode and dice_mode need catanatron da239a6 or
+# later on the server, and an engine with balanced dice in the house's checkout.
+# Specs are pinned by weights sha: a new @best fails loudly at startup instead of swapping bots.
 server: wss://catan.marcoya.ng
 server_key: 36da1994b58ca3dc627a0dd495210cf279977c0871f604396e87c5bf1a9c9f2f
 think_s: 0.8
 tables:
-  - name: puffer-graph2
-    label: puffer-graph2
-    spec: BELIEF:ckpt=puffer-graph2/full@best:worlds=16
+  # OpenHex's 1v1 rules (catanrl's base-2p-fr), which ppo-2p-fr3 trained on: 15 points, discard
+  # above 9, OpenHex's friendly robber (public points only) and its balanced dice.
+  # Replaces puffer-graph2's 1v1 (fair dice, the normal robber): a new table name, so new seat
+  # keys and a new transcripts/ppo-2p-fr3 directory; puffer-graph2's records stay where they are.
+  - name: ppo-2p-fr3
+    label: ppo-2p-fr3
+    spec: "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
     room:
-      name: 1v1 vs puffer-graph2
-      config: {num_players: 2, vps_to_win: 15, discard_limit: 9, decision_timeout_ms: 120000}
+      name: 1v1 OpenHex rules vs ppo-2p-fr3
+      config: {num_players: 2, vps_to_win: 15, discard_limit: 9, robber_mode: friendly_public,
+               dice_mode: balanced, decision_timeout_ms: 120000}
     max_games: 6
   - name: ppo-4p
     label: ppo-4p
-    spec: POLICY:ckpt=ppo-4p/main@best
+    spec: "POLICY:ckpt=ppo-4p/main@best#813b2c61338f"
     room:
       name: 4p vs ppo-4p
       config: {num_players: 4, decision_timeout_ms: 120000}
