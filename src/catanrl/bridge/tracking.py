@@ -57,7 +57,7 @@ from catanrl.bridge.position import (
     Position,
     SeatView,
     ViewError,
-    check_fair_dice,
+    check_dice,
     game_rules,
     public_mismatches,
     seat_of,
@@ -150,7 +150,7 @@ class SeatTracker:
         self.colors = tuple(view["colors"])
         self.game_id = (view.get("game") or {}).get("id")
         self.rules = rules if rules is not None else game_rules(view, supply)
-        check_fair_dice(self.rules)  # a Catanatron view's rolls are two fair dice
+        check_dice(self.rules, view)  # the replay rolls the game's dice
         self.catan_map = shared_map(view["map"])
         #: Public hand sizes after ``index`` log entries, from views seen in between.
         self.sizes: dict[int, tuple[int, ...]] = {}

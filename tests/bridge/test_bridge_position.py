@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from collections import Counter
 
+import cppanatron as cpp
 import numpy as np
 import pytest
 from bridge_games import GAMES, lockstep
@@ -79,8 +80,8 @@ def test_rules_refuse_a_supply_the_view_contradicts():
     assert game_rules(view, "base") == game_rules(view)
 
 
-def test_a_catanatron_view_refuses_balanced_dice():
-    # Catanatron rolls two fair dice: a balanced-dice supply or rule set is no Catanatron game's.
+def test_a_fair_dice_view_refuses_balanced_dice():
+    # The game rolled two fair dice: a balanced-dice supply or rule set is not its game's.
     ls = lockstep("base-2p", 0)
     view = ls.view(0)
     balanced = games.GameConfig.from_dict({**ls.config.to_dict(), "dice_mode": "balanced"})
@@ -91,6 +92,13 @@ def test_a_catanatron_view_refuses_balanced_dice():
     with pytest.raises(ViewError, match="fair dice"):
         SeatTracker(view, rules=balanced.cppanatron_rules())
     assert game_rules(view, ls.config) == SeatTracker(view).rules
+    # A view whose game rolls balanced dice (catanatron-server's dice_mode: balanced) refuses fair ones.
+    rolled = {**view, "game": {**view["game"], "dice_mode": "balanced"}}
+    assert game_rules(rolled).dice_mode == cpp.DiceMode.BALANCED
+    with pytest.raises(ViewError, match="balanced dice, not random"):
+        game_rules(rolled, ls.config)
+    with pytest.raises(ViewError, match="balanced dice, not random"):
+        SeatTracker(rolled, rules=ls.config.cppanatron_rules())
 
 
 def test_seat_view_reads_one_seat():

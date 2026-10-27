@@ -11,8 +11,9 @@ This module holds what both constructions of a position share:
 
 * :class:`SeatView`, typed access to a view;
 * :func:`game_rules` (the rules, the starting bank and deck inferred from the
-  view or taken from a supply) and :func:`shared_map` (one immutable
-  ``cpp.CatanMap`` per map document, shared by every game on it);
+  view or taken from a supply; the robber and the dice from the view's
+  ``game``) and :func:`shared_map` (one immutable ``cpp.CatanMap`` per map
+  document, shared by every game on it);
 * :func:`public_mismatches`, the check that a cppanatron game shows exactly
   what the view shows (everything a PRIVATE row reads, and more);
 * :func:`snapshot`: the position from one view through ``Game.apply_setup``,
@@ -218,7 +219,6 @@ def _supply_counts(supply: Any) -> tuple[tuple[int, ...], tuple[int, ...], tuple
     if hasattr(supply, "cppanatron_rules"):  # catanrl.games.GameConfig
         supply = supply.cppanatron_rules()
     if isinstance(supply, cpp.GameRules):
-        check_fair_dice(supply)
         return (tuple(supply.resource_bank), tuple(supply.development_deck),
                 (supply.roads_per_player, supply.settlements_per_player, supply.cities_per_player))
     if hasattr(supply, "resource_bank") and hasattr(supply, "roads"):  # catanatron Supply
@@ -227,24 +227,42 @@ def _supply_counts(supply: Any) -> tuple[tuple[int, ...], tuple[int, ...], tuple
     raise ViewError(f"cannot read a supply from {supply!r}")
 
 
-def check_fair_dice(rules: cpp.GameRules) -> None:
-    """Refuse rules a Catanatron game cannot have: Catanatron rolls two fair
-    dice, so its views replayed on balanced dice would refuse its rolls."""
-    if rules.dice_mode != cpp.DiceMode.RANDOM:
-        raise ViewError(f"a Catanatron game rolls two fair dice, not {rules.dice_mode.name.lower()} dice")
+def view_dice_mode(view: Mapping[str, Any]) -> cpp.DiceMode:
+    """The dice the view's game rolls: two fair dice, unless its ``game``
+    says ``dice_mode: balanced`` (OpenHex's balanced dice, which Catanatron
+    rolls as cppanatron does)."""
+    mode = (view.get("game") or {}).get("dice_mode", "random")
+    if mode not in ("random", "balanced"):
+        raise ViewError(f"unknown dice_mode {mode!r}")
+    return cpp.DiceMode[mode.upper()]
+
+
+def check_dice(rules: cpp.GameRules, view: Mapping[str, Any]) -> None:
+    """Refuse rules whose dice are not the view's game's: replayed on balanced
+    dice a fair game's rolls would be refused, and on fair dice a balanced
+    game's would go unchecked (and a search would plan on the wrong odds)."""
+    mode = view_dice_mode(view)
+    if rules.dice_mode != mode:
+        rolled = "two fair dice" if mode == cpp.DiceMode.RANDOM else "balanced dice"
+        raise ViewError(f"the game rolls {rolled}, not {rules.dice_mode.name.lower()} dice")
 
 
 def game_rules(view: Mapping[str, Any], supply: Any = None) -> cpp.GameRules:
     """The game's rules from the view.
 
-    Victory points to win, the discard limit and the friendly robber are in
-    ``view["game"]``. Pieces per player follow from any seat's pieces left
-    plus built. The starting deck is the unseen pool plus the seat's cards
-    plus every played card. The starting bank is the bank plus every hand;
-    only its total is public, so it is read as uniform unless ``supply``
-    (a Catanatron ``Supply``, ``"base"``/``"extension"``, a room config with
-    ``supply``, a catanrl ``GameConfig`` or a ``cpp.GameRules``) gives it, in
-    which case the view must agree with it.
+    Victory points to win, the discard limit, the robber and the dice are in
+    ``view["game"]``: either friendly robber is the engine's (OpenHex's,
+    public points), which catanatron-server's ``robber_mode:
+    friendly_public`` is exactly (Catanatron's own ``friendly_robber`` counts
+    hidden cards; see :mod:`catanrl.bridge.replay`), and ``dice_mode:
+    balanced`` is the engine's balanced dice. Pieces per player follow from
+    any seat's pieces left plus built. The starting deck is the unseen pool
+    plus the seat's cards plus every played card. The starting bank is the
+    bank plus every hand; only its total is public, so it is read as uniform
+    unless ``supply`` (a Catanatron ``Supply``, ``"base"``/``"extension"``, a
+    room config with ``supply``, a catanrl ``GameConfig`` or a
+    ``cpp.GameRules``) gives it, in which case the view must agree with it
+    (and a ``GameConfig``'s or ``GameRules``' dice with the view's).
     """
     sv = SeatView.of(view) if _has_single_perspective(view) else SeatView(view, 0)
     game = view["game"]
@@ -256,6 +274,10 @@ def game_rules(view: Mapping[str, Any], supply: Any = None) -> cpp.GameRules:
     )
     deck = sv.starting_deck()
     total = sum(sv.bank) + sum(sv.hand_sizes())
+    dice_mode = view_dice_mode(view)
+    given_rules = supply.cppanatron_rules() if hasattr(supply, "cppanatron_rules") else supply
+    if isinstance(given_rules, cpp.GameRules):
+        check_dice(given_rules, view)
     given = _supply_counts(supply)
     if given is None:
         if total % len(RESOURCES):
@@ -275,6 +297,7 @@ def game_rules(view: Mapping[str, Any], supply: Any = None) -> cpp.GameRules:
         roads_per_player=pieces[0],
         settlements_per_player=pieces[1],
         cities_per_player=pieces[2],
+        dice_mode=dice_mode,
     )
 
 
@@ -454,10 +477,11 @@ def _card_upper(count: int, victory_points: int) -> list[int]:
 
 def public_mismatches(game: cpp.Game, view: Mapping[str, Any], seat: int | None = None) -> list[str]:
     """What ``game`` shows differently from ``view``: the board, the bank, the
-    deck size, the prompt and turn state, every seat's public counts, pieces,
-    awards and road lengths, and the viewing seat's hand, cards and which of
-    them it may play. Empty when the game is what the seat sees (everything
-    a PRIVATE row reads is among these)."""
+    deck size, the prompt and turn state, the balanced dice and a knight's
+    Largest Army award (when the view shows them), every seat's public
+    counts, pieces, awards and road lengths, and the viewing seat's hand,
+    cards and which of them it may play. Empty when the game is what the seat
+    sees (everything a PRIVATE row reads is among these)."""
     sv = SeatView(view, seat_of(view) if seat is None else seat)
     out: list[str] = []
 
@@ -491,6 +515,14 @@ def public_mismatches(game: cpp.Game, view: Mapping[str, Any], seat: int | None 
     holder = game.board.longest_road_color
     check("longest road holder", None if holder is None else holder.name, board["road_color"])
 
+    if "balanced_dice" in view:
+        ours = None if game.balanced_dice is None else dice_json(game.balanced_dice, sv.colors)
+        check("balanced dice", ours, view["balanced_dice"])
+    if "largest_army_taken_from" in view:
+        taken = game.largest_army_taken_from
+        check("largest army taken from", None if taken is None else sv.colors[taken],
+              view["largest_army_taken_from"])
+
     for i in range(n):
         p = game.player(i)
         who = f"seat {i}"
@@ -512,6 +544,41 @@ def public_mismatches(game: cpp.Game, view: Mapping[str, Any], seat: int | None 
             check(f"{who} playable cards", tuple(p.development_card_owned_at_start), sv.owned_at_start(i))
             check(f"{who} actual points", p.actual_victory_points, int(sv.value(i, "ACTUAL_VICTORY_POINTS")))
     return out
+
+
+# ---------------------------------------------------------------- balanced dice
+
+
+def dice_json(dice: cpp.BalancedDice, colors: Sequence[str]) -> dict[str, Any]:
+    """A ``cpp.BalancedDice`` as Catanatron writes its own in a document
+    (``balanced_dice``: the cards left, the recent totals, the sevens per seat,
+    the run of sevens' owner by color and its length)."""
+    return {
+        "deck": [list(card) for card in sorted(dice.deck)],
+        "recent": list(dice.recent),
+        "sevens": list(dice.sevens),
+        "streak_player": None if dice.streak_player is None else colors[dice.streak_player],
+        "streak_count": int(dice.streak_count),
+    }
+
+
+def view_balanced_dice(view: Mapping[str, Any]) -> cpp.BalancedDice:
+    """The balanced dice of a view: its ``balanced_dice``, or else replayed
+    from the rolls in its log (all of it is public)."""
+    colors = list(view["colors"])
+    doc = view.get("balanced_dice")
+    if doc is not None:
+        player = doc["streak_player"]
+        return cpp.BalancedDice(sevens=[int(x) for x in doc["sevens"]],
+                                deck=[tuple(int(d) for d in card) for card in doc["deck"]],
+                                recent=[int(t) for t in doc["recent"]],
+                                streak_player=None if player is None else colors.index(player),
+                                streak_count=int(doc["streak_count"]))
+    dice = cpp.BalancedDice.fresh(len(colors))
+    for (color, kind, _value), result in view.get("action_records", ()):
+        if kind == "ROLL":
+            dice = dice.apply(tuple(int(d) for d in result), colors.index(color))
+    return dice
 
 
 # ---------------------------------------------------------------- snapshot
@@ -558,8 +625,9 @@ def snapshot(view: Mapping[str, Any], *, color: Any = None, rules: cpp.GameRules
     seat's settlements in building order), the prompt with the seat to act,
     cards left to discard, free roads, the seat's own cards and which of
     them it held when its turn began, Catanatron's road networks and cached
-    and published road lengths, awards, and from the log the turns of every
-    seat's last knight and purchase. Hidden hands are
+    and published road lengths, awards, the balanced dice and the seat a
+    knight took Largest Army from (``friendly_public``), and from the log the
+    turns of every seat's last knight and purchase. Hidden hands are
     :func:`placeholder_hands`. ``mismatches`` is empty when the game shows
     exactly what the view shows.
     """
@@ -592,6 +660,12 @@ def snapshot(view: Mapping[str, Any], *, color: Any = None, rules: cpp.GameRules
             last_development_card_bought_completed_turn=turns[i][1]))
     turn = int(view["current_turn_index"])
     acting = int(view["current_player_index"])
+    declared: dict[str, Any] = {}
+    if rules.dice_mode == cpp.DiceMode.BALANCED:
+        declared["dice"] = view_balanced_dice(view)
+    taken = view.get("largest_army_taken_from")
+    if taken is not None:
+        declared["largest_army_taken_from"] = sv.colors.index(taken)
     game = fresh_game(view, rules, catan_map, seed)
     game.apply_setup(
         players,
@@ -606,5 +680,6 @@ def snapshot(view: Mapping[str, Any], *, color: Any = None, rules: cpp.GameRules
         prompt=cpp.ActionPrompt[view["current_prompt"]],
         free_roads=int(view["free_roads_available"]) if view["is_road_building"] else 0,
         longest_road_length=int(board["road_length"]) if board.get("road_color") else None,
+        **declared,
     )
     return Position(game, sv.seat, "snapshot", tuple(public_mismatches(game, view, sv.seat)))

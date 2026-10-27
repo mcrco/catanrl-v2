@@ -9,15 +9,15 @@ forcing every outcome the log shows. Both engines follow the same rules
 (cppanatron's differential tests), so the replay reaches exactly the view's
 public state at every prompt, and every transition it passes through is
 what the seat's hand tracker learns from (:mod:`catanrl.bridge.tracking`).
-The one exception is the friendly robber: the engine plays OpenHex's rule
-(public points, so no placeholder changes the legal robber moves, and a
-knight's tile judged on the points before its Largest Army award), stock
-Catanatron counts hidden victory point cards and awards first, and a
-Catanatron game under it may rob a seat the replay shields (the step then
-fails like any move the replay cannot follow). A Catanatron server that turns
-the friendly robber on (the house's 1v1 table does not) needs its Catanatron
-re-ruled as OpenHex's first (tests/bridge/bridge_games.py does it for the
-tests).
+The friendly robber: the engine plays OpenHex's rule (public points, so no
+placeholder changes the legal robber moves, and a knight's tile judged on
+the points before its Largest Army award), which is Catanatron's
+``robber_mode="friendly_public"`` (catanatron-server's room config
+``robber_mode: friendly_public``) exactly. Catanatron's own friendly robber
+(``friendly_robber``, which catanatron-server refuses) counts hidden victory
+point cards and awards first, and a game under it may rob a seat the replay
+shields (the step then fails like any move the replay cannot follow;
+tests/bridge/bridge_games.py re-rules it as OpenHex's for the tests).
 
 The other seats' hidden cards are placeholders. They start as the fresh
 game's (empty hands) and change only by public moves and by placeholder
@@ -45,11 +45,12 @@ game withheld, or a board the replay has wrong) is logged and counted in
 ``repairs["production"]``; the engine's payout stands, since its bank cannot
 be set from here.
 
-Under balanced dice (``GameRules.dice_mode``, OpenHex's 1v1 rules) every roll
-replayed updates the game's public dice state, as the game's own draw did. A
-roll that state cannot give (a card its deck no longer holds, or a total with
-no chance) raises :class:`DiceRefused` before anything changes: the game did
-not roll the dice the replay follows.
+Under balanced dice (``GameRules.dice_mode``, OpenHex's 1v1 rules, and
+Catanatron's ``dice_mode="balanced"``) every roll replayed updates the game's
+public dice state, as the game's own draw did. A roll that state cannot give
+(a card its deck no longer holds, or a total with no chance) raises
+:class:`DiceRefused` before anything changes: the game did not roll the dice
+the replay follows.
 
 Monopoly takes are public (every hand size is visible), but a log entry does
 not carry them: :meth:`Replay.step` takes the hand sizes after the entry when
