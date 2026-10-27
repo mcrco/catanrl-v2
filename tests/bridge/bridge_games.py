@@ -6,12 +6,16 @@ plays the same actions with the same outcomes alongside, so the native
 features, hand trackers and agents of a seat can be compared with what the
 bridge builds from that seat's views alone.
 
-The friendly robber is the one rule the engines differ on: Catanatron shields
-seats under 3 actual points (hidden victory point cards count) after a knight's
+The friendly robber is the one rule the engines differ on: Catanatron's own
+(``friendly_robber``, what ``GameConfig.catanatron_game`` builds) shields seats
+under 3 actual points (hidden victory point cards count) after a knight's
 Largest Army award, the engine follows OpenHex (at most 2 public points, a
 knight's tile on the points before its award). The bridge tests' conftest makes
 the truth play the engine's rule for each bridge test
-(:func:`openhex_friendly_robber`), and undoes it after.
+(:func:`openhex_friendly_robber`), and undoes it after. A ``site`` lockstep's
+truth is a catanatron-server room's game instead (:func:`site_game`):
+Catanatron's ``robber_mode="friendly_public"``, which is OpenHex's rule, and the
+config's dice, balanced ones included.
 """
 
 from __future__ import annotations
@@ -86,6 +90,8 @@ class Lockstep:
     seed: int
     friendly_robber: bool | None = None
     vps_to_win: int | None = None
+    #: The truth as a catanatron-server room plays the config (:func:`site_game`).
+    site: bool = False
     truth: object = field(init=False)
     native: cpp.Game = field(init=False)
 
@@ -99,7 +105,8 @@ class Lockstep:
             data = {**self.config.to_dict(), **overrides}
             self.config = games.GameConfig.from_dict(data)
         players = [SimplePlayer(c) for c in list(Color)[: self.config.num_players]]
-        self.truth = self.config.catanatron_game(players, self.map_seed, self.seed)
+        build = site_game if self.site else games.GameConfig.catanatron_game
+        self.truth = build(self.config, players, self.map_seed, self.seed)
         spec = cpp.MapSpec.from_dict(self.config.map_spec(self.map_seed))
         colors = [cpp.Color[c.value] for c in self.truth.state.colors]
         self.native = cpp.Game(colors, map=cpp.CatanMap.from_spec(spec), rules=self.config.cppanatron_rules(),
@@ -154,6 +161,29 @@ class Lockstep:
         elif kind == ActionType.MOVE_ROBBER and record.result is not None:
             forced["stolen_resource"] = cpp.Resource[record.result]
         self.native.execute(from_catanatron_action(action), **forced)
+
+
+def site_game(config: games.GameConfig, players, map_seed: int, seed: int):
+    """The Catanatron game a catanatron-server room plays for ``config``: its
+    friendly robber is ``robber_mode="friendly_public"`` (the room config's
+    ``robber_mode: friendly_public``, OpenHex's rule, as the engine plays it),
+    its dice the config's (``dice_mode: balanced`` too)."""
+    from catanatron.game import Game
+    from catanatron.models.decks import Supply
+    from cppanatron.catanatron import catanatron_map_from_spec
+
+    return Game(
+        players,
+        seed=seed,
+        catan_map=catanatron_map_from_spec(config.map_spec(map_seed)),
+        vps_to_win=config.victory_points_to_win,
+        discard_limit=config.discard_limit,
+        robber_mode="friendly_public" if config.friendly_robber else "normal",
+        dice_mode=config.dice_mode,
+        supply=Supply(resource_bank=config.resource_bank, development_deck=config.development_deck,
+                      roads=config.roads_per_player, settlements=config.settlements_per_player,
+                      cities=config.cities_per_player),
+    )
 
 
 def lockstep(name: str, index: int, **kwargs) -> Lockstep:
