@@ -322,13 +322,13 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
 
 === discount vs no discount, from scratch #chip("running") <exp:recipe-discount>
 #meta(
-  dates: "2026-10-26 13:08 onward",
+  dates: "2026-10-26 13:08 – 2026-10-27 22:37 pdt (training); head to head running",
   owner: "marco",
   config: "configs/experiments/discount-2p.yaml",
   wandb: (("discount-2p-g999-s42-5057ed5a", "discount-2p/g999-s42"), ("discount-2p-g1-s42-5f1a556d", "discount-2p/g1-s42"), ("discount-2p-g999-s43-77e69c7e", "discount-2p/g999-s43"), ("discount-2p-g1-s43-12bb8a44", "discount-2p/g1-s43")),
-  records: ("57d449b3", "31ead730", "2109921e", "312910df", "9418974e", "05cc8756"),
+  records: ("57d449b3", "31ead730", "2109921e", "312910df", "9418974e", "05cc8756", "548ee03e", "e6bf7ad4"),
 )
-#tldr[every ppo run so far discounts the policy at γ = 0.999 per decision, inherited from v1. marco asked whether training without the discount does better. two arms, γ = 0.999 vs γ = 1 for both the policy and the critic, trained from scratch on openhex's 1v1 rules with two seeds each.]
+#tldr[every ppo run so far discounts the policy at γ = 0.999 per decision, inherited from v1. marco asked whether training without the discount does better. two arms, γ = 0.999 vs γ = 1 for both the policy and the critic, trained from scratch on openhex's 1v1 rules with two seeds each. *the discount makes games end faster*: without it, games against F run 4.6 and 2.6 turns longer on the two seeds (paired over the same 5,000 games, ±0.35), 1.6–1.7 turns longer against the reference, and self-play episodes are longer in every 500-epoch block of both seeds. the same arm on two seeds differs by half a turn. strength is level within the finals' intervals; the head to head between the arms is running.]
 
 *question.* marco's main question: does the discount make games end faster? second: does dropping it play better?
 
@@ -343,7 +343,7 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
 - *game length* (the main readout, marco). every cell's finals play the same 5,000 game ids (board, seats and game seed), so turns per game pair up game by game between the two arms of a seed: vs F, which the net beats 98–99% of the time, this is how fast it closes out a won game; vs the reference it is the length of a close game. from `g999-s42`'s finals (sd 11.5 turns vs F), the paired difference within a seed resolves to about ±0.45 turns (95%) even if games on one board are uncorrelated; the gap between the two seeds of one arm is the real yardstick. the self-play episode length logged in training (`environment/length`) gives the same comparison epoch by epoch.
 - *cost.* \~8.4 h per cell, \~34 h in all, in the order s42-`g999`, s42-`g1`, s43-`g999`, s43-`g1`.
 
-*result so far (3 of 4 cells).*
+*result (all 4 cells; the head to head is running).*
 #figure(
   btable(
     columns: (auto, auto, auto, auto, auto, auto, 1fr),
@@ -352,17 +352,32 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
     [`g999-s42`], [0.999], [98.56 #ci(98.19, 98.85)], [43.38 #ci(42.01, 44.76)], [70.85], [77.42], [77.7],
     [`g1-s42`], [1], [98.60 #ci(98.24, 98.89)], [44.20 #ci(42.83, 45.58)], [75.48], [79.07], [81.0],
     [`g999-s43`], [0.999], [98.56 #ci(98.19, 98.85)], [44.76 #ci(43.39, 46.14)], [71.31], [77.24], [77.3],
-    [`g1-s43`], [1], [running], [], [], [], [],
+    [`g1-s43`], [1], [98.08 #ci(97.66, 98.43)], [42.80 #ci(41.43, 44.18)], [73.96], [78.97], [82.2],
   ),
-  caption: [finals on `heldout-2p-fr`, 5,000 games each, each cell's last checkpoint (e3786); ref = `ppo-2p-fr3/full@e4350`. turns are the mean per game over all 5,000 (sd 11.5 vs F, 13.3 vs ref). self-play length is `environment/length` from training. records `57d449b3` and `31ead730` (`g999-s42`), `2109921e` and `312910df` (`g1-s42`), `9418974e` and `05cc8756` (`g999-s43`), vs F and vs the reference.],
+  caption: [finals on `heldout-2p-fr`, 5,000 games each, each cell's last checkpoint (e3786); ref = `ppo-2p-fr3/full@e4350`. turns are the mean per game over all 5,000 (sd 11.5 vs F, 13.3 vs ref). self-play length is `environment/length` from training. records `57d449b3` and `31ead730` (`g999-s42`), `2109921e` and `312910df` (`g1-s42`), `9418974e` and `05cc8756` (`g999-s43`), `548ee03e` and `e6bf7ad4` (`g1-s43`), vs F and vs the reference.],
 )
 
 the monitors for `g999-s42` (`select-2p-fr`, mean of each 500 epochs) were still climbing at the end: vs the reference 9.8, 22.4, 27.4, 31.0, 35.0, 39.2, 40.9, 42.1; vs F 72.9, 92.6, 94.5, 96.0, 96.8, 97.2, 97.9, 98.3. for scale, the reference has about 2b steps behind it (500m on the old rules, then 1.5b on these), against this cell's 500m. `g1-s42`'s monitors climbed the same way: 9.1, 22.5, 27.9, 30.8, 35.4, 39.7, 42.0, 43.3 vs the reference.
 
-*game length, seed 42.* without the discount, games run longer. paired game by game on the same 5,000 finals, `g1-s42` takes 4.64 ± 0.35 turns (95%) more than `g999-s42` against F, 75.5 against 70.9; on the 4,867 games both won it is the same, +4.65 ± 0.35. against the reference the gap is +1.64 ± 0.43 (+2.68 ± 0.82 on the 1,237 games both won). self-play shows it from the start: `environment/length`, mean of each 500 epochs, runs 105.6, 83.0, 82.2, 80.6, 79.5, 78.2, 77.3, 77.5 for `g999` against 107.4, 85.5, 84.6, 84.2, 82.6, 82.5, 82.1, 81.0 for `g1`, longer in every block. strength is level so far: 98.60 against 98.56 vs F, 44.2 against 43.4 vs the reference, inside each row's interval. this is one seed; it counts only if seed 43 shows the same sign.
+*game length.* without the discount, games run longer, on both seeds. paired game by game on the same 5,000 finals (95% intervals):
+#figure(
+  btable(
+    columns: (auto, 1fr, 1fr, 1fr, 1fr),
+    align: (left, right, right, right, right),
+    header: ([seed], [vs F, all games], [vs F, both won], [vs ref, all games], [vs ref, both won]),
+    [42], [+4.64 ± 0.35], [+4.65 ± 0.35 (4,867)], [+1.64 ± 0.43], [+2.68 ± 0.82 (1,237)],
+    [43], [+2.64 ± 0.36], [+2.65 ± 0.36 (4,839)], [+1.73 ± 0.43], [+2.92 ± 0.83 (1,270)],
+  ),
+  caption: [turns per game, `g1` minus `g999` within a seed, on the same game ids; "both won" keeps the games both cells won (their count in brackets).],
+) <tab:recipe-discount-length>
 
-*seed spread.* `g999-s43` gives the yardstick the setup asked for: the same arm on another seed. paired on the same games it plays 0.47 ± 0.35 turns longer than `g999-s42` against F and 0.18 ± 0.43 shorter against the reference; its self-play length ends at 77.3 against 77.7, and its strength matches (98.56 vs F, 44.8 vs the reference). so seed to seed the length moves by about half a turn, a tenth of seed 42's 4.6-turn gap between the arms. `g1-s43` decides whether that gap holds.
+- *it is the arm, not the seed.* the same arm on two seeds is much closer: `g999-s43` plays 0.47 ± 0.35 turns longer than `g999-s42` against F and 0.18 ± 0.43 shorter against the reference. `g1`'s two seeds are 1.5 turns apart against F (75.5 and 74.0), still under the smaller of the two arm gaps.
+- *self-play agrees, from the start.* `environment/length`, mean of each 500 epochs: `g999` 105.6, 83.0, 82.2, 80.6, 79.5, 78.2, 77.3, 77.5 (s42) and 103.9, 83.4, 81.7, 81.4, 79.2, 78.0, 78.1, 77.7 (s43); `g1` 107.4, 85.5, 84.6, 84.2, 82.6, 82.5, 82.1, 81.0 (s42) and 112.2, 87.0, 84.5, 83.7, 85.3, 83.9, 82.8, 82.0 (s43). `g1` is longer in all 16 blocks.
+- *it is in how the nets win.* against F, which both arms beat 98–99% of the time, the gap is the same on the games both won: the discounted net closes out a won game about 3–5 turns sooner, as E[γ#super[T] · win] asks.
+
+*strength.* level so far. pooled over the seeds, `g1` scores 98.34 vs F and 43.5 vs the reference, `g999` 98.56 and 44.1; every cell's row sits inside the others' intervals. the monitors climbed alike: `g1-s43` vs the reference 8.7, 20.7, 26.6, 31.1, 35.8, 37.7, 41.1, 42.2. the head to head between the arms within each seed (`discount-2p-h2h`, 5,000 games a row) decides whether dropping the discount plays better or worse.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/discount-2p.yaml
+catanrl run configs/experiments/discount-2p-h2h.yaml   # g1 vs g999 within each seed
 ```)
