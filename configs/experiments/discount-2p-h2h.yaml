@@ -1,0 +1,23 @@
+# discount-2p's head to head (planned in discount-2p.yaml before the run): each seed's g1 (gamma 1)
+# against its g999 (gamma 0.999), last checkpoints (e3786, chosen before the run), on heldout-2p-fr,
+# 5,000 games a row (+-1.4 pp at 50%). game lengths pair with the four cells' finals by game id
+# (scratchpad lengths.py). the arm difference counts if both seeds agree in sign and the pooled
+# head to head (10,000 games, +-1.0 pp) clears it.
+#
+# launch (main, no other run live):
+#   catanrl run configs/experiments/discount-2p-h2h.yaml
+name: discount-2p-h2h
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr}
+      lineup:
+        - "POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da"
+        - "POLICY:ckpt=discount-2p/g999-s42@e3786#762e018135d8"
+    - suite: {name: heldout-2p-fr}
+      lineup:
+        - "POLICY:ckpt=discount-2p/g1-s43@e3786#cb011caff064"
+        - "POLICY:ckpt=discount-2p/g999-s43@e3786#9db802fc3497"
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
