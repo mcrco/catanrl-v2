@@ -320,15 +320,15 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
 
 == the discount
 
-=== discount vs no discount, from scratch #chip("running") <exp:recipe-discount>
+=== discount vs no discount, from scratch #chip("done") <exp:recipe-discount>
 #meta(
-  dates: "2026-10-26 13:08 – 2026-10-27 22:37 pdt (training); head to head running",
+  dates: "2026-10-26 13:08 – 2026-10-27 23:05 pdt",
   owner: "marco",
   config: "configs/experiments/discount-2p.yaml",
-  wandb: (("discount-2p-g999-s42-5057ed5a", "discount-2p/g999-s42"), ("discount-2p-g1-s42-5f1a556d", "discount-2p/g1-s42"), ("discount-2p-g999-s43-77e69c7e", "discount-2p/g999-s43"), ("discount-2p-g1-s43-12bb8a44", "discount-2p/g1-s43")),
-  records: ("57d449b3", "31ead730", "2109921e", "312910df", "9418974e", "05cc8756", "548ee03e", "e6bf7ad4"),
+  wandb: (("discount-2p-g999-s42-5057ed5a", "discount-2p/g999-s42"), ("discount-2p-g1-s42-5f1a556d", "discount-2p/g1-s42"), ("discount-2p-g999-s43-77e69c7e", "discount-2p/g999-s43"), ("discount-2p-g1-s43-12bb8a44", "discount-2p/g1-s43"), ("discount-2p-h2h-main-e52c5b42", "discount-2p-h2h")),
+  records: ("57d449b3", "31ead730", "2109921e", "312910df", "9418974e", "05cc8756", "548ee03e", "e6bf7ad4", "98e98e0d", "e0b8011e"),
 )
-#tldr[every ppo run so far discounts the policy at γ = 0.999 per decision, inherited from v1. marco asked whether training without the discount does better. two arms, γ = 0.999 vs γ = 1 for both the policy and the critic, trained from scratch on openhex's 1v1 rules with two seeds each. *the discount makes games end faster*: without it, games against F run 4.6 and 2.6 turns longer on the two seeds (paired over the same 5,000 games, ±0.35), 1.6–1.7 turns longer against the reference, and self-play episodes are longer in every 500-epoch block of both seeds. the same arm on two seeds differs by half a turn. strength is level within the finals' intervals; the head to head between the arms is running.]
+#tldr[every ppo run so far discounts the policy at γ = 0.999 per decision, inherited from v1. marco asked whether training without the discount does better. two arms, γ = 0.999 vs γ = 1 for both the policy and the critic, trained from scratch on openhex's 1v1 rules with two seeds each. *the discount makes games end faster*: without it, games against F run 4.6 and 2.6 turns longer on the two seeds (paired over the same 5,000 games, ±0.35), 1.6–1.7 turns longer against the reference, and self-play episodes are longer in every 500-epoch block of both seeds. the same arm on two seeds differs by half a turn. *it doesn't change strength*: head to head the arms are dead level, 50.02% and 49.94% on the two seeds (5,000 games each), and level against F and the reference.]
 
 *question.* marco's main question: does the discount make games end faster? second: does dropping it play better?
 
@@ -343,7 +343,7 @@ catanrl run configs/experiments/aux-hidden-4p.yaml --only plain
 - *game length* (the main readout, marco). every cell's finals play the same 5,000 game ids (board, seats and game seed), so turns per game pair up game by game between the two arms of a seed: vs F, which the net beats 98–99% of the time, this is how fast it closes out a won game; vs the reference it is the length of a close game. from `g999-s42`'s finals (sd 11.5 turns vs F), the paired difference within a seed resolves to about ±0.45 turns (95%) even if games on one board are uncorrelated; the gap between the two seeds of one arm is the real yardstick. the self-play episode length logged in training (`environment/length`) gives the same comparison epoch by epoch.
 - *cost.* \~8.4 h per cell, \~34 h in all, in the order s42-`g999`, s42-`g1`, s43-`g999`, s43-`g1`.
 
-*result (all 4 cells; the head to head is running).*
+*result.*
 #figure(
   btable(
     columns: (auto, auto, auto, auto, auto, auto, 1fr),
@@ -375,7 +375,22 @@ the monitors for `g999-s42` (`select-2p-fr`, mean of each 500 epochs) were still
 - *self-play agrees, from the start.* `environment/length`, mean of each 500 epochs: `g999` 105.6, 83.0, 82.2, 80.6, 79.5, 78.2, 77.3, 77.5 (s42) and 103.9, 83.4, 81.7, 81.4, 79.2, 78.0, 78.1, 77.7 (s43); `g1` 107.4, 85.5, 84.6, 84.2, 82.6, 82.5, 82.1, 81.0 (s42) and 112.2, 87.0, 84.5, 83.7, 85.3, 83.9, 82.8, 82.0 (s43). `g1` is longer in all 16 blocks.
 - *it is in how the nets win.* against F, which both arms beat 98–99% of the time, the gap is the same on the games both won: the discounted net closes out a won game about 3–5 turns sooner, as E[γ#super[T] · win] asks.
 
-*strength.* level so far. pooled over the seeds, `g1` scores 98.34 vs F and 43.5 vs the reference, `g999` 98.56 and 44.1; every cell's row sits inside the others' intervals. the monitors climbed alike: `g1-s43` vs the reference 8.7, 20.7, 26.6, 31.1, 35.8, 37.7, 41.1, 42.2. the head to head between the arms within each seed (`discount-2p-h2h`, 5,000 games a row) decides whether dropping the discount plays better or worse.
+*strength.* level. head to head within each seed, on the cells' last checkpoints:
+#figure(
+  btable(
+    columns: (auto, 1fr, auto),
+    align: (left, right, left),
+    header: ([seed], [`g1` vs `g999`], [record]),
+    [42], [50.02 #ci(48.63, 51.41)], [`98e98e0d`],
+    [43], [49.94 #ci(48.55, 51.33)], [`e0b8011e`],
+    [pooled], [49.98 #ci(49.0, 51.0)], [10,000 games],
+  ),
+  caption: [`g1` (no discount) against `g999` (γ = 0.999) on `heldout-2p-fr`, 5,000 games a row, each seed's two cells at e3786. no game hit the turn limit.],
+) <tab:recipe-discount-h2h>
+
+pooled over the seeds, `g1` also scores 98.34 vs F and 43.5 vs the reference, `g999` 98.56 and 44.1; every cell's row sits inside the others' intervals, and the monitors climbed alike (`g1-s43` vs the reference 8.7, 20.7, 26.6, 31.1, 35.8, 37.7, 41.1, 42.2). in the head to head, too, the length follows the arm: games `g1` wins run 1.98 ± 0.75 (s42) and 1.33 ± 0.76 (s43) turns longer than the games `g999` wins.
+
+*reading.* the discount does what its objective says: it makes the net win sooner, about 3–5 turns sooner against F and 1.5 against an equal, without costing or buying any strength at 500m steps. either γ trains an equally strong 1v1 net, so the choice comes down to the game length marco wants.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/discount-2p.yaml
