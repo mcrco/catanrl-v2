@@ -161,6 +161,8 @@ def _parser() -> argparse.ArgumentParser:
     oh.add_argument("--state", default="openhex", help="games.jsonl and deploys.jsonl go here, one dir per bot")
     oh.add_argument("--device", default="cpu")
     oh.add_argument("--only", help="run just these bots (comma-separated names)")
+    oh.add_argument("--leave", action="store_true",
+                    help="leave the queue for each bot and exit (on stop, so OpenHex does not match a dead bot)")
     oh.add_argument("--check", action="store_true",
                     help="check the file, pins, agents, code and keys (set or not), print a row per bot, exit "
                          "0 or 1; contacts no one")
@@ -318,7 +320,12 @@ def _cmd_house(args) -> int:
 
 
 def _cmd_openhex(args) -> int:
+    """Keep the bots queued until told to stop. Two ways to stop: SIGUSR1
+    drains (the bots leave their queues, play out the games they are in, and
+    the process exits); SIGINT/SIGTERM (Ctrl-C) leaves the queues and exits
+    now, forfeiting any game in play. ``--leave`` only leaves the queues."""
     import logging
+    import signal
     import threading
 
     from catanrl.agents.spec import resolve_agent
@@ -338,7 +345,7 @@ def _cmd_openhex(args) -> int:
     if action in ("release", "fetch"):
         others = [option for option, value in (
             ("--check", args.check), ("--keys", args.keys), ("--describe", args.describe), ("--since", args.since),
-            ("--until", args.until), ("--allow-unpinned", args.allow_unpinned), ("--allow-dirty", args.allow_dirty),
+            ("--until", args.until), ("--leave", args.leave), ("--allow-unpinned", args.allow_unpinned), ("--allow-dirty", args.allow_dirty),
             ("--only", args.only and action == "release")) if value]
         if others:
             raise SystemExit(f"error: catanrl openhex {action} does not take {', '.join(others)}")
@@ -365,6 +372,15 @@ def _cmd_openhex(args) -> int:
     running = deploy.selected(entries, args.only)
     if not running:
         raise SystemExit("error: no bots to run")
+    api = settings.get("api", API)
+    if args.leave:
+        for entry in running:
+            try:
+                OpenHexClient(deploy.read_key(entry), api).leave(entry.mode)
+                log.info("%s: left the %s queue", entry.name, entry.mode)
+            except Exception as error:  # noqa: BLE001 - leave the others anyway
+                log.warning("%s: could not leave the %s queue: %s", entry.name, entry.mode, error)
+        return 0
     locks = deploy.lock_bots(args.state, running)  # held until the process ends
     for warning in deploy.check_pins(running, allow_unpinned=args.allow_unpinned):
         log.warning("%s", warning)
@@ -373,23 +389,48 @@ def _cmd_openhex(args) -> int:
     for problem in problems:
         log.warning("running anyway (--allow-dirty): %s", problem)
     keys = {entry.name: deploy.read_key(entry) for entry in running}
-    api = settings.get("api", API)
     # Before any agent loads: a key that is another bot's stops everything (and takes the
     # bots whose keys passed off the queue, where the last process left them).
     deploy.verify_keys(running, {entry.name: OpenHexClient(keys[entry.name], api) for entry in running})
     resolved = {entry.name: resolve_agent(entry.spec, harness="server") for entry in running}
     stamps = deploy.build_stamps(running, resolved, gits)
+    stop = threading.Event()
     bots = [OpenHexBot(resolved[entry.name], keys[entry.name], entry.mode, base=api, device=args.device,
-                       state_dir=Path(args.state) / entry.name, name=entry.name, stamp=stamps[entry.name])
+                       state_dir=Path(args.state) / entry.name, name=entry.name, stamp=stamps[entry.name],
+                       stop=stop)
             for entry in running]
     for bot in bots:
         bot.announce()
+
+    def leave_all() -> None:
+        for bot in bots:
+            try:
+                bot.leave()
+            except Exception as error:  # noqa: BLE001 - leave the others anyway
+                log.warning("%s: could not leave the %s queue: %s", bot.name, bot.mode, error)
+
+    signal.signal(signal.SIGUSR1, lambda signum, frame: stop.set())
+    log.info("pid %d: SIGUSR1 (kill -USR1) drains, Ctrl-C/SIGTERM stops now", os.getpid())
     threads = [threading.Thread(target=bot.run, name=bot.name, daemon=True) for bot in bots]
     for thread in threads:
         thread.start()
-    for thread in threads:
-        thread.join()
-    del locks  # (the bot threads run until the process ends; the locks with them)
+    left = False
+    try:
+        while any(thread.is_alive() for thread in threads):
+            if stop.is_set() and not left:
+                log.info("draining: leaving the queues, finishing the games in play")
+                leave_all()
+                left = True
+            for thread in threads:
+                thread.join(timeout=1.0)
+        log.info("every bot stopped")
+    except KeyboardInterrupt:
+        log.info("stopping now")
+        stop.set()
+    finally:
+        if not left:
+            leave_all()
+    del locks  # (held while the bots ran)
     return 0
 
 

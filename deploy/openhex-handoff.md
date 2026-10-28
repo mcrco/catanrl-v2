@@ -6,6 +6,16 @@ seat, see its module doc); the CLI is `catanrl openhex deploy/openhex.yaml`.
 
 ## Status
 
+- **Since 2026-10-20 the bots run on yang** (the house machine), not as a
+  service: `deploy/openhex.sh start|attach|status|drain|kill|leave` runs
+  `catanrl openhex deploy/openhex.yaml` in tmux session `openhex` from
+  `~/dev/catanrl-v2`, keys in `~/.config/catanrl/openhex.env` (mode 600),
+  records under `~/.local/state/catanrl/openhex`, `--device cuda` (yang's GTX
+  1080, torch cu126: `uv sync --extra cu126`). `drain` (SIGUSR1) leaves the
+  queues and finishes the games in play; `kill` (SIGTERM) leaves them and exits
+  now. Where this file says `/etc/catanrl/openhex.env`, `/opt/catanrl-v2` or
+  "restart the service", read those. Extra runner options follow `start`
+  (`deploy/openhex.sh start --only a,b`).
 - All three bots are **stopped and disabled** on the OCI VM (`ubuntu@170.9.8.49`,
   unit `catanrl-openhex`) since 2026-10-20 07:26 UTC, and have left OpenHex's
   queues. `sudo systemctl enable --now catanrl-openhex` there brings them back.

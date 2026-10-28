@@ -140,7 +140,8 @@ class NativeAgent:
         self.encoder = make_encoder(self.dims, self.level)
         self.action_space = self.encoder.action_space
         self.evaluator = BatchEvaluator(model, device=self.device, infer_rows=self.infer_rows,
-                                        mode=self.mode, heads=self.heads)
+                                        mode=self.mode, heads=self.heads,
+                                        kernels=str(_param(self.params, "kernels", "torch") or "torch"))
 
     def bind(self, dims: Mapping[str, int]) -> None:
         """Play at ``dims``: rebuild a dims-agnostic network there."""

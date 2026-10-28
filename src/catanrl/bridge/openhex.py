@@ -983,7 +983,7 @@ class OpenHexBot:
 
     def __init__(self, spec: Any, api_key: str, mode: str, *, base: str = API, device: str = "cpu",
                  state_dir: str | Path = "openhex", poll_s: float = 1.0, name: str | None = None,
-                 stamp: Mapping[str, Any] | None = None) -> None:
+                 stamp: Mapping[str, Any] | None = None, stop: threading.Event | None = None) -> None:
         from catanrl.bridge.openhex_deploy import provenance_id
 
         self.native, self.label = native_for(spec, device=device)
@@ -998,6 +998,9 @@ class OpenHexBot:
         #: The spec as configured (a resolved agent's canonical spec when there is no stamp).
         self.spec = self.stamp["spec"] if self.stamp else str(getattr(spec, "canonical", spec))
         self.provenance_id = provenance_id(self.stamp) if self.stamp else None
+        #: Set to drain: the bot plays out the games it is in, queues for no
+        #: more, and :meth:`run` returns (the caller leaves the queue).
+        self.stop = stop if stop is not None else threading.Event()
 
     def announce(self) -> None:
         """Log the bot's stamp in one line and append it, with the time and its
@@ -1011,6 +1014,12 @@ class OpenHexBot:
         with open(self.state_dir / "deploys.jsonl", "a") as file:
             file.write(json.dumps({"time": time.time(), "provenance_id": self.provenance_id, **self.stamp}) + "\n")
 
+    def leave(self) -> None:
+        """Leave the queue (a bot that stops while queued gets matched and
+        forfeits at the deadline)."""
+        self.client.leave(self.mode)
+        logger.info("%s: left the %s queue", self.name, self.mode)
+
     def run(self) -> None:
         backoff = 5.0
         while True:
@@ -1021,10 +1030,16 @@ class OpenHexBot:
                         self.play(str(game.get("id") or game.get("game_id")))
                     backoff = 5.0
                     continue
+                if self.stop.is_set():
+                    logger.info("%s: no game in play; stopped", self.name)
+                    return
                 self._join()
                 time.sleep(3.0)
                 backoff = 5.0
             except (OpenHexError, OSError, ValueError) as error:
+                if self.stop.is_set():
+                    logger.warning("%s: %s; stopped", self.name, error)
+                    return
                 logger.warning("%s: %s; trying again in %.0f s", self.name, error, backoff)
                 time.sleep(backoff)
                 backoff = min(300.0, backoff * 2)
@@ -1032,6 +1047,9 @@ class OpenHexBot:
                 # (A replay that cannot follow a game, say.) The game is lost
                 # either way: OpenHex aborts it at the deadline, after which it
                 # is no longer active and the bot queues again.
+                if self.stop.is_set():
+                    logger.exception("%s: giving up on the current game; stopped", self.name)
+                    return
                 logger.exception("%s: giving up on the current game; trying again in %.0f s", self.name, backoff)
                 time.sleep(backoff)
                 backoff = min(300.0, backoff * 2)
@@ -1075,6 +1093,9 @@ class OpenHexBot:
                 info, state = reply["game"], reply["state"]
                 if info.get("status") != "active":
                     return self._record(game_id, seat, info)
+                # The search runs in plan(): a plan's first action reports it, the rest
+                # the time since the action before them (OpenHex's per-move duration).
+                started = time.monotonic()
                 try:
                     plan = seat.plan(state)
                 except (OpenHexError, ValueError, RuntimeError) as error:
@@ -1088,10 +1109,10 @@ class OpenHexBot:
                 if problems:
                     logger.warning("%s: game %s: the replay differs from OpenHex: %s", self.name, game_id,
                                    "; ".join(problems[:3]))
-                started = time.monotonic()
                 for action in plan.actions:
                     try:
                         self.client.act(game_id, action, int(1000 * (time.monotonic() - started)))
+                        started = time.monotonic()
                         refused = 0
                     except OpenHexHTTPError as error:
                         if error.status >= 500:

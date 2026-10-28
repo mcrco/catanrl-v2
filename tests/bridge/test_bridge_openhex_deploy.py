@@ -131,6 +131,7 @@ def test_the_cli_runner_plays_only_versions_that_are_not_retired(tmp_path, monke
     assert fake.started[0].announced and fake.started[0].stamp["version"] == "1v1-v2"
     assert fake.started[0].stamp["code_id"] == {"catanrl": "a" * 16, "engine": "b" * 16}
     assert (tmp_path / "state" / "catanrl-1v1-v2" / "lock").exists() and fake.left == []
+    assert fake.stopped == ["catanrl-1v1-v2"]  # the runner leaves the queue on the way out
 
 
 def _fake_openhex(monkeypatch, *, git_problem=None, me=None):
@@ -140,7 +141,7 @@ def _fake_openhex(monkeypatch, *, git_problem=None, me=None):
     from catanrl import cli
     from catanrl.agents import spec as spec_module
 
-    fake = SimpleNamespace(started=[], asked=[], left=[])
+    fake = SimpleNamespace(started=[], asked=[], left=[], stopped=[])
     me = me or {KEY: {"id": "0123456789abcdef", "name": "catanrl-1v1-v2", "mode": "1v1"}}
 
     class Client:
@@ -156,8 +157,11 @@ def _fake_openhex(monkeypatch, *, git_problem=None, me=None):
 
     class Bot:
         def __init__(self, spec, key, mode, *, name, stamp, **_):
-            self.name, self.stamp = name, stamp
+            self.name, self.mode, self.stamp = name, mode, stamp
             fake.started.append(self)
+
+        def leave(self):
+            fake.stopped.append(self.name)
 
         def announce(self):
             self.announced = True

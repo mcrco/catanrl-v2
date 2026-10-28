@@ -11,7 +11,6 @@ requires-python = ">=3.11,<3.12"
 dependencies = [
     "numpy<2.0",
     "pyyaml>=6.0",
-    "torch",
     "pufferlib",
     "cppanatron",
     "catanatron",
@@ -22,6 +21,11 @@ dependencies = [
 
 [project.optional-dependencies]
 llm = ["openai>=1.84"]       # the LLM agent's OpenRouter client (the stubs need nothing)
+# torch for the machine's GPU, one of the two: `uv sync --extra cu130` (Turing and newer:
+# yin's RTX 2070 SUPER) or `uv sync --extra cu126` (Pascal: yang's GTX 1080, which CUDA 13
+# dropped). Without either, torch comes from PyPI (pufferlib needs it); both run on a CPU too.
+cu130 = ["torch"]
+cu126 = ["torch"]
 
 [project.scripts]
 catanrl = "catanrl.cli:main"
@@ -30,8 +34,12 @@ catanrl = "catanrl.cli:main"
 where = ["src"]
 include = ["catanrl*"]
 
+[tool.setuptools.package-data]
+"catanrl.models" = ["*.cu"]
+
 [tool.uv]
 no-build-isolation-package = ["pufferlib"]
+conflicts = [[{ extra = "cu130" }, { extra = "cu126" }]]
 
 [tool.uv.extra-build-dependencies]
 pufferlib = [{ requirement = "torch", match-runtime = true }, "numpy<2.0", "setuptools", "wheel", "Cython"]
@@ -43,11 +51,19 @@ pufferlib = { NO_OCEAN = "1" }
 pufferlib = { path = "third_party/pufferlib", editable = true }
 catanatron = { path = "third_party/catanatron", editable = true }
 cppanatron = { path = "engine/cppanatron", editable = true }
-torch = { index = "pytorch-cu130" }
+torch = [
+    { index = "pytorch-cu130", extra = "cu130" },
+    { index = "pytorch-cu126", extra = "cu126" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 # pufferlib's setup.py computes its requirements; uv needs them statically to

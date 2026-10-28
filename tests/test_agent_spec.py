@@ -74,6 +74,15 @@ def test_canonical_is_a_fixed_point_and_pins_best(ckpts):
     assert resolve_agent(mcts.canonical).canonical == mcts.canonical
     assert "device" not in mcts.canonical and "threads" not in mcts.canonical
     assert mcts.params.threads == 3  # still used to execute
+    # pending leaves per forward change the search, keyed through the engine config
+    # (so records made before the option keep their canonical spec and key).
+    batched = resolve_agent("MCTS:ckpt=exp/v@latest:sims=8:dets=2:pending=4")
+    assert batched.canonical == resolve_agent("MCTS:ckpt=exp/v@latest:sims=8:dets=2").canonical
+    assert "pending" not in batched.canonical and batched.params.pending == 4
+    assert batched.key_dict()["search"]["max_pending"] == 4 and mcts.key_dict()["search"]["max_pending"] == 1
+    assert batched.key_dict() != mcts.key_dict()
+    with pytest.raises(SpecError, match="pending"):
+        resolve_agent("MCTS:ckpt=exp/v@latest:pending=0")
     path = resolve_agent(f"BELIEF:ckpt={ckpts['full']}")
     sha = path.checkpoint.weights_sha256[:12]
     assert path.canonical.startswith(f"BELIEF:ckpt={ckpts['full'].resolve()}#{sha}:worlds=16")
@@ -149,6 +158,23 @@ def test_reuse_transpositions_and_dedup_are_keyed_only_when_set(ckpts):
     assert both.key_dict()["search"] == table.key_dict()["search"]
     native = both.native(device="cpu")
     assert native.reuse and native.needs_memory and native.config.transpositions
+
+
+def test_fused_kernels_are_keyed_only_when_set(ckpts):
+    """kernels=fused changes the network's outputs in the last bits: keyed when set, and
+    the default leaves every stored key as it was. The CPU refuses it when the agent builds
+    its evaluator."""
+    base = resolve_agent("MCTS:ckpt=exp/v:sims=8")
+    assert resolve_agent("MCTS:ckpt=exp/v:sims=8:kernels=torch").key_dict() == base.key_dict()
+    assert "kernels" not in base.key_dict()["params"]
+    fused = resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true:kernels=fused")
+    assert fused.canonical == base.canonical + ":reuse=true:kernels=fused"
+    assert resolve_agent(fused.canonical).canonical == fused.canonical
+    assert fused.key_dict()["params"] == {**base.key_dict()["params"], "reuse": True, "kernels": "fused"}
+    with pytest.raises(SpecError):
+        resolve_agent("MCTS:ckpt=exp/v:sims=8:kernels=triton")
+    with pytest.raises(ValueError, match="CUDA"):
+        fused.native(device="cpu")
 
 
 def _rebuilds_unchanged(entry: dict) -> None:
