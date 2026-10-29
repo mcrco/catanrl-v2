@@ -110,7 +110,7 @@ def test_bad_specs_raise():
                  "LLM:model=stub/first:retries=-1", "LLM:model=stub/first:notes=-1",
                  "LLM:model=stub/first:history=-1",
                  "LLM:model=stub/first:max_tokens=1000"):  # with thinking, half is a reasoning budget under 1024
-        with pytest.raises(SpecError):
+        with pytest.raises(SpecError, match=r"^(?!LLM: LLM:)"):
             check_spec_syntax(spec)
         with pytest.raises(SpecError):
             resolve_agent(spec, harness="catanatron")

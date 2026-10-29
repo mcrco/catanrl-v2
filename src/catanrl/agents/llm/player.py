@@ -78,9 +78,9 @@ class LlmParams:
 
     def __post_init__(self) -> None:
         if self.notes < 0 or self.history < 0:
-            raise ParamsError("LLM: notes and history count past entries shown (>= 0)")
+            raise ParamsError("notes and history count past entries shown (>= 0)")
         if self.thinking and self.max_tokens < 2048:
-            raise ParamsError("LLM: with thinking, max_tokens must be at least 2048 (half of it is the reasoning "
+            raise ParamsError("with thinking, max_tokens must be at least 2048 (half of it is the reasoning "
                               "budget, which providers floor at 1024)")
 
 

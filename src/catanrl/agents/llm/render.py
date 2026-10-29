@@ -457,7 +457,7 @@ def describe_action(game: Any, action: Any, observer: Color | None = None) -> st
         else:
             what = "too close to a building for a settlement"
         return f"{verb} {a}-{b} (to node {far}: {node_text(catan_map, far)}; {what}" + \
-            ("; links two parts of your network)" if not new else ")")
+            ("; both ends already on your network)" if not new else ")")
     if kind == ActionType.BUY_DEVELOPMENT_CARD:
         return f"Buy a development card ({len(state.development_listdeck)} left in the deck)"
     if kind == ActionType.PLAY_KNIGHT_CARD:
