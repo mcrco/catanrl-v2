@@ -22,8 +22,9 @@ segment has one. A forfeit makes the record ``valid: false``.
 ``harness="catanatron"`` plays the same schedule with Catanatron players
 (:mod:`catanrl.eval.catanatron`: the only harness for ``LLM`` agents); the
 harness is in the key, with Catanatron's code in ``code``. Rows of LLM seats
-carry an ``llm`` entry (per-game decisions, tokens, retries, fallbacks, wall
-time) that the summary totals per slot and ``verify`` ignores. Rows of a game
+carry an ``llm`` entry (per-game decisions, tokens, dollars, retries, cut-off
+replies, fallbacks, wall time) that the summary totals per slot and ``verify``
+ignores. Rows of a game
 with a domestic trade (a ``TRADE`` seat at the table) carry ``trades`` (offers,
 accepts, confirms and cancels per seat: :data:`TRADE_KEYS`), an outcome the
 summary totals per slot with the cancel rate; other rows are as they always
@@ -336,12 +337,15 @@ def trade_totals(rows: Sequence[Mapping[str, Any]], slot: int, games: int) -> di
 
 
 def llm_totals(stats: Sequence[Mapping[str, Any]]) -> dict:
-    """One slot's LLM stats over its games: sums, per-game means, and whether any token count
-    was an estimate (the stubs; a provider without usage) rather than the SDK's usage."""
-    keys = ("decisions", "forced", "calls", "prompt_tokens", "completion_tokens", "retries", "fallbacks", "wall_s")
+    """One slot's LLM stats over its games: sums, per-game means, whether any token count was
+    an estimate (the stubs; a provider without usage) rather than the SDK's usage, and whether
+    any cost was (a reply without a reported cost, priced at the fallback price)."""
+    keys = ("decisions", "forced", "calls", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens",
+            "cost", "retries", "truncated", "fallbacks", "wall_s")
     totals = {k: sum(s.get(k, 0) for s in stats) for k in keys}
     n = len(stats)
-    out = {"games": n, **totals, "estimated": any(s.get("estimated") for s in stats)}
+    out = {"games": n, **totals, "estimated": any(s.get("estimated") for s in stats),
+           "cost_estimated": any(s.get("cost_estimated") for s in stats)}
     out["per_game"] = {k: totals[k] / n for k in keys}
     out["fallback_rate"] = totals["fallbacks"] / totals["decisions"] if totals["decisions"] else 0.0
     return out
