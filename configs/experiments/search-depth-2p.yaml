@@ -1,0 +1,66 @@
+# search depth vs strength across training (Marco): MCTS at 64, 128, 256, 1024, 4096 and 16384
+# sims against the same checkpoint's raw policy, for five checkpoints of one run from scratch, to
+# see whether more search consistently helps and how that changes as the network trains.
+#
+# network: discount-2p/g1-s42 (puffer-graph2's recipe from scratch on openhex's 1v1 rules,
+# base-2p-fr, gamma 1, obs level full, 3,786 epochs). checkpoints about x3 apart in epochs:
+# e50, e150, e500, e1500, e3786 (47, 80, 92, 95 and 98.5% vs F on select-2p-fr's monitor).
+# searcher: MCTS:sims=N:dets=1, puct with one world sampled from the hand tracker (the fair search
+# of every 2p row in the report), on the fused graph kernels (kernels=fused, the deployed search
+# bot's; same outputs to the last bits, ~1.7x faster on this gpu).
+# raw policy: BELIEF:worlds=16 of the same checkpoint (a full-level network's fair raw policy).
+# suite: heldout-2p-fr's first 500 boards in both seat orders, 1,000 games a cell (+-3.1 pp at
+# 50%, wilson 95%). the same games in every cell, so any two cells pair by game id (McNemar,
+# tools/search_probe.py --pair).
+#
+# cost (measured 2026-10-29 on the 2070 super): ~82 searcher decisions a game, every one a full
+# search (the engine plays forced moves itself); one leaf row costs ~16 us on the fused kernels in
+# 512-row batches, ~21 us in 96-row batches, plus ~4-9 us of tree work. per checkpoint about
+# 0.03 / 0.06 / 0.12 / 0.5 / 2 / 10 h for the six sims: ~13 h for the whole curve up to 4096 sims,
+# then ~10 h a checkpoint at 16384, ~65 h in all.
+# memory: a 16384-sim tree holds ~95 MB (release_games is already on), so that cell keeps ~80
+# searches live (160 games in flight). infer_rows is sized just above the expected searchers per
+# step (half the games in flight in 2p): strict batches pad every forward to infer_rows.
+# order: variants by sims ascending; in every variant the last checkpoint first, then the middle,
+# so a stopped 16384 column still has its most useful points.
+#
+# launch (main, gpu free; the fused kernels build with nvcc and ninja on PATH):
+#   catanrl run configs/experiments/search-depth-2p.yaml
+name: search-depth-2p
+kind: eval
+params: {sims: 64}
+eval:
+  final:
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup:
+        - "MCTS:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:sims=${params.sims}:dets=1:kernels=fused"
+        - "BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16"
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup:
+        - "MCTS:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:sims=${params.sims}:dets=1:kernels=fused"
+        - "BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16"
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup:
+        - "MCTS:ckpt=discount-2p/g1-s42@e150#43de5c7b499b:sims=${params.sims}:dets=1:kernels=fused"
+        - "BELIEF:ckpt=discount-2p/g1-s42@e150#43de5c7b499b:worlds=16"
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup:
+        - "MCTS:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:sims=${params.sims}:dets=1:kernels=fused"
+        - "BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16"
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup:
+        - "MCTS:ckpt=discount-2p/g1-s42@e50#178c5c49caba:sims=${params.sims}:dets=1:kernels=fused"
+        - "BELIEF:ckpt=discount-2p/g1-s42@e50#178c5c49caba:worlds=16"
+sweep:
+  axes:
+    depth:
+      s64: {params.sims: 64, runtime.num_envs: 960, runtime.infer_rows: 512}
+      s128: {params.sims: 128, runtime.num_envs: 960, runtime.infer_rows: 512}
+      s256: {params.sims: 256, runtime.num_envs: 960, runtime.infer_rows: 512}
+      s1024: {params.sims: 1024, runtime.num_envs: 960, runtime.infer_rows: 512}
+      s4096: {params.sims: 4096, runtime.num_envs: 448, runtime.infer_rows: 256}
+      s16384: {params.sims: 16384, runtime.num_envs: 160, runtime.infer_rows: 96}
+  name: "{depth}"
+runtime: {device: cuda, threads: 12, num_envs: 960, infer_rows: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
