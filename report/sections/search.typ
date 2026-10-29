@@ -145,6 +145,35 @@ catanrl eval "MCTS:ckpt=puffer-graph2/public@e3600:sims=4096:dets=1" \
 catanrl run configs/experiments/gumbel-edge-2p.yaml
 ```)
 
+=== search depth vs strength across training #chip("running") <exp:search-depth-2p>
+#meta(
+  dates: "2026-10-29 00:47–",
+  owner: "marco",
+  config: "configs/experiments/search-depth-2p.yaml",
+  wandb: (("search-depth-2p-s64-b23bbbaf", "search-depth-2p/s64"),),
+  records: (),
+)
+#tldr[marco's question: does more search consistently make a network stronger, and does that change as the network trains? MCTS at 64, 128, 256, 1024, 4096 and 16384 sims against the same checkpoint's raw policy, for five checkpoints of one run from scratch, 1,000 games a cell. running; the curve up to 4096 sims takes \~13 h, the 16384 column \~10 h a checkpoint.]
+
+*question.* so far we have single points: 53.4 and 55.2 at 1024 and 4096 sims over one `full` checkpoint, 54.9 and 55.2 over one `public` checkpoint (@exp:search-edge-2p-full, @exp:search-edge-2p-public). the edge barely moved between 1024 and 4096. is that a ceiling, and is it the same for a weak network as for a strong one?
+
+*setup.*
+- *network:* `discount-2p/g1-s42`, puffer-graph2's recipe from scratch on openhex's 1v1 rules (`base-2p-fr`), $gamma = 1$, obs level `full` (@exp:recipe-discount). five checkpoints about 3× apart in epochs: e50, e150, e500, e1500 and e3786, which score 47, 80, 92, 95 and 98.5% against F on the select suite.
+- *searcher:* `MCTS:sims=N:dets=1:kernels=fused`, PUCT with one world sampled from the hand tracker, the fair search of every 2p row above. `kernels=fused` is the deployed search bot's network on custom cuda kernels: the same outputs to the last bits, about 1.7× faster here.
+- *raw policy:* `BELIEF:worlds=16` of the same checkpoint, the fair raw policy of a `full` network.
+- *games:* the first 500 boards of `heldout-2p-fr` in both seat orders, 1,000 games a cell, ±3.1 points at 50%. every cell plays the same games, so any two cells pair by game id.
+
+*cost.* measured on this box before launch. a game has about 82 searcher decisions, and every one is a full search: the engine plays forced moves itself. one leaf costs about 16 µs of network on the fused kernels in 512-row batches (29 µs in plain torch, at any batch size), 21 µs in 96-row batches, plus 4–9 µs of tree work. a 16384-sim tree holds about 95 MB, so that cell keeps only about 80 searches in flight. per checkpoint the six cells take about 0.03, 0.06, 0.12, 0.5, 2 and 10 h, \~65 h in all. the variants run in order of sims, and each plays the last checkpoint first and the middle one second, so a 16384 column cut short still has its most useful points.
+
+*result.* pending.
+
+#repro(```sh
+catanrl run configs/experiments/search-depth-2p.yaml     # six variants (s64 ... s16384), five finals each
+# one cell alone:
+catanrl eval "MCTS:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:sims=1024:dets=1:kernels=fused" \
+  "BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16" --suite heldout-2p-fr --boards 500
+```)
+
 == four players
 
 === 4p search vs three raw copies #chip("done") <exp:search-4p>
