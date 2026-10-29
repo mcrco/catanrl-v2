@@ -296,32 +296,52 @@ evaluation on cppanatron), as a Catanatron `Player`, or as a server client.
 
 **LLM players** (the report's "eval frontier models on how well they play
 Catan"). `LLM:model=<OpenRouter id>:strategy=<basic|strategy|search|rules|plan>`
-(`:thinking=true:max_tokens=8192:temperature=0.1:seed=0:retries=1` by
-default; `catanrl.agents.llm`) is a language model deciding from the game
+(`:thinking=true:max_tokens=16384:temperature=0.1:seed=0:retries=1:notes=8:history=30`
+by default; `catanrl.agents.llm`) is a language model deciding from the game
 rendered as text: catanllm's (the CS 159 project) prompting strategies,
-ported as Python strings (so `code_id` hashes a prompt edit), with the board
-topology section generated per map instead of hard-coded for BASE and the
-preamble stating the game's own VP target (base-2p plays to 15). The text
-is public information only: an opponent's hand size, dev-card count, played
-cards, buildings and visible VP, never its resource kinds, unplayed cards or
-hidden VP cards (catanllm's renderer read every seat's dev cards from the
-observer's slot; the port fixes it and `tests/test_llm_agent.py` pins the
-redaction), so the agent is `fair` by construction. The model answers with
-the action number; an unusable answer (no number, out of range) is
-re-prompted with the error `retries` times, then the player falls back to
-End Turn (else the first action), counted as a `fallback`, not a forfeit.
-Models go through OpenRouter via the openai SDK (an optional extra, `uv
-sync --extra llm`, imported lazily; `OPENROUTER_API_KEY` is read from the
-environment only); `model=stub/first`, `stub/random` and `stub/scripted` play
-without a network (tests, `catanrl llm-cost`). The agent exists only on the
-catanatron harness (6.6). Each row of an LLM seat carries `llm` stats
-(prompted decisions, forced moves, calls, prompt and completion tokens from
-the SDK's usage or a characters/4 estimate, retries, fallbacks, wall time),
-totalled per slot in the record's summary. `configs/experiments/llm-eval.yaml`
-is the eval (models x {plan, basic} x {F, our best 2p network} on the first
-20 heldout-2p boards, both seats); `catanrl llm-cost` plays stub games and
-prices a cell from a $/M-token table, so a budget is approved before any
-real call. `catanrl run llm-eval --smoke` plays every cell with
+ported as Python strings (so `code_id` hashes a prompt edit). The system
+prompt is static for a game (a cacheable prefix): the strategy's preamble,
+this game's rules generated from the game itself (players, VP target, discard
+limit, robber variant, bank-and-port-only trading, deck and pieces; they
+override catanllm's 4-player texts, whose discard limit and VP target are
+filled in and whose player-to-player trade section is gone), the guide or
+rulebook, and the board (tiles by id with resource and number, ports, each
+node's production and neighbours). The user message is the seat's view: its
+own hand and cards; for an opponent the visible VP, the count of unplayed
+development cards (never their kinds, so never hidden VP cards), the played
+cards, buildings, roads, and the resource hand, exactly in 2p (every resource
+movement is public there: production, builds, trades, discards and steals,
+whose thief or victim is always the observer; `tests/test_llm_agent.py`
+replays random games with a tracker that sees only that) and as a count with
+3+ players; the robber by tile id; open settlement spots near its network;
+the last `history` events as the seat saw them (a bought card named only to
+its buyer, a stolen card only to thief and victim); its own last `notes`
+one-line notes; the numbered actions annotated with what they need (a node's
+tiles, numbers, pips and port; a robber tile's buildings; the trade ratio).
+So the agent is `fair` by construction. The model answers with the action
+number on its last line; an unusable answer (no number, out of range, a reply
+cut off at `max_tokens`) is re-prompted with the error `retries` times, then
+the player falls back to End Turn (else the first action), counted as a
+`fallback`, not a forfeit. Models go through OpenRouter via the openai SDK (an
+optional extra, `uv sync --extra llm`, imported lazily; `OPENROUTER_API_KEY`
+is read from the environment only): half of `max_tokens` is the reasoning
+budget with thinking on, `temperature` is sent only with thinking off, a
+reply's `usage.cost` is recorded, and `anthropic/*` system prompts carry a
+cache breakpoint. A real model plays only under `CATANRL_LLM_BUDGET` (a
+dollar cap checked before every call, shared by the harness threads, across
+processes with `CATANRL_LLM_LEDGER`; reaching it stops the eval like an error,
+finished games kept, a rerun resumes; a missing cost is priced at a
+conservative fallback). `model=stub/first`, `stub/random` and `stub/scripted`
+play without a network or a cost (tests, `catanrl llm-cost`). The agent
+exists only on the catanatron harness (6.6). Each row of an LLM seat carries
+`llm` stats (prompted decisions, forced moves, calls, prompt, completion,
+cached and reasoning tokens from the SDK's usage or a characters/4 estimate,
+dollars, retries, cut-off replies, fallbacks, wall time), totalled per slot in
+the record's summary. `configs/experiments/llm-eval.yaml` is the eval (models x
+{plan, basic} x {F, a fair BELIEF over our 2p network} on the first
+`params.boards` heldout-2p boards, both seats); `catanrl llm-cost` plays stub
+games and prices a cell from a $/M-token table, so a budget is approved before
+any real call. `catanrl run llm-eval --smoke` plays every cell with
 `stub/random`: a smoke plan replaces the model of any `LLM:` spec, so a
 smoke never makes a paid call. A real model's record is `nondeterministic`
 (flagged † in the report) and `verify` refuses to replay it unless forced.
@@ -738,7 +758,7 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
    | PREDICT | always: it reads the private row and a learned predictor |
    | TRADE | its policy by POLICY's rule, and not `oracle` (the critic reads private rows of worlds dealt from its tracker) |
    | built-in bots | never |
-   | LLM | always: it reads only the public state text |
+   | LLM | always: it reads only its seat's view (in 2p the opponent's hand, which is public there) |
    | CANOPY | always: its snapshot holds the seat's view (opponent cards as counts) |
 
 4. Writes a canonical spec that is a fixed point of resolution:

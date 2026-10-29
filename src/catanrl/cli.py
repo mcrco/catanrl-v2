@@ -78,8 +78,8 @@ def _parser() -> argparse.ArgumentParser:
                            "replies are short; reasoning models write thousands)")
     cost.add_argument("--cell-games", type=int, default=50, help="games per cell in the cost column")
     cost.add_argument("--notes-chars", type=int, default=200,
-                      help="pad the stub's one-line notes to this many characters (a real model's note; every note "
-                           "is shown in every later prompt); 0 keeps the stub's own 18-24")
+                      help="pad the stub's one-line notes to this many characters (a real model's note; the last "
+                           "notes are shown in every prompt); 0 keeps the stub's own 18-24")
     cost.add_argument("--decisions", type=int,
                       help="also project the cost at this many prompted decisions per game (default: twice the "
                            "measured; a competent model outlasts a random one)")
@@ -251,7 +251,8 @@ def _cmd_eval(args) -> int:
             llm = slot["llm"]["per_game"]
             print(f"{slot['label']:<40} per game: {llm['decisions']:.1f} decisions, {llm['prompt_tokens']:.0f} prompt + "
                   f"{llm['completion_tokens']:.0f} completion tokens{' (estimated)' if slot['llm']['estimated'] else ''}, "
-                  f"{llm['fallbacks']:.2f} fallbacks, {llm['wall_s']:.1f} s")
+                  f"${llm.get('cost', 0.0):.4f}{' (estimated)' if slot['llm'].get('cost_estimated') else ''}, "
+                  f"{llm.get('truncated', 0):.2f} cut off, {llm['fallbacks']:.2f} fallbacks, {llm['wall_s']:.1f} s")
         if "canopy" in slot:
             c = slot["canopy"]
             print(f"{slot['label']:<40} Canopy: {c['decisions']} decisions ({c['per_game_decisions']:.1f}/game, "

@@ -3,15 +3,23 @@
 
 Each strategy is a system prompt: a preamble that fixes the answer format
 (reasoning, then a one-line note the player keeps for later turns, then the
-action number alone on the last line), for ``strategy`` and ``rules`` a guide
-or the rulebook, and the board coordinate explanation. catanllm's files
-hard-code the BASE board's tile corners and node neighbours; here that
-section is generated from the map the game is played on (``board_section``),
-and the preamble states the game's own victory-point target (base-2p plays to
-15, not 10). ``plan`` is catanllm's mini-map prompt without its fixed board
-(the state text carries the board). Texts are Python strings, not package
-data, so ``code_id`` (provenance) hashes them: a prompt edit is an outcome
-code change.
+action number alone on the last line), this game's rules (``rules_section``,
+generated from the game: players, VP target, discard limit, robber variant,
+bank-and-port-only trading, the deck and the pieces), for ``strategy`` and
+``rules`` a guide or the rulebook, and the board section. catanllm's texts
+describe the 4-player base game (discard above 7, trading between players);
+the generated rules come first and override them, the guide and the rulebook
+state this game's discard limit and VP target, and the rulebook's
+player-to-player trade section is replaced (the harness never offers such a
+trade). catanllm's files hard-code the BASE board's tile corners and node
+neighbours; here that section is generated from the map the game is played on
+(``board_section``), on tile ids (the state, the history and the actions name
+tiles by id too), with every tile's resource and number, the ports and each
+node's production: the board is fixed for the game, so it lives in this
+static, cacheable prefix rather than in every state text. ``plan`` is
+catanllm's mini-map prompt without its fixed board. Texts are Python strings,
+not package data, so ``code_id`` (provenance) hashes them: a prompt edit is an
+outcome code change.
 """
 
 from __future__ import annotations
@@ -119,7 +127,7 @@ Anyways, let’s get started…
 **Cut people off**
 
 * Even if you are two or three roads away from cutting someone off, don’t let this deter you. If you are fairly confident you may be able to build somewhere before someone else, focus on the contested spot(s) first. You may derail someone else’s game who positioned their settlements assuming they could get it — a great offensive move by you. Meanwhile, you are also gaining a spot that may be accretive to your production. Anywhere else that may be less desirable could still be up for grabs later too.
-* When cutting someone off, it’s best to build all the required roads on *one single turn*. Otherwise, if you build one road to start (even if it helps get you to 7 or less cards), the other player will see what you’re doing and prioritize getting there before you. Thus, you will have wasted your resources building to nowhere (if there is no back-up route).
+* When cutting someone off, it’s best to build all the required roads on *one single turn*. Otherwise, if you build one road to start (even if it helps get you to {discard} or fewer cards), the other player will see what you’re doing and prioritize getting there before you. Thus, you will have wasted your resources building to nowhere (if there is no back-up route).
 
 **Don’t get cut off**
 
@@ -135,7 +143,7 @@ Anyways, let’s get started…
 
 * **Resource diversity:** It’s* typically* better to have access to more (or all) of the five resources. Thereby, you are less reliant on trading a 4–1 with the bank, 2–1 with a port, or forced into making a deal with someone.
 * **Number diversity:** You want to have your numbers as distributed as possible. For example, while the numbers 6 and 8 have equal probabilities of being rolled, it is better to have access to a 6 AND 8, rather than two 6’s or two 8's.
-* *Here’s why:* your production is less concentrated on isolated numbers. Therefore, if a needed roll of the dice doesn’t come, the effect on you will be less drastic and variable. With staggered production (aka accessing repeat numbers), you are more likely to hold more than 7 cards or few in your hand at any point.
+* *Here’s why:* your production is less concentrated on isolated numbers. Therefore, if a needed roll of the dice doesn’t come, the effect on you will be less drastic and variable. With staggered production (aka accessing repeat numbers), you are more likely to hold more than {discard} cards or few in your hand at any point.
 
 6. How to play your development cards
 
@@ -187,7 +195,7 @@ Anyways, let’s get started…
 13. Card tracking
 
 * **At the highest level of play, tracking is what separates the great players from the best.** This is the act of keeping a tally of who has what resources. This is a tremendous advantage because you are awake of what trades someone is willing to make so that you can maximize every exchange. It also keeps you informed on what move someone is focused on making next.
-* While at first this may seem unrealistic, it becomes easier over time the more you practice. As the game progresses and more trades are made, knowing exactly what cards everyone has is impossible. However, a general idea of what someone has can be sufficient. This is done by remembering the previous rolls that have occurred and what someone has spent their resources on. If they must discard cards from having more than 7, pay attention to what they get rid of.
+* While at first this may seem unrealistic, it becomes easier over time the more you practice. As the game progresses and more trades are made, knowing exactly what cards everyone has is impossible. However, a general idea of what someone has can be sufficient. This is done by remembering the previous rolls that have occurred and what someone has spent their resources on. If they must discard cards from having more than {discard}, pay attention to what they get rid of.
 * When first learning to track cards, start with a reasonable goal of keeping track of the last 5 rolls at any given point. Therefore, even if you don’t remember what each person has in their hand, you can back solve what cards each person has based on where they are positioned on the board.
 
 14. Involve yourself in others’ initial placements
@@ -334,10 +342,10 @@ The White player rolls an 8. Blue has a settlement on the mountain hex with the 
 **RESOLVE A 7**
 When you roll a 7, hexes do not produce any resources. Instead:
 **1. DISCARD RESOURCES**
-Each player who has more than 7 resource cards must choose half (rounded down) of their resource cards and return them to the supply.
+Each player who has more than {discard} resource cards must choose half (rounded down) of their resource cards and return them to the supply.
 
 **Example:**
-White has 9 resource cards in hand. When a 7 is rolled, they must discard 4 cards.
+White has {discard_example} resource cards in hand. When a 7 is rolled, they must discard {discard_half} cards.
 
 **2. ACTIVATE THE ROBBER**
 You must move the robber to a new hex.
@@ -353,15 +361,8 @@ Orange rolls a 7. They move the robber to the pasture hex with a red settlement 
 You may take actions in this phase as often as you like and in any order, as long as you have the resources to do so.
 
 **TRADE**
-You may trade freely with other players and the supply to get the resources you need to build. During your turn, other players may only trade with you, not with each other or with the supply.
-There are three types of trades you may perform:
-
-**TRADE WITH OTHER PLAYERS**
-To trade with other players, announce which resource(s) you want and which resource(s) you are willing to trade. Other players may accept your proposal, make counteroffers, or make their own proposals.
-**Important:**
-You may not give away cards in any way, which includes trading matching resource cards (for example, trying to trade 3 ore for 1 ore is not allowed).
-**Example:**
-It is Blue™s turn, and they want 1 wheat. Orange will trade 1 wheat and wants 1 wool in return. Blue agrees and the players exchange cards. White also wants to trade for 1 wool, but Blue no longer has any. White may not trade with Orange because it is not Orange's turn.
+In this game you trade only with the supply to get the resources you need to build: there is no trading between players.
+There are two types of trades you may perform:
 
 **GENERAL TRADE WITH THE SUPPLY (4:1)**
 To trade with the supply, put 4 of the same resource cards into the supply and take 1 card of a different resource from the supply.
@@ -439,56 +440,167 @@ Congratulations!
 Blue ends the game on their turn with ten VPs (2 cities, 3 settlements, the Longest Route tile, and 1 Victory Point card). Victory!
 """
 
-#: catanllm's user-message instruction (util/llm_wrapper.py).
+#: catanllm's user-message instruction (util/llm_wrapper.py), with the answer format restated.
 INSTRUCTION = ("Based on the current game state and available actions, provide a brief explanation of your "
-               "reasoning and choose the best action by responding with the action number (e.g., '2' for action 2).")
+               "reasoning and choose the best action. End your reply with your one-line notes and then the "
+               "action number alone on the last line (e.g. '2' for action 2).")
 
 #: What the model is told when its answer could not be used (a re-prompt, then the fallback).
 RETRY = ("Your previous answer could not be used: {error}. Answer again. Your output must end with the "
          "one-line notes and then the action number alone on the last line.")
 
+#: catanllm's spatial overview, on tile ids (the state, the history and the actions name tiles by id).
 SPATIAL = """\
 --- SPATIAL RELATIONSHIPS OVERVIEW ---
-- Tiles: Hexagonal tiles, identified by cube coordinates (x,y,z) where x+y+z=0
-- Nodes: Intersection points between tiles, identified by integer IDs (0-{last_node})
-- Edges/Roads: Connections between two nodes, represented as (node_id1, node_id2)
+- Tiles: Hexagonal land tiles, identified by integer IDs; each is written with its resource and number, e.g. Tile 7 (Wheat 5)
+- Nodes: Intersection points between tiles, identified by integer IDs (0-{last_node}); settlements and cities go on nodes
+- Edges/Roads: Connections between two neighbouring nodes, written as node_id1-node_id2 (e.g. 12-13)
 - Each tile has 6 nodes at its corners and 6 edges connecting those nodes
 - Adjacent tiles share nodes and edges
-- Ports are located on specific edges facing the ocean
+- Pips: the ways (out of 36) two dice roll a tile's number (6 and 8: 5 pips; 5 and 9: 4; 4 and 10: 3; 3 and 11: 2; 2 and 12: 1); a node's pips add up its tiles'
+- Ports sit on the coast: a building on either of a port's two nodes lets you trade at it
 """
+
+ROBBER_RULES = {
+    "normal": "The robber may be moved to any land tile other than the one it is on.",
+    "friendly": ("Friendly robber: the robber may not be moved to a tile where an opponent with fewer than 3 victory "
+                 "points (hidden Victory Point cards count) has a building, unless every other tile is barred."),
+    "friendly_public": ("Friendly robber: the robber may not be moved to a tile where an opponent with at most 2 "
+                        "visible victory points has a building, unless every other tile is barred."),
+}
+
+
+def rules_section(game: Any, observer: Any) -> str:
+    """This game's rules, generated from the game itself (players and turn order, the
+    victory-point target, the discard limit, the robber variant, bank-and-port-only trading, the
+    bank, the development deck and the pieces as dealt), stated as overriding any general text
+    that follows (catanllm's rulebook and guide describe the 4-player base game)."""
+    from catanatron.models.enums import DEVELOPMENT_CARDS, RESOURCES
+    from catanatron.state_functions import player_key
+
+    from catanrl.agents.llm.render import CARD_LABELS, RESOURCE_LABELS, exact_hands
+
+    state = game.state
+    colors = list(state.colors)
+    limit = int(state.discard_limit)
+    # As dealt (conservation, so exact whenever this is built): what the bank and the deck hold plus
+    # what every seat holds, played or built.
+    bank = [sum(x) for x in zip(state.resource_freqdeck, *(
+        [state.player_state[f"{player_key(state, c)}_{r}_IN_HAND"] for r in RESOURCES] for c in colors))]
+    deck = {card: state.development_listdeck.count(card) for card in DEVELOPMENT_CARDS}
+    for color in colors:
+        key = player_key(state, color)
+        for card in DEVELOPMENT_CARDS:
+            deck[card] += state.player_state[f"{key}_{card}_IN_HAND"] + state.player_state[f"{key}_PLAYED_{card}"]
+    key = player_key(state, observer)
+    built = state.buildings_by_color[observer]
+    pieces = (state.player_state[f"{key}_ROADS_AVAILABLE"] + len(built.get("ROAD", [])),
+              state.player_state[f"{key}_SETTLEMENTS_AVAILABLE"] + len(built.get("SETTLEMENT", [])),
+              state.player_state[f"{key}_CITIES_AVAILABLE"] + len(built.get("CITY", [])))
+    snake = ", ".join(c.name for c in [*colors, *reversed(colors)])
+    same_bank = len(set(bank)) == 1
+    bank_text = f"{bank[0]} of each resource" if same_bank else ", ".join(
+        f"{n} {lab}" for lab, n in zip(RESOURCE_LABELS, bank))
+    deck_text = ", ".join(f"{n} {CARD_LABELS[card]}" for card, n in deck.items() if n)
+    if exact_hands(state):
+        info = ("In this 2-player game every resource card movement is visible to both players (production follows "
+                "the dice, builds, trades and discards are public, and a steal is seen by both sides), so you are "
+                "shown your opponent's exact hand; its unplayed development cards, and so any Victory Point cards, "
+                "stay hidden (you see how many it holds).")
+    else:
+        info = ("You see how many resource and development cards the others hold, not which ones; steals between "
+                "other players are hidden from you.")
+    rules = [
+        f"- Players: {len(colors)}, in turn order {', '.join(c.name for c in colors)}. You are {observer.name}.",
+        (f"- The first player to reach {game.vps_to_win} victory points wins, at once (Victory Point cards count for "
+         "their owner). Settlement 1 VP, city 2 VP, Longest Road 2 VP, Largest Army 2 VP, Victory Point card 1 VP."),
+        (f"- Setup: in the order {snake}, each player places a settlement and a road touching it (no cost); the "
+         "second settlement pays one card of each resource tile it touches."),
+        ("- Each turn: roll two fair dice; every tile with the rolled number pays 1 card per touching settlement and 2 "
+         "per city to their owners, unless the robber is on it (if the bank cannot pay everyone a resource, nobody "
+         "gets it). Then build, buy, trade and play development cards in any order, then end the turn."),
+        (f"- A roll of 7 pays nothing: every player holding more than {limit} resource cards discards half of them "
+         "(rounded down); then the roller moves the robber and steals one random resource card from a player with a "
+         "building on the robber's new tile."),
+        f"- {ROBBER_RULES.get(state.robber_mode, ROBBER_RULES['normal'])}",
+        ("- Trading: only with the bank, 4 identical cards for 1 card of another resource, or at a port you have a "
+         "settlement or city on (3:1 port: 3 identical cards; 2:1 port: 2 of its resource). There is no trading "
+         "between players in this game."),
+        ("- Costs: road = 1 Wood + 1 Brick; settlement = 1 Wood + 1 Brick + 1 Sheep + 1 Wheat; city (upgrades your "
+         "settlement) = 2 Wheat + 3 Ore; development card = 1 Sheep + 1 Wheat + 1 Ore."),
+        (f"- Pieces per player: {pieces[0]} roads, {pieces[1]} settlements, {pieces[2]} cities (a city returns its "
+         "settlement). A settlement needs every neighbouring node empty (the distance rule) and, after the setup, "
+         "one of your roads touching it; a road must touch your road, settlement or city and cannot run on "
+         "through an opponent's building."),
+        (f"- The bank starts with {bank_text}. The development deck has {sum(deck.values())} cards ({deck_text}). "
+         "You may play one development card per turn, before or after rolling, but not one bought this turn; "
+         "Victory Point cards are never played. Knight: move the robber and steal. Year of Plenty: take 2 "
+         "resource cards from the bank. Monopoly: take every card of one resource from the other players. Road "
+         "Building: build 2 roads for free."),
+        ("- Longest Road: the first player with 5 or more roads in one continuous route, then whoever builds a "
+         "longer one. Largest Army: the first player with 3 or more played Knights, then whoever plays more."),
+        f"- Information: {info}",
+        ("- Resource names: Wood (lumber), Brick, Sheep (wool), Wheat (grain), Ore. Year of Plenty is also called "
+         "Invention; Longest Road, Longest Route."),
+    ]
+    return ("=== THIS GAME'S RULES (they override any general rule or advice below that differs) ===\n"
+            + "\n".join(rules) + "\n")
 
 
 def board_section(catan_map: Any, *, intro: bool = False) -> str:
-    """catanllm's ``=== BOARD COORDINATE SYSTEM EXPLANATION ===`` for ``catan_map`` (a
-    Catanatron ``CatanMap``): every land tile's corner nodes, every land node's
-    neighbours (the map's own graph, land only) and adjacent tiles."""
+    """catanllm's ``=== BOARD COORDINATE SYSTEM EXPLANATION ===`` for ``catan_map`` (a Catanatron
+    ``CatanMap``), on tile ids: every land tile's resource, number and corner nodes, the ports,
+    and every land node's production (``render.node_text``), adjacent tiles and neighbours (the
+    map's own graph, land only). The board never changes during a game, so the state text
+    leaves it here."""
+    from catanatron.models.map import PORT_DIRECTION_TO_NODEREFS, Port
+
+    from catanrl.agents.llm.render import label, node_ports, node_text, tile_text
+
     lines = ["=== BOARD COORDINATE SYSTEM EXPLANATION ===", ""]
     if intro:
         lines += ["Below is an explanation for how the board/game state will be represented in natural language.",
                   ""]
     lines += SPATIAL.format(last_node=max(catan_map.land_nodes)).splitlines()
     lines += ["", "--- HEXAGON TILES ---"]
-    for coordinate, tile in sorted(catan_map.land_tiles.items()):
-        lines.append(f"Tile {tuple(coordinate)} (ID {tile.id}): corner nodes: {sorted(tile.nodes.values())}")
+    for tile in sorted(catan_map.land_tiles.values(), key=lambda t: t.id):
+        lines.append(f"{tile_text(tile)}: corner nodes {', '.join(map(str, sorted(tile.nodes.values())))}")
+    lines += ["", "--- PORTS ---"]
+    ports = []
+    for tile in catan_map.tiles.values():
+        if isinstance(tile, Port):
+            a, b = PORT_DIRECTION_TO_NODEREFS[tile.direction]
+            kind = "3:1 port" if tile.resource is None else f"2:1 {label(tile.resource)} port"
+            ports.append((sorted((tile.nodes[a], tile.nodes[b])), kind))
+    lines += [f"{kind}: nodes {a}, {b}" for (a, b), kind in sorted(ports)] or ["This map has no ports."]
     lines += ["", "--- NODES ---"]
+    known = node_ports(catan_map)
     for node in sorted(catan_map.land_nodes):
-        neighbors = sorted(catan_map.graph.neighbors(node))
         tiles = ", ".join(str(t.id) for t in sorted(catan_map.adjacent_tiles.get(node, []), key=lambda t: t.id))
-        lines.append(f"Node {node}: neighbors: {neighbors} | adjacent to tile IDs: {tiles}")
+        neighbors = ", ".join(map(str, sorted(catan_map.graph.neighbors(node))))
+        lines.append(f"Node {node}: {node_text(catan_map, node, ports=known)} | tiles {tiles} | neighbors {neighbors}")
     return "\n".join(lines) + "\n"
 
 
-def system_prompt(strategy: str, catan_map: Any, *, vps: int = 10) -> str:
-    """The system prompt of ``strategy`` for a game on ``catan_map`` played to ``vps`` points."""
+def system_prompt(strategy: str, game: Any, observer: Any) -> str:
+    """The system prompt of ``strategy`` for ``observer``'s seat in ``game``: the strategy's
+    preamble, this game's rules (:func:`rules_section`), the guide or the rulebook, then the
+    board. Everything in it is fixed for the game, so it is a cacheable prefix."""
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}; one of {STRATEGIES}")
+    vps, limit = int(game.vps_to_win), int(game.state.discard_limit)
+    rules = rules_section(game, observer)
+    catan_map = game.state.board.map
     if strategy == "search":
-        return SEARCH.format(vps=vps) + "\n" + board_section(catan_map)
+        return SEARCH.format(vps=vps) + "\n" + rules + "\n" + board_section(catan_map)
     basic = BASIC.format(vps=vps)
     if strategy == "basic":
-        return basic + "\n" + board_section(catan_map)
+        return basic + "\n" + rules + "\n" + board_section(catan_map)
     if strategy == "plan":
-        return basic + "\n" + PLAN_EXTRA + "\n" + board_section(catan_map)
-    if strategy == "strategy":  # the guide's and the rulebook's "10 VP" sentences state this game's target too
-        return basic + "\n" + STRATEGY_GUIDE.format(vps=vps) + "\n" + board_section(catan_map, intro=True)
-    return basic + "\n" + RULEBOOK.format(vps=vps) + "\n" + board_section(catan_map)
+        return basic + "\n" + PLAN_EXTRA + "\n" + rules + "\n" + board_section(catan_map)
+    if strategy == "strategy":  # the guide's VP target and discard limit are this game's
+        return (basic + "\n" + rules + "\n" + STRATEGY_GUIDE.format(vps=vps, discard=limit) + "\n"
+                + board_section(catan_map, intro=True))
+    example = limit + 2  # the rulebook's worked discard, at this game's limit
+    return (basic + "\n" + rules + "\n" + RULEBOOK.format(vps=vps, discard=limit, discard_example=example,
+                                                           discard_half=example // 2) + "\n" + board_section(catan_map))

@@ -1,37 +1,54 @@
 # Frontier language models as Catan players (the report's LLM eval idea): catanllm's
 # prompting strategies (plan, basic) ported to v2's LLM agent, through the Catanatron
-# harness, against F and against our best 2p network, on the first 20 heldout-2p boards
-# (2p BASE to 15 VP, each board from both seats: 40 games per cell). Model ids are
-# OpenRouter ids (placeholders: edit the model axis); stub/random plays without a network.
-#   catanrl llm-cost --games 5 --strategies plan,basic --price gpt-5=1.25,10   # the budget first
+# harness, against F and against our 2p network, on the first ${params.boards} heldout-2p
+# boards, each from both seats (2 x boards games per cell). heldout-2p is base-2p: 2p BASE
+# to 15 VP, discard above 9 cards, the standard robber, fair dice (the catanatron harness
+# cannot roll OpenHex's balanced dice, so not heldout-2p-fr).
+# Model ids are OpenRouter ids, placeholders to confirm before any paid run (edit the model
+# axis); stub/random plays without a network.
+# n and the budget are Marco's call: params.boards (n = 2 x boards games per cell) is a
+# placeholder, not a choice. Price a cell with llm-cost first, then play under a hard cap.
+#   catanrl llm-cost --games 5 --strategies plan,basic --price opus-5.5=4,20 --price sonnet-5.5=2,10
 #   catanrl run llm-eval --smoke     # every cell on 2 boards with stub/random in place of each model: no network
-#   OPENROUTER_API_KEY=... catanrl eval 'LLM:model=openai/gpt-5:strategy=plan' F --suite heldout-2p --boards 1 \
-#       --harness catanatron         # one real model on one board (2 games), to see it answer before the sweep
-#   OPENROUTER_API_KEY=... catanrl run llm-eval            # every cell (real calls cost money)
+#   OPENROUTER_API_KEY=... CATANRL_LLM_BUDGET=5 catanrl eval 'LLM:model=anthropic/claude-sonnet-5.5:strategy=plan' F \
+#       --suite heldout-2p --boards 1 --harness catanatron   # one real model on one board (2 games) first
+#   OPENROUTER_API_KEY=... CATANRL_LLM_BUDGET=<dollars> CATANRL_LLM_LEDGER=runs/llm-eval.spend.jsonl \
+#       catanrl run llm-eval        # every cell; the ledger makes the cap span the cells (one process each)
+# A real model refuses to play without CATANRL_LLM_BUDGET (dollars; "none" for no cap); a cell
+# that reaches the cap stops like an error (finished games recorded; rerun to resume).
+# The net: BELIEF over ppo-2p-fr3's full actor (e4350, pinned #43eca7ffdd41 in the record's key;
+# the ref carries no #sha here because a smoke rewrites @e4350 to @latest), fair: it samples
+# the LLM's hidden cards from what its seat saw (the full POLICY would read them). It was
+# trained on base-2p-fr (friendly robber, balanced dice) and plays base-2p's rules here;
+# puffer-graph2 trained on base-2p (fair forms: BELIEF:ckpt=puffer-graph2/full@best:worlds=16,
+# POLICY:ckpt=puffer-graph2/public@e3600).
 name: llm-eval
 kind: eval
-params: {model: stub/random, strategy: plan, opponent: F}
+params: {model: stub/random, strategy: plan, opponent: F, boards: 20}
 eval:
   final:
-    - suite: {name: heldout-2p, boards: 20}
+    - suite: {name: heldout-2p, boards: "${params.boards}"}
       harness: catanatron
-      lineup: ["LLM:model=${params.model}:strategy=${params.strategy}:thinking=true:max_tokens=8192:temperature=0.1:seed=0",
+      lineup: ["LLM:model=${params.model}:strategy=${params.strategy}:thinking=true:max_tokens=16384:notes=8:history=30:seed=0",
                "${params.opponent}"]
 sweep:
   axes:
     model:
       stub: {params.model: stub/random}
-      gpt5: {params.model: openai/gpt-5}
-      sonnet45: {params.model: anthropic/claude-sonnet-4.5}
-      gemini25: {params.model: google/gemini-2.5-pro}
+      opus55: {params.model: anthropic/claude-opus-5.5}
+      sonnet55: {params.model: anthropic/claude-sonnet-5.5}
+      gpt61sol: {params.model: openai/gpt-6.1-sol}
+      gemini4argon: {params.model: google/gemini-4-argon}
     params.strategy: [plan, basic]
     opponent:
       f: {params.opponent: F}
-      policy: {params.opponent: "POLICY:ckpt=puffer-graph2/full@best:device=cpu"}
+      net: {params.opponent: "BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16:device=cpu"}
   name: "{model}-{params.strategy}-{opponent}"
 # an eval config's hash carries the ppo train defaults (nothing reads them)
 train: {critic_targets: vtrace, critic_gamma: null}   # pinned at the pre-2026-10-19 defaults: a run made before the change still matches
-runtime: {device: cpu, threads: 4}
+# 16 games at once: a game waits on the network (a reasoning call takes seconds to minutes), BELIEF
+# decides in ~0.05 s on CPU; OpenRouter's rate limits, not the CPU, bound this.
+runtime: {device: cpu, threads: 16}
 meta:
   notes: "LLM eval (DESIGN 3): catanllm's strategies through the catanatron harness; one command plays the paid cells"
   wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

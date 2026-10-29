@@ -24,12 +24,13 @@ the first game and calls its ``preflight()`` when it has one (the LLM's model
 client, a POLICY's checkpoint), so a missing API key or SDK fails before
 anything is played.
 
-When a game raises (or on KeyboardInterrupt), the other running games stop
-at their next tick (one more model call at most; their rows are not
-delivered), games not started are cancelled, the workers are joined, the
-rows of games that still finished are delivered, and the error is re-raised:
-nothing keeps playing (and paying) in the background, and a resume replays
-only what was not recorded.
+When a game raises (or on KeyboardInterrupt, or when the LLM spending cap is
+reached: ``catanrl.agents.llm.budget.BudgetExceeded``, raised before a call),
+the other running games stop at their next tick (one more model call at most;
+their rows are not delivered), games not started are cancelled, the workers
+are joined, the rows of games that still finished are delivered, and the
+error is re-raised: nothing keeps playing (and paying) in the background, and
+a resume replays only what was not recorded.
 """
 
 from __future__ import annotations
