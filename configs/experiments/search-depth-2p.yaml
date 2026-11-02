@@ -21,6 +21,9 @@
 # memory: a 16384-sim tree holds ~95 MB (release_games is already on), so that cell keeps ~80
 # searches live (160 games in flight). infer_rows is sized just above the expected searchers per
 # step (half the games in flight in 2p): strict batches pad every forward to infer_rows.
+# 2026-10-31 the oom killer ended s16384 at 160 in flight (16.6 GB with less memory free than at
+# launch), after e3786 and e500; 96 in flight from 2026-11-02 (runtime is not hashed: same variant,
+# same records, and strict games don't depend on num_envs or infer_rows).
 # order: variants by sims ascending; in every variant the last checkpoint first, then the middle,
 # so a stopped 16384 column still has its most useful points.
 #
@@ -59,7 +62,7 @@ sweep:
       s256: {params.sims: 256, runtime.num_envs: 960, runtime.infer_rows: 512}
       s1024: {params.sims: 1024, runtime.num_envs: 960, runtime.infer_rows: 512}
       s4096: {params.sims: 4096, runtime.num_envs: 448, runtime.infer_rows: 256}
-      s16384: {params.sims: 16384, runtime.num_envs: 160, runtime.infer_rows: 96}
+      s16384: {params.sims: 16384, runtime.num_envs: 96, runtime.infer_rows: 64}
   name: "{depth}"
 runtime: {device: cuda, threads: 12, num_envs: 960, infer_rows: 512}
 meta:
