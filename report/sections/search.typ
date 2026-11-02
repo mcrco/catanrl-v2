@@ -145,15 +145,15 @@ catanrl eval "MCTS:ckpt=puffer-graph2/public@e3600:sims=4096:dets=1" \
 catanrl run configs/experiments/gumbel-edge-2p.yaml
 ```)
 
-=== search depth vs strength across training #chip("running") <exp:search-depth-2p>
+=== search depth vs strength across training #chip("stopped") <exp:search-depth-2p>
 #meta(
-  dates: "2026-10-29 00:47–",
+  dates: "2026-10-29 00:47 – 10-31 23:41",
   owner: "marco",
   config: "configs/experiments/search-depth-2p.yaml",
-  wandb: (("search-depth-2p-s64-b23bbbaf", "s64"), ("search-depth-2p-s128-1cd135fb", "s128"), ("search-depth-2p-s256-28bd5783", "s256"), ("search-depth-2p-s1024-2bb0e327", "s1024"), ("search-depth-2p-s4096-510e46c4", "s4096")),
-  records: ("be98751d", "2672eaad", "101296e4", "13061034", "d7fc0e57", "9004b0ac", "19048e65", "ad2a43f4", "76c3fbed", "8269c07b", "032c4368", "83b507c8", "ec991f87", "1cee7f01", "49254c47", "ce9f6daf", "13ed5ff1", "25c4c060", "e26edabf", "c91e1186"),
+  wandb: (("search-depth-2p-s64-b23bbbaf", "s64"), ("search-depth-2p-s128-1cd135fb", "s128"), ("search-depth-2p-s256-28bd5783", "s256"), ("search-depth-2p-s1024-2bb0e327", "s1024"), ("search-depth-2p-s4096-510e46c4", "s4096"), ("search-depth-2p-s16384-152f0cab", "s16384")),
+  records: ("be98751d", "2672eaad", "101296e4", "13061034", "d7fc0e57", "9004b0ac", "19048e65", "ad2a43f4", "76c3fbed", "8269c07b", "032c4368", "83b507c8", "ec991f87", "1cee7f01", "49254c47", "ce9f6daf", "13ed5ff1", "25c4c060", "e26edabf", "c91e1186", "ce60e974", "f44b638f", "1055bdc2", "d653b342", "812040d1", "e07a8a98", "1f623400"),
 )
-#tldr[marco's question: does more search consistently make a network stronger, and does that change as the network trains? MCTS at 64 to 16384 sims against the same checkpoint's raw policy, for five checkpoints of one run from scratch, 1,000 games a cell. so far (up to 1024 sims): yes, every step up in sims helps every checkpoint, and the weaker the network, the more search adds: from 64 to 1024 sims the e50 net gains 18 points and the final net 5.5. at 64 sims the final net's search is only level with its raw policy. 4096 is running; the 16384 column costs far more than first estimated (below).]
+#tldr[marco's question: does more search consistently make a network stronger, and does that change as the network trains? MCTS at 64 to 16384 sims against the same checkpoint's raw policy, for five checkpoints of one run from scratch, 1,000 games a cell. yes, and it hasn't flattened: every 4× step in sims from 256 up helps every checkpoint measured, by 3–7 points, including 4096 → 16384 (final net 57.0 → 60.5, e500 71.1 → 75.8). the weaker the network, the more search adds: at 4096 sims the e50 net's search wins 82.0% against its own raw policy, the final net's 57.0%. the run was killed out of memory 15 minutes into the third 16384 cell; e150, e1500 and e50 at 16384 are not played.]
 
 *question.* so far we have single points: 53.4 and 55.2 at 1024 and 4096 sims over one `full` checkpoint, 54.9 and 55.2 over one `public` checkpoint (@exp:search-edge-2p-full, @exp:search-edge-2p-public). the edge barely moved between 1024 and 4096. is that a ceiling, and is it the same for a weak network as for a strong one?
 
@@ -165,21 +165,23 @@ catanrl run configs/experiments/gumbel-edge-2p.yaml
 
 *cost.* measured on this box before launch: a game has about 82 searcher decisions, and every one is a full search (the engine plays forced moves itself). one leaf costs about 16 µs of network on the fused kernels in 512-row batches (29 µs in plain torch, at any batch size), 21 µs in 96-row batches, plus 4–9 µs of tree work. a 16384-sim tree holds about 95 MB, so that cell keeps only about 80 searches in flight. the variants run in order of sims, and each plays the last checkpoint first and the middle one second.
 
-the launch estimate (\~65 h) was too low by about 2×, for two reasons. the suite's strict determinism pads every forward to the full batch, so the tail of a cell, when only a few long games are left, costs as much per move as a full batch. and the e50 network plays some very long games (112 turns on average at 1024 sims, six of 1,000 cut at the 500-turn limit), so its cells take 3–3.5× the others. measured: 1024 sims took 1.1 h a checkpoint (3.8 h for e50); 4096 is on course for \~4.5 h a checkpoint. at that rate the 16384 column would take \~20 h a checkpoint and much longer for e50.
+the launch estimate (\~65 h) was too low by about 2×, for two reasons. the suite's strict determinism pads every forward to the full batch, so the tail of a cell, when only a few long games are left, costs as much per move as a full batch. and the e50 network plays some very long games (112 turns on average at 1024 sims, six of 1,000 cut at the 500-turn limit), so its cells take 3–3.5× the others. measured: 1024 sims took 1.1 h a checkpoint (3.8 h for e50); 4096 took 4.1–4.3 h a checkpoint (8.8 h for e50); 16384 took 16.3–16.5 h a checkpoint for e3786 and e500.
 
-*result.* up to 1024 sims, mcts win rate against the same checkpoint's raw policy (%):
+*stopped.* on 31 october at 23:41, 15 minutes into the e150 cell at 16384 sims, the kernel's oom killer ended the eval: it held 16.6 GB with 160 searches in flight, and the box had less free memory than at launch (swap full). the two finished cells are complete records. a resume plays the three missing cells (e150, e1500, e50); at a memory-safe \~100 searches in flight that is about 25 h each for e150 and e1500 and three days or more for e50.
+
+*result.* mcts win rate against the same checkpoint's raw policy (%):
 #figure(
   btable(
     columns: (auto, auto, auto, auto, auto, auto, auto, auto),
     align: (left, right, right, right, right, right, right, right),
     header: ([checkpoint], [vs F], [64], [128], [256], [1024], [4096], [16384]),
-    [e50], [47], [57.5], [61.3], [66.4], [*75.7*], [—], [—],
-    [e150], [80], [55.6], [60.2], [62.7], [*71.0*], [—], [—],
-    [e500], [92], [56.2], [57.4], [60.0], [*64.4*], [—], [—],
-    [e1500], [95], [51.9], [53.1], [56.9], [*60.7*], [—], [—],
-    [e3786], [98.5], [48.4], [49.0], [50.7], [*53.9*], [—], [—],
+    [e50], [47], [57.5], [61.3], [66.4], [75.7], [*82.0*], [—],
+    [e150], [80], [55.6], [60.2], [62.7], [71.0], [*76.4*], [—],
+    [e500], [92], [56.2], [57.4], [60.0], [64.4], [71.1], [*75.8*],
+    [e1500], [95], [51.9], [53.1], [56.9], [60.7], [*65.0*], [—],
+    [e3786], [98.5], [48.4], [49.0], [50.7], [53.9], [57.0], [*60.5*],
   ),
-  caption: [`MCTS:sims=N:dets=1` against `BELIEF:worlds=16` of the same `discount-2p/g1-s42` checkpoint on `heldout-2p-fr`, 1,000 games a cell (±3.1 points). "vs F" is the raw policy on the select suite during training.],
+  caption: [`MCTS:sims=N:dets=1` against `BELIEF:worlds=16` of the same `discount-2p/g1-s42` checkpoint on `heldout-2p-fr`, 1,000 games a cell (±3.1 points). "vs F" is the raw policy on the select suite during training. "—": not played (the run stopped).],
 ) <tab:search-depth>
 
 #figure(
@@ -190,19 +192,19 @@ the launch estimate (\~65 h) was too low by about 2×, for two reasons. the suit
 the gains are paired over the same 1,000 games (mcnemar):
 #figure(
   btable(
-    columns: (auto, auto, auto),
-    align: (left, right, right),
-    header: ([checkpoint], [64 → 1024 sims], [256 → 1024 sims]),
-    [e50], [+18.1 (p = 8e-24)], [+9.2 (p = 2e-7)],
-    [e150], [+15.4 (p = 3e-20)], [+8.3 (p = 2e-7)],
-    [e500], [+8.2 (p = 3e-6)], [+4.4 (p = 0.003)],
-    [e1500], [+8.8 (p = 3e-8)], [+3.8 (p = 0.007)],
-    [e3786], [+5.5 (p = 5e-5)], [+3.2 (p = 0.007)],
+    columns: (auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([checkpoint], [64 → 1024], [256 → 1024], [1024 → 4096], [4096 → 16384]),
+    [e50], [+18.1 (p = 8e-24)], [+9.2 (p = 2e-7)], [+6.4 (p = 7e-5)], [—],
+    [e150], [+15.4 (p = 3e-20)], [+8.3 (p = 2e-7)], [+5.4 (p = 7e-4)], [—],
+    [e500], [+8.2 (p = 3e-6)], [+4.4 (p = 0.003)], [+6.7 (p = 3e-5)], [+4.7 (p = 0.003)],
+    [e1500], [+8.8 (p = 3e-8)], [+3.8 (p = 0.007)], [+4.3 (p = 0.005)], [—],
+    [e3786], [+5.5 (p = 5e-5)], [+3.2 (p = 0.007)], [+3.1 (p = 0.02)], [+3.5 (p = 0.01)],
   ),
   caption: [win-rate gain in points from more sims, same games, `tools/search_probe.py --pair`.],
 ) <tab:search-depth-paired>
 
-*reading so far.* more search helps every checkpoint, at every step measured, and significantly from 256 to 1024 sims even for the final net. the gain shrinks as the network trains, which fits search fixing mistakes a weaker policy and critic make and a stronger one makes less often. note that each checkpoint is measured against its own raw policy, so a column compares gains, not strength. one world sampled from the tracker costs something at small budgets: at 64 sims the final net's search only matches its raw policy (48.4, interval 45.3–51.5). whether the curves flatten by 4096 (the earlier single points, 53.4 and 55.2, barely moved from 1024 to 4096) is the next column.
+*reading.* more search helps every checkpoint at every step measured, and it hasn't flattened by 16384 sims. from 256 sims up, each 4× step adds 3–7 points to every checkpoint, all significant paired; for the final net the steps are nearly constant (+3.2, +3.1, +3.5 points per 4×), so its gain grows about linearly in log sims with no ceiling in sight. the earlier single points (53.4 and 55.2 at 1024 and 4096, @exp:search-edge-2p-full) moved by about as much as these steps, within their own noise. the gain shrinks as the network trains, which fits search fixing mistakes a weaker policy and critic make and a stronger one makes less often. each checkpoint is measured against its own raw policy, so a column compares gains, not strength. one world sampled from the tracker costs something at small budgets: at 64 sims the final net's search only matches its raw policy (48.4, interval 45.3–51.5).
 
 #repro(```sh
 catanrl run configs/experiments/search-depth-2p.yaml     # six variants (s64 ... s16384), five finals each
