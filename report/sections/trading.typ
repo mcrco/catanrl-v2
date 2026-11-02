@@ -6,11 +6,11 @@ can a bot gain from domestic trades, and are they worth an action space? the eng
 
 == is trading worth an action space?
 
-=== trades in the action space and env #chip("todo") <exp:trade-engine>
-#meta(owner: "marco", wandb: (), records: ())
-#tldr[the engine already plays domestic trades by catanatron's rules. the policy can't: the action space, the env and the row have no trades. this blocks a learned trader, not the harness below.]
+=== trades in the action space and env #chip("queued") <exp:trade-engine>
+#meta(dates: "2026-11-02", dates-label: "built", owner: "marco", wandb: (), records: ())
+#tldr[built on 2 november, off by default. domestic trades are now actions (offer, accept, reject, cancel, confirm with a seat), the env offers them up to 3 times a turn, and the row carries the offer, who made it and who accepted. with trades off every stored record replays bit for bit. on integration; main and the gpu after the search-depth sweep.]
 
-*status.* cppanatron implements domestic trades (offer, accept, reject, confirm, cancel) in parity with catanatron. what is missing is everything in front of it. the map-agnostic action space (`GraphActionSpace`) leaves trades out, the env never offers them, and the encoder has no trade prompt in the row. so "adding trading" means an action-space extension plus the env, the mask and the trade prompts. the trade harness (@exp:trade-harness-pilot) sidesteps all of it with one engine side channel (`VecEnv.set_action`).
+*what changed.* the engine's `GraphActionSpace` gained a trade block before the no-op, behind `env.trades: {offers: N}` (0, the default, is today's game). an offer is legal on the mover's own turn after the roll, with a card in hand and fewer than N offers made this turn. the row gets a `trade` block (what the offer gives and asks per resource, the proposer, who accepted, offers left); the rest of the row is unchanged bit for bit. seats without a trade head (F, older checkpoints, MCTS, `BELIEF`) reject every offer; R still accepts at random. 80 games from four stored 4p records (`e5b302ee`, `c4900f87`, `7164d396`, `b07e5bd9`) replay identically with trades off.
 
 === trade oracle: which trades does the critic like for both sides? #chip("done") <exp:trade-oracle>
 #meta(
@@ -223,10 +223,22 @@ catanrl run configs/experiments/trade-harness-m4.yaml   # needs the ppo-4p/main 
 
 == learned trading
 
-=== a trade head trained from the ppo checkpoint #chip("todo") <exp:trade-learned>
-#meta(owner: "marco", wandb: (), records: ())
-#tldr[step (2) of marco's plan: a small trade head for the proposer and a yes/no for the responder, trained from the ppo checkpoint. not started; it needs trades in the action space first (@exp:trade-engine).]
+=== a trade head trained from the ppo checkpoint #chip("queued") <exp:trade-learned>
+#meta(dates: "2026-11-02", dates-label: "built", owner: "marco", config: "configs/experiments/trade-learned-4p.yaml", wandb: (), records: ())
+#tldr[step (2) of marco's plan, built on 2 november: option one (an offer action plus 10 floats rounded to integers, a yes/no for the responder) on `ppo-4p/main@best`, with a function-preserving start. about 3.5 h on the gpu; queued after the search-depth sweep, waiting on marco's answers below.]
 
-*plan.* marco wants learned trading without an explosive action space. option one: a trade action plus 10 floats, one per resource for what the mover gives and what it gets, each rounded to an integer (11 extra outputs). option two: one output per integer amount (18 choices) per resource per side (181 extra outputs). a policy trained with trades from scratch probably won't learn to trade well. so the order is: first train a competent policy with the ppo recipe. then add option one for the proposer and a yes/no for the responder, trained from the ppo checkpoint with the trade actions masked in at a low entropy bonus. option one is the default.
+*plan.* marco wants learned trading without an explosive action space. option one: a trade action plus 10 floats, one per resource for what the mover gives and what it gets, each rounded to an integer (11 extra outputs). option two: one output per integer amount (18 choices) per resource per side (181 extra outputs). a policy trained with trades from scratch probably won't learn to trade well, so it starts from a competent ppo policy with the trade actions masked in at a low entropy bonus. option one is the default.
+
+*built.* a trade head on the shared trunk: step logits for offer, accept, reject, cancel and confirm, and ten gaussian means with a learned spread for the bundle. the floats map to a legal offer in a fixed order: negatives to 0, a resource on both sides netted, gives clipped to the hand, gets to the bank's 19, and an empty side means no offer (it still spends one of the turn's offers). the ppo log-prob is the action's plus, on an offer, the gaussian density of the unrounded floats. with trades masked out the extended `ppo-4p/main@best` gives the checkpoint's logits and values exactly (2,400 rows), and an update at learning rate 0 changes nothing (kl 0, clip fraction 0).
+
+*one deviation, to approve.* a zero-initialised offer logit next to a trained policy's logits has a sampling probability around 4e-6 (1,334 post-roll rows), so training would never try a trade. the offer logit is instead a gate added to the log-sum-exp of the other legal actions: p(offer) starts at 0.1 and the other actions keep their shares.
+
+*run.* 750 epochs at a constant 5e-4 (where ppo-4p's cosine had decayed to), pure self-play at 4p, the undiscounted lambda critic, `ent_coef` 0.005. select on the table against three of m4's critic responders, where offers can land. finals, 4,000 games a row (±1.3–1.5 pp): against three m4 responders, pairing with m4's control (`7164d396`, 25.0) and m4's critic proposer (`c4900f87`, 41.2); head to head with the start, answering by m4's rule and rejecting everything, both slot orders; and against three F.
+
+*open for marco.* the 0.1 offer prior; constant 5e-4; `main@best` as the start; the policy's γ (0.999 or 1.0, open since 26 october); whether to add a sampled-policy row (argmax only offers where p(offer) > 0.5).
 
 *open harness rows (not queued).* the symmetric table, where every seat proposes; a number against F, which needs an F that answers offers; and whether a policy trained with trades on the table keeps the edge.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/trade-learned-4p.yaml
+```)

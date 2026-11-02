@@ -115,8 +115,16 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 == the whole history
 
-=== a transformer over the whole history #chip("todo") <exp:markov-transformer>
-#meta(owner: "marco", wandb: (), records: ())
-#tldr[the expensive end of marco's scope. it was parked after the 2p tie; the 4p lstm's +4.4 pp takes it off the shelf. not started.]
+=== a transformer over the whole history #chip("queued") <exp:markov-transformer>
+#meta(dates: "2026-11-02", dates-label: "built", owner: "marco", config: "configs/experiments/transformer-4p.yaml", wandb: (), records: ())
+#tldr[the expensive end of marco's scope, built on 2 november: the graph trunk plus a causal transformer over every one of the seat's own decisions since the start of the game, sized to the lstm's parameter count, on `lstm-4p`'s recipe. about 3 h on the gpu; queued after the search-depth sweep.]
 
-*status.* a sequential model over the entire game history costs orders of magnitude more compute than the markov net. the plan was to build it only if the lstm beat the markov net, and at 4p it did. the question to answer first is what the memory carries, since it isn't hands: the candidates are the order of events and who did what to whom.
+*built.* preset `transformer`: the `graph-s` trunk's pooled embedding becomes one token per own decision; 2 pre-norm layers, width 128, 4 heads, rotary positions over the seat's decision index, the output at the current token fed into both heads as the lstm's memory is. the feed-forward is 128 wide so the net has 855,780 parameters against the lstm's 857,956: the comparison is about memory, not capacity. the context is the whole game (a `context` cap exists as a fallback). tokens from earlier rollout epochs are stored, so gradients don't reach the trunk through them, the same cut as the lstm's stored states. an update at learning rate 0 reproduces the rollout (clip fraction 0, kl at float rounding). eval streams are per seat, independent of `num_envs`, threads and game order; mcts, `BELIEF` and the server refuse it, as they refuse the lstm.
+
+*run.* `lstm-4p` with only the model changed: 750 epochs, 49.2M decisions, seed 42, the lambda critic. finals, 4,000 `heldout-4p` games a row: against three F, and head to head against the markov control (`aux-hidden-4p/plain@best`) and against `lstm-4p/main@best`, each in both slot orders (a paired gap of about 2.8 points is detectable). estimated 3 h and 6 GB peak on the gpu, from a cpu ratio of 0.83× the lstm; a gpu smoke comes first.
+
+*not built.* a token per env step (every seat's move, not only the seat's own) would let the memory see who did what to whom, the candidate for what the lstm's memory carries. the engine plays F's moves and forced moves inside its step, so evaluating it fairly against F needs an engine mode that hands the policy a row after every action; training would cost 2–3× more. marco decides after the decision-token run.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/transformer-4p.yaml
+```)
