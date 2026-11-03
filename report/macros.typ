@@ -86,12 +86,15 @@
   }
 }
 
+// A paragraph label that stands alone before a table, figure or list, kept on the same page as it: #lead[Result.]
+#let lead(body) = block(sticky: true, above: 1.05em, below: 0.65em, strong(body))
+
 // The plain-language summary at the top of an experiment.
 #let tldr(body) = callout[*Summary.* #body]
 
 // The command(s) that reproduce an experiment.
 #let repro(body) = block(
-  width: 100%, fill: code-fill, radius: 3pt, inset: (x: 9pt, y: 7pt), above: 1em, below: 1.2em,
+  breakable: false, width: 100%, fill: code-fill, radius: 3pt, inset: (x: 9pt, y: 7pt), above: 1em, below: 1.2em,
   {
     set text(size: 8.6pt)
     set par(justify: false)

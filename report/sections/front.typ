@@ -124,7 +124,7 @@ Dates appear only in the metadata lines. Marco's ideas are credited to him; idea
 
 *Setup.* v1 (#link("https://github.com/mcrco/catanrl")[catanrl]): `graph-s`, DAgger from F, then MARL PPO, 73.7M steps. The numbers come from the v1 report and are never paired with v2's.
 
-*Result.*
+#lead[Result.]
 #figure(
   btable(
     columns: (1fr, auto, auto, auto),
