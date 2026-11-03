@@ -1,0 +1,66 @@
+# Marco's fair trading test: two seats that can propose and accept trades against two that
+# can't, at one 4p table. Unlike M1-M4 (one strategic proposer against copies that accept
+# whatever their critic likes), both sides of every trade here use the same rule, and the only
+# asymmetry is that two seats trade at all. Read: the two traders' combined share against a
+# parity of 50, paired game by game with the same games where nobody trades.
+#   T = TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best   (proposes and answers,
+#       M4's player and critic)
+#   N = POLICY:ckpt=ppo-4p/main@best                                    (rejects every offer)
+# Rows, 1,000 heldout-4p boards x 4 rotations = 4,000 games each (the rotations put each
+# pattern in every seating):
+#   adjacent     [T, T, N, N]    alternating     [T, N, T, N]    control     [N, N, N, N]
+#   adjacent-F   [T, T, F, F]    alternating-F   [T, F, T, F]    control-F   [N, N, F, F], [N, F, N, F]
+# F never accepts an offer, so it is a non-trader already: the F rows give a trading number
+# against F. Summing the two trader slots also absorbs the slot after an F. The control for a
+# pattern is the same lineup with every T replaced by N (control serves both same-net
+# patterns). A paired gap of about 2 points in the pair's share is detectable at 80% power.
+# Records land under ppo-4p/main. Cost: M1-M4 ran 16,000 games in 34 min, so about an hour.
+name: trade-2v2-4p
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-4p, boards: 1000}   # adjacent
+      lineup:
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - "POLICY:ckpt=ppo-4p/main@best"
+    - suite: {name: heldout-4p, boards: 1000}   # alternating
+      lineup:
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - "POLICY:ckpt=ppo-4p/main@best"
+    - suite: {name: heldout-4p, boards: 1000}   # control
+      lineup:
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - "POLICY:ckpt=ppo-4p/main@best"
+    - suite: {name: heldout-4p, boards: 1000}   # adjacent-F
+      lineup:
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - F
+        - F
+    - suite: {name: heldout-4p, boards: 1000}   # alternating-F
+      lineup:
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - F
+        - "TRADE:ckpt=ppo-4p/main@best:critic=aux-hidden-4p/plain@best"
+        - F
+    - suite: {name: heldout-4p, boards: 1000}   # control for adjacent-F
+      lineup:
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - F
+        - F
+    - suite: {name: heldout-4p, boards: 1000}   # control for alternating-F
+      lineup:
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - F
+        - "POLICY:ckpt=ppo-4p/main@best"
+        - F
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

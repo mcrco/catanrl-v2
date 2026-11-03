@@ -227,6 +227,23 @@ Paired: 1,080 games won only with trading, 433 only without, p < 10#super[−60]
 catanrl run configs/experiments/trade-harness-m4.yaml   # needs the ppo-4p/main and aux-hidden-4p/plain runs
 ```)
 
+=== The fair test: two traders against two non-traders #chip("queued") <exp:trade-2v2>
+#meta(dates: "2026-11-03", dates-label: "queued", owner: "marco", config: "configs/experiments/trade-2v2-4p.yaml", wandb: (), records: ())
+#tldr[Marco's design. In m1–m4 a strategic proposer faced copies that accept whatever their critic likes, and those acceptors lost share (18 each in m1), so the proposer's gain was partly exploitation. Here both sides of every trade use the same rule; the only asymmetry is that two seats trade at all. Queued for when the search-depth sweep pauses after its e150 cell.]
+
+*Question.* Do two seats that trade with each other beat two seats that don't?
+
+#lead[Setup.]
+- *Seats.* T proposes and answers by Marco's rule (m4's player and critic: `ppo-4p/main@best`, judged by `aux-hidden-4p/plain@best`); N is the same net as a plain `POLICY`, which rejects every offer.
+- *Rows.* Adjacent `[T, T, N, N]` and alternating `[T, N, T, N]`; the suite's four rotations put each pattern in every seating. Then the same two patterns with F as the non-traders (F never accepts, so it needs no change), which gives a trading number against F.
+- *Control.* Each lineup with every T replaced by N, on the same games.
+- *Metric.* The two traders' combined share against a parity of 50, paired game by game with its control; 4,000 `heldout-4p` games a row, so a gap of about 2 points is detectable. About an hour on the GPU for all seven rows.
+- *Reading.* Above 50: trades between equals pay, and the outsiders pay for them. At 50: trading only moves share between the two traders, and m1–m4's gain came from exploiting acceptors.
+
+#repro(```sh
+catanrl run configs/experiments/trade-2v2-4p.yaml
+```)
+
 == Learned trading
 
 === A trade head trained from the PPO checkpoint #chip("queued") <exp:trade-learned>
@@ -253,10 +270,11 @@ The config holds a choice for items 1–4.
 + `main@best` as the start.
 + The policy's γ: 0.999 (`ppo-4p`'s, in the config) or 1.0; open since 26 October.
 + Whether to add a sampled-policy row: argmax only offers where p(offer) > 0.5.
++ Replacing the finals against m4's naive responders with the 2v2 test (@exp:trade-2v2): two learned traders against two copies of the start.
 
 #lead[Open harness rows (not queued).]
 + The symmetric table, where every seat proposes.
-+ A number against F, which needs an F that answers offers.
++ A number against F that answers offers (@exp:trade-2v2 gives one against F that never accepts).
 + Whether a policy trained with trades on the table keeps the edge.
 
 #repro(```sh
