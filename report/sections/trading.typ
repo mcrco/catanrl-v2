@@ -2,7 +2,7 @@
 
 = Trading <sec:trading>
 
-Can a bot gain from domestic trades? A critic-only oracle finds few trades that help both sides, yet a harness proposing every trade the critic likes for both takes 45.5% of 4p games (parity 25), +20.5 pp paired. The edge is in proposing, not accepting, and holds with the strongest 4p policy. A learned trade head is built and queued (@exp:trade-engine, @exp:trade-learned).
+Can a bot gain from domestic trades? A critic-only oracle finds few trades that help both sides, yet a harness proposing every trade the critic likes for both takes 45.5% of 4p games (parity 25), +20.5 pp paired. The edge is in proposing, not accepting, and holds with the strongest 4p policy. It also holds between equals: two seats trading with each other take 62–63% against two copies that don't (parity 50; @exp:trade-2v2). A learned trade head is built and queued (@exp:trade-engine, @exp:trade-learned).
 
 == Is trading worth an action space?
 
@@ -227,21 +227,49 @@ Paired: 1,080 games won only with trading, 433 only without, p < 10#super[−60]
 catanrl run configs/experiments/trade-harness-m4.yaml   # needs the ppo-4p/main and aux-hidden-4p/plain runs
 ```)
 
-=== The fair test: two traders against two non-traders #chip("running") <exp:trade-2v2>
-#meta(dates: "2026-11-03 06:47 –", owner: "marco", config: "configs/experiments/trade-2v2-4p.yaml", wandb: (("trade-2v2-4p-main-98b87d55", "main"),), records: ())
-#tldr[Marco's design. In m1–m4 a strategic proposer faced copies that accept whatever their critic likes, and those acceptors lost share (18 each in m1), so the proposer's gain was partly exploitation. Here both sides of every trade use the same rule; the only asymmetry is that two seats trade at all. Queued for when the search-depth sweep pauses after its e150 cell.]
+=== The fair test: two traders against two non-traders #chip("done") <exp:trade-2v2>
+#meta(
+  dates: "2026-11-03 06:47–08:08",
+  owner: "marco",
+  config: "configs/experiments/trade-2v2-4p.yaml",
+  wandb: (("trade-2v2-4p-main-98b87d55", "main"),),
+  records: ("f97034f7", "715096b5", "317670c3", "2071fef6", "f8473069", "2adefc8e", "324d79eb"),
+)
+#tldr[Trading pays between equals. Two seats that trade with each other take 61.7% (adjacent) and 62.9% (alternating) of games against two copies of the same net that don't, against exactly 50 without trading: +11.7 and +12.9 pp paired. Both traders gain 5–7 points each, so neither is exploiting the other. Against F, which the pair already beats 91–93% of the time, trading adds 3 points.]
 
-*Question.* Do two seats that trade with each other beat two seats that don't?
+*Question.* Do two seats that trade with each other beat two seats that don't (Marco)? In m1–m4 the proposer's acceptors lost share (18 each in m1), so part of the proposer's gain could be exploitation. Here both sides of every trade use the same rule; the only asymmetry is that two seats trade at all.
 
 #lead[Setup.]
 - *Seats.* T proposes and answers by Marco's rule (m4's player and critic: `ppo-4p/main@best`, judged by `aux-hidden-4p/plain@best`); N is the same net as a plain `POLICY`, which rejects every offer.
-- *Rows.* Adjacent `[T, T, N, N]` and alternating `[T, N, T, N]`; the suite's four rotations put each pattern in every seating. Then the same two patterns with F as the non-traders (F never accepts, so it needs no change), which gives a trading number against F.
-- *Control.* Each lineup with every T replaced by N, on the same games.
-- *Metric.* The two traders' combined share against a parity of 50, paired game by game with its control; 4,000 `heldout-4p` games a row, so a gap of about 2 points is detectable. About an hour on the GPU for all seven rows.
-- *Reading.* Above 50: trades between equals pay, and the outsiders pay for them. At 50: trading only moves share between the two traders, and m1–m4's gain came from exploiting acceptors.
+- *Rows.* Adjacent `[T, T, N, N]` and alternating `[T, N, T, N]`; the suite's four rotations put each pattern in every seating. Then the same two patterns with F as the non-traders (F never accepts, so it needs no change).
+- *Control.* Each lineup with every T replaced by N, on the same games. With N in all four seats it is exactly 50 by symmetry: each game's winning seat falls in a given pair of seats in two of the four rotations.
+- *Metric.* The two traders' combined share (parity 50), paired game by game with the control; 4,000 `heldout-4p` games a row. 1 h 21 min on the GPU for all seven rows.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, left),
+    header: ([Lineup], [Traders' share], [Control], [Paired gain], [Trades / game], [Records]),
+    tgroup(6)[Against the same net],
+    [`T T N N`], [*61.7* #ci[60.2][63.2]], [50.0], [+11.7 #sub[(p = 1e-30)]], [13.7], [`f97034f7` / `317670c3`],
+    [`T N T N`], [*62.9* #ci[61.4][64.4]], [50.0], [+12.9 #sub[(p = 1e-36)]], [14.1], [`715096b5` / `317670c3`],
+    tgroup(6)[Against F],
+    [`T T F F`], [*96.2* #ci[95.5][96.7]], [93.2], [+3.0 #sub[(p = 2e-10)]], [11.8], [`2071fef6` / `2adefc8e`],
+    [`T F T F`], [*94.8* #ci[94.0][95.4]], [91.3], [+3.4 #sub[(p = 2e-11)]], [12.2], [`f8473069` / `324d79eb`],
+  ),
+  caption: [The two traders' combined share (%) on `heldout-4p`, 4,000 games a row, against the same lineup with every T replaced by N. Paired gain: McNemar on games the pair wins.],
+) <tab:trade-2v2>
+
+- *Paired intervals.* +11.7 (9.7–13.7) and +12.9 (11.0–14.9) against the same net; +3.0 (2.1–3.9) and +3.4 (2.4–4.4) against F.
+- *Per seat, against the same net.* The traders take 31.6 and 30.1 (adjacent), 32.3 and 30.6 (alternating), each 5–7 points over 25; each outsider loses about 6.
+- *Per seat, against F.* The gain comes out of F's share, which falls from 6.8 to 3.8% (adjacent) and 8.7 to 5.2% (alternating). Within the adjacent pair it is uneven: +4.4 for the trader who plays after an F, −1.5 ±1.9 for the one who plays before.
+- *Trades.* Only between the two traders: about 44 offers a game, 12–14 completed, 4% cancelled. Games end 3.3 turns sooner against the same net (76.4 vs 79.7), 5.2 sooner against F.
+
+*Reading.* Yes for Marco's question, with the harness's rule: two seats trading with each other gain about 12 points of combined share from two equals that don't, and the outsiders pay for it. Unlike m1, both sides of the trades gain, so the edge is not one trader exploiting a naive acceptor. Seating barely matters (adjacent 61.7, alternating 62.9).
 
 #repro(```sh
-catanrl run configs/experiments/trade-2v2-4p.yaml
+catanrl run configs/experiments/trade-2v2-4p.yaml   # needs the ppo-4p/main and aux-hidden-4p/plain runs
 ```)
 
 == Learned trading
