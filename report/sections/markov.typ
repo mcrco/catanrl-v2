@@ -2,7 +2,7 @@
 
 = How Markov a decision is <sec:markov>
 
-Does the bot gain from remembering the game? Marco's scope runs from a cheap LSTM over the seat's own decisions to a transformer over the whole history: orders of magnitude more compute, but in his view the only way to a "perfect" bot, one that could learn that a seat which didn't play a knight while its best tile was blocked probably holds none. So far the LSTM ties the Markov net in 2p, beats it by 4.4 points in 4p, and doesn't read hands. The transformer is queued (@exp:markov-transformer).
+Does the bot gain from remembering the game? Marco's scope runs from a cheap LSTM over the seat's own decisions to a transformer over the whole history: orders of magnitude more compute, but in his view the only way to a "perfect" bot, one that could learn that a seat which didn't play a knight while its best tile was blocked probably holds none. So far the LSTM ties the Markov net in 2p, beats it by 4.4 points in 4p, and doesn't read hands. The transformer is running (@exp:markov-transformer).
 
 == An LSTM over the seat's own decisions
 
@@ -127,9 +127,9 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 == The whole history
 
-=== A transformer over the whole history #chip("queued") <exp:markov-transformer>
-#meta(dates: "2026-11-02", dates-label: "built", owner: "marco", config: "configs/experiments/transformer-4p.yaml", wandb: (), records: ())
-#tldr[The expensive end of Marco's scope: a causal transformer over all of the seat's own decisions this game, sized to the LSTM, on `lstm-4p`'s recipe. About 3 h on the GPU, queued after the search-depth sweep.]
+=== A transformer over the whole history #chip("running") <exp:markov-transformer>
+#meta(dates: "2026-11-03 08:24 –", owner: "marco", config: "configs/experiments/transformer-4p.yaml", wandb: (("transformer-4p-main-6feb995a", "main"),), records: ())
+#tldr[The expensive end of Marco's scope: a causal transformer over all of the seat's own decisions this game, sized to the LSTM, on `lstm-4p`'s recipe. Running since 3 November, about 3 h; it trains as fast as the LSTM.]
 
 #lead[Built.]
 - *Preset `transformer`.* One token per own decision from `graph-s`'s pooled embedding; 2 pre-norm layers, width 128, 4 heads, rotary positions; the current token's output feeds both heads. Context is the whole game (a `context` cap exists as a fallback).
@@ -139,7 +139,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 #lead[Run.]
 - `lstm-4p` with only the model changed: 750 epochs, 49.2M decisions, seed 42, the lambda critic.
 - Finals, 4,000 `heldout-4p` games a row: against three F, and head to head against the Markov control (`aux-hidden-4p/plain@best`) and `lstm-4p/main@best` in both slot orders (a paired gap of about 2.8 points is detectable).
-- An estimated 6 GB peak on the GPU (from a CPU ratio of 0.83× the LSTM); a GPU smoke first.
+- GPU smoke (3 November, scratch runs, W&B off): the CUDA tests pass; at learning rate 0 the KL stays below 2 × 10#super[−10] with clip fraction 0; 60 epochs from scratch run at 21.5k decisions/s (the LSTM: 22.5k) with a 5.65 GiB peak (4.9).
 
 #lead[Open for Marco.]
 + Tokens per env step (every seat's move) would show the memory who did what to whom, but need an engine mode that hands the policy a row after every action (the engine plays F's and forced moves inside its step) and cost 2–3× more to train. Marco decides after this run.
