@@ -227,8 +227,8 @@ Paired: 1,080 games won only with trading, 433 only without, p < 10#super[−60]
 catanrl run configs/experiments/trade-harness-m4.yaml   # needs the ppo-4p/main and aux-hidden-4p/plain runs
 ```)
 
-=== The fair test: two traders against two non-traders #chip("queued") <exp:trade-2v2>
-#meta(dates: "2026-11-03", dates-label: "queued", owner: "marco", config: "configs/experiments/trade-2v2-4p.yaml", wandb: (), records: ())
+=== The fair test: two traders against two non-traders #chip("running") <exp:trade-2v2>
+#meta(dates: "2026-11-03 06:47 –", owner: "marco", config: "configs/experiments/trade-2v2-4p.yaml", wandb: (("trade-2v2-4p-main-98b87d55", "main"),), records: ())
 #tldr[Marco's design. In m1–m4 a strategic proposer faced copies that accept whatever their critic likes, and those acceptors lost share (18 each in m1), so the proposer's gain was partly exploitation. Here both sides of every trade use the same rule; the only asymmetry is that two seats trade at all. Queued for when the search-depth sweep pauses after its e150 cell.]
 
 *Question.* Do two seats that trade with each other beat two seats that don't?

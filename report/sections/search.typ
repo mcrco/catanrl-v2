@@ -145,15 +145,15 @@ catanrl eval "MCTS:ckpt=puffer-graph2/public@e3600:sims=4096:dets=1" \
 catanrl run configs/experiments/gumbel-edge-2p.yaml
 ```)
 
-=== Search depth vs strength across training #chip("stopped") <exp:search-depth-2p>
+=== Search depth vs strength across training #chip("parked") <exp:search-depth-2p>
 #meta(
-  dates: "2026-10-29 00:47 – 10-31 23:41",
+  dates: "2026-10-29 00:47 – 11-03 06:46; paused",
   owner: "marco",
   config: "configs/experiments/search-depth-2p.yaml",
   wandb: (("search-depth-2p-s64-b23bbbaf", "s64"), ("search-depth-2p-s128-1cd135fb", "s128"), ("search-depth-2p-s256-28bd5783", "s256"), ("search-depth-2p-s1024-2bb0e327", "s1024"), ("search-depth-2p-s4096-510e46c4", "s4096"), ("search-depth-2p-s16384-152f0cab", "s16384")),
-  records: ("be98751d", "2672eaad", "101296e4", "13061034", "d7fc0e57", "9004b0ac", "19048e65", "ad2a43f4", "76c3fbed", "8269c07b", "032c4368", "83b507c8", "ec991f87", "1cee7f01", "49254c47", "ce9f6daf", "13ed5ff1", "25c4c060", "e26edabf", "c91e1186", "ce60e974", "f44b638f", "1055bdc2", "d653b342", "812040d1", "e07a8a98", "1f623400"),
+  records: ("be98751d", "2672eaad", "101296e4", "13061034", "d7fc0e57", "9004b0ac", "19048e65", "ad2a43f4", "76c3fbed", "8269c07b", "032c4368", "83b507c8", "ec991f87", "1cee7f01", "49254c47", "ce9f6daf", "13ed5ff1", "25c4c060", "e26edabf", "c91e1186", "ce60e974", "f44b638f", "1055bdc2", "d653b342", "812040d1", "e07a8a98", "1f623400", "4fae3019"),
 )
-#tldr[More search helps every checkpoint and has not leveled off: each 4× in sims from 256 up adds 3–7 points, including 4,096 → 16,384 (final net 57.0 → 60.5%, e500 71.1 → 75.8%). The weaker the net, the more search adds: at 4,096 sims e50's search wins 82.0%, the final net's 57.0%. Three 16,384-sim cells (e150, e1500, e50) are pending, being played again after an out-of-memory kill.]
+#tldr[More search helps every checkpoint and has not leveled off: each 4× in sims from 256 up adds 3–7 points, including 4,096 → 16,384 (final net 57.0 → 60.5%, e500 71.1 → 75.8%, e150 76.4 → 80.7%). The weaker the net, the more search adds: at 4,096 sims e50's search wins 82.0%, the final net's 57.0%. Paused on 3 November (Marco) for the 2v2 trading test and the transformer, with the e1500 and e50 cells at 16,384 sims still to play.]
 
 *Question.* Does more search keep making a network stronger, and does that change as it trains (Marco)?
 
@@ -167,9 +167,9 @@ catanrl run configs/experiments/gumbel-edge-2p.yaml
 - Before launch: about 82 searcher decisions a game, each a full search. A leaf costs about 16 µs of network on the fused kernels in 512-row batches (29 µs in plain PyTorch), 21 µs in 96-row batches, plus 4–9 µs of tree work.
 - A 16,384-sim tree holds about 95~MB, so that cell keeps about 80 searches (160 games) in flight. Variants run by sims; each plays the last checkpoint first, then the middle one.
 - The \~65 h launch estimate was 2× too low. Strict determinism pads every forward to the full batch, so a cell's tail of a few long games costs a full batch per move. And e50 plays very long games (112 turns on average at 1,024 sims, six of 1,000 cut at 500 turns), so its cells take 3–3.5× the others.
-- Wall time per checkpoint: 1.1 h at 1,024 sims (e50: 3.8 h), 4.1–4.3 h at 4,096 (e50: 8.8 h), 16.3–16.5 h at 16,384 (e3786, e500).
+- Wall time per checkpoint: 1.1 h at 1,024 sims (e50: 3.8 h), 4.1–4.3 h at 4,096 (e50: 8.8 h), 16.3–16.5 h at 16,384 (e3786, e500) with 160 games in flight, 17.9 h for e150 with 96.
 
-*Stopped.* 15 minutes into the e150 cell at 16,384 sims, the OOM killer ended the eval at 16.6~GB with 160 games in flight (less free memory than at launch, swap full). The e3786 and e500 cells at 16,384 are complete. A resume plays e150, e1500 and e50 at 96 games in flight: an estimated 25 h each for e150 and e1500, three days or more for e50.
+*Stopped, resumed, paused.* 15 minutes into the e150 cell at 16,384 sims, the OOM killer ended the eval at 16.6~GB with 160 games in flight (less free memory than at launch, swap full). The resume (2 November, 96 games in flight) finished e150 in 17.9 h, then was paused at the start of e1500 for the 2v2 trading test and the transformer (Marco). Still to play at 16,384: e1500 (about 18 h) and e50 (two days or more). Resuming skips finished cells, but must run on the same code: records from different code do not pair.
 
 #lead[Result.]
 #figure(
@@ -178,12 +178,12 @@ catanrl run configs/experiments/gumbel-edge-2p.yaml
     align: (left, right, right, right, right, right, right, right),
     header: ([Checkpoint], [vs F], [64], [128], [256], [1,024], [4,096], [16,384]),
     [e50], [47], [57.5], [61.3], [66.4], [75.7], [*82.0*], [—],
-    [e150], [80], [55.6], [60.2], [62.7], [71.0], [*76.4*], [—],
+    [e150], [80], [55.6], [60.2], [62.7], [71.0], [76.4], [*80.7*],
     [e500], [92], [56.2], [57.4], [60.0], [64.4], [71.1], [*75.8*],
     [e1500], [95], [51.9], [53.1], [56.9], [60.7], [*65.0*], [—],
     [e3786], [98.5], [48.4], [49.0], [50.7], [53.9], [57.0], [*60.5*],
   ),
-  caption: [MCTS win rate (%) by sims against the same checkpoint's raw policy on `heldout-2p-fr`, 1,000 games a cell. "vs F": the raw policy on the select suite in training. "—": pending, being played again.],
+  caption: [MCTS win rate (%) by sims against the same checkpoint's raw policy on `heldout-2p-fr`, 1,000 games a cell. "vs F": the raw policy on the select suite in training. "—": not yet played (sweep paused).],
 ) <tab:search-depth>
 
 #figure(
@@ -197,12 +197,12 @@ catanrl run configs/experiments/gumbel-edge-2p.yaml
     align: (left, right, right, right, right),
     header: ([Checkpoint], [64 → 1,024], [256 → 1,024], [1,024 → 4,096], [4,096 → 16,384]),
     [e50], [+18.1 #sub[(p = 8e-24)]], [+9.2 #sub[(p = 2e-7)]], [+6.4 #sub[(p = 7e-5)]], [—],
-    [e150], [+15.4 #sub[(p = 3e-20)]], [+8.3 #sub[(p = 2e-7)]], [+5.4 #sub[(p = 7e-4)]], [—],
+    [e150], [+15.4 #sub[(p = 3e-20)]], [+8.3 #sub[(p = 2e-7)]], [+5.4 #sub[(p = 7e-4)]], [+4.3 #sub[(p = 0.002)]],
     [e500], [+8.2 #sub[(p = 3e-6)]], [+4.4 #sub[(p = 0.003)]], [+6.7 #sub[(p = 3e-5)]], [+4.7 #sub[(p = 0.003)]],
     [e1500], [+8.8 #sub[(p = 3e-8)]], [+3.8 #sub[(p = 0.007)]], [+4.3 #sub[(p = 0.005)]], [—],
     [e3786], [+5.5 #sub[(p = 5e-5)]], [+3.2 #sub[(p = 0.007)]], [+3.1 #sub[(p = 0.02)]], [+3.5 #sub[(p = 0.01)]],
   ),
-  caption: [Win-rate gain in points from more sims, paired on the same games (McNemar, `tools/search_probe.py --pair`). "—": pending.],
+  caption: [Win-rate gain in points from more sims, paired on the same games (McNemar, `tools/search_probe.py --pair`). "—": not yet played.],
 ) <tab:search-depth-paired>
 
 #lead[Reading.]
