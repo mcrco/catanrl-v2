@@ -2,7 +2,7 @@
 
 = Monte Carlo playouts instead of a tree <sec:playouts>
 
-Marco's idea: replace the search tree with plain playouts. For the policy's top _k_ actions, play _n_ full games from each with the raw policy on sampled worlds, and take the action with the best win rate. Costed from our own numbers, it is far too slow as a player at _k_~=~5, _n_~=~1,000, but cheap enough as a reference that grades the search and the critic. Nothing is queued.
+Marco's idea: replace the search tree with playouts. For the policy's top _k_ actions, play _n_ full games from each with the raw policy on sampled worlds; take the best win rate. Nothing is queued.
 
 === Monte Carlo playouts over the top actions #chip("todo") <exp:playouts>
 #meta(
@@ -12,9 +12,9 @@ Marco's idea: replace the search tree with plain playouts. For the policy's top 
   wandb: (),
   records: ("831eea84",),
 )
-#tldr[Costed, not run. As a player at _k_~=~5, _n_~=~1,000 it would cost \~150 GPU hours a 1,000-game row, against 3.9 h for MCTS at 2,048 sims. It is feasible as a reference $Q^pi$ at a few hundred positions, or as a cheaper player with sequential halving or truncated playouts.]
+#tldr[Costed, not run. As a player at _k_~=~5, _n_~=~1,000 it would cost \~150 GPU hours a 1,000-game row (MCTS at 2,048 sims: 3.9 h). It is feasible as a reference $Q^pi$ for grading the search and the critic, or as a cheaper player (sequential halving, truncated playouts).]
 
-*Idea.* _k_ ≈ 5 actions, _n_ ≈ 1,000 playouts each, no critic at all. The policy plays fair (it sees only its own observation), so a playout in a world dealt from the tracker is a proper sample of the outcome. That makes this one step of policy iteration (Tesauro's backgammon rollouts). The engine has the pieces: `cpp.sample_world` deals a world from a seat's tracker, and games copy.
+*Idea.* No critic at all. The policy sees only its own observation, so a playout in a world dealt from the tracker is a fair sample of the outcome: one step of policy iteration (Tesauro's backgammon rollouts). The engine has the pieces: `cpp.sample_world` deals a world from a seat's tracker, and games copy.
 
 #lead[Cost.]
 #figure(
@@ -33,6 +33,6 @@ Marco's idea: replace the search tree with plain playouts. For the policy's top 
   caption: [The cost of playouts as a player, from our own numbers.],
 )
 
-*Status.* Not viable as a player at that size. Two cheaper uses:
-+ *A reference.* $Q^pi (s, a)$ for the top actions at a few hundred positions (500 positions ≈ 1.5 GPU hours), with common random numbers (the same worlds and dice for every action): ±1.6 pp per action at _n_~=~1,000. It would grade the search's choices and the critic far better than one noisy 8,192-sim search. (Claude's suggestion, not queued)
-+ *A cheaper player.* Sequential halving over the actions, or truncated playouts (_d_ moves, then the critic), at maybe 5–10× the cost of MCTS at 2,048 sims. (Claude's suggestion, not queued)
+*Status.* Two cheaper uses:
++ *A reference.* $Q^pi (s, a)$ for the top actions at a few hundred positions (500 positions ≈ 1.5 GPU hours), with common random numbers (the same worlds and dice for every action): ±1.6 pp per action at _n_~=~1,000. A far better grader of the search's choices and the critic than one noisy 8,192-sim search. (Claude's suggestion, not queued)
++ *A cheaper player.* Sequential halving over actions, or truncated playouts (_d_ moves, then the critic), at maybe 5–10× MCTS's cost at 2,048 sims. (Claude's suggestion, not queued)

@@ -2,7 +2,7 @@
 
 = One model for any number of players and any map <sec:generalist>
 
-Marco's idea: train one network for any player count and any map, using masked numeric features and the graph network, which already handles any hex board. Can such a generalist match the specialists? So far `ppo-mixed` comes within 2–3 points of each specialist against F and plays unseen blob maps nearly as well as BASE, but the specialists still win head to head: the generalist scores 45.7% against the 2p specialist and trails the 4p specialist by 2.7 points. Training on blob maps too made it worse everywhere, so `ppo-mixed` is the bot on the island table (@sec:deploy).
+Marco's idea: one network for any player count and any map, using masked numeric features and the graph network, which already handles any hex board. `ppo-mixed` nearly matches the specialists against F, even on unseen maps, but loses to them head to head. Training on blob maps too made it worse everywhere, so `ppo-mixed` is the bot on the island table (@sec:deploy).
 
 == One network over 2–4 players
 
@@ -14,15 +14,15 @@ Marco's idea: train one network for any player count and any map, using masked n
   wandb: (("ppo-mixed-main-f4b771c0", "ppo-mixed/main"),),
   records: ("b2690265", "0f448f68", "7c17d0ae", "9b470a17", "340ce1db", "32aab9f3"),
 )
-#tldr[One network for 2, 3 and 4 players on two board types comes within 2–3 points of each specialist against F, and plays blob maps it never saw nearly as well as BASE (73.9 vs 77.0). Head to head the specialists still win: the generalist scores 45.7% in 2p and trails by 2.7 points in 4p.]
+#tldr[One network for 2–4 players on two board types comes within 2–3 points of each specialist against F and plays unseen blob maps nearly as well as BASE (73.9 vs 77.0). Head to head it scores 45.7% in 2p and trails by 2.7 points in 4p.]
 
-*Question.* Can one network match the specialists at the same total number of decisions?
+*Question.* Can one network match the specialists at the same total decisions?
 
 #lead[Setup.]
-- *Scenarios.* `ppo-4p`'s recipe (@sec:recipe) over six equally weighted scenarios: 2, 3 and 4 players on BASE and on `hexagon` boards. `env.scenarios` draws each game from a weighted list of (player count, rules, map generator).
-- *Masking.* The harness already does it: each row is padded to the env's maxima with a validity bit per slot, absent seats are all zero, the global block one-hots the number of seats, and the per-seat value head predicts every present seat.
-- *Budget.* `ppo-4p`'s: 3,800 epochs, 1B agent steps = 249M decisions, 11.5 h. Best checkpoint `e3550` by `select-mixed` (83.6). Launched without the W&B mirror and backfilled.
-- *Blob maps.* Blob-shaped boards of 15–30 tiles (`random-4p`) stay out of training: they would double the row (6,316 floats vs 3,202) and the memory. The run is tested on them zero-shot (`heldout-random-4p`).
+- *Scenarios.* `ppo-4p`'s recipe (@sec:recipe) over six equally weighted scenarios, drawn per game by `env.scenarios`: 2, 3 and 4 players on BASE and on `hexagon` boards.
+- *Masking.* Rows are padded to the env's maxima with a validity bit per slot; absent seats are zero, the global block one-hots the seat count, and the per-seat value head predicts every present seat.
+- *Budget.* `ppo-4p`'s: 3,800 epochs, 1B agent steps = 249M decisions, 11.5 h. Best `e3550` by `select-mixed` (83.6). Run without the W&B mirror, backfilled.
+- *Blob maps* (`random-4p`) stay out of training: they would double the row (6,316 floats vs 3,202) and the memory.
 
 #lead[Result.]
 #figure(
@@ -37,13 +37,13 @@ Marco's idea: train one network for any player count and any map, using masked n
     [Blob maps, zero-shot (`heldout-random-4p`) \ #sub[15–30 tiles]], [4,000], [73.9 #ci[72.5][75.3]], [—], [`7c17d0ae`],
     [The mixed suite as a whole (`heldout-mixed`)], [4,500], [79.8 #ci[78.6][80.9]], [—], [`9b470a17`],
     tgroup(5)[Head to head (generalist's share, specialist's share)],
-    [2p, vs `puffer-graph2`'s belief-averaged policy], [5,000], [45.7 #ci[44.4][47.1]], [], [`340ce1db`],
+    [2p, vs the specialist belief-averaged \ #sub[`BELIEF`, 16 worlds]], [5,000], [45.7 #ci[44.4][47.1]], [], [`340ce1db`],
     [4p, vs `ppo-4p` with two F \ #sub[both slot orders (@exp:gen-slot-order)]], [2 × 4,000], [45.1], [47.8], [`32aab9f3` \ `0903fae0`],
   ),
-  caption: [`ppo-mixed@e3550` against F and against the specialists. Scores are score shares (a win counts 1, a truncation 1/N). The 4p head to head is the corrected one: paired −2.7 pp #ci[−4.7][−0.8] per game for the generalist.],
+  caption: [`ppo-mixed@e3550`, score shares. Specialists: `puffer-graph2/full@e3350` in 2p, raw against F (`ff8528a4`; unfair, it sees F's dev cards), and `ppo-4p/main@e3650` in 4p. The 4p head to head is paired over both slot orders: −2.7 pp #ci[−4.7][−0.8] per game for the generalist.],
 )
 
-*Reading.* One network handles any seat count and board shape within 2–3 points of a specialist against F, and the graph net transfers to board shapes it never trained on nearly for free (73.9 on blobs vs 77.0 on BASE). But each setting got a third of a specialist's decisions, and the specialists win the direct matches: this is a budget question as much as a capacity one. The next step is more decisions per setting (@exp:gen-followups).
+*Reading.* Seat count and board shape cost little, even zero-shot. But each setting got a third of a specialist's decisions, so losing the direct matches is a budget question as much as a capacity one. Next: more decisions per setting (@exp:gen-followups).
 
 #repro(```sh
 # Training, then the six finals of eval.final
@@ -57,11 +57,11 @@ catanrl run configs/experiments/ppo-mixed.yaml
   wandb: (("slot-order-main-f29f8c33", "slot-order, eval only"), ("ppo-4p-main-6349dc93", "ppo-4p/main (no local mirror)"), ("ppo-mixed-main-f4b771c0", "ppo-mixed/main")),
   records: ("0903fae0", "32aab9f3", "b07e5bd9"),
 )
-#tldr[In a 4p table with two F, the slot right after an F loses about 12 points: two identical copies of `ppo-4p` split 40.45 / 52.75. So every 4p head to head has to run both slot orders. Corrected that way, the 4p specialist beats `ppo-mixed` by 2.7 points, not 14.]
+#tldr[With two F at a 4p table, the slot right after an F loses about 12 points: identical copies of `ppo-4p` split 40.45 / 52.75. Over both slot orders the 4p specialist beats `ppo-mixed` by 2.7 points, not 14.]
 
-*Question.* The first 4p head to head had `ppo-mixed` at 39.3 against `ppo-4p`'s 53.0; how much of that gap is the seating?
+*Question.* How much of `ppo-mixed`'s first 4p head-to-head deficit is seating?
 
-*Setup.* Slot 0 always moves right after the F in slot 3, which robs and blocks it (see "The slot after an F" in @sec:front; the diagnosis came from the tracker-modes table, @sec:hidden). `slot-order` plays the swapped order [`ppo-4p`, `ppo-mixed`, F, F] on the same 1,000 boards × 4 rotations (4,000 games, one minute). Averaging each agent over the two orders pairs them game by game.
+*Setup.* Slot 0 moves right after the F in slot 3, which robs and blocks it (@sec:front; diagnosed in @sec:hidden). `slot-order` plays the swapped lineup on the same 1,000 boards × 4 rotations (4,000 games, one minute); averaging each agent over both orders pairs them game by game.
 
 #lead[Result.]
 #figure(
@@ -75,10 +75,10 @@ catanrl run configs/experiments/ppo-mixed.yaml
     mid,
     table.cell(colspan: 4)[Over both orders: `ppo-mixed` 45.1, `ppo-4p` 47.8; paired −2.7 pp #ci[−4.7][−0.8] per game],
   ),
-  caption: [4p head-to-head shares with the two learners in slots 0 and 1 and F in slots 2 and 3; 4,000 games a record.],
+  caption: [4p shares with the learners in slots 0 and 1 and F in slots 2 and 3; 4,000 games a record.],
 )
 
-*Reading.* The 4p specialist does win, by three points rather than fourteen. Every later 4p head to head runs both slot orders or reports the two learner seats summed.
+*Reading.* Every later 4p head to head runs both slot orders or sums the two learner seats.
 
 #repro(```sh
 # The swapped order (0903fae0)
@@ -98,16 +98,16 @@ catanrl eval "POLICY:ckpt=ppo-mixed/main@e3550" "POLICY:ckpt=ppo-4p/main@e3650" 
   wandb: (("ppo-mixed-blob-main-14c55ba5", "ppo-mixed-blob/main"),),
   records: ("75cab037", "799eac40", "ac020b20", "fb5a66f8", "7c17d0ae"),
 )
-#tldr[Adding blob maps as a seventh scenario made the generalist worse everywhere, blobs included: 67.4 against `ppo-mixed`'s zero-shot 73.9. Three things changed at once and none was isolated, so `ppo-mixed` stays the island bot.]
+#tldr[Blob maps as a seventh scenario made the generalist worse everywhere, blobs included (67.4 against `ppo-mixed`'s zero-shot 73.9). Three things changed at once, none isolated, so `ppo-mixed` stays the island bot.]
 
-*Question.* Zero-shot, the architecture copes with blob maps; does training on them beat `ppo-mixed`'s 73.9 on `heldout-random-4p`?
+*Question.* Does training on blob maps beat zero-shot?
 
-*Setup.* `ppo-mixed` with `random-4p` as a seventh scenario of equal weight.
-- *Same steps.* 512 games in flight over 7,600 epochs instead of 1,024 over 3,800, with the same 32,768-row minibatch, so agent and optimizer steps match.
-- *Critic.* The lambda default (`ppo-mixed` trained with the older V-trace critic; @sec:recipe).
-- *Padding.* The blobs set the dims (30 tiles, 122 nodes, 151 edges, 611 actions, against 19 / 54 / 72 / 352), so every row is padded to them, and six games in seven are 19-tile boards run at blob size.
-- *Cost.* Compute is the limit, not memory (5.5 GiB peak): 11.5k agent steps/s against `ppo-mixed`'s 24.7k; 24.2 h in all.
-- *Checkpoint.* `e7600`, the last, by `select-mixed` (78.8); still climbing at the end (76.8 at e7300).
+*Setup.* `ppo-mixed` plus `random-4p` at equal weight.
+- *Same steps.* 512 games in flight over 7,600 epochs instead of 1,024 over 3,800; same 32,768-row minibatch.
+- *Critic.* The lambda default (`ppo-mixed` used the older V-trace critic; @sec:recipe).
+- *Padding.* Blobs set the dims (30 tiles, 122 nodes, 151 edges, 611 actions vs 19 / 54 / 72 / 352), so six games in seven are 19-tile boards run at blob size.
+- *Cost.* Compute-bound, not memory-bound (5.5 GiB peak): 11.5k agent steps/s vs `ppo-mixed`'s 24.7k; 24.2 h.
+- *Checkpoint.* `e7600`, the last, by `select-mixed` (78.8); still climbing (76.8 at e7300).
 
 #lead[Result.]
 #figure(
@@ -120,10 +120,10 @@ catanrl eval "POLICY:ckpt=ppo-mixed/main@e3550" "POLICY:ckpt=ppo-4p/main@e3650" 
     [4p (`heldout-4p`)], [4,000], [70.6 #ci[69.2][72.0]], [77.0 #ci[75.7][78.3]], [`ac020b20` / `0f448f68`],
     [The mixed suite (`heldout-mixed`)], [4,500], [75.0 #ci[73.7][76.2]], [79.8 #ci[78.6][80.9]], [`fb5a66f8` / `9b470a17`],
   ),
-  caption: [`ppo-mixed-blob@e7600` against `ppo-mixed@e3550`, on the same suites and lineups.],
+  caption: [`ppo-mixed-blob@e7600` and `ppo-mixed@e3550` against F, same suites and lineups.],
 )
 
-*Reading.* A drop of 2–7 points in every setting, the added one included, is not the seventh scenario taking a seventh of the decisions instead of a sixth: something changed for all of them. Three things did, none tested on its own: the lambda critic default, half as many games in flight per epoch, and every row padded to blob size. The deploy gate failed: for an island table `ppo-mixed` stays the stronger bot until one of those is isolated.
+*Reading.* A 2–7 point drop in every setting, the added one included, is not the blob scenario taking a seventh of the decisions instead of a sixth; something changed for all of them. Three things did, none tested alone: the lambda critic, half the games in flight, and blob-size padding. The deploy gate failed.
 
 #repro(```sh
 catanrl run configs/experiments/ppo-mixed-blob.yaml
@@ -133,10 +133,10 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 
 === Closing the gap to the specialists #chip("todo") <exp:gen-followups>
 #meta(owner: "assistant")
-#tldr[Give the generalist the specialists' per-setting budget or a per-setting fine-tune; separately, find which of `ppo-mixed-blob`'s three changes cost the 2–7 points. (Claude's suggestion, not queued)]
+#tldr[Give the generalist the specialists' per-setting budget or a per-setting fine-tune, and isolate which `ppo-mixed-blob` change cost 2–7 points. (Claude's suggestion, not queued)]
 
-*Plan.* Each setting got a third of a specialist's decisions. Give the generalist the specialists' per-setting budget (3× the decisions, about 35 h), or fine-tune it per setting for a few hundred epochs; if the gap closes, the generalist is the model to ship. Separately, rerun `ppo-mixed-blob` with one change at a time (the lambda critic, half the games in flight, padding to blob size) to find what cost the 2–7 points.
+*Plan.* Either 3× the decisions (the specialists' per-setting budget, about 35 h) or a per-setting fine-tune of a few hundred epochs; if the gap closes, ship the generalist. Separately, rerun `ppo-mixed-blob` with one change at a time (@exp:gen-blob).
 
 === 5–6 players on the extension map #chip("todo") <exp:gen-5-6p>
 #meta(owner: "marco")
-#tldr[Not started: blocked on the engine, since 5–6 player games need the special building phase. After that, 5–6 players are one more scenario in `ppo-mixed` (one more entry in `env.scenarios`).]
+#tldr[Blocked on the engine: 5–6 player games need the special building phase; then they are one more entry in `ppo-mixed`'s `env.scenarios`.]

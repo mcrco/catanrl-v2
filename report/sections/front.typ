@@ -2,11 +2,9 @@
 
 = Goal and current best bots <sec:front>
 
-The goal is a recipe for the best Catan bot, for any number of players on any map. v1 (#link("https://github.com/mcrco/catanrl")[catanrl]) got a two-player bot to about 90% against Catanatron's `ValueFunctionPlayer` (F). v2 rebuilt the stack around a C++ engine and PufferLib; its raw policy, trained from scratch, wins over 95% against F in 2p.
+The goal is a recipe for the best Catan bot, for any number of players on any map. v1 (#link("https://github.com/mcrco/catanrl")[catanrl]) reached about 90% against Catanatron's `ValueFunctionPlayer` (F) in 2p. v2 rebuilt the stack around a C++ engine and PufferLib; its raw policy, trained from scratch, wins over 95%.
 
-The bottom line so far: self-play PPO on a graph network gives a strong raw policy, and search on top of it wins 53.4–62.4% of games against that same policy. Two AlphaZero runs on top made the network worse (@sec:az).
-
-Most experiments are a config under `configs/experiments/`. A number without an eval record states its source: a training metric, or a JSON file under `report/data/`.
+So far: self-play PPO on a graph network gives a strong raw policy, and search on top wins 53.4–62.4% of games against that same policy. Two AlphaZero runs on top made the network worse (@sec:az). Most experiments are a config under `configs/experiments/`; a number without an eval record names its source (a training metric, or a JSON file under `report/data/`).
 
 #callout[
   *Marco's recipe.* Implement the engine in C++, turn it into a PufferLib env, run for about 1B steps, and get a really good shared-trunk critic + policy that beats `ValueFunctionPlayer` about 90% of the time. Put the critic + policy inside an MCTS harness, with a simple probabilistic belief-sampling determinization, to get another few points head to head over the raw policy.
@@ -16,11 +14,11 @@ Most experiments are a config under `configs/experiments/`. A number without an 
 
 == Latest results (2 November 2026)
 
-- *Search depth sweep* (Marco; @exp:search-depth-2p). MCTS at 64 to 16,384 sims against the same checkpoint's raw policy, for five checkpoints of one run from scratch, 1,000 games per cell. More search helps every checkpoint at every step and has not leveled off by 16,384 sims: each 4× adds 3–7 points, and the final net scores 53.9, 57.0 and 60.5% at 1,024, 4,096 and 16,384 sims. The weaker the net, the more search adds (82.0% for the epoch-50 net at 4,096 sims). The run ran out of memory with three 16,384-sim cells unplayed; they are running again with fewer games in flight.
+- *Search depth sweep* (Marco; @exp:search-depth-2p). MCTS at 64 to 16,384 sims against the same checkpoint's raw policy, five checkpoints of one run, 1,000 games per cell. More search helps every checkpoint at every step, with no plateau by 16,384 sims: each 4× adds 3–7 points (final net: 53.9, 57.0, 60.5% at 1,024, 4,096, 16,384). Weaker nets gain more (82.0% for the epoch-50 net at 4,096). Three 16,384-sim cells were lost to an out-of-memory kill and are running again with fewer games in flight.
 - *Queued behind the sweep*: Marco's learned trading (option one on `ppo-4p/main@best`, @exp:trade-learned) and the transformer over the whole game history (@exp:markov-transformer). Both were built and tested on 2 November.
-- *LLM eval* (@exp:llm-eval). Audited before any paid run: the prompts stated the wrong rules, named robber targets in coordinates the state never used, showed no game history, and nothing capped spending. All fixed; the eval waits on a model list and a budget.
-- *OpenHex rules* (@sec:recipe). The deployed 1v1 net, continued for 1B steps on OpenHex's 1v1 rules (friendly robber, balanced dice), beats its start 63.2% and F 98.8%. A second 1B steps at the final, lowest learning rate gained little: its best checkpoint is level with the first run's (51.0% head to head, 98.9% vs F), so the net has roughly leveled off. Restarting the learning rate at its peak fell to \~41% against the start and was stopped.
-- *Discount vs no discount* (@exp:recipe-discount), from scratch with two seeds per arm. The discount makes games end faster: without it, games against F run 4.6 and 2.6 turns longer on the two seeds (paired over 5,000 games), against half a turn between two seeds of the same arm. It does not change strength: head to head the arms are level, 49.98% over 10,000 games.
+- *LLM eval* (@exp:llm-eval). Audited before any paid run: the prompts stated the wrong rules, named robber targets in coordinates the state never used and showed no game history, and nothing capped spending. All fixed; waiting on a model list and a budget.
+- *OpenHex rules* (@sec:recipe). The deployed 1v1 net, continued for 1B steps on OpenHex's 1v1 rules (friendly robber, balanced dice), beats its start 63.2% and F 98.8%. A second 1B steps at the lowest learning rate gained little (51.0% head to head, 98.9% vs F): the net has roughly leveled off. Restarting the learning rate at its peak fell to \~41% against the start and was stopped.
+- *Discount vs no discount* (@exp:recipe-discount), from scratch, two seeds per arm. The discount makes games end faster (without it, games against F run 4.6 and 2.6 turns longer on the two seeds, paired over 5,000 games, against half a turn between seeds of one arm) but does not change strength: 49.98% head to head over 10,000 games.
 - *Critic refit*: null (@sec:critic).
 - *Canopy*: its search lost to ours 33.0–67.0 over 1,000 games (@sec:canopy).
 - *Deployment*: the OpenHex net is released for OpenHex (@exp:deploy-openhex-v2). It also beats the site's 1v1 bot on the site's rules, 55.8% (@exp:deploy-site-rules-2p), and the site's server now offers OpenHex's friendly robber and balanced dice (@exp:deploy-site-openhex-rules).
@@ -60,54 +58,48 @@ Most experiments are a config under `configs/experiments/`. A number without an 
 
 == How to read this log
 
-Sections are ideas, not dates. Each experiment is one block:
-- a status chip: *done*, *running*, *queued*, *stopped* (ended early), *todo* (planned, nothing run) or *parked* (planned, set aside);
-- a metadata line: when it ran, whose idea it was, its config, its W&B runs and the eval records that hold its numbers;
-- a summary, then the question, setup, result and reading;
-- the command that reproduces it.
+Sections are ideas, not dates. Each experiment is one block: a status chip (*done*, *running*, *queued*, *stopped* early, *todo* or *parked*); a metadata line (dates, whose idea, config, W&B runs, eval records); a summary; the question, setup, result and reading; and the command that reproduces it. Marco's ideas are credited to him; ideas from Claude (the assistant writing this log) that were never run are marked "(Claude's suggestion, not queued)".
 
-Dates appear only in the metadata lines. Marco's ideas are credited to him; ideas from Claude (the assistant writing this log) that were never run are marked "(Claude's suggestion, not queued)".
+/ Records: An 8-character hex id in backticks (`831eea84`) is the start of an eval record's id. Records live under `runs/<experiment>/<variant>/evals/<suite>/`, or `runs/_evals/<suite>/` for eval-only rows. `catanrl verify <id prefix or path>` replays a record's games and checks them; a record stored in several run directories needs the path (the critic fix's start row `60cd10b6` sits in all four arms).
 
-/ Records: An 8-character hex id in backticks (`831eea84`) names an eval record: it is the start of the record's eval id. A record lives under `runs/<experiment>/<variant>/evals/<suite>/`, or under `runs/_evals/<suite>/` for an eval-only row. `catanrl verify <eval id>` replays a record's games and checks them against it; it takes any unique prefix of the id, or the record's path. A record stored in several run directories needs the path (the critic fix's start row `60cd10b6` sits in all four arms).
+/ Commands: From the repo root. `catanrl run <config>` runs an experiment's variants in dependency order, with their finals; `--only <glob>` picks variants. An eval-only row is one `catanrl eval` line, rebuilt from the record's agent specs.
 
-/ Commands: Every command runs from the repo root. `catanrl run <config>` runs an experiment's variants in dependency order, with their finals; `--only <glob>` picks variants. An eval-only row is one `catanrl eval` line, rebuilt from the record's agent specs.
-
-/ W&B: The metadata line links each run on W&B (project link at the top). Runs before 2026-10-17 were backfilled from `runs/*/metrics.jsonl` and the eval records. Since then a live mirror (`catanrl.wandb_mirror`) logs every run whose config sets `meta.wandb.project`, and `tools/wandb_backfill.py` re-syncs a run directory into the same W&B run. The record on disk is the source of truth; a W&B failure is only a warning. A run logs losses, entropy, KL, clip fraction, game length, seat win rates, throughput, the select curve and the critic's calibration (`critic/value_sum_*`: the seats' predicted win probabilities summed, which should match the share of games somebody wins). A link labeled "eval only" is an eval run: its W&B page shows no finals, and its results are in the records. A link tagged "no local mirror" is computed from the run's config hash; no local W&B directory confirms it was synced.
+/ W&B: Runs before 2026-10-17 were backfilled from `runs/*/metrics.jsonl` and the eval records; since then a live mirror (`catanrl.wandb_mirror`) logs every run whose config sets `meta.wandb.project`, and `tools/wandb_backfill.py` re-syncs a run directory. The record on disk is the source of truth. Runs log the usual PPO metrics, game length, seat win rates, throughput, the select curve and the critic's calibration (`critic/value_sum_*`, the seats' predicted win probabilities summed, which should match the share of games somebody wins). "Eval only" links are eval runs whose results are in the records; "no local mirror" links are computed from the config hash, with no local W&B directory confirming the sync.
 
 == Setup
 
-/ Engine: cppanatron, a C++20 port of Catanatron kept in lockstep parity with it: 2–6 players, explicit maps of any shape. The observation encoder, action codec, threaded multi-game env, hand tracker and batched MCTS all live in C++, so training, search and deployment cannot drift apart. The network reads one float32 row per (game, seat), seat-relative and padded to the env's maxima: `[global | players | tiles | nodes | edges | topology | action mask]`.
+/ Engine: cppanatron, a C++20 port of Catanatron kept in lockstep parity with it: 2–6 players, maps of any shape. The encoder, action codec, threaded env, hand tracker and batched MCTS all live in C++, so training, search and deployment cannot drift apart. The network reads one float32 row per (game, seat), seat-relative and padded: `[global | players | tiles | nodes | edges | topology | action mask]`.
 
 / Observation levels: How much of the other seats' hidden state a row shows.
-  - `private`: what the seat itself sees. The encoder zeroes the other seats' 15 hidden features (5 resource ratios, actual VPs, 5 dev-card counts, 4 playable flags). These are exactly what a sampled world could change, so averaging a `private` policy over sampled worlds gives back the plain argmax policy.
-  - `public`: in 2p every resource movement is seen by both seats, so the opponent's exact hand is a perfect card counter's knowledge. A `public` policy is fair in 2p without belief averaging.
+  - `private`: what the seat itself sees. The encoder zeroes the other seats' 15 hidden features (5 resource ratios, actual VPs, 5 dev-card counts, 4 playable flags). Those are exactly what a sampled world changes, so belief-averaging a `private` policy gives back its argmax.
+  - `public`: in 2p both seats see every resource movement, so the opponent's exact hand is a card counter's knowledge: a `public` policy is fair in 2p without belief averaging.
   - `full`: adds the opponent's dev cards in hand. Played raw, it is unfair.
 
 / Agents: Each player is a spec string.
   - `POLICY:ckpt=<run>@<epoch>`: the raw network, argmax.
-  - `BELIEF:ckpt=…:worlds=16`: the raw policy averaged over 16 worlds sampled from the hand tracker's belief; the fair way to play a network trained on more than its seat sees.
+  - `BELIEF:ckpt=…:worlds=16`: the raw policy averaged over 16 worlds sampled from the hand tracker; the fair way to play a net that sees more than its seat.
   - `MCTS:ckpt=…:sims=N:dets=K`: a batched N-player PUCT search over K worlds sampled from the tracker at the root, with per-seat values backed up max#super[n] and exact chance nodes for dice, dev-card draws and steals. `oracle=true` searches the true game and is only a reference.
   - `F` is Catanatron's `ValueFunctionPlayer`; `R` plays uniformly random legal moves.
   - `<run>@eN` is the run's checkpoint at epoch N; `@best` is the one its select suite chose, `@latest` the last one saved.
 
-/ The slot after an F: F (`enemies=next`) robs and blocks the seat after it. A 4p suite seats `lineup[(seat + r) mod 4]`, so slot 0 always moves right after the F in slot 3 and pays for it. Any 4p table of the shape `[A, B, F, F]` therefore needs both slot orders, or the two learner slots summed (@sec:hidden has the diagnosis).
+/ The slot after an F: F (`enemies=next`) robs and blocks the seat after it. A 4p suite seats `lineup[(seat + r) mod 4]`, so slot 0 always moves right after the F in slot 3. A 4p table of the shape `[A, B, F, F]` needs both slot orders, or the two learner slots summed (diagnosis in @sec:hidden).
 
 / Rules:
   - `base-2p`: the BASE map, 15 VP, discard above 9 cards.
   - `base-2p-fr`: OpenHex's 1v1 rules, which are `base-2p` plus a friendly robber (tiles touching an opponent with at most 2 public VP are off limits) and balanced dice (a 36-card deck of dice pairs, with recent totals and 7 streaks damped). New 1v1 runs train on it.
   - `base-4p`: BASE under the standard rules, 10 VP, discard limit 7; also the engine's default.
 
-/ Boards: Every number is on boards training never saw; `catanrl validate` checks the training pools against the suites.
+/ Boards: Every number is on boards training never saw (`catanrl validate` checks).
   - `heldout-2p`: 2,500 boards (seed 67) in both seat orders, 5,000 games. `heldout-2p-fr` is the same seed and size on `base-2p-fr`.
   - `heldout-4p`: 1,000 boards (seed 68) in 4 rotations, 4,000 games.
   - `heldout-random-4p`: 1,000 blob-shaped boards of 15–30 tiles (seed 69) in 4 rotations. `heldout-mixed` mixes 2p and 3p BASE with 4p blobs.
   - The `hexagon` generator (training only) keeps the BASE shape with shuffled numbers and generated harbors.
-  - Checkpoints are chosen every 50 epochs on separate `select-*` suites, so a held-out number never picked its own checkpoint. `select-2p` is 200 boards (seed 123, 400 games); `select-2p-fr` is 500 boards on the same seed (1,000 games); `select-4p` is 800 games. `select-mixed` is 2, 3 and 4 players on BASE, 100 boards each in every seat rotation (900 games, seed 126).
+  - Checkpoints are chosen every 50 epochs on separate `select-*` suites, so no held-out number picked its own checkpoint. `select-2p` is 200 boards (seed 123, 400 games); `select-2p-fr` is 500 boards on the same seed (1,000 games); `select-4p` is 800 games. `select-mixed` is 2, 3 and 4 players on BASE, 100 boards each in every seat rotation (900 games, seed 126).
   - The AlphaZero and critic-refit runs select on `select-2p`'s seed (123) in both seat orders: `select-2p-2k` is 2,000 boards (4,000 games), `select-2p-500` its first 500 boards (1,000 games).
 
-/ Measurement: Intervals are Wilson 95%, printed small and grey in parentheses after the number, #box[e.g. 94.96 #ci[94.3][95.5]]. pp means percentage points. In N-player games the number is slot 0's _score share_: a win counts 1 and a truncated game gives 1/N to every seat, so parity is 1/N. Agents that use information a player doesn't have (a raw `full` policy, an oracle search) are marked unfair; everything else is fair.
+/ Measurement: Intervals are Wilson 95%, printed small after the number: #box[94.96 #ci[94.3][95.5]]. pp means percentage points. In N-player games the number is slot 0's _score share_: a win counts 1 and a truncated game 1/N to every seat, so parity is 1/N. Agents that use information a player doesn't have (a raw `full` policy, an oracle search) are marked unfair.
 
-/ Paired statistics: Two rows played on the same game ids pair game by game: McNemar over the shared ids (`tools/search_probe.py --pair`), with Holm when a decision rests on two tests. 4p tables played in both slot orders use a bootstrap over board × rotation pairs. Power figures are for 80% power at a two-sided 5% level.
+/ Paired statistics: Rows played on the same game ids pair game by game: McNemar over the shared ids (`tools/search_probe.py --pair`), with Holm when a decision rests on two tests. 4p tables in both slot orders use a bootstrap over board × rotation pairs. Power figures are 80% power at a two-sided 5% level.
 
 == v1, for reference
 
@@ -118,11 +110,11 @@ Dates appear only in the metadata lines. Marco's ideas are credited to him; idea
   wandb: (),
   records: (),
 )
-#tldr[v1's best 2p numbers, kept for history and never rerun. Its belief-averaged raw policy scored 89.65% against F, and its search beat that policy 51.1–58.1% depending on sims. v2 from scratch is 5 points higher against F.]
+#tldr[v1's best 2p numbers, kept for history: its belief-averaged raw policy scored 89.65% against F, and its search beat that policy 51.1–58.1% depending on sims. v2 from scratch is 5 points higher against F.]
 
 *Question.* What did v1's best 2p bot score, as a yardstick for v2?
 
-*Setup.* v1 (#link("https://github.com/mcrco/catanrl")[catanrl]): `graph-s`, DAgger from F, then MARL PPO, 73.7M steps. The numbers come from the v1 report and are never paired with v2's.
+*Setup.* v1's `graph-s`: DAgger from F, then MARL PPO, 73.7M steps. Numbers from the v1 report, never paired with v2's.
 
 #lead[Result.]
 #figure(
@@ -139,7 +131,7 @@ Dates appear only in the metadata lines. Marco's ideas are credited to him; idea
   caption: [v1's reference rows, from the v1 report.],
 )
 
-*Reading.* Two more v1 results that later sections lean on:
+*Reading.* Two more v1 results that later sections use:
 - v1 never trained AlphaZero above 512 sims, and its frozen-teacher distillation of an 8 × 64-sim search (EX-1d) gave +1.3 vs F and 50.6% head to head, both null (@sec:az).
 - v1 ran Canopy's PUCT recipe on a 55%-vs-F graph net and raised it to 70.5% raw vs F over 10 iterations, but never from a start above 90% (@sec:canopy).
 
