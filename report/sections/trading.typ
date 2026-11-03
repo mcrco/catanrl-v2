@@ -264,6 +264,7 @@ catanrl run configs/experiments/trade-harness-m4.yaml   # needs the ppo-4p/main 
 - *Paired intervals.* +11.7 (9.7–13.7) and +12.9 (11.0–14.9) against the same net; +3.0 (2.1–3.9) and +3.4 (2.4–4.4) against F.
 - *Per seat, against the same net.* The traders take 31.6 and 30.1 (adjacent), 32.3 and 30.6 (alternating), each 5–7 points over 25; each outsider loses about 6.
 - *Per seat, against F.* The gain comes out of F's share, which falls from 6.8 to 3.8% (adjacent) and 8.7 to 5.2% (alternating). Within the adjacent pair it is uneven: +4.4 for the trader who plays after an F, −1.5 ±1.9 for the one who plays before.
+- *Seating.* With N in every seat the first player wins 26.9% and the last 23.6%. The four rotations put a trader first in exactly half the games, and the gain holds either way: +9.9 with a trader first, +13.5 with a non-trader first (adjacent); +12.7 and +13.2 (alternating). A trader wins 28–33% from every seat.
 - *Trades.* Only between the two traders: about 44 offers a game, 12–14 completed, 4% cancelled. Games end 3.3 turns sooner against the same net (76.4 vs 79.7), 5.2 sooner against F.
 
 *Reading.* Yes for Marco's question, with the harness's rule: two seats trading with each other gain about 12 points of combined share from two equals that don't, and the outsiders pay for it. Unlike m1, both sides of the trades gain, so the edge is not one trader exploiting a naive acceptor. Seating barely matters (adjacent 61.7, alternating 62.9).
