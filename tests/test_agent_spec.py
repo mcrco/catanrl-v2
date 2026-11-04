@@ -177,6 +177,23 @@ def test_fused_kernels_are_keyed_only_when_set(ckpts):
         fused.native(device="cpu")
 
 
+def test_a_deadline_is_keyed_only_when_set_and_only_the_server_takes_it(ckpts):
+    """deadline=S stops a search by the wall clock: keyed when set (the default leaves every
+    stored key as it was), and refused where games must replay (native, catanatron)."""
+    base = resolve_agent("MCTS:ckpt=exp/v:sims=8", harness="server")
+    assert "deadline" not in base.key_dict()["params"]
+    timed = resolve_agent("MCTS:ckpt=exp/v:sims=8:reuse=true:deadline=45", harness="server")
+    assert timed.canonical == base.canonical + ":reuse=true:deadline=45.0"
+    assert resolve_agent(timed.canonical, harness="server").canonical == timed.canonical
+    assert timed.key_dict()["params"] == {**base.key_dict()["params"], "reuse": True, "deadline": 45.0}
+    assert timed.native(device="cpu").deadline == 45.0
+    for harness in ("native", "catanatron"):
+        with pytest.raises(SpecError, match="deadline"):
+            resolve_agent("MCTS:ckpt=exp/v:sims=8:deadline=45", harness=harness)
+    with pytest.raises(SpecError, match="deadline"):
+        resolve_agent("MCTS:ckpt=exp/v:sims=8:deadline=-1", harness="server")
+
+
 def _rebuilds_unchanged(entry: dict) -> None:
     params = MctsParams(ckpt="x", **entry["params"])
     assert key_params(params) == entry["params"]

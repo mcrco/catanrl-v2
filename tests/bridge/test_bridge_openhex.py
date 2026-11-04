@@ -346,6 +346,37 @@ def test_the_robber_after_a_knight_reuses_the_knights_search():
     seat.close()
 
 
+def test_a_deadline_is_one_openhex_moves_budget():
+    """With an MCTS deadline the budget belongs to an OpenHex move, from when the
+    seat began deciding it: a discard chain spreads what is left over the cards
+    still to discard, a knight's robber (decided ahead) has what the knight left,
+    and nothing outlives the decision (``stop_at`` is cleared after each)."""
+    game = _game()
+    native = _mcts(reuse=True)
+    native.deadline = 30.0
+    seen: list[tuple[str, float, float]] = []
+    real = native.act
+
+    def act(rows, masks, seeds, **kwargs):
+        seen.append((kwargs["games"][0].current_prompt.name, seat.move_started, native.stop_at))
+        return real(rows, masks, seeds, **kwargs)
+
+    native.act = act
+    seat = OpenHexSeat(native, "fixture", game, "blue")
+    plans = list(_record(seat, game))
+    assert native.stop_at is None and seen
+    assert all(started < stop <= started + 30.0 for _p, started, stop in seen)
+    chain = [entry for entry in seen if entry[0] == "DISCARD"]
+    assert len(chain) >= 2 and len({started for _p, started, _s in chain}) == 1
+    started = chain[0][1]
+    # The first card had the budget split over every card; the last had what was left.
+    assert chain[0][2] <= started + 30.0 / len(chain) + 1.0 and chain[-1][2] > chain[0][2]
+    knights = [i for i, entry in enumerate(seen) if entry[0] == "MOVE_ROBBER" and i
+               and seen[i - 1][0] == "PLAY_TURN" and seen[i - 1][1] == entry[1]]
+    assert knights and any(plan.actions[0]["type"] == "playKnight" for _s, plan, _a in plans)
+    seat.close()
+
+
 @pytest.mark.parametrize("color", ["blue", "red"])
 def test_a_bank_short_re_replay_restarts_the_stream(color):
     """The game replayed again on a larger bank (seq 374's roll, fed with its
