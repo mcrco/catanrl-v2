@@ -128,6 +128,30 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 #lead[Check.] At epoch 1,000, compare against `graph-s` at the same steps (26.4% vs fr3, 95.9% vs F), along with the approximate KL (`graph-s`: about 0.02).
 
+#lead[Progress at epoch 500 (66M steps, 3 h).] Ahead of `graph-s` at the same steps, though not yet significantly, and well ahead of the first try:
+
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([Epoch], [Half learning rate], [`graph-m` at 0.005], [`graph-s`]),
+    tgroup(4)[Against fr3],
+    [200], [12.6], [9.1], [9.1],
+    [300], [18.0], [10.7], [12.8],
+    [400], [17.8], [15.9], [16.3],
+    [500], [*23.1*], [16.5], [19.7],
+    tgroup(4)[Against F],
+    [200], [88.6], [84.4], [83.7],
+    [300], [88.3], [84.6], [88.9],
+    [400], [89.7], [87.6], [89.2],
+    [500], [*93.9*], [88.1], [91.8],
+  ),
+  caption: [Monitor score rates (%) on `select-2p-fr`, 1,000 games each.],
+)
+
+- *Paired at epoch 500* (same 1,000 games). Against `graph-s`: +3.4 pp against fr3 (169 against 135 discordant, p = 0.06) and +2.1 pp against F (67 against 46, p = 0.06). Against the first try: +6.6 pp against fr3 (p = 2e-4) and +5.8 pp against F (p = 2e-6).
+- *Update size.* The approximate KL per epoch is 0.020, the same as `graph-s` (0.022). The first try was at 0.049 by this point. Entropy matches `graph-s` (0.25).
+
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p-lr.yaml
 ```)
