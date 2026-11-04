@@ -12,7 +12,9 @@ So far: self-play PPO on a graph network gives a strong raw policy, and search o
   *Measured.* The raw policy wins 95% against F (@sec:recipe). Search beats it 53.4–55.2% with our default PUCT search and 62.4% with Gumbel AlphaZero's root at 2048 sims (@sec:search).
 ]
 
-== Latest results (3 November 2026)
+== Latest results (4 November 2026)
+
+- *Running*: `graph-m`, a network about 2× wider and one layer deeper than every 1v1 net so far, from scratch for 3B steps on OpenHex's 1v1 rules (Marco; @exp:arch-graph-m-2p). About 6 days, to roughly 10 November.
 
 - *Search depth sweep* (Marco; @exp:search-depth-2p). MCTS at 64 to 16,384 sims against the same checkpoint's raw policy, five checkpoints of one run, 1,000 games per cell. More search helps every checkpoint at every step, with no plateau by 16,384 sims: each 4× adds 3–7 points (final net: 53.9, 57.0, 60.5% at 1,024, 4,096, 16,384). Weaker nets gain more (82.0% for the epoch-50 net at 4,096; the epoch-150 net 76.4 → 80.7% from 4,096 to 16,384). Paused on 3 November with two 16,384-sim cells (e1500, e50) still to play.
 - *Trading between equals* (Marco; @exp:trade-2v2). Two seats that trade with each other, against two copies of the same net that can't, take 61.7% (adjacent) and 62.9% (alternating) of 4p games, against exactly 50 without trading (+11.7 and +12.9 pp paired, 4,000 games a row). Both traders gain, so it isn't exploitation of a naive acceptor. Against F the pair goes from 93 to 96%.

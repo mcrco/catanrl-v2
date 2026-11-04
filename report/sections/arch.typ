@@ -61,3 +61,28 @@ catanrl run configs/experiments/arch-ablation.yaml
 #tldr[Separating `graph-s` from `lstm` needs the full 500M-step budget and more seeds (Claude's suggestion, not queued).]
 
 *Status.* Nothing run. The closest config, `configs/experiments/arch-lineage.yaml`, sweeps `graph-s`, `graph-m` and `mlp` over two seeds at 400M steps (6.5 h a cell; 12 cells, about a week of GPU). It ports v1's lineage script (`full` level, γ = 0.99, then γ = 1 from epoch 3000), not the current recipe, and has no `lstm` cell.
+
+== Network size
+
+=== `graph-m` for 3B steps on OpenHex's 1v1 rules #chip("running") <exp:arch-graph-m-2p>
+#meta(
+  dates: "2026-11-04 02:20 –",
+  owner: "marco",
+  config: "configs/experiments/graph-m-2p.yaml",
+  wandb: (("graph-m-2p-main-651bcbbc", "main"),),
+  records: (),
+)
+#tldr[Is the 1v1 net too small? Every 1v1 net so far is `graph-s` (0.54M parameters), and it has leveled off: a second \~1B steps on OpenHex's rules moved it about a point (@exp:recipe-2p-openhex-3), while `hexn-4d.0` leads OpenHex 1v1 about 120 Elo above our best bot. `graph-m` from scratch for 3B steps, about 6 days.]
+
+*Question.* Does a bigger network make a stronger 1v1 bot under the same recipe (Marco)?
+
+#lead[Setup.]
+- *Network.* `graph-m`: hidden 192, global 96, 4 layers, head 256 (`graph-s`: 96, 64, 3, 128), shared trunk.
+- *Recipe.* `discount-2p`'s no-discount cell (@exp:recipe-discount) with only the model and budget changed: `base-2p-fr`, `full` level, γ = 1 for the policy and the lambda critic, seed 42, 3B agent steps (\~22,700 epochs) on one cosine from 0.005 to 0.0005.
+- *Monitors.* Every 100 epochs on `select-2p-fr`, 1,000 games each: against F and against the deployed 1v1 net, `ppo-2p-fr3/full@e4350`.
+- *Finals.* `@latest` on `heldout-2p-fr`, 5,000 games each: against F and against `ppo-2p-fr3/full@e4350` (±1.4 pp). `graph-s` at the same steps can be read afterwards: `graph-m@e3786` against `discount-2p/g1-s42@e3786`.
+- *Cost.* 6.0k steps/s (`graph-s`: 17.7k) at a 4.26 GiB peak with micro-batches of 2,048 rows; 4,096 gave 6.3k at 6.89 GiB with allocator warnings. About 139 h of training plus 3 h of monitors. The budget fixes the cosine, so a shorter run means a restart, not an early stop.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p.yaml
+```)
