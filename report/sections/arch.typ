@@ -64,15 +64,15 @@ catanrl run configs/experiments/arch-ablation.yaml
 
 == Network size
 
-=== `graph-m` for 3B steps on OpenHex's 1v1 rules #chip("running") <exp:arch-graph-m-2p>
+=== `graph-m` for 3B steps on OpenHex's 1v1 rules #chip("stopped") <exp:arch-graph-m-2p>
 #meta(
-  dates: "2026-11-04 02:10 –",
+  dates: "2026-11-04 02:10 – 11:10",
   owner: "marco",
   config: "configs/experiments/graph-m-2p.yaml",
   wandb: (("graph-m-2p-main-651bcbbc", "main"),),
   records: (),
 )
-#tldr[Is the 1v1 net too small? Every 1v1 net so far is `graph-s` (0.54M parameters), and it has leveled off: a second \~1B steps on OpenHex's rules moved it about a point (@exp:recipe-2p-openhex-3), while `hexn-4d.0` leads OpenHex 1v1 about 120 Elo above our best bot. `graph-m` from scratch for 3B steps, about 6 days.]
+#tldr[Is the 1v1 net too small? Every 1v1 net so far is `graph-s` (0.54M parameters), and it has leveled off: a second \~1B steps on OpenHex's rules moved it about a point (@exp:recipe-2p-openhex-3), while `hexn-4d.0` leads OpenHex 1v1 about 120 Elo above our best bot. `graph-m` from scratch at `graph-s`'s learning rate fell behind `graph-s` at the same steps and stalled (20.0% against 31.0% vs fr3 at epoch 1,400), with policy updates about 5× larger. Stopped at epoch 1,500 and restarted at half the learning rate (@exp:arch-graph-m-2p-lr).]
 
 *Question.* Does a bigger network make a stronger 1v1 bot under the same recipe (Marco)?
 
@@ -80,10 +80,10 @@ catanrl run configs/experiments/arch-ablation.yaml
 - *Network.* `graph-m`: hidden 192, global 96, 4 layers, head 256 (`graph-s`: 96, 64, 3, 128), shared trunk.
 - *Recipe.* `discount-2p`'s no-discount cell (@exp:recipe-discount) with only the model and budget changed: `base-2p-fr`, `full` level, γ = 1 for the policy and the lambda critic, seed 42, 3B agent steps (\~22,700 epochs) on one cosine from 0.005 to 0.0005.
 - *Monitors.* Every 100 epochs on `select-2p-fr`, 1,000 games each: against F and against the deployed 1v1 net, `ppo-2p-fr3/full@e4350`.
-- *Finals.* `@latest` on `heldout-2p-fr`, 5,000 games each: against F and against `ppo-2p-fr3/full@e4350` (±1.4 pp). `graph-s` at the same steps can be read afterwards: `graph-m@e3786` against `discount-2p/g1-s42@e3786`.
-- *Cost.* 6.0k steps/s (`graph-s`: 17.7k) at a 4.26 GiB peak with micro-batches of 2,048 rows; 4,096 gave 6.3k at 6.89 GiB with allocator warnings. About 139 h of training plus 3 h of monitors. The budget fixes the cosine, so a shorter run means a restart, not an early stop.
+- *Finals (planned, not run).* `@latest` on `heldout-2p-fr`, 5,000 games each: against F and against `ppo-2p-fr3/full@e4350`.
+- *Cost.* 6.0k steps/s (`graph-s`: 17.7k) at a 4.26 GiB peak with micro-batches of 2,048 rows; 4,096 gave 6.3k at 6.89 GiB with allocator warnings. About 139 h of training plus 3 h of monitors for the full budget. The budget fixes the cosine, so a shorter run means a restart, not an early stop.
 
-#lead[Progress at epoch 1,000 (132M steps, 6 h).] Behind `graph-s` at the same steps, and flat since epoch 600:
+#lead[Result.] Behind `graph-s` at the same steps from epoch 600 on, and flat after that:
 
 #figure(
   btable(
@@ -95,14 +95,39 @@ catanrl run configs/experiments/arch-ablation.yaml
     [600], [17.5], [21.3], [92.1], [92.5],
     [800], [19.5], [21.8], [91.1], [93.2],
     [1,000], [16.7], [*26.4*], [91.1], [*95.9*],
+    [1,200], [19.9], [*26.9*], [92.9], [*94.4*],
+    [1,400], [20.0], [*31.0*], [92.8], [*95.9*],
+    [1,500], [18.6], [*30.4*], [90.2], [*95.4*],
   ),
   caption: [Monitor score rates (%) on `select-2p-fr`, 1,000 games each (±2.5 pp at 20%). `graph-s` is `discount-2p/g1-s42`; fr3 is `ppo-2p-fr3/full@e4350`.],
 )
 
-- *Paired at epoch 1,000* (same 1,000 games). Against fr3: −9.7 pp (106 against 203 discordant, p = 4e-8). Against F: −4.8 pp (35 against 83, p = 1e-5).
-- *Since epoch 600.* Against fr3: 17.5 → 16.7 (p = 0.65), while `graph-s` went 21.3 → 26.4.
-- *Update size.* The approximate KL per epoch rose from 0.03 to 0.09; `graph-s` stayed at 0.02–0.03 over the same epochs. Entropy is the same (0.17), and the learning rate is about the same (0.0050 against 0.0043). So the bigger net takes about 4× larger policy steps at the same learning rate. Its critic is slightly better (Brier 0.127 against 0.134).
+- *Paired* (same 1,000 games). At epoch 1,000, against fr3: −9.7 pp (106 against 203 discordant, p = 4e-8); against F: −4.8 pp (35 against 83, p = 1e-5). At epoch 1,400, against fr3: −11.0 pp (115 against 225, p = 3e-9); against F: −3.1 pp (35 against 66, p = 0.003).
+- *Plateau.* Against fr3 between 17% and 20% from epoch 600 to 1,500, while `graph-s` went from 21.3% to 30.4%.
+- *Update size.* The approximate KL per epoch rose from 0.03 to 0.13 by epoch 1,400. `graph-s` stayed at 0.02–0.03 over the same epochs, at the same entropy (0.17 at epoch 1,000) and about the same learning rate (0.0050 against 0.0043). So the bigger net took about 4–5× larger policy steps at the same learning rate. Its critic was slightly better (Brier 0.127 against 0.134 at epoch 1,000).
+
+#lead[Reading.] `graph-s`'s learning rate is too high for `graph-m`: its policy changes too much per update and stops improving. That says nothing yet about capacity. Stopped at epoch 1,500 (11 h), and restarted from scratch at half the learning rate.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p.yaml
+```)
+
+=== `graph-m` at half the learning rate #chip("running") <exp:arch-graph-m-2p-lr>
+#meta(
+  dates: "2026-11-04 11:10 –",
+  owner: "marco",
+  config: "configs/experiments/graph-m-2p-lr.yaml",
+  wandb: (("graph-m-2p-lr-main-03f356b6", "main"),),
+  records: (),
+)
+#tldr[@exp:arch-graph-m-2p restarted from scratch at half `graph-s`'s learning rate, to keep `graph-m`'s policy updates near `graph-s`'s size. Same 3B-step budget, about 6 days.]
+
+*Question.* At a learning rate that suits it, does `graph-m` beat `graph-s` (Marco)?
+
+#lead[Setup.] As @exp:arch-graph-m-2p, but with the cosine from 0.0025 to 0.00025. Monitors and finals are unchanged.
+
+#lead[Check.] At epoch 1,000, compare against `graph-s` at the same steps (26.4% vs fr3, 95.9% vs F), along with the approximate KL (`graph-s`: about 0.02).
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p-lr.yaml
 ```)
