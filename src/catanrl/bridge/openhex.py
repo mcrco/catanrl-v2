@@ -517,6 +517,9 @@ class OpenHexSeat:
         self.lagging: tuple[list[str], int] = ([], 0)
         self.decisions = 0
         self.fallbacks = 0
+        #: When the move being decided began (``time.monotonic()``): an MCTS ``deadline`` is
+        #: the budget of a whole OpenHex move, which can take several decisions.
+        self.move_started = time.monotonic()
 
     def _build(self) -> None:
         """A fresh replay and tracker on the rules, with the bank margin (and fair dice once desynced)."""
@@ -738,7 +741,11 @@ class OpenHexSeat:
         others = [c for i, c in enumerate(self.colors) if i != self.seat]
         return others[0].lower()
 
-    def _choose(self, game: cpp.Game, tracker: cpp.HandTracker | None) -> cpp.Action:
+    def _choose(self, game: cpp.Game, tracker: cpp.HandTracker | None, share: int = 1) -> cpp.Action:
+        """The agent's action in ``game``. With an MCTS ``deadline`` (seconds an OpenHex move
+        may take, from :attr:`move_started`), this decision may search until its ``share``-th
+        of what the move has left: a discard spreads it over its cards, and a knight's robber
+        has what the knight left (at least one round, in the knight's reused tree)."""
         native = self.native
         legal = list(game.playable_actions)
         if len(legal) == 1:
@@ -759,6 +766,10 @@ class OpenHexSeat:
         self.decisions += 1
         if tracker is None:
             tracker = cpp.HandTracker(game, self.seat)
+        deadline = float(getattr(native, "deadline", 0.0) or 0.0)
+        if deadline:
+            now = time.monotonic()
+            native.stop_at = now + max(0.0, self.move_started + deadline - now) / max(1, share)
         try:
             chosen = space.decode(game, self._act(row, mask, seed, game, tracker))
         except (ValueError, RuntimeError) as error:
@@ -775,6 +786,14 @@ class OpenHexSeat:
 
     def _act(self, row: np.ndarray, mask: np.ndarray, seed: int, game: cpp.Game, tracker: cpp.HandTracker) -> int:
         """The agent's index for ``game``; a reusing agent decides on the seat's stream."""
+        native = self.native
+        try:
+            return self._act_now(row, mask, seed, game, tracker)
+        finally:
+            if getattr(native, "stop_at", None) is not None:
+                native.stop_at = None  # the move's budget is this decision's only
+
+    def _act_now(self, row: np.ndarray, mask: np.ndarray, seed: int, game: cpp.Game, tracker: cpp.HandTracker) -> int:
         native = self.native
         seeds = np.array([seed], dtype=np.uint64)
         trackers = [tracker] if getattr(native, "needs_trackers", False) else None
@@ -807,6 +826,7 @@ class OpenHexSeat:
         self._restart_stream()
 
     def _decide(self, game: cpp.Game) -> Plan:
+        self.move_started = time.monotonic()
         action = self._choose(game, self.tracker)
         kind = action.action_type.name
         if kind == "PLAY_KNIGHT_CARD":
@@ -874,6 +894,7 @@ class OpenHexSeat:
         placeholder cards first. Each decision deals from a tracker of the
         copy (the seat's own knows nothing of the placeholders), so a reusing
         agent's search of the chain ends with it (see the class doc)."""
+        self.move_started = time.monotonic()
         ahead = self.replay.game.copy()
         cards = [0] * 5
         asked = self.decisions
@@ -883,7 +904,7 @@ class OpenHexSeat:
             if ahead.current_player_index != self.seat:
                 ahead.execute(ahead.playable_actions[0])
                 continue
-            action = self._choose(ahead, None)
+            action = self._choose(ahead, None, share=ahead.remaining_discards(self.seat))
             ahead.execute(action)
             cards[RESOURCES.index(action.value.name if hasattr(action.value, "name") else str(action.value))] += 1
         if self.memory and self.decisions > asked:

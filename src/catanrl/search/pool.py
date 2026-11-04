@@ -10,6 +10,7 @@ completion; :func:`search_config` maps agent parameters onto the engine's
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -76,17 +77,24 @@ def make_pool(dims: Mapping[str, int], level: str, config: cpp.SearchConfig,
     return cpp.SearchPool(encoder.action_space, encoder, config)
 
 
-def run_searches(pool: cpp.SearchPool, evaluator: BatchEvaluator, *, batch_rows: int) -> int:
-    """Collect, evaluate and apply until every search in the pool is done; returns leaf rows."""
-    return run_pools([pool], evaluator, batch_rows=[batch_rows])
+def run_searches(pool: cpp.SearchPool, evaluator: BatchEvaluator, *, batch_rows: int,
+                 stop: float | None = None) -> int:
+    """Collect, evaluate and apply until every search in the pool is done, or ``stop``
+    passes (see :func:`run_pools`); returns leaf rows."""
+    return run_pools([pool], evaluator, batch_rows=[batch_rows], stop=stop)
 
 
-def run_pools(pools: Sequence[cpp.SearchPool], evaluator: BatchEvaluator, *, batch_rows: Sequence[int]) -> int:
+def run_pools(pools: Sequence[cpp.SearchPool], evaluator: BatchEvaluator, *, batch_rows: Sequence[int],
+              stop: float | None = None) -> int:
     """Run several pools in lockstep, their leaves evaluated in one batch per round
     (e.g. full- and fast-budget searches of playout cap randomization); returns leaf rows.
 
     A row's outputs do not depend on its batch (strict evaluator), so the
     searches are the same as run pool by pool.
+
+    ``stop`` (a ``time.monotonic()`` instant) ends the run between rounds once it has
+    passed, after at least one round, with nothing pending: the searches are cut short
+    but whole (``select`` plays the most visits so far, ``advance`` re-roots them).
     """
     for pool in pools:
         if pool.observation_size != evaluator.obs_size:
@@ -97,6 +105,8 @@ def run_pools(pools: Sequence[cpp.SearchPool], evaluator: BatchEvaluator, *, bat
                for pool, rows in zip(pools, batch_rows)]
     total = 0
     while True:
+        if stop is not None and total and time.monotonic() >= stop:
+            return total
         counts = []
         try:
             for pool, (observations, ids) in zip(pools, buffers):

@@ -16,7 +16,7 @@ bots:
     key_env: OPENHEX_KEY_1V1
     bot_id: 05c4a25c6c0e46e1
     deployed: 2026-10-17
-    tag: openhex-1v1-v2.1
+    tag: openhex-1v1-v2.2
     retired: false
   - name: catanrl-4p
     mode: 4p
@@ -25,7 +25,7 @@ bots:
     key_env: OPENHEX_KEY_4P
     bot_id: 068460ec188f4a2c
     deployed: 2026-10-17
-    tag: openhex-1v1-v2.1
+    tag: openhex-1v1-v2.2
     retired: false
   - name: catanrl-1v1-search
     mode: 1v1
@@ -37,7 +37,8 @@ bots:
     bot_id: b8334c08b8d34a19
     deployed: 2026-10-20
     tag: openhex-1v1-v2.1
-    retired: false
+    retired: true
+    retired_at: 2026-11-04  # replaced by catanrl-1v1-search-v2
   # v2 (2026-10-27): ppo-2p-fr3/full@e4350, v1's net (puffer-graph2/full@e3350) continued for
   # ~1.57b steps on OpenHex's 1v1 rules (friendly robber, balanced dice). heldout-2p-fr, 5,000
   # games each: POLICY 98.92 vs F, 64.66 vs v1's net, 51.0 vs ppo-2p-fr/full@e7600; BELIEF
@@ -49,16 +50,21 @@ bots:
     key_env: OPENHEX_KEY_1V1_V2
     bot_id: 9f7c562318324853
     deployed: 2026-10-27
-    tag: openhex-1v1-v2.1
+    tag: openhex-1v1-v2.2
     evidence: [cbba2d1098a7be6c, b38e49dc2f3a95b3, 507970d71e8d6566, 7c0d2f67135e7aad, 32d82b766f6b9526]
     retired: false
-  # 2^16 sims (Marco). Time it on the serving machine before registering:
-  # tools/move_time.py SPEC --moves 20 must stay under OpenHex's 60 s per move.
+  # 2^17 sims (Marco), v1's search options, and deadline=45: a move's searches stop at 45 s
+  # and play their most-visited move so far (counted as "cut" in games.jsonl's search). On
+  # yang's GTX 1080 a fresh 2^17 search takes 7.5-9.9 s (8 positions, 2026-11-04), so the
+  # deadline is a safety net. (tools/move_time.py overstates search ~7x: its Catanatron
+  # harness path managed ~2k sims/s against ~15k on the bridge's.)
   - name: catanrl-1v1-search-v2
     mode: 1v1
     version: 1v1-search-v2
-    spec: MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=65536:dets=1
+    spec: MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45
     key_env: OPENHEX_KEY_1V1_SEARCH_V2
-    tag: openhex-1v1-v2.1
+    bot_id: 730e1fb940fe46ff
+    deployed: 2026-11-04
+    tag: openhex-1v1-v2.2
     evidence: [cbba2d1098a7be6c, 507970d71e8d6566, 7c0d2f67135e7aad]
     retired: false

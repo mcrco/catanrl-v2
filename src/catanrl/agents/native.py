@@ -49,6 +49,7 @@ play through ``VecEnv.set_action``; every agent but TRADE rejects or cancels.
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -419,7 +420,8 @@ class MctsAgent(NativeAgent):
     (dropped by ``forget``), ``refused_diverged`` (the game is not the previous one plus
     the action played; a search dropped by another seat's first decision counts here at
     its next decision, since that move diverged it) and ``refused_engine`` (``advance``
-    returned false); ``search_stats`` sums ``SearchStats`` over every search run.
+    returned false) and ``cut`` (searches ``deadline`` or ``stop_at`` ended before their
+    budget); ``search_stats`` sums ``SearchStats`` over every search run.
 
     ``reuse_check`` is how the game handed is matched against the previous game plus
     the action played: ``"exact"`` (``search_equivalent``) on the native harness, whose
@@ -444,6 +446,11 @@ class MctsAgent(NativeAgent):
         self.needs_trackers = self.config.determinizations > 0
         self.tracker_mode = tracker_mode_of(params)
         self.temperature = float(_param(params, "temperature", 0.0))
+        #: Seconds a decision may search (0: none; the spec's ``deadline``).
+        self.deadline = float(_param(params, "deadline", 0.0))
+        #: A ``time.monotonic()`` instant a caller sets to end the next decisions' search
+        #: earlier than ``deadline`` would (the bridges' budget for one move of a ladder).
+        self.stop_at: float | None = None
         #: "exact" or "view" (see the class doc); the server bridge sets "view".
         self.reuse_check = "exact"
         self.counters: Counter[str] = Counter()
@@ -485,7 +492,12 @@ class MctsAgent(NativeAgent):
                     ids[i] = self.pool.add(game, seed=int(seed), tracker=tracker,
                                            deal=self.tracker_mode if tracker is not None else None)
                     self.counters["fresh"] += 1
-            run_searches(self.pool, self.evaluator, batch_rows=len(ids) * self.config.max_pending)
+            stop = time.monotonic() + self.deadline if self.deadline else None
+            if self.stop_at is not None:
+                stop = self.stop_at if stop is None else min(stop, self.stop_at)
+            run_searches(self.pool, self.evaluator, batch_rows=len(ids) * self.config.max_pending, stop=stop)
+            if stop is not None:
+                self.counters["cut"] += sum(not self.pool.done(sid) for sid in ids)
             choices = [int(self.pool.select(sid, self.temperature)) for sid in ids]
             self.counters["decisions"] += len(ids)
             for sid in ids:

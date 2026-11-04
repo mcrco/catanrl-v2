@@ -102,6 +102,11 @@ class MctsParams:
     #: graph networks on a CUDA device). Its outputs differ from the module's in the last
     #: bits, so it is keyed when set.
     kernels: Literal["torch", "fused"] = field(default="torch", metadata={"key_if_set": True})
+    #: Seconds a decision may search (0: no limit): the search stops at the first round past
+    #: it and plays its most-visited move so far (at least one round runs). A wall clock, so
+    #: play depends on the machine: the server harness only, for a ladder's per-move limit,
+    #: where the bridge spreads it over every decision one move of the ladder takes.
+    deadline: float = field(default=0.0, metadata={"key_if_set": True})
     dedup: bool = field(default=True, metadata={"execution": True})
     #: Leaves one search sends to the network per forward (virtual visits while they
     #: wait). More leaves per forward is what makes a GPU pay: at 1 the search is one
@@ -346,6 +351,8 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
             raise SpecError("MCTS: sims must be positive")
         if params.pending < 1:
             raise SpecError("MCTS: pending counts leaves per forward (>= 1)")
+        if params.deadline < 0:
+            raise SpecError("MCTS: deadline is seconds a decision may search (> 0; 0 for none)")
     if key == "BELIEF" and params.worlds < 1:
         raise SpecError("BELIEF: worlds must be positive")
     if key == "PREDICT" and not params.predictor:
@@ -468,6 +475,11 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
         # position at a time.
         raise SpecError("MCTS: reuse=true keeps a seat's search between its decisions, which the catanatron "
                         "harness does not stream (the native and server harnesses do)")
+    if key == "MCTS" and params.deadline and harness != "server":
+        # A wall-clock cutoff makes a game depend on the machine and its load: no record
+        # could be replayed, so only the ladder bridges (their per-move limit) take it.
+        raise SpecError("MCTS: deadline stops a search by the wall clock, which only the server harness takes "
+                        "(an eval's games must replay)")
     configs = [g if hasattr(g, "num_players") else load_game(g) for g in games]
     if configs and not ckpt.dims_agnostic and dims_for(configs) != dims:
         raise SpecError(f"{key}: {ref} is a {ckpt.header['model']['class']} network at dims {dims}; "
