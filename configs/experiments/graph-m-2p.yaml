@@ -1,0 +1,75 @@
+# a bigger 1v1 net (marco, 2026-11-04: "let's try graph-m for 3B steps first rn").
+#
+# the 1v1 net has leveled off: a second ~1B steps on openhex's 1v1 rules moved ppo-2p-fr3 by about a
+# point head to head, and hexn-4d.0 sits ~120 elo above our best openhex bot. every 1v1 net so far is
+# graph-s (0.54M params); graph-m (hidden 192, global 96, 4 layers, head 256) was never run. this
+# asks whether capacity is the limit.
+#
+# design: discount-2p's g1 cell with only the model and the budget changed: puffer-graph2's recipe
+# from scratch on openhex's 1v1 rules (base-2p-fr), obs level full, gamma 1 for the policy and the
+# lambda critic (the undiscounted default), seed 42, 3B agent steps (~22,700 epochs) on one cosine
+# from 0.005 to 0.0005.
+#
+# monitors every 100 epochs (not 50: 6x the epochs) on select-2p-fr, 1,000 games each: vs F and vs
+# the fixed reference ppo-2p-fr3/full@e4350 (the deployed 1v1-v2 net). finals on heldout-2p-fr,
+# 5,000 games each, on @latest (fixed before the run): vs F and vs the reference (+-1.4 pp at 50%).
+# graph-s at the same steps can be read post hoc: graph-m@e3786 vs discount-2p/g1-s42@e3786.
+#
+# memory: max_minibatch_size 2048: 4.26 GiB peak, 6.0k agent steps/s (smoke, 2026-11-04); 4096 gave 6.3k
+# at 6.89 GiB with allocator oom warnings, too close to the 8 gb card.
+# the minibatch stays 16384 rows, accumulated over 8 micro-batches.
+# cost: ~139 h of training at 6.0k steps/s (graph-s: 17.7k) + ~3 h of monitors: about 6 days.
+#
+# launch (main, no other run live):
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p.yaml
+name: graph-m-2p
+seed: 42
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+model: {preset: graph-m, args: {shared: true}}
+obs: {level: full}
+train:
+  algo: ppo
+  total_timesteps: 3_000_000_000  # ~22,700 epochs x 132,096 agent steps (both seats' rows)
+  optimizer: muon               # heavyball ForeachMuon(heavyball_momentum=True), as puffer-graph2
+  learning_rate: 0.005          # puffer-graph2's peak, cosine to 0.0005
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 1.0                    # no discount (discount-2p: same strength, longer games)
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2             # not read (per-seat value loss)
+  ent_coef: 0.005
+  max_grad_norm: 2.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 2048      # header: memory
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  critic_targets: lambda
+  critic_gamma: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 100
+eval:
+  champion: "ppo-2p-fr3/full@e4350#43eca7ffdd41"   # the fixed reference (header)
+  select: {from: champion}
+  monitor:
+    - {name: champion, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"], every: 100,
+       metric: score_rate}
+    - {name: f, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", F], every: 100, metric: score_rate}
+  final:
+    - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", F]}
+    - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=${champion}"]}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
