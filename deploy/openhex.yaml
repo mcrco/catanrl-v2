@@ -52,7 +52,8 @@ bots:
     deployed: 2026-10-27
     tag: openhex-1v1-v2.2
     evidence: [cbba2d1098a7be6c, b38e49dc2f3a95b3, 507970d71e8d6566, 7c0d2f67135e7aad, 32d82b766f6b9526]
-    retired: false
+    retired: true
+    retired_at: 2026-11-04  # off the ladder so catanrl-1v1-search-v2 meets other bots (41 of its first 43 games were this one)
   # 2^17 sims (Marco), v1's search options, and deadline=45: a move's searches stop at 45 s
   # and play their most-visited move so far (counted as "cut" in games.jsonl's search). On
   # yang's GTX 1080 a fresh 2^17 search takes 7.5-9.9 s (8 positions, 2026-11-04), so the
