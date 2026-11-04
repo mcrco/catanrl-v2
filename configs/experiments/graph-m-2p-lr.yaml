@@ -1,0 +1,62 @@
+# graph-m-2p at half the learning rate (marco, 2026-11-04: "sounds good let's do it").
+#
+# graph-m-2p (0.005, the graph-s peak) fell behind graph-s at the same steps and stalled: at e1000
+# 16.7 vs 26.4% against fr3@e4350 (paired p = 4e-8) and 91.1 vs 95.9% against F, at e1400 20.0 vs
+# 31.0% against fr3, with the approximate kl per epoch rising from 0.03 to 0.13 (graph-s: 0.02-0.03
+# at the same entropy and about the same lr). stopped at ~e1500. this restarts it from scratch at
+# 0.0025, cosine to 0.00025, everything else unchanged (graph-m-2p's header holds the design,
+# memory and cost). first check: e1000 against graph-s at the same steps, as for graph-m-2p.
+#
+# launch (main, no other run live):
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p-lr.yaml
+name: graph-m-2p-lr
+seed: 42
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+model: {preset: graph-m, args: {shared: true}}
+obs: {level: full}
+train:
+  algo: ppo
+  total_timesteps: 3_000_000_000  # ~22,700 epochs x 132,096 agent steps (both seats' rows)
+  optimizer: muon               # heavyball ForeachMuon(heavyball_momentum=True), as puffer-graph2
+  learning_rate: 0.0025         # half of puffer-graph2's peak (header), cosine to 0.00025
+  lr_schedule: constant         # catanrl's KL schedule off; the cosine is PuffeRL's anneal_lr
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 1.0                    # no discount (discount-2p: same strength, longer games)
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2             # not read (per-seat value loss)
+  ent_coef: 0.005
+  max_grad_norm: 2.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 2048      # header: memory
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  critic_targets: lambda
+  critic_gamma: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 100
+eval:
+  champion: "ppo-2p-fr3/full@e4350#43eca7ffdd41"   # the fixed reference (header)
+  select: {from: champion}
+  monitor:
+    - {name: champion, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"], every: 100,
+       metric: score_rate}
+    - {name: f, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", F], every: 100, metric: score_rate}
+  final:
+    - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", F]}
+    - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=${champion}"]}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
