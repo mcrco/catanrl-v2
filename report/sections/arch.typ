@@ -83,6 +83,26 @@ catanrl run configs/experiments/arch-ablation.yaml
 - *Finals.* `@latest` on `heldout-2p-fr`, 5,000 games each: against F and against `ppo-2p-fr3/full@e4350` (±1.4 pp). `graph-s` at the same steps can be read afterwards: `graph-m@e3786` against `discount-2p/g1-s42@e3786`.
 - *Cost.* 6.0k steps/s (`graph-s`: 17.7k) at a 4.26 GiB peak with micro-batches of 2,048 rows; 4,096 gave 6.3k at 6.89 GiB with allocator warnings. About 139 h of training plus 3 h of monitors. The budget fixes the cosine, so a shorter run means a restart, not an early stop.
 
+#lead[Progress at epoch 1,000 (132M steps, 6 h).] Behind `graph-s` at the same steps, and flat since epoch 600:
+
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Epoch], [`graph-m` vs fr3], [`graph-s` vs fr3], [`graph-m` vs F], [`graph-s` vs F]),
+    [200], [9.1], [9.1], [84.4], [83.7],
+    [400], [15.9], [16.3], [87.6], [89.2],
+    [600], [17.5], [21.3], [92.1], [92.5],
+    [800], [19.5], [21.8], [91.1], [93.2],
+    [1,000], [16.7], [*26.4*], [91.1], [*95.9*],
+  ),
+  caption: [Monitor score rates (%) on `select-2p-fr`, 1,000 games each (±2.5 pp at 20%). `graph-s` is `discount-2p/g1-s42`; fr3 is `ppo-2p-fr3/full@e4350`.],
+)
+
+- *Paired at epoch 1,000* (same 1,000 games). Against fr3: −9.7 pp (106 against 203 discordant, p = 4e-8). Against F: −4.8 pp (35 against 83, p = 1e-5).
+- *Since epoch 600.* Against fr3: 17.5 → 16.7 (p = 0.65), while `graph-s` went 21.3 → 26.4.
+- *Update size.* The approximate KL per epoch rose from 0.03 to 0.09; `graph-s` stayed at 0.02–0.03 over the same epochs. Entropy is the same (0.17), and the learning rate is about the same (0.0050 against 0.0043). So the bigger net takes about 4× larger policy steps at the same learning rate. Its critic is slightly better (Brier 0.127 against 0.134).
+
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p.yaml
 ```)
