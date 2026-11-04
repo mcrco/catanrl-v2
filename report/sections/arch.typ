@@ -66,7 +66,7 @@ catanrl run configs/experiments/arch-ablation.yaml
 
 === `graph-m` for 3B steps on OpenHex's 1v1 rules #chip("running") <exp:arch-graph-m-2p>
 #meta(
-  dates: "2026-11-04 02:20 –",
+  dates: "2026-11-04 02:10 –",
   owner: "marco",
   config: "configs/experiments/graph-m-2p.yaml",
   wandb: (("graph-m-2p-main-651bcbbc", "main"),),
