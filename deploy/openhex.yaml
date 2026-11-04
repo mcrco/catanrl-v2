@@ -63,6 +63,8 @@ bots:
     version: 1v1-search-v2
     spec: MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45
     key_env: OPENHEX_KEY_1V1_SEARCH_V2
+    bot_id: 730e1fb940fe46ff
+    deployed: 2026-11-04
     tag: openhex-1v1-v2.2
     evidence: [cbba2d1098a7be6c, 507970d71e8d6566, 7c0d2f67135e7aad]
     retired: false
