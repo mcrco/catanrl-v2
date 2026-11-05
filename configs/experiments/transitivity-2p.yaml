@@ -1,0 +1,102 @@
+# transitivity (marco, 2026-11-04: "could we get a transitivity experiment? im not sure if training
+# leads to better model for sure"). does a later checkpoint of one run beat every earlier one, and do
+# the results fit a single rating (bradley-terry / elo), or are there cycles (a beats b beats c beats
+# a) that self-play against the current self can hide?
+#
+# players: eight checkpoints of discount-2p/g1-s42 (graph-s, puffer-graph2's recipe from scratch on
+# openhex's 1v1 rules, gamma 1, 3,786 epochs, one cosine; the same run as the search-depth sweep and
+# graph-m's comparison): e250, e500, e1000, e1500, e2000, e2500, e3000, e3786; plus the deployed 1v1
+# net ppo-2p-fr3/full@e4350 (another lineage) as an anchor. all 36 pairs.
+# agent: POLICY (argmax, full level: both sides see all hands, the game the nets train on and the
+# monitors play). BELIEF:worlds=16 (the fair raw bot) is ~16x the cost: ~2 days on the cpu, and the
+# gpu is graph-m-2p-lr's. full-level argmax and belief-averaged play are within 0.1 pp against F
+# (recipe-2p-openhex-1).
+# suite: heldout-2p-fr's first 500 boards in both seat orders, 1,000 games a pair (+-3.1 pp at 50%,
+# wilson 95%; a 4.4 pp difference at 80% power). close late pairs (e3000/e3786) may be inside that;
+# the bradley-terry fit pools 8,000 games a player.
+# analysis: the 9x9 score matrix; later-vs-earlier violations; a bradley-terry fit and its goodness of
+# fit (deviance on 36 - 8 = 28 df); significant cycles.
+# cost (smoke 2026-11-04, cpu, 8 threads): 100 games in 42 s with startup: ~2-3 h for 36,000 games on
+# the cpu, beside graph-m-2p-lr (which uses one core).
+#
+# launch (main; cpu only):
+#   catanrl run configs/experiments/transitivity-2p.yaml
+name: transitivity-2p
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41", "POLICY:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41", "POLICY:ckpt=discount-2p/g1-s42@e500#46ccf535b7db"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41", "POLICY:ckpt=discount-2p/g1-s42@e1000#083b068cb14d"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41", "POLICY:ckpt=discount-2p/g1-s42@e1500#5b135e28b536"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41", "POLICY:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41", "POLICY:ckpt=discount-2p/g1-s42@e2500#696a921c00bc"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41", "POLICY:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41", "POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da", "POLICY:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da", "POLICY:ckpt=discount-2p/g1-s42@e500#46ccf535b7db"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da", "POLICY:ckpt=discount-2p/g1-s42@e1000#083b068cb14d"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da", "POLICY:ckpt=discount-2p/g1-s42@e1500#5b135e28b536"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da", "POLICY:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da", "POLICY:ckpt=discount-2p/g1-s42@e2500#696a921c00bc"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da", "POLICY:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4", "POLICY:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4", "POLICY:ckpt=discount-2p/g1-s42@e500#46ccf535b7db"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4", "POLICY:ckpt=discount-2p/g1-s42@e1000#083b068cb14d"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4", "POLICY:ckpt=discount-2p/g1-s42@e1500#5b135e28b536"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4", "POLICY:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4", "POLICY:ckpt=discount-2p/g1-s42@e2500#696a921c00bc"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2500#696a921c00bc", "POLICY:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2500#696a921c00bc", "POLICY:ckpt=discount-2p/g1-s42@e500#46ccf535b7db"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2500#696a921c00bc", "POLICY:ckpt=discount-2p/g1-s42@e1000#083b068cb14d"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2500#696a921c00bc", "POLICY:ckpt=discount-2p/g1-s42@e1500#5b135e28b536"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2500#696a921c00bc", "POLICY:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0", "POLICY:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0", "POLICY:ckpt=discount-2p/g1-s42@e500#46ccf535b7db"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0", "POLICY:ckpt=discount-2p/g1-s42@e1000#083b068cb14d"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0", "POLICY:ckpt=discount-2p/g1-s42@e1500#5b135e28b536"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e1500#5b135e28b536", "POLICY:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e1500#5b135e28b536", "POLICY:ckpt=discount-2p/g1-s42@e500#46ccf535b7db"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e1500#5b135e28b536", "POLICY:ckpt=discount-2p/g1-s42@e1000#083b068cb14d"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e1000#083b068cb14d", "POLICY:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e1000#083b068cb14d", "POLICY:ckpt=discount-2p/g1-s42@e500#46ccf535b7db"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["POLICY:ckpt=discount-2p/g1-s42@e500#46ccf535b7db", "POLICY:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa"]
+runtime: {device: cpu, threads: 12, num_envs: 500}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
