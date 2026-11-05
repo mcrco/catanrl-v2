@@ -418,3 +418,27 @@ Pooled over seeds, `g1` scores 98.34 against F and 43.5 against the reference, `
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/discount-2p.yaml
 catanrl run configs/experiments/discount-2p-h2h.yaml   # g1 vs g999 within each seed
 ```)
+
+== Does training keep improving?
+
+=== Transitivity: a round robin of one run's checkpoints #chip("running") <exp:recipe-transitivity>
+#meta(
+  dates: "2026-11-04 22:34 –",
+  owner: "marco",
+  config: "configs/experiments/transitivity-2p.yaml",
+  wandb: (("transitivity-2p-main-33604123", "main"),),
+  records: (),
+)
+#tldr[Self-play only ever plays the current net, so steady gains against F and fr3 don't rule out cycles between checkpoints. A round robin of eight checkpoints of one run, plus the deployed net, about 2–3 h on the CPU.]
+
+*Question.* Does every later checkpoint beat every earlier one, and do the results fit a single rating (Marco)?
+
+#lead[Setup.]
+- *Players.* `discount-2p/g1-s42` (`graph-s` from scratch on OpenHex's 1v1 rules, 3,786 epochs; @exp:recipe-discount) at epochs 250, 500, 1,000, 1,500, 2,000, 2,500, 3,000 and 3,786, plus the deployed `ppo-2p-fr3/full@e4350` from another lineage. All 36 pairs.
+- *Agent.* The argmax policy at the `full` level, where both sides see all hands: the game the nets train on and the monitors play. The fair belief-averaged bot costs about 16× as much (about 2 days on the CPU, while `graph-m` holds the GPU), and the two agents score within 0.1 pp of each other against F (@exp:recipe-2p-full).
+- *Games.* `heldout-2p-fr`'s first 500 boards in both seat orders: 1,000 games a pair (±3.1 pp at 50%, Wilson 95%). A 4.4 pp difference has 80% power, so close late pairs may not separate on their own; the rating fit pools 8,000 games a player.
+- *Analysis.* The score matrix; pairs where the earlier checkpoint wins; a Bradley–Terry fit and its goodness of fit (deviance on 36 − 8 = 28 df); any significant cycle.
+
+#repro(```sh
+catanrl run configs/experiments/transitivity-2p.yaml
+```)
