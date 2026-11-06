@@ -442,3 +442,30 @@ catanrl run configs/experiments/discount-2p-h2h.yaml   # g1 vs g999 within each 
 #repro(```sh
 catanrl run configs/experiments/transitivity-2p.yaml
 ```)
+
+== Rollout segments and λ
+
+=== 256-step segments and λ = 1, from scratch #chip("queued") <exp:recipe-horizon>
+#meta(
+  dates: "queued for the GPU after `graph-m` (about 10 November)",
+  owner: "marco",
+  config: "configs/experiments/horizon-2p.yaml",
+  wandb: (),
+  records: (),
+)
+#tldr[Every run so far cuts each env's rollout into 64-step segments with λ = 0.95, so a step's target is mostly the critic's estimate about 20 decisions later. The same run as `discount-2p/g1-s42` with 256-step segments and λ = 1, so most targets are the game's actual result.]
+
+*Question.* Do longer segments with λ = 1 train a stronger 1v1 net than 64 steps with λ = 0.95 (Marco)?
+
+#lead[Why.] A 1v1 game is about 209 decisions (both seats, 88 turns), so a 64-step segment holds about a third of one. At the cut the targets fall back on the critic's value, and λ = 0.95 weighs a step k decisions ahead by 0.95#super[k] (0.36 at 20, 0.04 at 64). With 256 steps and λ = 1, a step's target is the actual result whenever its game ends inside the segment (about 59% of steps) and the critic's value at the cut otherwise. The critic's λ-return targets use the same λ. The graph nets have no memory, so the segment length changes only the targets.
+
+#lead[Setup.]
+- *Baseline.* `discount-2p/g1-s42` (@exp:recipe-discount): `graph-s` from scratch on `base-2p-fr`, γ = 1, seed 42, 500M steps on a cosine from 0.005 to 0.0005.
+- *Changes.* Segment length 64 → 256, λ 0.95 → 1, and 1,032 → 258 envs, so each update still sees 132,096 steps (516 rows × 256) with the same 16 optimizer steps. Fewer games run in parallel. Both knobs change together, so a difference can't be pinned on either alone.
+- *Monitors.* Every 50 epochs on `select-2p-fr` against F and fr3, on the same games as the baseline's monitors, so every epoch pairs with it game by game.
+- *Finals.* `heldout-2p-fr`, 5,000 games each, on the last checkpoint: against F, against fr3, and head to head against the baseline's last checkpoint (±1.4 pp at 50%).
+- *Cost.* The baseline took 7.9 h; collecting 4× more, 4× smaller steps may be slower (to be measured). Needs the 8 GB card alone. A 2-epoch CPU smoke passed.
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/horizon-2p.yaml
+```)
