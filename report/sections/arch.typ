@@ -128,7 +128,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 #lead[Check.] At epoch 1,000, compare against `graph-s` at the same steps (26.4% vs fr3, 95.9% vs F), along with the approximate KL (`graph-s`: about 0.02).
 
-#lead[Progress at epoch 6,000 (793M steps, 36 h).] Level with where `graph-s` ended against both opponents. Gains against fr3 have slowed while the learning rate is still near its peak:
+#lead[Progress at epoch 7,000 (925M steps, 42 h).] Level with where `graph-s` ended against both opponents, and gaining about 0.7 pp against fr3 per 1,000 epochs since epoch 4,000, with the learning rate at 82% of its peak:
 
 #figure(
   btable(
@@ -140,36 +140,30 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
     [1,000], [26.1], [16.7], [26.4],
     [1,500], [31.2], [18.6], [30.4],
     [2,000], [35.8], [—], [33.2],
-    [2,500], [33.9], [—], [37.9],
     [3,000], [37.1], [—], [42.5],
-    [3,500], [37.7], [—], [41.3],
     [4,000], [41.5], [—], [44.7],
-    [4,500], [41.3], [—], [—],
     [5,000], [43.6], [—], [—],
-    [5,500], [43.2], [—], [—],
     [6,000], [42.6], [—], [—],
+    [7,000], [43.2], [—], [—],
     tgroup(4)[Against F],
     [500], [93.9], [88.1], [91.8],
     [1,000], [94.5], [91.1], [95.9],
     [1,500], [96.7], [90.2], [95.4],
     [2,000], [96.3], [—], [95.2],
-    [2,500], [96.5], [—], [96.2],
     [3,000], [97.1], [—], [97.5],
-    [3,500], [97.5], [—], [97.8],
     [4,000], [98.0], [—], [98.8],
-    [4,500], [96.5], [—], [—],
     [5,000], [97.2], [—], [—],
-    [5,500], [98.3], [—], [—],
     [6,000], [98.7], [—], [—],
+    [7,000], [98.5], [—], [—],
   ),
   caption: [Monitor score rates (%) on `select-2p-fr`, 1,000 games each. The first try stopped at epoch 1,500. `graph-s` ended at epoch 3,786, so its 4,000 row is its last monitor (epoch 3,750).],
 )
 
-- *Against `graph-s`'s end* (epoch 3,750, same 1,000 games): −2.1 pp against fr3 (181 against 202 discordant, p = 0.31) and −0.1 pp against F (9 against 10, p = 1). Over the last ten monitors (epochs 5,100 to 6,000) `graph-m` averages 42.0% against fr3 and 98.1% against F, against 44.7% and 98.8% for `graph-s`'s end.
-- *Gains have slowed.* The last ten monitors beat the ten before by 0.8 pp against fr3 (10,000 pairs, p = 0.22) and 0.4 pp against F (p = 0.08). From epoch 3,000 to 5,000 it had gained 6.5 pp against fr3 (p = 0.002).
+- *Against `graph-s`'s end* (epoch 3,750, same 1,000 games): −1.5 pp against fr3 (188 against 203 discordant, p = 0.48) and −0.3 pp against F (12 against 15, p = 0.70). Over the last ten monitors (epochs 6,100 to 7,000) `graph-m` averages 42.7% against fr3 and 97.9% against F, against 44.7% and 98.8% for `graph-s`'s end.
+- *Slow gains since epoch 4,000.* The last ten monitors beat the ten before by 0.7 pp against fr3 (10,000 pairs, p = 0.31) and the ten from epochs 4,100 to 5,000 by 1.4 pp (p = 0.03). Against F they are level (−0.2 and +0.2 pp). From epoch 3,000 to 5,000 it had gained 6.5 pp against fr3 (p = 0.002).
 - *Earlier, paired at equal steps.* Behind from epoch 2,500 on (−3.9 pp against fr3 pooled over epochs 3,100 to 3,700, p = 1e-7, optimistic since each epoch replays the same games), while `graph-s` annealed. Level at epochs 2,000 (+2.6 pp, p = 0.19) and 1,000 (−0.3 pp, p = 0.91); ahead at epoch 500 (+3.4 pp, p = 0.06). Against the first try at epoch 1,000: +9.4 pp against fr3 (p = 3e-8).
-- *Learning rate.* `graph-m` is at 0.0022, 88% of its peak, and anneals over the remaining 16,700 epochs. `graph-s`'s late gains came as its learning rate fell (+9 pp against fr3 from epoch 2,000 to 3,000, 0.0026 to 0.00096). The finals against fr3 decide.
-- *Update size.* From epoch 5,500 to 6,000 the approximate KL per epoch has a median of 0.018 (largest 0.25), with a clip fraction of 0.04. Entropy is 0.10. Speed is 6.2k steps/s, with a 5.0 GiB peak.
+- *Learning rate.* `graph-m` is at 0.0020, 82% of its peak, and anneals over the remaining 15,700 epochs. `graph-s`'s late gains came as its learning rate fell (+9 pp against fr3 from epoch 2,000 to 3,000, 0.0026 to 0.00096). The finals against fr3 decide.
+- *Update size.* From epoch 6,500 to 7,000 the approximate KL per epoch has a median of 0.017 (largest 0.17), with a clip fraction of 0.036. Entropy is 0.09. Speed is 6.2k steps/s, with a 5.0 GiB peak.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p-lr.yaml
