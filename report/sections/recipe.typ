@@ -462,8 +462,8 @@ catanrl run configs/experiments/transitivity-2p.yaml
 #lead[Setup.]
 - *Baseline.* `discount-2p/g1-s42` (@exp:recipe-discount): `graph-s` from scratch on `base-2p-fr`, γ = 1, seed 42, 500M steps on a cosine from 0.005 to 0.0005.
 - *Changes.* Segment length 64 → 256, λ 0.95 → 1, and 1,032 → 258 envs, so each update still sees 132,096 steps (516 rows × 256) with the same 16 optimizer steps. Fewer games run in parallel. Both knobs change together, so a difference can't be pinned on either alone.
-- *Monitors.* Every 50 epochs on `select-2p-fr` against F and fr3, on the same games as the baseline's monitors, so every epoch pairs with it game by game.
-- *Finals.* `heldout-2p-fr`, 5,000 games each, on the last checkpoint: against F, against fr3, and head to head against the baseline's last checkpoint (±1.4 pp at 50%).
+- *Monitors.* Every 50 epochs on `select-2p-fr` against fr3, on the same games as the baseline's monitors, so every epoch pairs with it game by game. No monitor or final against F, which sits near 98% (Marco).
+- *Finals.* `heldout-2p-fr`, 5,000 games each, on the last checkpoint: against fr3, and head to head against the baseline's last checkpoint (±1.4 pp at 50%).
 - *Cost.* The baseline took 7.9 h; collecting 4× more, 4× smaller steps may be slower (to be measured). Needs the 8 GB card alone. A 2-epoch CPU smoke passed.
 
 #repro(```sh

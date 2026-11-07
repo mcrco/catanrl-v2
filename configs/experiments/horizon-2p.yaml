@@ -17,10 +17,11 @@
 # fewer games run in parallel (258 against 1032); the env steps per epoch are the same. both knobs
 # change together (one run, as asked), so a difference can't be pinned on either alone.
 #
-# monitors every 50 epochs on select-2p-fr (1,000 games each): vs F and vs ppo-2p-fr3/full@e4350,
-# the same games as g1-s42's monitors, so every epoch pairs with g1 by game id (McNemar). finals on
-# heldout-2p-fr, 5,000 games each, on @latest: vs F, vs fr3, and head to head vs g1-s42@e3786 (the
-# baseline's last checkpoint; +-1.4 pp at 50%).
+# monitors every 50 epochs on select-2p-fr (1,000 games each) vs ppo-2p-fr3/full@e4350 only, the
+# same games as g1-s42's fr3 monitors, so every epoch pairs with g1 by game id (McNemar). no F monitor
+# or final (marco, 2026-11-07: "drop f ... since we have a better metric now"; F sits at ~98%).
+# finals on heldout-2p-fr, 5,000 games each, on @latest: vs fr3, and head to head vs g1-s42@e3786
+# (the baseline's last checkpoint; +-1.4 pp at 50%).
 #
 # cost: g1 took ~7.9 h at ~17.7k agent steps/s; 4x more, 4x smaller rollout steps may slow
 # collection (unmeasured until a gpu smoke). needs the 8 gb card alone (~4.5 GB; graph-m-2p-lr holds
@@ -72,9 +73,7 @@ eval:
   monitor:
     - {name: champion, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"], every: 50,
        metric: score_rate}
-    - {name: f, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate}
   final:
-    - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", F]}
     - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=${champion}"]}
     - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da"]}
 meta:
