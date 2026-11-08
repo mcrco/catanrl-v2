@@ -61,6 +61,29 @@ So far: self-play PPO on a graph network gives a strong raw policy, and search o
   caption: [The best agent per setting, on held-out boards. 2p scores are win rates; 4p scores are slot 0's score share. v2 trains from scratch (no DAgger) and lands 5 points above v1's warm-started reference in 2p. Hidden information is worth under a point in 2p: the fair `public` and belief-averaged nets are level with the raw `full` net. 4p is trained and played at the `private` level, the only fair level past two players.],
 ) <tab:best>
 
+== Models <sec:models>
+
+Every network we talk about gets a name of the form _players–network–number_, so the name always gives the player count and the size (Marco): `2p-graph-s-3` is the third 2p net of preset `graph-s`. The names and their pinned checkpoints live in `configs/registry.yaml`. Records and configs keep the full checkpoint refs.
+
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, 1fr),
+    align: (left, left, right, left, left),
+    header: ([Name], [Rules], [Steps], [Checkpoint], [Notes]),
+    tgroup(5)[`graph-s`: hidden 96, 3 layers, 541,540 parameters],
+    [`2p-graph-s-1`], [`base-2p`], [0.44B], [`puffer-graph2/full@e3350`], [From scratch; the first deployed 1v1 net],
+    [`2p-graph-s-2`], [`base-2p-fr`], [1.45B], [`ppo-2p-fr/full@e7600`], [`2p-graph-s-1` + 1.0B on OpenHex's rules],
+    [`2p-graph-s-3`], [`base-2p-fr`], [2.02B], [`ppo-2p-fr3/full@e4350`], [fr3: `2p-graph-s-2` + 0.57B; deployed; *best-2p*],
+    [`2p-graph-s-4`], [`base-2p-fr`], [0.50B], [`discount-2p/g1-s42@e3786`], [g1: from scratch, γ = 1],
+    [`4p-graph-s-1`], [`base-4p`], [0.96B], [`ppo-4p/main@e3650`], [From scratch; deployed; *best-4p*],
+    [`4p-graph-s-2`], [`base-4p`], [0.16B], [`aux-hidden-4p/plain@e600`], [The calibrated critic that judges trades],
+    [`mix-graph-s-1`], [2–4 players], [0.93B], [`ppo-mixed/main@e3550`], [One net for 2–4 players and any map; deployed],
+    tgroup(5)[`graph-m`: hidden 192, 4 layers, 2,320,100 parameters],
+    [`2p-graph-m-1`], [`base-2p-fr`], [3.0B], [`graph-m-2p-lr/main`, pinned at its finals], [From scratch (@exp:arch-graph-m-2p-lr); running],
+  ),
+  caption: [Named models. Steps count every agent step behind the weights, parents included. *best-2p* and *best-4p* are roles that move to a better net; every new run plays best-2p (or best-4p) as its yardstick.],
+) <tab:models>
+
 == How to read this log
 
 Sections are ideas, not dates. Each experiment is one block: a status chip (*done*, *running*, *queued*, *stopped* early, *todo* or *parked*); a metadata line (dates, whose idea, config, W&B runs, eval records); a summary; the question, setup, result and reading; and the command that reproduces it. Marco's ideas are credited to him; ideas from Claude (the assistant writing this log) that were never run are marked "(Claude's suggestion, not queued)".

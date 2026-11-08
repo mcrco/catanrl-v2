@@ -1,0 +1,61 @@
+# Model names (Marco, 2026-11-08): one short name per network we talk about, so the name always
+# says the player count and the network size. Format: <players>-<preset>-<n>
+#   players: 2p, 4p, or mix (one net for 2-4 players)
+#   preset:  the network preset in configs/models (graph-s 541,540 parameters, graph-m 2,320,100)
+#   n:       1, 2, 3 ... in the order registered for that players-preset pair
+# `ref` is the pinned checkpoint (run/variant@epoch#weights-sha) that the name stands for; records and
+# configs keep using refs, so nothing older changes. `steps` counts every agent step behind the
+# weights, parents included. Roles point at a name and move when a better net replaces it.
+# Docs only for now: `ckpt=<name>` resolves after graph-m-2p-lr ends (runner code freeze).
+roles:
+  best-2p: 2p-graph-s-3        # the yardstick every new 1v1 net plays (fr3)
+  best-4p: 4p-graph-s-1
+models:
+  2p-graph-s-1:
+    ref: "puffer-graph2/full@e3350#3355b5059503"
+    rules: base-2p
+    from: scratch
+    steps: 442_521_600
+    use: first deployed 1v1 net (OpenHex 1v1-v1, 1v1-search-v1)
+  2p-graph-s-2:
+    ref: "ppo-2p-fr/full@e7600#7c7b43b099c0"
+    rules: base-2p-fr
+    from: 2p-graph-s-1
+    steps: 1_446_451_200
+    use: 2p-graph-s-1 continued for 1.0B steps on OpenHex's 1v1 rules
+  2p-graph-s-3:
+    ref: "ppo-2p-fr3/full@e4350#43eca7ffdd41"
+    rules: base-2p-fr
+    from: 2p-graph-s-2
+    steps: 2_021_068_800
+    use: fr3; deployed (OpenHex 1v1-v2, the site's 1v1 room); best-2p
+  2p-graph-s-4:
+    ref: "discount-2p/g1-s42@e3786#aa8868d9c6da"
+    rules: base-2p-fr
+    from: scratch
+    steps: 500_115_456
+    use: g1; the from-scratch graph-s baseline on OpenHex's 1v1 rules (gamma 1)
+  2p-graph-m-1:
+    ref: null                  # graph-m-2p-lr/main, pinned at its finals (about 2026-11-10)
+    rules: base-2p-fr
+    from: scratch
+    steps: 3_000_000_000
+    use: graph-m from scratch at half graph-s's learning rate
+  4p-graph-s-1:
+    ref: "ppo-4p/main@e3650#813b2c61338f"
+    rules: base-4p
+    from: scratch
+    steps: 956_825_600
+    use: deployed (OpenHex 4p-v1, the site's 4p room); best-4p
+  4p-graph-s-2:
+    ref: "aux-hidden-4p/plain@e600#d2c81ca79841"
+    rules: base-4p
+    from: scratch
+    steps: 157_286_400
+    use: the calibrated critic that judges trades in the trade harness
+  mix-graph-s-1:
+    ref: "ppo-mixed/main@e3550#1183427bf0cf"
+    rules: base-2p, 3p and base-4p
+    from: scratch
+    steps: 930_611_200
+    use: one net for 2-4 players and any map; deployed (the site's island room)
