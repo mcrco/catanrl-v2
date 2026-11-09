@@ -1,0 +1,157 @@
+# The offline distillation gate (Marco approved 2026-11-09; Claude's design, az.typ's follow-up):
+# is there anything in 2048-sim search targets that makes fr3 a better search network, and which
+# target shape keeps the network intact? Before another self-play loop, three fits of the same
+# searched positions, each judged inside the search (Marco's rule, @exp:az-e8-search).
+#
+# Start: ppo-2p-fr3/full@e4350 (#43eca7ffdd41, 2p-graph-s-3, the deployed 1v1 net: graph-s, 541,540
+# parameters, one shared trunk, full observation level, trained on base-2p-fr), actor and critic.
+#
+# Variants (the runner plays them in this order; each fit names the dataset, so waits for it):
+#   positions (train.phase: collect): fr3's raw self-play as PPO samples it (softmax of the masked
+#     logits) on its own training pool (seed 42: the 4,096 base-2p-fr boards it trained on, turn
+#     limit 1000; not the select or heldout suites), each env's first game, 512 games at a time, 5,120
+#     games. 20 decisions per game are kept, uniformly (a reservoir sample of the decisions with more
+#     than one legal move; the env plays forced moves itself): 102,400 positions. Each is searched
+#     once with az-2p-2048's search (Gumbel root, 2048 sims, m 16, c_puct 0.75) on the true game
+#     (dets 0): fr3 reads the true state (full level), so its targets should be about the true
+#     state. Kept per position (positions.npz in the run folder, its sha256 in positions.json and
+#     the last metrics row): the row, and over its legal moves fr3's root logits, visits, Q and the
+#     engine's own target; fr3's per-seat values at the root, the search's root values and depth;
+#     game id, seed, seat, turn and outcome. Written chunk by chunk (512 games), so a relaunch
+#     resumes. Then its final: the baseline harness row (below).
+#   engine, canopy, canopy-anchor (train.phase: fit): fr3 again, fitted to one target each,
+#     rebuilt offline from the same dataset; 10% of the games (512) held out:
+#     - engine: the engine's Gumbel target, softmax(log prior + (50 + max visits) x 0.1 x Q
+#       min-max rescaled over the moves), what az-2p-2048 trained on. The control: it should
+#       reproduce az-2p-2048's drop (raw 48.0 vs its start at e6);
+#     - canopy: the same formula with Q unrescaled (clamped to [0, 1]), c_scale 1, no prior
+#       temperature: the Canopy-shaped target of the CPU probe (@exp:az-canopy-diff: it overruled
+#       the start on knight-or-roll 2.2% of the time, the engine's 18.9%);
+#     - canopy-anchor: 0.5 x canopy + 0.5 x fr3's own policy at the root (the same as cross-entropy
+#       to canopy plus a KL anchor to the start, halved).
+#     Loss: cross-entropy to the target over the legal moves, plus the value head's BCE to fr3's
+#     own win probabilities at each position (the trunk is shared, so the critic is held where it
+#     was). AdamW from fresh state at az-2p-2048's settings (lr 5e-5, weight decay 1e-4, clip 1.0,
+#     minibatches of 512 drawn uniformly with replacement).
+#     Dose: 128 updates for every target, az-2p-2048's at its e6 select (the 48.0 row): its learn()
+#     first ran in iterations 5 and 6 (runs/az-2p-2048/main/metrics.jsonl has train/* rows from
+#     epoch 5 on), 64 updates of 512 each, so e6 had 128 updates, 65,536 samples. Here that is 0.71
+#     passes over the 92,160 training positions. An epoch is one update: e128 is the fit, e0 fr3's
+#     weights, e64 the halfway point.
+#     Logged every 8 updates (W&B): on the held-out games (heldout/*) and on as many training
+#     positions (probe/*): cross-entropy to the target, KL(fr3 || net), entropy, argmax agreement
+#     with fr3 and with the target, value drift (mean |p - p_fr3| per seat), value KL to fr3, the
+#     value's BCE to the real outcome; held-out agreement and KL per phase (setup, discard, robber,
+#     dev, build). Row e0 adds the targets' statistics (target/*: entropy, share >= 0.99 on one
+#     move, overrule rate of fr3's argmax).
+#
+# Finals, all on heldout-2p-fr's first 1,000 boards in both seat orders: 2,000 games a row, the same
+# games in every row, so any two rows pair by game id (tools/search_probe.py --pair A B):
+#   - search harness (Marco's rule: MCTS(new) and MCTS(old), each against the raw start, paired):
+#     MCTS:sims=512:dets=1:root=gumbel:gumbel_m=16:kernels=fused with the fit inside, against fr3's
+#     fair raw bot, BELIEF:worlds=16; and the baseline, fr3 itself inside the same search (in the
+#     positions variant, so it plays first). The fused kernels serve any root (agents/spec.py: an
+#     evaluator option), as in search-depth-2p;
+#   - raw screen (secondary): BELIEF:worlds=16 of the fit against BELIEF:worlds=16 of fr3.
+#
+# Decision rule (fixed before launch): each target's harness row against the baseline row, paired by
+# McNemar over the 2,000 shared games, Holm at 0.05 over the three targets.
+#   - a clear loss: that target breaks the net (expected for engine, the control; if engine does not
+#     lose, the gate cannot see what broke az-2p-2048 and says little about the others);
+#   - a clear win: run the full AlphaZero loop with that target;
+#   - neither: no effect of about 3.5 pp or more. The paired SE is sqrt(discordant share / n): the az
+#     pairs disagreed on ~25% of games (c4ea7b52 vs 831eea84), so ~1.1 pp at 2,000 games, 80% power
+#     at ~3.1 pp two-sided (~3.6 pp at Holm's 0.0167 for the smallest p).
+#   The raw screen is read alongside, never alone (az-2p-2048's raw drop came with a flat search row).
+#
+# Cost (one RTX 2070 SUPER, nothing measured for this config yet; the GPU smoke measures the search):
+#   positions: 102,400 searches x 2,049 leaf rows = 210M leaves: 2.5 h at az-2p-2048's 23.6k leaves/s
+#     (torch kernels, 512 searches in lockstep: ~22 ms a round, ~15 of them the forward). The fused
+#     kernels cut the forward to ~9 ms (15.7-17 us a row), not the tree work, so ~1.8 h; self-play is
+#     ~1 min a chunk. Host RAM ~6.2 GB of trees (az-2p-2048 at 512 searches); the dataset ~1.1 GB
+#     (float32 rows).
+#   fits: about a minute each (128 updates plus 17 scorings of 2 x 10k positions).
+#   finals: search-depth-2p's 1,000-game cells (fused, dets 1 vs BELIEF w16) took 0.3 h at 256 sims
+#     and 1.1 h at 1,024, so ~0.6 h at 512 and ~1.15 h per 2,000-game row: 4 harness rows ~4.6 h (a
+#     broken fit's longer games cost more); raw rows ~5 min each (~76 s per 1,000 games per BELIEF seat).
+#   total ~7-8 h of GPU, the 8 GB card alone.
+#
+# Launch (main, GPU free; the fused kernels build with nvcc and ninja on PATH):
+#   catanrl run configs/experiments/az-gate-2p.yaml
+name: az-gate-2p
+seed: 42                        # fr3's: its training pool (map_pool from the seed)
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]   # fr3's own scenario and pool
+  num_envs: 512                 # games played (then searched) per chunk
+obs: {level: full}
+model: {preset: graph-s, args: {shared: true}}
+init_from: {ckpt: "ppo-2p-fr3/full@e4350#43eca7ffdd41", parts: [actor, critic]}
+train:
+  algo: distill
+  games: 5120                   # 10 chunks of 512
+  positions_per_game: 20        # 102,400 positions
+  root: gumbel                  # az-2p-2048's search
+  sims: 2048
+  dets: 0                       # the true game (fr3 reads it whole)
+  c_puct: 0.75
+  gumbel_m: 16
+  kernels: fused                # the network on the fused CUDA kernels (nvcc and ninja on PATH)
+  search_rows: 512              # searches in lockstep (az-2p-2048's 512 games)
+  holdout_fraction: 0.1         # 512 games held out
+  updates: 128                  # az-2p-2048's dose at its e6 select (header)
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  max_grad_norm: 1.0
+  value_coef: 1.0
+  log_interval: 8
+  checkpoint_interval: 64       # e0, e64, e128
+sweep:
+  axes:
+    arm:
+      positions:
+        train.phase: collect
+        eval.final:
+          - suite: {name: heldout-2p-fr, boards: 1000}
+            lineup:
+              - "MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=512:dets=1:root=gumbel:gumbel_m=16:kernels=fused"
+              - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+      engine:
+        train.dataset: "${experiment}/positions"
+        train.policy_target: engine
+        eval.final:
+          - suite: {name: heldout-2p-fr, boards: 1000}
+            lineup:
+              - "MCTS:ckpt=${run}@latest:sims=512:dets=1:root=gumbel:gumbel_m=16:kernels=fused"
+              - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+          - suite: {name: heldout-2p-fr, boards: 1000}
+            lineup: ["BELIEF:ckpt=${run}@latest:worlds=16", "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"]
+      canopy:
+        train.dataset: "${experiment}/positions"
+        train.policy_target: gumbel
+        train.target_c_scale: 1.0
+        train.target_rescale: false
+        eval.final:
+          - suite: {name: heldout-2p-fr, boards: 1000}
+            lineup:
+              - "MCTS:ckpt=${run}@latest:sims=512:dets=1:root=gumbel:gumbel_m=16:kernels=fused"
+              - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+          - suite: {name: heldout-2p-fr, boards: 1000}
+            lineup: ["BELIEF:ckpt=${run}@latest:worlds=16", "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"]
+      canopy-anchor:
+        train.dataset: "${experiment}/positions"
+        train.policy_target: gumbel
+        train.target_c_scale: 1.0
+        train.target_rescale: false
+        train.target_anchor: 0.5
+        eval.final:
+          - suite: {name: heldout-2p-fr, boards: 1000}
+            lineup:
+              - "MCTS:ckpt=${run}@latest:sims=512:dets=1:root=gumbel:gumbel_m=16:kernels=fused"
+              - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+          - suite: {name: heldout-2p-fr, boards: 1000}
+            lineup: ["BELIEF:ckpt=${run}@latest:worlds=16", "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"]
+  name: "{arm}"
+runtime: {device: cuda, threads: 12, num_envs: 960, infer_rows: 512}   # num_envs, infer_rows: eval games in flight, search-depth-2p's
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

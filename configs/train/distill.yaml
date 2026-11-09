@@ -1,0 +1,33 @@
+# The offline distillation gate (catanrl.train.distill): search a network's own positions once
+# (phase: collect), then fit copies of it to targets rebuilt from those searches (phase: fit).
+# Exactly catanrl's DISTILL_KEYS. One experiment holds both phases as variants: the fit variants
+# name the collect variant in train.dataset, so the runner plays it first.
+algo: distill
+phase: fit                     # collect: play, pick and search the positions | fit: train on them
+dataset: null                  # fit: the collect variant's run, ${experiment}/<variant>
+# collect (env.num_envs games are played and searched at a time)
+games: 5120                    # each env's first game of the start's raw self-play (softmax samples, as PPO)
+positions_per_game: 20         # decisions kept per game, uniformly (reservoir); only rows with >1 legal action
+root: gumbel                   # puct | gumbel
+sims: 2048                     # simulations of every search
+dets: 0                        # the true game (the only setting: the dataset keeps one root's prior)
+c_puct: 0.75                   # engine units (v1's 1.5)
+gumbel_m: 16                   # actions a Gumbel root considers
+kernels: torch                 # torch | fused (the network on custom CUDA kernels; needs ninja on PATH)
+search_rows: 512               # searches in lockstep, so leaf rows per network call
+# fit
+policy_target: engine          # engine: the search's own target | gumbel: rebuilt with the sigma below
+target_c_visit: 50.0           # gumbel's sigma = (c_visit + the most visits of an action) * c_scale * completed Q,
+target_c_scale: 0.1            # at the engine's constants (50, 0.1, true) the engine's own target
+target_rescale: true           # completed Q min-max rescaled over the legal actions (false: clamped to [0, 1])
+target_prior_temperature: 1.0  # gumbel's prior term: softmax(logits / T)
+target_anchor: 0.0             # weight of the start's own policy in the target: (1 - a) target + a start
+holdout_fraction: 0.1          # games (not positions) held out for validation
+updates: 128                   # AdamW steps; an epoch is one update
+minibatch_size: 512            # positions per update, drawn uniformly with replacement
+learning_rate: 5.0e-5
+weight_decay: 1.0e-4           # AdamW (decoupled L2)
+max_grad_norm: 1.0
+value_coef: 1.0                # weight of the value head's BCE to the start's own values (an anchor)
+log_interval: 8                # updates between metric rows (train probe and held-out games)
+checkpoint_interval: 64        # updates

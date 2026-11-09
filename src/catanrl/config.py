@@ -84,7 +84,7 @@ MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
-ALGOS = ("ppo", "imitation", "alphazero")
+ALGOS = ("ppo", "imitation", "alphazero", "distill")
 #: Sections whose keys are not checked against the defaults.
 OPEN = {"meta", "params", "model.args"}
 #: Keys of each entry of these lists or optional mappings.
@@ -379,6 +379,8 @@ def _check_train(train: Any) -> dict:
         _check_freeze(out.get("freeze", []))
     if algo == "alphazero":
         _check_alphazero_targets(out, base)
+    if algo == "distill":
+        check_distill(out, base)
     return out
 
 
@@ -409,6 +411,52 @@ def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) 
     if train["policy_target"] == "engine" and any(train[k] != base[k] for k in constants):
         raise ConfigError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
                           "has the search's own sigma (set policy_target: gumbel)")
+
+
+def check_distill(train: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> None:
+    """The offline distillation gate's refusals (catanrl.train.distill), at resolution and again
+    in the trainer: a phase and its dataset, the search it can store, the target it can build."""
+    base = train_defaults("distill") if base is None else base
+    if train["phase"] not in ("collect", "fit"):
+        raise ConfigError(f"train.phase must be collect or fit, not {train['phase']!r}")
+    dataset = train["dataset"]
+    if train["phase"] == "fit" and (not isinstance(dataset, str) or not dataset):
+        raise ConfigError("train.phase: fit reads the collect variant's dataset: set train.dataset to its run "
+                          "(${experiment}/<variant>)")
+    if train["phase"] == "collect" and dataset is not None:
+        raise ConfigError("train.phase: collect makes the dataset; train.dataset is for phase: fit")
+    if train["root"] not in ("puct", "gumbel"):
+        raise ConfigError(f"train.root must be puct or gumbel, not {train['root']!r}")
+    if train["dets"] != 0:
+        raise ConfigError("train.dets: the dataset keeps one root's prior, so the searches read the true game "
+                          "(dets 0)")
+    if train["kernels"] not in ("torch", "fused"):
+        raise ConfigError(f"train.kernels must be torch or fused, not {train['kernels']!r}")
+    for key in ("games", "positions_per_game", "sims", "gumbel_m", "search_rows", "updates", "minibatch_size",
+                "log_interval", "checkpoint_interval"):
+        if train[key] < 1:
+            raise ConfigError(f"train.{key} must be positive")
+    if not 0.0 <= train["holdout_fraction"] < 1.0:
+        raise ConfigError("train.holdout_fraction is a fraction of the games in [0, 1)")
+    if train["policy_target"] not in ("engine", "gumbel"):
+        raise ConfigError(f"train.policy_target must be engine or gumbel, not {train['policy_target']!r}")
+    if train["policy_target"] == "gumbel" and train["root"] != "gumbel":
+        raise ConfigError("train.policy_target: gumbel rebuilds a Gumbel root's improved policy; a PUCT root's "
+                          "target is its visits (policy_target: engine)")
+    if not (train["target_c_visit"] >= 0.0 and train["target_c_scale"] >= 0.0):
+        raise ConfigError("train.target_c_visit and train.target_c_scale must be non-negative")
+    if not train["target_prior_temperature"] > 0.0:
+        raise ConfigError("train.target_prior_temperature must be positive")
+    constants = ("target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature")
+    if train["policy_target"] == "engine" and any(train[k] != base[k] for k in constants):
+        raise ConfigError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
+                          "has the search's own sigma (set policy_target: gumbel)")
+    if not 0.0 <= train["target_anchor"] <= 1.0:
+        raise ConfigError("train.target_anchor is the start policy's weight in the target, in [0, 1]")
+    if train["learning_rate"] < 0.0 or train["weight_decay"] < 0.0 or train["value_coef"] < 0.0 \
+            or train["max_grad_norm"] <= 0.0:
+        raise ConfigError("train.learning_rate, weight_decay and value_coef must be non-negative and "
+                          "max_grad_norm positive")
 
 
 def _check_model(model: Any) -> dict:

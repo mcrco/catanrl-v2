@@ -49,6 +49,10 @@ def _trainer(algo: str):
         from catanrl.train.alphazero import train_alphazero
 
         return train_alphazero
+    if algo == "distill":
+        from catanrl.train.distill import train_distill
+
+        return train_distill
     raise NotImplementedError(f"train.algo {algo!r} has no trainer yet")
 
 
