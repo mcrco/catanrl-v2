@@ -276,10 +276,50 @@ Canopy publishes no win rates, Elo or opponents, only a README line ("we believe
 #tldr[All Claude's suggestions. Marco moved AlphaZero to the bottom of the queue on 2026-10-24: Canopy loses to our PPO-plus-search bot, so PPO into search is the path.]
 
 #lead[Plan.]
-- A Canopy-shaped target (divergence 1 of @exp:az-canopy-diff). (Claude's suggestion, not queued)
+- A Canopy-shaped target (divergence 1 of @exp:az-canopy-diff). Tested offline first in @exp:az-gate.
 - Per-simulation world resampling (divergence 4). (Claude's suggestion, not queued)
-- An offline distillation gate: policy-only fits to one fixed set of 1024-sim targets, judged head to head, as a cheap test of whether there is anything to distill. (Claude's suggestion, not queued)
+- An offline distillation gate: fits to one fixed set of search targets, as a cheap test of whether there is anything to distill. Queued as @exp:az-gate (approved by Marco on 2026-11-09).
 - Cheaper self-play: the engine top-up budget and eval cache (@exp:az-cost). (Claude's suggestion, not queued)
 - The warm-start critic is discounted V-trace while AlphaZero trains undiscounted win/loss, so the value head drifts; the critic refit (@sec:critic) measures that.
 
 `az-2p-2048`'s search finals (`configs/experiments/az-2p-2048-search.yaml`: best and init in the 2048-sim search) were never played.
+
+== The offline distillation gate
+
+=== Fit fr3 once to fixed 2048-sim searches: `az-gate-2p` #chip("queued") <exp:az-gate>
+#meta(
+  dates: "queued for the GPU after graph-m and the transitivity round robin",
+  owner: "marco",
+  config: "configs/experiments/az-gate-2p.yaml",
+  wandb: (),
+  records: (),
+)
+#tldr[Claude's design, approved by Marco on 2026-11-09. Before another self-play loop: search 102,400 of fr3’s own positions once with `az-2p-2048`’s search, fit fr3 to three target shapes from that one dataset at `az-2p-2048`’s e6 dose, and judge each fit inside the search against fr3’s own search, paired on the same 2,000 games.]
+
+*Question.* Do 2048-sim search targets hold anything that makes fr3 a better search network, and which target shape keeps the network intact?
+
+#lead[Setup.]
+- *Start.* fr3 (`2p-graph-s-3`, `ppo-2p-fr3/full@e4350`): `graph-s` with one shared trunk, `full` observation level, trained on `base-2p-fr`.
+- *Positions.* 5,120 games of fr3’s raw self-play (moves sampled as PPO samples them) on its own 4,096 training boards. From each game, 20 decisions drawn uniformly from those with more than one legal move: 102,400 positions. 512 games (10%) are held out for validation.
+- *Search.* Each position is searched once with `az-2p-2048`’s search (Gumbel root, 2,048 sims, m = 16, `c_puct` 0.75) on the true game (`dets: 0`): fr3 reads the true state, so its targets should be about it. The dataset keeps everything needed to rebuild a target offline (fr3’s root logits and values, visits, Q, the engine's own target), with its sha256.
+- *Targets.* Three fits, each from fr3:
+  - `engine`: the engine's Gumbel target (Q min-max rescaled, `c_scale` 0.1), which `az-2p-2048` trained on. The control: it should reproduce that run's drop.
+  - `canopy`: Q unrescaled, `c_scale` 1, no prior temperature. The Canopy-shaped target of the CPU probe (@exp:az-canopy-diff).
+  - `canopy-anchor`: half `canopy`, half fr3’s own policy, i.e. a KL anchor to the start.
+- *Fit.* Cross-entropy to the target, plus a BCE that holds the value head at fr3’s own win probabilities (the trunk is shared). AdamW at `az-2p-2048`’s settings (lr 5e-5, minibatches of 512). Every target gets 128 updates, `az-2p-2048`’s dose at its e6 select (learning had run twice by then, 64 updates each): 0.71 passes over the training positions. W&B logs held-out cross-entropy, KL from fr3, entropy, argmax agreement with fr3 and with the target, and value drift.
+- *Finals.* `heldout-2p-fr`’s first 1,000 boards in both seat orders, 2,000 games a row, the same games in every row:
+  - search harness (Marco's rule): each fit inside a 512-sim Gumbel search (`dets=1`, m = 16, fused kernels) against fr3’s fair raw bot (`BELIEF:worlds=16`), and fr3 itself in the same search as the baseline;
+  - raw screen (secondary): each fit as `BELIEF:worlds=16` against fr3.
+
+#lead[Decision rule.] Each target's harness row against the baseline, paired by McNemar's test over the shared games, Holm at 0.05 over the three targets.
+- A clear loss: that target breaks the net. `engine` should lose; if it doesn't, the gate cannot see what broke `az-2p-2048`.
+- A clear win: run the full AlphaZero loop with that target.
+- Otherwise no effect of about 3.5 pp or more. About a quarter of paired games split (@exp:az-e8-search), so 2,000 games give a paired SE of about 1.1 pp.
+The raw screen is read alongside the harness, never alone.
+
+#lead[Cost.] About 7–8 h of GPU with the card alone: 1.8–2.5 h of searching (210M leaf evaluations; `az-2p-2048` ran 23.6k a second), a minute per fit, about 1.15 h per harness row (from `search-depth-2p`’s cells; 4.6 h for four) and about 5 minutes per raw row. A CPU smoke of the whole pipeline passed; a 10-minute GPU smoke comes first.
+
+#repro(```sh
+catanrl run configs/experiments/az-gate-2p.yaml   # positions (then the baseline row), engine, canopy, canopy-anchor
+uv run python tools/search_probe.py --pair <a fit's harness record> <the baseline record>
+```)

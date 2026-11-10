@@ -279,3 +279,70 @@ def test_ppo_2p_fr_is_puffer_graph2_full_continued():
         [f"POLICY:ckpt={start_ref}", "F"], [f"BELIEF:ckpt={start_ref}:worlds=16", "F"],
         [f"POLICY:ckpt={best}", f"POLICY:ckpt={start_ref}"],
         [f"BELIEF:ckpt={best}:worlds=16", f"BELIEF:ckpt={start_ref}:worlds=16"])]
+
+
+def test_az_gate_2p_fits_fr3_at_az_2p_2048s_dose_and_pairs_every_final():
+    """The offline distillation gate (approved 2026-11-09): fr3's network, rows, rules and training
+    pool; one collect variant searching 102,400 positions with az-2p-2048's Gumbel search on the true
+    game; three fits of that one dataset that differ only in the target, each given az-2p-2048's
+    update dose at its e6 select (learn() ran in iterations 5 and 6: 2 x 64 updates of 512) at its
+    optimizer settings; and finals that all play the same 2,000 games of heldout-2p-fr, the harness
+    rows in exactly the baseline's search."""
+    fr3 = load_plan("ppo-2p-fr3").variant("full").config
+    az = load_plan("az-2p-2048").variants[0].config["train"]
+    plan = load_plan("az-gate-2p")
+    assert [v.name for v in plan.variants] == ["positions", "engine", "canopy", "canopy-anchor"]
+    start = "ppo-2p-fr3/full@e4350#43eca7ffdd41"
+    for v in plan.variants:
+        cfg = v.config
+        assert {k: cfg[k] for k in ("seed", "obs", "model")} == {k: fr3[k] for k in ("seed", "obs", "model")}
+        assert cfg["env"]["scenarios"] == fr3["env"]["scenarios"] and cfg["env"]["map_pool"] == fr3["env"]["map_pool"]
+        assert cfg["init_from"] == {"ckpt": start, "parts": ["actor", "critic"]}
+        train = cfg["train"]
+        assert (train["root"], train["sims"], train["gumbel_m"], train["c_puct"]) == (
+            az["root"], az["sims"], az["gumbel_m"], az["c_puct"])
+        assert train["dets"] == 0 and train["games"] * train["positions_per_game"] == 102_400
+        assert train["games"] % cfg["env"]["num_envs"] == 0
+        assert v.depends_on == (() if v.name == "positions" else ("positions",))
+    positions, *fits = plan.variants
+    assert positions.config["train"]["phase"] == "collect"
+    collect = {k: positions.config["train"][k] for k in ("games", "positions_per_game", "sims", "kernels")}
+    targets = {"engine": ("engine", 0.1, True, 0.0), "canopy": ("gumbel", 1.0, False, 0.0),
+               "canopy-anchor": ("gumbel", 1.0, False, 0.5)}
+    shape = ("policy_target", "target_c_scale", "target_rescale", "target_anchor")
+    for v in fits:
+        train = v.config["train"]
+        assert train["phase"] == "fit" and train["dataset"] == "az-gate-2p/positions"
+        assert {k: train[k] for k in collect} == collect
+        assert tuple(train[k] for k in shape) == targets[v.name]
+        assert (train["target_c_visit"], train["target_prior_temperature"]) == (50.0, 1.0)
+        assert train["updates"] == 2 * az["updates_per_iteration"] == 128
+        assert (train["minibatch_size"], train["learning_rate"], train["weight_decay"], train["max_grad_norm"]) == (
+            az["minibatch_size"], az["learning_rate"], az["weight_decay"], az["max_grad_norm"])
+        same = {k: x for k, x in train.items() if k not in shape}
+        assert same == {k: x for k, x in fits[0].config["train"].items() if k not in shape}
+
+    suite = {"name": "heldout-2p-fr", "boards": 1000}  # x 2 seat orders: 2,000 games, the same in every row
+    search = "sims=512:dets=1:root=gumbel:gumbel_m=16:kernels=fused"
+    opponent = f"BELIEF:ckpt={start}:worlds=16"
+    assert [(e["suite"], e["lineup"]) for e in positions.config["eval"]["final"]] == [
+        (suite, [f"MCTS:ckpt={start}:{search}", opponent])]
+    for v in fits:
+        assert [(e["suite"], e["lineup"]) for e in v.config["eval"]["final"]] == [
+            (suite, [f"MCTS:ckpt={v.ref}@latest:{search}", opponent]),
+            (suite, [f"BELIEF:ckpt={v.ref}@latest:worlds=16", opponent])]
+
+
+@pytest.mark.runs
+def test_az_2p_2048_had_two_learning_steps_by_its_e6_select():
+    """az-gate-2p's dose: az-2p-2048's learn() ran first in iteration 5 (replay reached min_replay),
+    so its e6 checkpoint (the 48.0 select) had two learn() calls of updates_per_iteration each."""
+    from catanrl.runs import RunError, load_experiment
+
+    try:
+        run = load_experiment("az-2p-2048/main")
+    except RunError:
+        pytest.skip("az-2p-2048/main is not in the runs directory")
+    learned = [row["epoch"] for row in run.metrics() if "train/policy_loss" in row and row["epoch"] <= 6]
+    assert learned == [5, 6]
+    assert run.config["train"]["updates_per_iteration"] == 64
