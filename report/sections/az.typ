@@ -276,9 +276,9 @@ Canopy publishes no win rates, Elo or opponents, only a README line ("we believe
 #tldr[All Claude's suggestions. Marco moved AlphaZero to the bottom of the queue on 2026-10-24: Canopy loses to our PPO-plus-search bot, so PPO into search is the path.]
 
 #lead[Plan.]
-- A Canopy-shaped target (divergence 1 of @exp:az-canopy-diff). Tested offline first in @exp:az-gate.
+- A Canopy-shaped target (divergence 1 of @exp:az-canopy-diff). Tested offline in @exp:az-gate: no effect inside the search.
 - Per-simulation world resampling (divergence 4). (Claude's suggestion, not queued)
-- An offline distillation gate: fits to one fixed set of search targets, as a cheap test of whether there is anything to distill. Queued as @exp:az-gate (approved by Marco on 2026-11-09).
+- An offline distillation gate: fits to one fixed set of search targets, as a cheap test of whether there is anything to distill. Done as @exp:az-gate (approved by Marco on 2026-11-09): null for all three targets, the control included.
 - Cheaper self-play: the engine top-up budget and eval cache (@exp:az-cost). (Claude's suggestion, not queued)
 - The warm-start critic is discounted V-trace while AlphaZero trains undiscounted win/loss, so the value head drifts; the critic refit (@sec:critic) measures that.
 
@@ -286,15 +286,15 @@ Canopy publishes no win rates, Elo or opponents, only a README line ("we believe
 
 == The offline distillation gate
 
-=== Fit fr3 once to fixed 2048-sim searches: `az-gate-2p` #chip("running") <exp:az-gate>
+=== Fit fr3 once to fixed 2048-sim searches: `az-gate-2p` #chip("done") <exp:az-gate>
 #meta(
-  dates: "2026-11-10 08:14 –",
+  dates: "2026-11-10 08:14 – 13:32",
   owner: "marco",
   config: "configs/experiments/az-gate-2p.yaml",
-  wandb: (("az-gate-2p-positions-b6aa1044", "positions"),),
-  records: (),
+  wandb: (("az-gate-2p-positions-b6aa1044", "positions"), ("az-gate-2p-engine-f61f6a78", "engine"), ("az-gate-2p-canopy-dc666ac0", "canopy"), ("az-gate-2p-canopy-anchor-f6be5e75", "canopy-anchor")),
+  records: ("3a55789c", "41389abf", "5757cfc6", "ec88ecb4", "b407cba0", "c6027c5d", "08b96b96"),
 )
-#tldr[Claude's design, approved by Marco on 2026-11-09. Before another self-play loop: search 102,400 of fr3’s own positions once with `az-2p-2048`’s search, fit fr3 to three target shapes from that one dataset at `az-2p-2048`’s e6 dose, and judge each fit inside the search against fr3’s own search, paired on the same 2,000 games. Running on the GPU since 10 November; a 10-minute GPU smoke of all four variants passed.]
+#tldr[Claude's design, approved by Marco on 2026-11-09. Search 102,400 of fr3’s own positions once with `az-2p-2048`’s search, fit fr3 to three target shapes at `az-2p-2048`’s e6 dose, and judge each fit inside the search against fr3’s own search on the same 2,000 games. Null: inside the search the three fits score −0.15, −0.25 and −0.65 pp against fr3 (each ±2.3 pp). The control did not lose either, so at this dose the gate cannot see what broke `az-2p-2048`. Neither could the search harness for `az-2p-2048`'s own e8 (@exp:az-e8-search). By the rule fixed before launch, no full AlphaZero loop follows.]
 
 *Question.* Do 2048-sim search targets hold anything that makes fr3 a better search network, and which target shape keeps the network intact?
 
@@ -317,7 +317,34 @@ Canopy publishes no win rates, Elo or opponents, only a README line ("we believe
 - Otherwise no effect of about 3.5 pp or more. About a quarter of paired games split (@exp:az-e8-search), so 2,000 games give a paired SE of about 1.1 pp.
 The raw screen is read alongside the harness, never alone.
 
-#lead[Cost.] About 7–8 h of GPU with the card alone: 1.8–2.5 h of searching (210M leaf evaluations; `az-2p-2048` ran 23.6k a second), a minute per fit, about 1.15 h per harness row (from `search-depth-2p`’s cells; 4.6 h for four) and about 5 minutes per raw row. A CPU smoke of the whole pipeline passed; a 10-minute GPU smoke comes first.
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([Network inside the search], [Score vs fr3's fair raw bot], [Paired vs fr3 inside], [Raw: `BELIEF` vs fr3's]),
+    [fr3 (the baseline) \ #sub[`3a55789c`]], [55.60 #ci[53.41][57.76]], [–], [–],
+    [`engine`, the control \ #sub[`41389abf`, raw `b407cba0`]], [55.45 #ci[53.26][57.62]], [−0.15 #ci[−2.49][2.19] \ #sub[284/287, p = 0.93]], [49.45 #ci[47.26][51.64]],
+    [`canopy` \ #sub[`5757cfc6`, raw `c6027c5d`]], [55.35 #ci[53.16][57.52]], [−0.25 #ci[−2.48][1.98] \ #sub[256/261, p = 0.86]], [50.80 #ci[48.61][52.99]],
+    [`canopy-anchor` \ #sub[`ec88ecb4`, raw `08b96b96`]], [54.95 #ci[52.76][57.12]], [−0.65 #ci[−2.78][1.48] \ #sub[229/242, p = 0.58]], [50.90 #ci[48.71][53.09]],
+  ),
+  caption: [`heldout-2p-fr`'s first 1,000 boards in both seat orders, 2,000 games a row, the same games in every row. The search is 512-sim Gumbel (`dets=1`, m = 16, fused kernels). "Paired" counts games won only by the fit / only by the baseline (McNemar).],
+)
+- *Rule.* No target is a clear loss or a clear win (smallest p 0.58; Holm needs 0.017). Between 24% and 29% of the paired games split, so the paired 95% intervals are about ±2.3 pp.
+- *Raw screen.* No fit is clearly off fr3 as a fair raw bot. `engine`'s 49.45 fits either no change or `az-2p-2048`'s 48.0 at e6. Paired with each other, `engine` trails `canopy` by 1.35 pp (p = 0.27) and `canopy-anchor` by 1.45 pp (p = 0.24).
+
+#lead[What the fits did.] On the 512 held-out games, after the 128 updates:
+- *Targets.* `engine`'s target overrules fr3's argmax at 13.8% of positions, `canopy`'s at 6.2% and `canopy-anchor`'s at 3.5%. Each puts ≥ 0.99 on one move at 92%, 90% and 85% of positions.
+- *Movement.* KL from fr3 is 0.24, 0.030 and 0.015. Argmax agreement with fr3 is 94.8, 98.2 and 98.8%. `engine` moved most on dev-card decisions (KL 0.48, mostly knight or roll), least on the robber (0.03).
+- *Not toward the target's moves.* Argmax agreement with the target fell slightly (86.4 → 85.1%, 93.9 → 93.6%, 96.6 → 96.5%), though the cross-entropy to it fell (3.20 → 2.48 for `engine`). The changed argmaxes mostly did not land on the moves the search preferred.
+- *Value held.* Mean value drift was 0.004 or less.
+
+#lead[Reading.]
+- At `az-2p-2048`'s e6 dose, `engine`'s target changed about 1 in 20 of fr3's argmaxes, and the 512-sim search absorbed it: no change of 2.5 pp or more either way. The search harness did not see `az-2p-2048`'s damage either (e8 −0.6 pp, @exp:az-e8-search), so the gate's blind spot is the harness's, not the fits'.
+- With no clear win, the rule gives no full AlphaZero loop with any of these targets.
+- Cost: 5.3 h. Collection 1.5 h (204M leaf evaluations at 38k a second, 1.08 GB dataset, sha256 `95d4c7c4`); fits under a minute; each harness row with its raw row about 55 min.
+
+#lead[Cost, as planned.] About 7–8 h of GPU with the card alone: 1.8–2.5 h of searching (210M leaf evaluations; `az-2p-2048` ran 23.6k a second), a minute per fit, about 1.15 h per harness row (from `search-depth-2p`’s cells; 4.6 h for four) and about 5 minutes per raw row. A CPU smoke of the whole pipeline passed; a 10-minute GPU smoke comes first.
 
 #repro(```sh
 catanrl run configs/experiments/az-gate-2p.yaml   # positions (then the baseline row), engine, canopy, canopy-anchor
