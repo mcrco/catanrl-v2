@@ -286,15 +286,15 @@ Canopy publishes no win rates, Elo or opponents, only a README line ("we believe
 
 == The offline distillation gate
 
-=== Fit fr3 once to fixed 2048-sim searches: `az-gate-2p` #chip("queued") <exp:az-gate>
+=== Fit fr3 once to fixed 2048-sim searches: `az-gate-2p` #chip("running") <exp:az-gate>
 #meta(
-  dates: "queued for the GPU after graph-m and the transitivity round robin",
+  dates: "2026-11-10 08:14 –",
   owner: "marco",
   config: "configs/experiments/az-gate-2p.yaml",
-  wandb: (),
+  wandb: (("az-gate-2p-positions-b6aa1044", "positions"),),
   records: (),
 )
-#tldr[Claude's design, approved by Marco on 2026-11-09. Before another self-play loop: search 102,400 of fr3’s own positions once with `az-2p-2048`’s search, fit fr3 to three target shapes from that one dataset at `az-2p-2048`’s e6 dose, and judge each fit inside the search against fr3’s own search, paired on the same 2,000 games.]
+#tldr[Claude's design, approved by Marco on 2026-11-09. Before another self-play loop: search 102,400 of fr3’s own positions once with `az-2p-2048`’s search, fit fr3 to three target shapes from that one dataset at `az-2p-2048`’s e6 dose, and judge each fit inside the search against fr3’s own search, paired on the same 2,000 games. Running on the GPU since 10 November; a 10-minute GPU smoke of all four variants passed.]
 
 *Question.* Do 2048-sim search targets hold anything that makes fr3 a better search network, and which target shape keeps the network intact?
 
