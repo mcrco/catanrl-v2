@@ -33,6 +33,9 @@ eval:
       lineup:
         - "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=300:dets=1:pending=64:reuse=true:transpositions=true"
         - "MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
-runtime: {device: cuda, threads: 12, num_envs: 960, infer_rows: 512}
+# 256 games in flight: at 960 the search row's trees (two search seats, reuse and transpositions,
+# ~11 MB a tree) reached 21 GB of host RAM and the kernel's oom killer stopped the first launch
+# (2026-11-10 14:51), after the raw row had finished.
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512}
 meta:
   wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

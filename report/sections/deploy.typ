@@ -176,11 +176,11 @@ catanrl openhex deploy/openhex.yaml --check
 
 === OpenHex v3 candidate: `graph-m` against fr3 #chip("running") <exp:deploy-graph-m-check>
 #meta(
-  dates: "2026-11-10 14:20 –",
+  dates: "2026-11-10 14:14 –",
   owner: "marco",
   config: "configs/experiments/deploy-check-2p-graph-m.yaml",
   wandb: (("deploy-check-2p-graph-m-main-82cef592", "main"),),
-  records: (),
+  records: ("71af32b1",),
 )
 #tldr[`2p-graph-m-1` beats fr3 56.5% with both raw nets reading every hand (@exp:arch-graph-m-2p-lr). Before it could replace fr3 on OpenHex: the same comparison with the fair raw bot, and with search at equal time per move, since `graph-m` costs more per simulation. Approved by Marco on 10 November; deploying still waits for his go. Running on the GPU since 10 November.]
 
@@ -192,6 +192,10 @@ catanrl openhex deploy/openhex.yaml --check
 - *Calibration.* _k_ is measured at batch 1, the way the bridge plays: `tools/search_probe.py` with one env on the GPU, each net's search at 2#super[14] sims against fr3's raw policy, on the same boards. Time per simulation is the wall time over decisions × simulations per decision. It runs on this box's RTX 2070 SUPER; the deployed bots run on yang's GTX 1080. Measured: 352 µs a simulation for `graph-m` against 104 µs for fr3 (4 games each, 290 and 331 searched decisions), so _k_ = 3.38 (`report/data/deploy-graph-m-calibration-*.json`). At this cost `graph-m`'s 2#super[17]-sim search, the deployed budget, would take about 46 s a move here, past the 45 s deadline.
 - *Decision rule* (fixed before launch). `graph-m` is a deploy candidate if its search row is above 50% at 95% and its fair raw row is not below 50% at 95%.
 - *Cost.* The fair raw row about 30 min. The search row is unmeasured: the AlphaZero gate's 2,000-game rows at 512 sims with one search seat are estimated at 1.15 h, so roughly 4–5 h with two search seats at 1,024.
+
+#lead[Result so far.]
+- *Fair raw bot.* `graph-m` beats fr3 55.0% #ci[53.6][56.4] over 5,000 games (`71af32b1`), so this half of the rule passes. Reading every hand it scored 56.5% on the same games; the fair bot is 1.5 pp lower, paired (550 games won only as the fair bot, 626 only reading every hand; p = 0.03).
+- *Search.* The first launch ran 960 games at a time. Two search seats with reuse and transpositions kept about 11 MB of trees per seat, and the run reached 21 GB of host RAM. The kernel's out-of-memory killer stopped it at 14:51, just after the raw row finished; nothing else was killed. Relaunched at 14:54 with 256 games in flight: it holds 8.3 GB, and its launcher stops it if free memory falls below 3 GB.
 
 #repro(```sh
 # Calibration (batch 1), then the two rows
