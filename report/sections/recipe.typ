@@ -469,3 +469,37 @@ catanrl run configs/experiments/transitivity-2p.yaml
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/horizon-2p.yaml
 ```)
+
+== Mixed precision
+
+=== float16 training at `graph-m-2p-lr`'s start: `fp16-2p` #chip("queued") <exp:fp16>
+#meta(
+  dates: "queued for the GPU after graph-m finishes",
+  owner: "marco",
+  config: "configs/experiments/fp16-2p.yaml",
+  wandb: (),
+  records: (),
+)
+#tldr[Claude's design, approved by Marco on 2026-11-09. Every run so far trains in float32, and this card (Turing) has fp16 tensor cores but no bf16. `graph-m-2p-lr`'s first 300 epochs twice, in float32 and in float16 with loss scaling: is float16 faster at no cost in strength?]
+
+*Question.* Does float16 mixed precision train `graph-m` at least 15% faster without a weaker net?
+
+#lead[Setup.]
+- *Arms.* `fp32`, then `fp16`: `graph-m-2p-lr`'s run exactly (seed 42, `base-2p-fr`, `graph-m` with one shared trunk, Muon, the 3B-step cosine from 0.0025), stopped after epoch 300 (39.6M steps) by the new `train.stop_epoch`. The cosine still spans the whole budget, so both follow `graph-m-2p-lr`'s first 300 epochs (the learning rate is still 99.96% of its peak). Micro-batches stay 2,048 rows in both, so precision is the only difference.
+- *float16.* The network's forwards (rollout and update) run under autocast to float16. A GradScaler scales each micro-batch's loss, the gradients are unscaled before the clip, and a step with a non-finite gradient is skipped. Weights, gradients, Muon and the losses stay float32. Logged per epoch: the scale, skipped steps, peak memory, and a probe of the rollout's log-probs against the update's forward on the same rows before any step.
+- *Monitors.* Against fr3 every 100 epochs on `select-2p-fr`, 1,000 games each (±2.4 pp at 18%), as context. `graph-m-2p-lr` scored 5.1, 12.6 and 18.0% at epochs 100, 200 and 300.
+- *Finals.* `heldout-2p-fr` against fr3, 5,000 games a row, the same games in every row: each arm's epoch 300, and `graph-m-2p-lr`'s own epoch 300. Two float32 runs of one seed differ on the GPU, so `fp32` against `graph-m-2p-lr` gives the run-to-run spread.
+
+#lead[Decision rule.] Adopt float16 for new runs if all three hold:
++ the median steps/s over epochs 50–300 is at least 1.15× that of `fp32` (`graph-m-2p-lr` varied about 2% over those epochs);
++ no loss is ever non-finite, and skipped steps stay under 1% of optimizer steps after epoch 10 (at most 46 of 4,640);
++ the final of `fp16` against fr3 is not significantly below that of `fp32` (paired McNemar over the shared games, two-sided 0.05), read against the gap between `fp32` and `graph-m-2p-lr`.
+At about 18% a row is ±1.1 pp. The paired SE of the difference is at most 0.77 pp (independent games), so 80% power for about 2.2 pp; a smaller deficit could go unseen.
+
+#lead[Cost.] About 3.5 h of GPU with the card alone: 1.8 h for `fp32` (300 × 132,096 steps at about 6.1k steps/s), at most 1.6 h for `fp16` if it passes rule 1, about 1.5 minutes of monitors per arm and about 5 minutes of finals. A 15-minute GPU smoke (20 epochs per arm in a scratch directory, W&B off) comes first. A CPU check of the whole path passed.
+
+#repro(```sh
+env -u WANDB_API_KEY WANDB_MODE=disabled uv run python tools/fp16_smoke.py --runs /tmp/fp16-smoke   # GPU smoke
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/fp16-2p.yaml
+uv run python tools/search_probe.py --pair <fp16's final record> <fp32's final record>
+```)
