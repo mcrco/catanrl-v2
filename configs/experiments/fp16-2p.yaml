@@ -1,0 +1,118 @@
+# fp16 mixed precision for PPO (Marco approved 2026-11-09; Claude's design): does float16 autocast
+# with loss scaling train graph-m faster on this card without costing strength?
+#
+# The RTX 2070 SUPER (Turing, sm_75) has fp16 tensor cores and no native bf16; every run so far is
+# float32. graph-m-2p-lr spends ~84% of an epoch in the update (3.6 s collect, 18.2 s train at
+# e100-300), mostly matrix products the tensor cores could take.
+#
+# Design: two variants of graph-m-2p-lr's config, run back to back (fp32 first). Both are its run
+# exactly (seed 42, base-2p-fr, graph-m with one shared trunk, full level, Muon, the 3B-step cosine
+# from 0.0025 to 0.00025, minibatch 16384 accumulated over 8 micro-batches of 2048) with
+# train.stop_epoch 300: each ends after epoch 300 (39.6M agent steps) on the first 300 epochs of the
+# full run's learning rate (the cosine is still computed from total_timesteps: 1.3% of its epochs,
+# the learning rate still 99.96% of its peak at e300).
+# fp16 differs only in train.precision float16 and train.amp true: the network's forwards (rollout
+# and update) autocast to float16, a GradScaler scales every micro-batch's loss, the gradients are
+# unscaled before the clip and a step with a non-finite gradient is skipped; weights, gradients,
+# Muon (its Newton-Schulz included) and the losses stay float32 (catanrl.train.puffer).
+# max_minibatch_size stays 2048 in both, so precision is the only difference; memory/peak_GiB is
+# logged every epoch, so a later fp16 run can raise it (graph-m-2p: 4096 was 6.89 GiB in float32).
+# fp16 also logs amp/scale, amp/skipped_steps, amp/optimizer_steps (16 per epoch) and amp/probe_kl:
+# the training forward on one minibatch of the epoch's stored steps before any update, against the
+# log-probs the rollout stored (the two forwards run different batch shapes).
+#
+# Monitors (context, not decisions): the champion row only, every 100 epochs on select-2p-fr against
+# fr3 (ppo-2p-fr3/full@e4350), 1,000 games each (500 boards, both seat orders): e0, e100, e200, e300.
+# At ~18% (graph-m-2p-lr: 5.1 / 12.6 / 18.0% at e100 / e200 / e300) one row is +-2.4 pp (95%); fp16
+# against fp32 at the same epoch pairs over the same games, detecting ~4.8 pp at 80% power.
+#
+# Finals, all on heldout-2p-fr against fr3, 5,000 games each (2,500 boards, both seat orders), the
+# same games in every row, so rows pair by game id (tools/search_probe.py --pair A B):
+#   - fp32@latest and fp16@latest (e300);
+#   - graph-m-2p-lr/main@e300 (#21153dbc209c, its own e300, pinned), in fp32's finals. Two float32
+#     runs of one seed are not bit-identical on the GPU, so fp32 against it is the run-to-run
+#     yardstick. It waits for graph-m-2p-lr to be finished (or catanrl finish), like any control.
+# Power: at ~18% a row is +-1.1 pp (95%). Paired, the SE of fp16 - fp32 is at most
+# sqrt(2p(1-p)/n) = 0.77 pp (independent games; shared boards and seats only lower it), so 80% power
+# at two-sided 0.05 for a difference of ~2.2 pp (~1.8 pp if 20% of games split).
+#
+# Decision rule (fixed before launch): adopt fp16 for new runs if
+#   1. median throughput/agent_steps_per_s over epochs 50-300 is at least 1.15x fp32's (graph-m-2p-lr
+#      ran 6.0-6.2k over those epochs, a 2% spread, so noise cannot decide it);
+#   2. no non-finite losses/* in any epoch, and amp/skipped_steps under 1% of the optimizer steps after
+#      epoch 10 (290 epochs x 16 = 4,640 steps: at most 46; the scaler's growth tries cost ~1 skip per
+#      2,000 clean steps);
+#   3. fp16's final against fr3 is not significantly below fp32's (paired McNemar, two-sided 0.05),
+#      read against the fp32 - graph-m-2p-lr@e300 gap for the run-to-run spread. A deficit under
+#      ~2 pp could go unseen.
+#
+# Cost (one RTX 2070 SUPER, the card alone): fp32 300 epochs x 132,096 agent steps at ~6.1k steps/s
+# = 1.8 h, plus compile warm-up and 4 monitors (~20 s each); fp16 at most 1.6 h if rule 1 holds; the
+# finals ~100 s each (3 x 5,000 games). About 3.5 h in all.
+#
+# GPU smoke first (~10-15 min, scratch runs dir, W&B off): see tools/fp16_smoke.py.
+#
+# Launch (main, GPU free, graph-m-2p-lr finished):
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/fp16-2p.yaml
+name: fp16-2p
+seed: 42
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 1032
+model: {preset: graph-m, args: {shared: true}}
+obs: {level: full}
+train:
+  algo: ppo
+  total_timesteps: 3_000_000_000  # graph-m-2p-lr's budget: the cosine's length (~22,700 epochs)
+  stop_epoch: 300               # ...of which these runs train the first 300
+  optimizer: muon               # heavyball ForeachMuon(heavyball_momentum=True)
+  learning_rate: 0.0025         # graph-m-2p-lr's: cosine to 0.00025 over the whole budget
+  lr_schedule: constant
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95              # Muon's momentum
+  adam_beta2: 0.999             # not read by Muon
+  adam_eps: 1.0e-12             # not read by Muon
+  gamma: 1.0
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2             # not read (per-seat value loss)
+  ent_coef: 0.005
+  max_grad_norm: 2.0
+  bptt_horizon: 64
+  minibatch_size: 16384
+  max_minibatch_size: 2048      # both arms (header): precision is the only difference
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  critic_targets: lambda
+  critic_gamma: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 100
+eval:
+  champion: "ppo-2p-fr3/full@e4350#43eca7ffdd41"   # fr3, the yardstick
+  select: {from: champion}
+  monitor:
+    - {name: champion, suite: select-2p-fr, lineup: ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"], every: 100,
+       metric: score_rate}
+  final:
+    - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=${champion}"]}
+sweep:
+  axes:
+    arm:
+      fp32:
+        eval.final:
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=${champion}"]}
+          - {suite: heldout-2p-fr, lineup: ["POLICY:ckpt=graph-m-2p-lr/main@e300#21153dbc209c",
+                                            "POLICY:ckpt=${champion}"]}
+      fp16:
+        train.precision: float16
+        train.amp: true
+  name: "{arm}"
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
