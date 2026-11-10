@@ -128,7 +128,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 #lead[Check.] At epoch 1,000, compare against `graph-s` at the same steps (26.4% vs fr3, 95.9% vs F), along with the approximate KL (`graph-s`: about 0.02).
 
-#lead[Progress at epoch 21,000 (2.77B steps, 129 h).] Ahead of where `graph-s` ended against fr3 (+10.7 pp, p = 1e-7) and level against F. The last ten monitors average 55.6% against fr3, 10.9 pp above `graph-s`'s end and 5.6 pp above fr3 itself (one monitor's 95% interval is ±3.1 pp), the same as the ten before. The learning rate is at 11% of its peak:
+#lead[Progress at epoch 22,000 (2.91B steps, 135 h).] Ahead of where `graph-s` ended against fr3 (+13.8 pp, p = 3e-12) and level against F. The last ten monitors average 57.3% against fr3, 12.6 pp above `graph-s`'s end and 7.3 pp above fr3 itself (one monitor's 95% interval is ±3.1 pp), up 1.7 pp on the ten before (p = 0.002). The learning rate is at its floor, 10% of its peak:
 
 #figure(
   btable(
@@ -159,6 +159,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
     [19,000], [55.4], [—], [—],
     [20,000], [54.8], [—], [—],
     [21,000], [55.4], [—], [—],
+    [22,000], [58.5], [—], [—],
     tgroup(4)[Against F],
     [500], [93.9], [88.1], [91.8],
     [1,000], [94.5], [91.1], [95.9],
@@ -183,15 +184,16 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
     [19,000], [99.1], [—], [—],
     [20,000], [99.1], [—], [—],
     [21,000], [99.0], [—], [—],
+    [22,000], [99.2], [—], [—],
   ),
   caption: [Monitor score rates (%) on `select-2p-fr`, 1,000 games each. The first try stopped at epoch 1,500. `graph-s` ended at epoch 3,786, so its 4,000 row is its last monitor (epoch 3,750).],
 )
 
-- *Against `graph-s`'s end* (epoch 3,750, same 1,000 games): +10.7 pp against fr3 (254 against 147 discordant, p = 1e-7) and +0.2 pp against F (12 against 10, p = 0.83). Over the last ten monitors (epochs 20,100 to 21,000) `graph-m` averages 55.6% against fr3 and 99.2% against F, against 44.7% and 98.8% for `graph-s`'s end.
-- *Gains per 1,000 epochs against fr3*, each the last ten monitors against the ten before (10,000 pairs): +0.7 pp (epoch 7,000, p = 0.31), +1.3 (8,000, p = 0.03), +1.8 (9,000, p = 0.005), +0.4 (10,000, p = 0.51), +1.5 (11,000, p = 0.02), +0.4 (12,000, p = 0.50), +1.7 (13,000, p = 0.006), +2.3 (14,000, p = 2e-4), −1.1 (15,000, p = 0.07), +1.0 (16,000, p = 0.09), +1.6 (17,000, p = 0.007), +0.7 (18,000, p = 0.26), +0.9 (19,000, p = 0.12), +0.4 (20,000, p = 0.50), +0.0 (21,000, p = 0.93). Against F level since epoch 8,000. Pooled p-values are optimistic, since each epoch replays the same games.
+- *Against `graph-s`'s end* (epoch 3,750, same 1,000 games): +13.8 pp against fr3 (265 against 127 discordant, p = 3e-12) and +0.4 pp against F (12 against 8, p = 0.50). Over the last ten monitors (epochs 21,100 to 22,000) `graph-m` averages 57.3% against fr3 and 99.2% against F, against 44.7% and 98.8% for `graph-s`'s end.
+- *Gains per 1,000 epochs against fr3*, each the last ten monitors against the ten before (10,000 pairs): +0.7 pp (epoch 7,000, p = 0.31), +1.3 (8,000, p = 0.03), +1.8 (9,000, p = 0.005), +0.4 (10,000, p = 0.51), +1.5 (11,000, p = 0.02), +0.4 (12,000, p = 0.50), +1.7 (13,000, p = 0.006), +2.3 (14,000, p = 2e-4), −1.1 (15,000, p = 0.07), +1.0 (16,000, p = 0.09), +1.6 (17,000, p = 0.007), +0.7 (18,000, p = 0.26), +0.9 (19,000, p = 0.12), +0.4 (20,000, p = 0.50), +0.0 (21,000, p = 0.93), +1.7 (22,000, p = 0.002). Against F level since epoch 8,000. Pooled p-values are optimistic, since each epoch replays the same games.
 - *Earlier, paired at equal steps.* Behind from epoch 2,500 on (−3.9 pp against fr3 pooled over epochs 3,100 to 3,700, p = 1e-7), while `graph-s` annealed. Level at epochs 2,000 (+2.6 pp, p = 0.19) and 1,000 (−0.3 pp, p = 0.91); ahead at epoch 500 (+3.4 pp, p = 0.06). Against the first try at epoch 1,000: +9.4 pp against fr3 (p = 3e-8).
-- *Learning rate.* `graph-m` is at 0.00028, 11% of its peak, and anneals over the remaining 1,700 epochs. `graph-s`'s late gains came as its learning rate fell (+9 pp against fr3 from epoch 2,000 to 3,000, 0.0026 to 0.00096). The finals against fr3 decide.
-- *Update size.* From epoch 20,500 to 21,000 the approximate KL per epoch has a median of 0.002 (largest 0.004), with a clip fraction of 0.008; an earlier one-epoch outlier of 0.14 (epoch 17,541) had a normal clip fraction, and the next monitors held. Entropy is 0.05. Speed is 5.9–6.2k steps/s, with a 5.0 GiB peak.
+- *Learning rate.* `graph-m` is at 0.00026, its floor of 10% of the peak, for the remaining 700 epochs. `graph-s`'s late gains came as its learning rate fell (+9 pp against fr3 from epoch 2,000 to 3,000, 0.0026 to 0.00096). The finals against fr3 decide.
+- *Update size.* From epoch 21,500 to 22,000 the approximate KL per epoch has a median of 0.001 (largest 0.005), with a clip fraction of 0.007; an earlier one-epoch outlier of 0.14 (epoch 17,541) had a normal clip fraction, and the next monitors held. Entropy is 0.05. Speed is 6.1–6.3k steps/s, with a 5.0 GiB peak.
 - *Eval cost.* The two monitors take about 36 s every 100 epochs (22 s against fr3, 14 s against F), about 1.7% of the wall time.
 
 #repro(```sh
