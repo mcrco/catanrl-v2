@@ -421,21 +421,49 @@ catanrl run configs/experiments/discount-2p-h2h.yaml   # g1 vs g999 within each 
 
 == Does training keep improving?
 
-=== Transitivity: a round robin of one run's checkpoints #chip("running") <exp:recipe-transitivity>
+=== Transitivity: a round robin of one run's checkpoints #chip("done") <exp:recipe-transitivity>
 #meta(
-  dates: "2026-11-10 06:22 –",
+  dates: "2026-11-10 06:22 – 07:58",
   owner: "marco",
   config: "configs/experiments/transitivity-2p-belief.yaml",
   wandb: (("transitivity-2p-belief-main-5c004308", "main"), ("transitivity-2p-main-33604123", "CPU try, stopped")),
-  records: (),
+  records: ("8e14efa6", "cc266f20", "d2b1ad49", "b3c1bcaf", "621df948", "47ea4e27", "29fa4fcb", "13b5109a", "f74bb619", "2595a510", "55c023d1", "4285662e", "82126ac8", "b74388af", "083a92d1", "8f9847b1", "78bbfefb", "205d9634", "cbe77520", "00ccdeb3", "2f9b4206", "5e3e9a0a", "4934d6da", "cf845991", "0784ba13", "62e2451b", "a60863e6", "28383622", "650def09", "47385ae9", "2f5cc732", "a7ebe01b", "c5e3f944", "073b9564", "fdf88c50", "5bc5d392"),
 )
-#tldr[Self-play only ever plays the current net, so steady gains against F and fr3 don't rule out cycles between checkpoints. A round robin of eight checkpoints of one run, plus the deployed net. Running on the GPU since 10 November.]
+#tldr[Self-play only ever plays the current net, so steady gains against F and fr3 don't rule out cycles between checkpoints. A round robin of eight checkpoints of one run plus the deployed net, 1,000 games a pair with the fair bot: training is transitive. Every later checkpoint beats or ties every earlier one, one Bradley–Terry rating fits all 36 pairs (p = 0.58), and there are no cycles. The gains shrink as training goes on.]
 
 *Question.* Does every later checkpoint beat every earlier one, and do the results fit a single rating (Marco)?
 
+#lead[Result.]
+#figure(
+  btable(
+    columns: (auto,) + (1fr,) * 9,
+    align: (left,) + (right,) * 9,
+    header: ([], [250], [500], [1,000], [1,500], [2,000], [2,500], [3,000], [3,786], [fr3]),
+    [250], [–], [33.7], [26.4], [21.8], [20.2], [19.4], [14.6], [15.4], [11.5],
+    [500], [66.3], [–], [41.2], [36.0], [30.8], [28.3], [26.8], [23.5], [19.3],
+    [1,000], [73.6], [58.8], [–], [43.6], [42.0], [38.4], [31.6], [31.0], [25.2],
+    [1,500], [78.2], [64.0], [56.4], [–], [46.0], [42.5], [36.6], [37.0], [32.6],
+    [2,000], [79.8], [69.2], [58.0], [54.0], [–], [49.8], [43.1], [41.6], [33.9],
+    [2,500], [80.6], [71.7], [61.6], [57.5], [50.2], [–], [45.2], [43.2], [38.6],
+    [3,000], [85.4], [73.2], [68.4], [63.4], [56.9], [54.8], [–], [50.0], [39.3],
+    [3,786], [84.6], [76.5], [69.0], [63.0], [58.4], [56.8], [50.0], [–], [47.6],
+    [fr3], [88.5], [80.7], [74.8], [67.4], [66.1], [61.4], [60.7], [52.4], [–],
+  ),
+  caption: [Row's score against column (%), 1,000 games a pair on `heldout-2p-fr`, `BELIEF:worlds=16` on both sides. Numbers are `discount-2p/g1-s42`'s epochs; fr3 is `ppo-2p-fr3/full@e4350`. ±3.1 pp at 50%.],
+)
+- *Later beats earlier.* The later checkpoint wins 26 of the 28 pairs within the run, each above 50% at 95%. The other two are level: 2,500 against 2,000 (50.2%, 47.1–53.3) and 3,786 against 3,000 (50.0%, 46.9–53.1). No earlier checkpoint wins a pair.
+- *One rating.* A Bradley–Terry fit (8 free ratings) leaves a deviance of 26.0 on 28 df (p = 0.58). The largest of the 36 residuals is z = −2.3 (fr3 against 3,786).
+- *No cycles.* No three players beat each other in a ring, even counting wins inside their intervals.
+- *Shrinking gains.* Elo above epoch 250 (bootstrap sd about 6): 110 at 500, 174 at 1,000, 215 at 1,500, 245 at 2,000, 261 at 2,500, 298 at 3,000, 310 at 3,786, and 352 for fr3. Per 500 epochs that is 63, 41, 30, 16 and 36 Elo, then 13 over the last 786.
+- *fr3.* It beats every checkpoint of the run, the last one 52.4% (41 Elo, 30–52). At the `full` level without belief averaging it scored 55.8% against the same checkpoint over 5,000 games (@exp:recipe-discount).
+
+#lead[One pair off the rating.] The last 786 epochs (the end of the cosine, near 0.0005) helped against fr3 but not against epoch 3,000. On the same games fr3 scored 60.7% against 3,000 and 52.4% against 3,786 (215 against 132 games that differ, paired p = 1e-5), yet 3,786 and 3,000 tie. On one rating, 8 points gained against fr3 would mean about 58% against 3,000. This was picked after the fact as the largest residual, and the overall fit is fine.
+
+#lead[Reading.] Within this run, self-play kept improving against all its past selves, with no sign of the cycling that self-play can fall into. One rating describes the run and fr3 well enough to rank checkpoints by a single number. The scope is one run, one seed and the fair bot.
+
 #lead[Setup.]
 - *Players.* `discount-2p/g1-s42` (`graph-s` from scratch on OpenHex's 1v1 rules, 3,786 epochs; @exp:recipe-discount) at epochs 250, 500, 1,000, 1,500, 2,000, 2,500, 3,000 and 3,786, plus the deployed `ppo-2p-fr3/full@e4350` from another lineage. All 36 pairs.
-- *Agent.* The fair belief-averaged bot (`BELIEF:worlds=16`, the deployed 1v1 bot) on the GPU. A first launch on the CPU used the argmax `full`-level policy to leave the GPU to `graph-m`. It was stopped after 6 of 36 pairs (1.8 h projected) so the round robin waits for the GPU (Marco). The GPU run is a config of its own, `transitivity-2p-belief`, since the agents changed. 100 games took 22 s with startup.
+- *Agent.* The fair belief-averaged bot (`BELIEF:worlds=16`, the deployed 1v1 bot) on the GPU. A first launch on the CPU used the argmax `full`-level policy to leave the GPU to `graph-m`. It was stopped after 6 of 36 pairs (1.8 h projected) so the round robin waits for the GPU (Marco). The GPU run is a config of its own, `transitivity-2p-belief`, since the agents changed. The 36,000 games took 96 min.
 - *Games.* `heldout-2p-fr`'s first 500 boards in both seat orders: 1,000 games a pair (±3.1 pp at 50%, Wilson 95%). A 4.4 pp difference has 80% power, so close late pairs may not separate on their own; the rating fit pools 8,000 games a player.
 - *Analysis.* The score matrix; pairs where the earlier checkpoint wins; a Bradley–Terry fit and its goodness of fit (deviance on 36 − 8 = 28 df); any significant cycle.
 
