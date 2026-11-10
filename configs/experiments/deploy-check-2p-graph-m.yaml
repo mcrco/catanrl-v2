@@ -1,0 +1,38 @@
+# deploy check for 2p-graph-m-1 against fr3 (marco, 2026-11-10: "yes and yes", to making graph-m
+# best-2p and to this check before any deploy). graph-m beat fr3 56.5% with both raw nets reading
+# every hand (graph-m-2p-lr's finals); this plays the two ways a deployed 1v1 bot plays.
+#
+# rows, heldout-2p-fr:
+#   - fair raw bot: BELIEF:worlds=16 of each (catanrl-1v1-v2's spec for fr3), all 2,500 boards in
+#     both seat orders, 5,000 games (+-1.4 pp at 50%).
+#   - search at equal time per move: catanrl-1v1-search-v2's options (dets=1, pending=64, reuse,
+#     transpositions) for both. fr3 at 1,024 sims with the fused kernels, as deployed; the fused
+#     kernels are compiled for hidden 96 and refuse graph-m (hidden 192), so graph-m searches with the
+#     torch forward at 300 sims = 1,024 / 3.38. 3.38 is graph-m's time per simulation over fr3's at
+#     batch 1, the way the bridge plays (tools/search_probe.py, one env, 2^14 sims each, 4 games:
+#     352 vs 104 us; report/data/deploy-graph-m-calibration-*.json). first 1,000 boards in both seat
+#     orders, 2,000 games (+-2.2 pp; 80% power at ~3.1 pp).
+#
+# decision rule (fixed before launch): graph-m is a deploy candidate if its search row is above 50%
+# at 95% and its fair raw row is not below 50% at 95%. deploying still waits for marco's go.
+#
+# cost: the raw row ~30 min; the search row ~4-5 h (search-depth-2p's 1,024-sim cells took 1.1 h per
+# 1,000 games with one search seat; here both seats search, time-matched).
+#
+# launch (main; the gpu alone):
+#   catanrl run configs/experiments/deploy-check-2p-graph-m.yaml
+name: deploy-check-2p-graph-m
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr}
+      lineup:
+        - "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup:
+        - "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=300:dets=1:pending=64:reuse=true:transpositions=true"
+        - "MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+runtime: {device: cuda, threads: 12, num_envs: 960, infer_rows: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

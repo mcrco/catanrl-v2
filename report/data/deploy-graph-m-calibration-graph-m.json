@@ -1,0 +1,53 @@
+{
+ "suite": "heldout-2p-fr",
+ "boards": 2,
+ "games": 4,
+ "wall_s": 1674.3522380022332,
+ "truncated": 0,
+ "slots": [
+  {
+   "slot": 0,
+   "spec": "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=16384:dets=1:oracle=false:root=puct:c_puct=0.75:gumbel_m=16:temperature=0.0:noise=false:allow_drift=false:tracker=pool:reuse=true:transpositions=true",
+   "score_rate": 0.5,
+   "wilson": [
+    0.15003898915214947,
+    0.8499610108478506
+   ],
+   "counters": {
+    "decisions": 290,
+    "fresh": 209,
+    "reused": 81,
+    "dropped_first": 3,
+    "refused_diverged": 140,
+    "refused_engine": 65
+   },
+   "reuse_rate": 0.2793103448275862,
+   "per_decision": {
+    "coalesced_outcomes": 0.0,
+    "evaluations": 16169.568965517241,
+    "max_depth": 34.11379310344827,
+    "nodes": 37990.872413793106,
+    "simulations": 16384.0,
+    "transpositions": 396.8965517241379
+   },
+   "dedup": {
+    "rows": 4689175,
+    "forwarded": 2877692,
+    "batch_hits": 24804,
+    "cache_hits": 1786679,
+    "batch_hit_fraction": 0.005289629838937553,
+    "cache_hit_fraction": 0.38102203479290064,
+    "forwarded_fraction": 0.6136883353681618
+   }
+  },
+  {
+   "slot": 1,
+   "spec": "POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sample=false:temperature=1.0:allow_drift=false",
+   "score_rate": 0.5,
+   "wilson": [
+    0.15003898915214947,
+    0.8499610108478506
+   ]
+  }
+ ]
+}

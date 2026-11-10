@@ -174,24 +174,32 @@ python tools/move_time.py "MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=655
 catanrl openhex deploy/openhex.yaml --check
 ```)
 
-=== OpenHex v3 candidate: `graph-m` against fr3 #chip("queued") <exp:deploy-graph-m-check>
+=== OpenHex v3 candidate: `graph-m` against fr3 #chip("running") <exp:deploy-graph-m-check>
 #meta(
-  dates: "queued for the GPU after the AlphaZero gate (10 November)",
+  dates: "2026-11-10 14:20 –",
   owner: "marco",
-  config: "configs/experiments/deploy-check-2p-graph-m.yaml (written after the calibration)",
-  wandb: (),
+  config: "configs/experiments/deploy-check-2p-graph-m.yaml",
+  wandb: (("deploy-check-2p-graph-m-main-82cef592", "main"),),
   records: (),
 )
-#tldr[`2p-graph-m-1` beats fr3 56.5% with both raw nets reading every hand (@exp:arch-graph-m-2p-lr). Before it could replace fr3 on OpenHex: the same comparison with the fair raw bot, and with search at equal time per move, since `graph-m` costs more per simulation. Approved by Marco on 10 November; deploying still waits for his go.]
+#tldr[`2p-graph-m-1` beats fr3 56.5% with both raw nets reading every hand (@exp:arch-graph-m-2p-lr). Before it could replace fr3 on OpenHex: the same comparison with the fair raw bot, and with search at equal time per move, since `graph-m` costs more per simulation. Approved by Marco on 10 November; deploying still waits for his go. Running on the GPU since 10 November.]
 
 *Question.* Does `graph-m` still beat fr3 as a fair bot, and inside the deployed search when both get the same time per move?
 
 #lead[Setup.]
 - *Fair raw bot.* `BELIEF:worlds=16` of `graph-m-2p-lr/main@e22711` against the same of fr3 (`catanrl-1v1-v2`'s spec), 5,000 games on `heldout-2p-fr` (±1.4 pp at 50%).
-- *Search.* `catanrl-1v1-search-v2`'s options (`dets=1:pending=64:reuse=true:transpositions=true`) for both nets, head to head, 2,000 games on `heldout-2p-fr`'s first 1,000 boards in both seat orders (±2.2 pp; 80% power at about 3.1 pp). fr3 searches 1,024 sims with the fused kernels, as deployed. The fused kernels are compiled for hidden 96 and refuse `graph-m` (hidden 192), so it searches with the torch forward. Its sims are 1,024 / _k_, where _k_ is its time per simulation over fr3's.
-- *Calibration.* _k_ is measured at batch 1, the way the bridge plays: `tools/search_probe.py` with one env on the GPU, each net's search at 2#super[14] sims against fr3's raw policy, on the same boards. Time per simulation is the wall time over decisions × simulations per decision. It runs on this box's RTX 2070 SUPER; the deployed bots run on yang's GTX 1080.
+- *Search.* `catanrl-1v1-search-v2`'s options (`dets=1:pending=64:reuse=true:transpositions=true`) for both nets, head to head, 2,000 games on `heldout-2p-fr`'s first 1,000 boards in both seat orders (±2.2 pp; 80% power at about 3.1 pp). fr3 searches 1,024 sims with the fused kernels, as deployed. The fused kernels are compiled for hidden 96 and refuse `graph-m` (hidden 192), so it searches with the torch forward. Its sims are 1,024 / _k_ = 300, where _k_ is its time per simulation over fr3's.
+- *Calibration.* _k_ is measured at batch 1, the way the bridge plays: `tools/search_probe.py` with one env on the GPU, each net's search at 2#super[14] sims against fr3's raw policy, on the same boards. Time per simulation is the wall time over decisions × simulations per decision. It runs on this box's RTX 2070 SUPER; the deployed bots run on yang's GTX 1080. Measured: 352 µs a simulation for `graph-m` against 104 µs for fr3 (4 games each, 290 and 331 searched decisions), so _k_ = 3.38 (`report/data/deploy-graph-m-calibration-*.json`). At this cost `graph-m`'s 2#super[17]-sim search, the deployed budget, would take about 46 s a move here, past the 45 s deadline.
 - *Decision rule* (fixed before launch). `graph-m` is a deploy candidate if its search row is above 50% at 95% and its fair raw row is not below 50% at 95%.
 - *Cost.* The fair raw row about 30 min. The search row is unmeasured: the AlphaZero gate's 2,000-game rows at 512 sims with one search seat are estimated at 1.15 h, so roughly 4–5 h with two search seats at 1,024.
+
+#repro(```sh
+# Calibration (batch 1), then the two rows
+O=sims=16384:dets=1:pending=64:reuse=true:transpositions=true
+uv run python tools/search_probe.py "MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:$O:kernels=fused" "POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41" --suite heldout-2p-fr --boards 2 --device cuda --num-envs 1
+uv run python tools/search_probe.py "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:$O" "POLICY:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41" --suite heldout-2p-fr --boards 2 --device cuda --num-envs 1
+catanrl run configs/experiments/deploy-check-2p-graph-m.yaml
+```)
 
 == Search in the deployed bots
 
