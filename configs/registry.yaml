@@ -8,7 +8,7 @@
 # weights, parents included. Roles point at a name and move when a better net replaces it.
 # Docs only for now: `ckpt=<name>` resolves after graph-m-2p-lr ends (runner code freeze).
 roles:
-  best-2p: 2p-graph-s-3        # the yardstick every new 1v1 net plays (fr3)
+  best-2p: 2p-graph-m-1        # the yardstick every new 1v1 net plays (Marco, 2026-11-10; fr3 before)
   best-4p: 4p-graph-s-1
 models:
   2p-graph-s-1:
@@ -28,7 +28,7 @@ models:
     rules: base-2p-fr
     from: 2p-graph-s-2
     steps: 2_021_068_800
-    use: fr3; deployed (OpenHex 1v1-v2, the site's 1v1 room); best-2p
+    use: fr3; deployed (OpenHex 1v1-v2, the site's 1v1 room); best-2p until 2026-11-10
   2p-graph-s-4:
     ref: "discount-2p/g1-s42@e3786#aa8868d9c6da"
     rules: base-2p-fr
@@ -40,7 +40,7 @@ models:
     rules: base-2p-fr
     from: scratch
     steps: 3_000_032_256
-    use: graph-m from scratch at half graph-s's learning rate; 56.5% vs 2p-graph-s-3 (fr3) on heldout-2p-fr
+    use: graph-m from scratch at half graph-s's learning rate; 56.5% vs 2p-graph-s-3 (fr3) on heldout-2p-fr; best-2p since 2026-11-10
   4p-graph-s-1:
     ref: "ppo-4p/main@e3650#813b2c61338f"
     rules: base-4p

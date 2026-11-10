@@ -120,7 +120,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
   wandb: (("graph-m-2p-lr-main-03f356b6", "main"),),
   records: ("914fc0f0", "d664995b"),
 )
-#tldr[@exp:arch-graph-m-2p restarted from scratch at half `graph-s`'s learning rate. After 3B steps (139 h) `graph-m` beats fr3, the deployed 1v1 net, 56.5% over 5,000 held-out games (p = 3e-20), and F 99.4%. `graph-s` from scratch under the same recipe ended at 44.2% against fr3 on the same games (+12.3 pp paired). Now `2p-graph-m-1`.]
+#tldr[@exp:arch-graph-m-2p restarted from scratch at half `graph-s`'s learning rate. After 3B steps (139 h) `graph-m` beats fr3, the deployed 1v1 net, 56.5% over 5,000 held-out games (p = 3e-20), and F 99.4%. `graph-s` from scratch under the same recipe ended at 44.2% against fr3 on the same games (+12.3 pp paired). Now `2p-graph-m-1` and the 1v1 yardstick, *best-2p* (Marco, 10 November).]
 
 *Question.* At a learning rate that suits it, does `graph-m` beat `graph-s` (Marco)?
 

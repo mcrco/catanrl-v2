@@ -14,10 +14,11 @@ So far: self-play PPO on a graph network gives a strong raw policy, and search o
 
 == Latest results (10 November 2026)
 
-- *Bigger 1v1 net* (Marco; @exp:arch-graph-m-2p-lr). `graph-m` (2.32M parameters, 4.3× `graph-s`), from scratch for 3B steps on OpenHex's 1v1 rules at half `graph-s`'s learning rate, beats fr3, the deployed 1v1 net, 56.5% over 5,000 held-out games (±1.4 pp, p = 3e-20) and F 99.4%. `graph-s` from scratch under the same recipe ended at 44.2% against fr3 on the same games (+12.3 pp paired, p = 2e-41). Both sides read every hand in these rows; the fair (`BELIEF`) and search rows are next. Now `2p-graph-m-1`. The first try at `graph-s`'s learning rate stalled, with policy updates about 5× larger (@exp:arch-graph-m-2p).
+- *Bigger 1v1 net* (Marco; @exp:arch-graph-m-2p-lr). `graph-m` (2.32M parameters, 4.3× `graph-s`), from scratch for 3B steps on OpenHex's 1v1 rules at half `graph-s`'s learning rate, beats fr3, the deployed 1v1 net, 56.5% over 5,000 held-out games (±1.4 pp, p = 3e-20) and F 99.4%. `graph-s` from scratch under the same recipe ended at 44.2% against fr3 on the same games (+12.3 pp paired, p = 2e-41). Both sides read every hand in these rows; the fair (`BELIEF`) and search rows are next. Now `2p-graph-m-1` and *best-2p*, the yardstick new 1v1 runs play (Marco). The first try at `graph-s`'s learning rate stalled, with policy updates about 5× larger (@exp:arch-graph-m-2p).
 - *Transitivity* (Marco; @exp:recipe-transitivity). A round robin of eight checkpoints of one 1v1 run plus fr3, 1,000 games a pair with the fair raw bot: every later checkpoint beats or ties every earlier one, one Bradley–Terry rating fits all 36 pairs (deviance 26.0 on 28 df, p = 0.58) and there are no cycles. Gains shrink: 110 Elo from epoch 250 to 500, 13 from 3,000 to 3,786. The last stretch gained 8 points against fr3 but tied epoch 3,000 head to head.
 - *Running*: the AlphaZero gate, fr3 fitted once to three shapes of 2048-sim search targets on 102,400 of its own positions, each judged inside the search against fr3's own search (approved by Marco; @exp:az-gate). On the GPU since 10 November, about 7–8 h.
-- *Queued*: 256-step rollout segments and λ = 1, `graph-s` from scratch for 500M steps against the same run at 64 steps and λ = 0.95 (Marco; @exp:recipe-horizon). About 8 h on the GPU, after the AlphaZero gate.
+- *Queued*: a deploy check of `graph-m` against fr3, as fair raw bots (5,000 games) and inside the deployed search at equal time per move (2,000 games); `graph-m` can't use the fused search kernels, so it gets fewer sims (Marco; @exp:deploy-graph-m-check). Next on the GPU, after the AlphaZero gate.
+- *Queued*: 256-step rollout segments and λ = 1, `graph-s` from scratch for 500M steps against the same run at 64 steps and λ = 0.95 (Marco; @exp:recipe-horizon). About 8 h on the GPU, after the deploy check and the fp16 A/B.
 
 - *Search depth sweep* (Marco; @exp:search-depth-2p). MCTS at 64 to 16,384 sims against the same checkpoint's raw policy, five checkpoints of one run, 1,000 games per cell. More search helps every checkpoint at every step, with no plateau by 16,384 sims: each 4× adds 3–7 points (final net: 53.9, 57.0, 60.5% at 1,024, 4,096, 16,384). Weaker nets gain more (82.0% for the epoch-50 net at 4,096; the epoch-150 net 76.4 → 80.7% from 4,096 to 16,384). Paused on 3 November with two 16,384-sim cells (e1500, e50) still to play.
 - *Trading between equals* (Marco; @exp:trade-2v2). Two seats that trade with each other, against two copies of the same net that can't, take 61.7% (adjacent) and 62.9% (alternating) of 4p games, against exactly 50 without trading (+11.7 and +12.9 pp paired, 4,000 games a row). Both traders gain, so it isn't exploitation of a naive acceptor. Against F the pair goes from 93 to 96%.
@@ -76,13 +77,13 @@ Every network we talk about gets a name of the form _players–network–number_
     tgroup(5)[`graph-s`: hidden 96, 3 layers, 541,540 parameters],
     [`2p-graph-s-1`], [`base-2p`], [0.44B], [`puffer-graph2/full@e3350`], [From scratch; the first deployed 1v1 net],
     [`2p-graph-s-2`], [`base-2p-fr`], [1.45B], [`ppo-2p-fr/full@e7600`], [`2p-graph-s-1` + 1.0B on OpenHex's rules],
-    [`2p-graph-s-3`], [`base-2p-fr`], [2.02B], [`ppo-2p-fr3/full@e4350`], [fr3: `2p-graph-s-2` + 0.57B; deployed; *best-2p*],
+    [`2p-graph-s-3`], [`base-2p-fr`], [2.02B], [`ppo-2p-fr3/full@e4350`], [fr3: `2p-graph-s-2` + 0.57B; deployed; *best-2p* until 10 November],
     [`2p-graph-s-4`], [`base-2p-fr`], [0.50B], [`discount-2p/g1-s42@e3786`], [g1: from scratch, γ = 1],
     [`4p-graph-s-1`], [`base-4p`], [0.96B], [`ppo-4p/main@e3650`], [From scratch; deployed; *best-4p*],
     [`4p-graph-s-2`], [`base-4p`], [0.16B], [`aux-hidden-4p/plain@e600`], [The calibrated critic that judges trades],
     [`mix-graph-s-1`], [2–4 players], [0.93B], [`ppo-mixed/main@e3550`], [One net for 2–4 players and any map; deployed],
     tgroup(5)[`graph-m`: hidden 192, 4 layers, 2,320,100 parameters],
-    [`2p-graph-m-1`], [`base-2p-fr`], [3.0B], [`graph-m-2p-lr/main@e22711`], [From scratch (@exp:arch-graph-m-2p-lr); 56.5% against fr3],
+    [`2p-graph-m-1`], [`base-2p-fr`], [3.0B], [`graph-m-2p-lr/main@e22711`], [From scratch (@exp:arch-graph-m-2p-lr); 56.5% against fr3; *best-2p* since 10 November (Marco)],
   ),
   caption: [Named models. Steps count every agent step behind the weights, parents included. *best-2p* and *best-4p* are roles that move to a better net; every new run plays best-2p (or best-4p) as its yardstick.],
 ) <tab:models>
