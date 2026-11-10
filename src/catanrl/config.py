@@ -28,7 +28,9 @@ metric, fill}``: evals run at checkpoints like the select eval, each logged
 to ``metrics.jsonl`` as ``select/<name>/...`` (:mod:`catanrl.train.select`),
 deciding nothing. ``eval.select: {from: NAME}`` makes monitor NAME the select
 eval (resolution copies its suite, lineup, every, metric and fill into
-``eval.select``), so ``best`` follows it.
+``eval.select``), so ``best`` follows it. A PPO variant's ``train.stop_epoch``
+is optional the same way (:data:`TRAIN_OPTIONAL`): absent from
+``configs/train/ppo.yaml``, so a config without it keeps its hash.
 
 An AlphaZero variant that starts from a network (``init_from`` with the
 actor) gets :func:`alphazero_evals` as a layer between the defaults and the
@@ -99,6 +101,14 @@ ENTRY_LISTS = ("eval.final", "eval.monitor")
 #: Keys a config may set that defaults.yaml leaves out, with the value that means "unset": a
 #: config without them (or with them at that value, dropped at resolution) hashes as before.
 OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None}
+#: Train keys of an algo that its ``configs/train/<algo>.yaml`` leaves out, with the value that
+#: means "unset": like :data:`OPTIONAL`, a config without them (or with them unset, dropped at
+#: resolution) hashes as it did before they existed. ``stop_epoch``: end the run after that
+#: epoch (its checkpoint, then the finals) with the schedule still the whole budget's.
+TRAIN_OPTIONAL: dict[str, dict[str, Any]] = {"ppo": {"stop_epoch": None}}
+#: train.precision of a PPO run: float32; bfloat16 (PuffeRL's own autocast, with train.amp);
+#: float16 (needs train.amp: catanrl.train.puffer's autocast and GradScaler).
+PRECISIONS = ("float32", "bfloat16", "float16")
 PARTS = ("actor", "critic")
 #: The parts ``train.freeze`` may name (a network's ``parts``; ``aux`` only on an aux head).
 FREEZE_PARTS = ("actor", "critic", "aux")
@@ -365,10 +375,15 @@ def _check_train(train: Any) -> dict:
     execution = sorted(EXECUTION_KEYS & set(train))
     if execution:
         raise ConfigError(f"train.{execution[0]} is an execution key: set it under runtime (or let the runner)")
+    optional = TRAIN_OPTIONAL.get(algo, {})
     out = dict(base)
     for key, value in train.items():
+        if key in optional and key not in base:
+            if value is not None and value != optional[key]:
+                out[key] = value  # unset: left out, so the config hashes as before the key existed
+            continue
         if key not in base:
-            raise ConfigError(f"unknown key 'train.{key}' for algo {algo}{_suggest(key, list(base))}")
+            raise ConfigError(f"unknown key 'train.{key}' for algo {algo}{_suggest(key, [*base, *optional])}")
         out[key] = _coerce(value, base[key], f"train.{key}")
     if algo == "ppo" and out.get("critic_gamma") is not None and out.get("critic_targets") != "lambda":
         # the trainer's _critic_options refuses this too, but only after the run dir exists; ppo.yaml
@@ -377,6 +392,8 @@ def _check_train(train: Any) -> dict:
                           f"{out['critic_targets']} takes critic_gamma: null (set both)")
     if algo == "ppo":
         _check_freeze(out.get("freeze", []))
+        _check_precision(out)
+        _check_stop_epoch(out.get("stop_epoch"))
     if algo == "alphazero":
         _check_alphazero_targets(out, base)
     if algo == "distill":
@@ -391,6 +408,27 @@ def _check_freeze(freeze: Any) -> None:
     unknown = [part for part in freeze if part not in FREEZE_PARTS]
     if unknown or len(set(freeze)) != len(freeze):
         raise ConfigError(f"train.freeze takes distinct parts of {list(FREEZE_PARTS)}, not {freeze!r}")
+
+
+def _check_precision(train: Mapping[str, Any]) -> None:
+    """train.precision and train.amp of a PPO run (the trainer checks the device: float16 needs
+    fp16 tensor cores, CUDA compute capability 7.0+, or runs on the CPU)."""
+    precision = train.get("precision", "float32")
+    if precision not in PRECISIONS:
+        raise ConfigError(f"train.precision must be one of {PRECISIONS}, not {precision!r}")
+    if precision == "float16" and train.get("amp") is not True:
+        raise ConfigError("train.precision float16 is mixed precision: set train.amp: true (the network's "
+                          "forwards autocast to float16 and a GradScaler scales the loss; the weights, the "
+                          "optimizer and the losses stay float32)")
+
+
+def _check_stop_epoch(stop: Any) -> None:
+    """train.stop_epoch: null, or the positive epoch after which the run ends (finished)."""
+    if stop is None:
+        return
+    if isinstance(stop, bool) or not isinstance(stop, int) or stop < 1:
+        raise ConfigError(f"train.stop_epoch is a positive epoch (the run ends after it, finished) or null, "
+                          f"not {stop!r}")
 
 
 def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) -> None:

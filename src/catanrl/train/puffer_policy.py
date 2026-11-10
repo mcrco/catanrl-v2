@@ -40,6 +40,16 @@ segment ``s`` holds row ``s``). In each env only the seat to move acts:
   cell through the horizon as the policy and value losses do. The rollout
   never runs the head.
 
+* **float16 mixed precision** (``amp_dtype=torch.float16``, ``train.precision:
+  float16``): only the network's own calls (heads, trunk, memory cell) run
+  under ``torch.autocast`` to that dtype, in a ``with`` block of their own, in
+  the rollout and the training forward alike. Their outputs come back as
+  float32 (the logits are masked at -1e9 in float32 by the models), so the
+  distribution math (log-softmax, entropy, ratios), the value loss, the
+  calibration sums and everything PuffeRL does with them stay float32, and no
+  autocast outlives a forward (PuffeRL's own, which it enters without
+  exiting, stays off). Without it nothing changes.
+
 The adapter also tracks the critic's calibration by player count: the sum
 over seats of the predicted win probabilities, against the sum of the
 targets it is trained on and, given the critic's discount, against the
@@ -49,6 +59,7 @@ the aux head's error per hidden feature (:meth:`PufferPolicy.pop_aux`).
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 import torch
@@ -91,10 +102,15 @@ class PufferPolicy(nn.Module):
     """The model behind PufferLib's ``forward_eval`` / ``forward`` / ``value_loss``."""
 
     def __init__(self, model: CatanModel, *, num_rows: int, compile: bool = False,
-                 critic_gamma: float | None = None, aux_coef: float = 0.0) -> None:
+                 critic_gamma: float | None = None, aux_coef: float = 0.0,
+                 amp_dtype: torch.dtype | None = None) -> None:
         super().__init__()
         self.model = model
         self.recurrent = bool(getattr(model, "recurrent", False))
+        if amp_dtype not in (None, torch.float16):
+            raise ValueError(f"amp_dtype is torch.float16 or None, not {amp_dtype}")
+        #: The network's calls autocast to this dtype (None: float32, no autocast).
+        self.amp_dtype = amp_dtype
         self.aux_coef = float(aux_coef)
         if self.aux_coef < 0.0:
             raise ValueError("aux_coef must be >= 0")
@@ -140,6 +156,12 @@ class PufferPolicy(nn.Module):
         self._outcomes = None if critic_gamma is None else OutcomeCalibration(
             num_envs=self.num_rows // self.max_players, max_players=self.max_players, gamma=critic_gamma)
 
+    def _autocast(self, device: torch.device):
+        """The autocast block of one network call (a no-op without ``amp_dtype``)."""
+        if self.amp_dtype is None:
+            return contextlib.nullcontext()
+        return torch.autocast(device_type=device.type, dtype=self.amp_dtype)
+
     # ------------------------------------------------------------ rollout
 
     def forward_eval(self, observations: torch.Tensor, state=None):
@@ -158,7 +180,9 @@ class PufferPolicy(nn.Module):
             done = state.get("done") if state is not None else None
             self._reset_memory(rows, observations.device, done)
         if acting.numel():
-            act_logits, value_logits, present = self._rollout_heads(observations.index_select(0, acting), acting)
+            with self._autocast(observations.device):
+                act_logits, value_logits, present = self._rollout_heads(observations.index_select(0, acting),
+                                                                        acting)
             logits.index_copy_(0, acting, act_logits.float())
             probs = torch.sigmoid(value_logits.float()) * present
             target, valid = seat_rows(acting, present, self.max_players)
@@ -266,11 +290,13 @@ class PufferPolicy(nn.Module):
         acting_obs = observations.index_select(0, acting)
         aux = None
         if self.aux_coef:
-            act_logits, value_logits, present, predictions = self._heads_with_aux(acting_obs)
+            with self._autocast(observations.device):
+                act_logits, value_logits, present, predictions = self._heads_with_aux(acting_obs)
             targets, others = self.model.aux_targets(acting_obs)
             aux = (predictions, targets, others)
         else:
-            act_logits, value_logits, present = self._heads(acting_obs)
+            with self._autocast(observations.device):
+                act_logits, value_logits, present = self._heads(acting_obs)
         logits = logits.index_copy(0, acting, act_logits.float())
         return logits, ValueBatch(acting, value_logits.float(), present, rows, aux)
 
@@ -293,7 +319,8 @@ class PufferPolicy(nn.Module):
         acting = torch.nonzero(self.model.acting(flat)).squeeze(1)
         logits = self.model.waiting_logits(rows, flat.device)
         acting_obs = flat.index_select(0, acting)
-        emb, obs_rows = self._embed(acting_obs)
+        with self._autocast(flat.device):
+            emb, obs_rows = self._embed(acting_obs)
         inputs = emb.pooled.new_zeros(rows, emb.pooled.shape[1]).index_copy(0, acting, emb.pooled)
         inputs = inputs.reshape(segments, horizon, -1)
         act = self.model.acting(flat).reshape(segments, horizon, 1)
@@ -306,7 +333,8 @@ class PufferPolicy(nn.Module):
         memories = []
         for t in range(horizon):
             h, c = h * keep[:, t], c * keep[:, t]
-            h_new, c_new = self.model.remember(inputs[:, t], h, c)
+            with self._autocast(flat.device):
+                h_new, c_new = self.model.remember(inputs[:, t], h, c)
             # The state stays float32 along the horizon, as the rollout's memory does (under
             # autocast the cell returns bf16 on CUDA; torch.where and the stack need one dtype).
             h = torch.where(act[:, t], h_new.to(h.dtype), h)
@@ -315,11 +343,13 @@ class PufferPolicy(nn.Module):
         memory = torch.stack(memories, dim=1).reshape(rows, -1).index_select(0, acting)
         aux = None
         if self.aux_coef:
-            act_logits, value_logits, present, predictions = self._decode_with_aux(emb, obs_rows, memory)
+            with self._autocast(flat.device):
+                act_logits, value_logits, present, predictions = self._decode_with_aux(emb, obs_rows, memory)
             targets, others = self.model.aux_targets(acting_obs)
             aux = (predictions, targets, others)
         else:
-            act_logits, value_logits, present = self._decode(emb, obs_rows, memory)
+            with self._autocast(flat.device):
+                act_logits, value_logits, present = self._decode(emb, obs_rows, memory)
         logits = logits.index_copy(0, acting, act_logits.float())
         return logits, ValueBatch(acting, value_logits.float(), present, rows, aux)
 

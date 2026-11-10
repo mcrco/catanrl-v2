@@ -45,8 +45,9 @@ def test_absent_or_unset_monitors_and_champion_keep_the_hash():
 
 
 def test_every_experiment_hashes_as_pinned():
-    """configs/experiments/*.yaml resolve to the hashes pinned before eval.monitor existed, so
-    stored runs still match. A deliberate config change re-pins: regenerate the file from
+    """configs/experiments/*.yaml resolve to the hashes pinned before eval.monitor existed (and,
+    since train.stop_epoch, every variant with a stored run then), so stored runs still match. A
+    deliberate config change re-pins: regenerate the file from
     ``{f"{v.experiment}/{v.name}": v.config_hash for each plan's variants}``."""
     pinned = json.loads((ROOT / "tests" / "data" / "experiment_hashes.json").read_text())
     got = {}

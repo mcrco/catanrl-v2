@@ -14,4 +14,5 @@ set:
     log_interval: 4
     iterations: 2
     steps_per_iteration: 16
+    stop_epoch: 2            # only where a config sets one: a smoke run's budget is 4 epochs
   runtime: {device: cpu, threads: 2, num_envs: 8, infer_rows: 16, compile: false, time_limit_hours: null}
