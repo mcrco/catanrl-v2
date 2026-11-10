@@ -1,0 +1,98 @@
+# transitivity on the gpu with the fair raw bot (marco, 2026-11-04: "could we get a transitivity
+# experiment? im not sure if training leads to better model for sure"; 2026-11-09: run it before the
+# alphazero gate if it takes ~3 h or less). the question, players, suite and analysis are
+# transitivity-2p.yaml's: does a later checkpoint of one run beat every earlier one, do the results fit
+# one bradley-terry rating, or are there cycles?
+#
+# players: discount-2p/g1-s42 at e250, e500, e1000, e1500, e2000, e2500, e3000, e3786, plus fr3
+# (ppo-2p-fr3/full@e4350) as an anchor from another lineage. all 36 pairs.
+# agent: BELIEF:worlds=16 on both sides, the fair raw bot (it samples the hidden hands instead of
+# reading them). transitivity-2p.yaml planned full-level POLICY on the cpu, since the gpu was
+# graph-m-2p-lr's; it was stopped after 6 of 36 pairs (transitivity-2p/main, interrupted). graph-m has
+# finished, so this runs the fair bot on the gpu instead.
+# suite: heldout-2p-fr's first 500 boards in both seat orders, 1,000 games a pair (+-3.1 pp at 50%,
+# wilson 95%; a 4.4 pp difference at 80% power); the bradley-terry fit pools 8,000 games a player.
+# cost: belief on cuda took ~380 s per 5,000 games with one belief seat, so ~150 s a pair with two:
+# ~1.5-2 h for 36,000 games.
+#
+# launch (main; the gpu alone):
+#   catanrl run configs/experiments/transitivity-2p-belief.yaml
+name: transitivity-2p-belief
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1000#083b068cb14d:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e2500#696a921c00bc:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1000#083b068cb14d:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e2500#696a921c00bc:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3786#aa8868d9c6da:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1000#083b068cb14d:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e3000#906aba3fb0a4:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e2500#696a921c00bc:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2500#696a921c00bc:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2500#696a921c00bc:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2500#696a921c00bc:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1000#083b068cb14d:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2500#696a921c00bc:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2500#696a921c00bc:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1000#083b068cb14d:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e2000#9b0e90fd2cd0:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e1500#5b135e28b536:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e1000#083b068cb14d:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e1000#083b068cb14d:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e1000#083b068cb14d:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16"]
+    - suite: {name: heldout-2p-fr, boards: 500}
+      lineup: ["BELIEF:ckpt=discount-2p/g1-s42@e500#46ccf535b7db:worlds=16", "BELIEF:ckpt=discount-2p/g1-s42@e250#c52b2ff73cfa:worlds=16"]
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

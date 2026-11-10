@@ -36,11 +36,11 @@ models:
     steps: 500_115_456
     use: g1; the from-scratch graph-s baseline on OpenHex's 1v1 rules (gamma 1)
   2p-graph-m-1:
-    ref: null                  # graph-m-2p-lr/main, pinned at its finals (about 2026-11-10)
+    ref: "graph-m-2p-lr/main@e22711#673425d606b5"
     rules: base-2p-fr
     from: scratch
-    steps: 3_000_000_000
-    use: graph-m from scratch at half graph-s's learning rate
+    steps: 3_000_032_256
+    use: graph-m from scratch at half graph-s's learning rate; 56.5% vs 2p-graph-s-3 (fr3) on heldout-2p-fr
   4p-graph-s-1:
     ref: "ppo-4p/main@e3650#813b2c61338f"
     rules: base-4p
