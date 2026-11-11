@@ -4,7 +4,7 @@
 # PuffeRL keys minus the runner's (device, seed, data_dir, compile,
 # batch_size, ...: set from `runtime` and the env) plus catanrl's
 # (algo, lr_schedule, kl_target, lr_min, lr_max, log_interval, muon_exclude,
-# muon_exclude_lr, aux_coef, freeze).
+# muon_exclude_lr, aux_coef, freeze, and the optional stop_epoch).
 algo: ppo
 total_timesteps: 400_000_000   # agent steps: rows (num_envs x max_players) per VecEnv step
 learning_rate: 3.0e-4
@@ -29,7 +29,8 @@ ent_coef: 0.01
 bptt_horizon: 64
 minibatch_size: 2048
 max_minibatch_size: 2048
-precision: float32
+precision: float32             # float32 | bfloat16 (PuffeRL's autocast) | float16 (needs amp: true: catanrl's autocast
+                               # of the network's forwards and a GradScaler; weights, optimizer and losses stay float32)
 amp: false                     # PuffeRL reads config.get('amp', True)
 prio_alpha: 0.0                # uniform minibatches
 prio_beta0: 1.0
@@ -54,3 +55,6 @@ freeze: []                     # network parts (actor, critic, aux: model.parts)
                                # head trains, so split one first (init_from.split_shared) to refit a whole critic network
 checkpoint_interval: 50        # epochs
 log_interval: 32               # VecEnv steps between episode-stat pops
+# Optional, absent by default (a config without it keeps its hash; config.TRAIN_OPTIONAL):
+# stop_epoch: N                # end the run after epoch N: its checkpoint, then the finals, status finished
+#                              # (a relaunch does not resume it); the cosine is still total_timesteps'
