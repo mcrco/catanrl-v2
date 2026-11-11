@@ -174,15 +174,15 @@ python tools/move_time.py "MCTS:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:sims=655
 catanrl openhex deploy/openhex.yaml --check
 ```)
 
-=== OpenHex v3 candidate: `graph-m` against fr3 #chip("running") <exp:deploy-graph-m-check>
+=== OpenHex v3 candidate: `graph-m` against fr3 #chip("done") <exp:deploy-graph-m-check>
 #meta(
-  dates: "2026-11-10 14:14 –",
+  dates: "2026-11-10 14:14 – 23:59",
   owner: "marco",
   config: "configs/experiments/deploy-check-2p-graph-m.yaml",
   wandb: (("deploy-check-2p-graph-m-main-82cef592", "main"),),
-  records: ("71af32b1",),
+  records: ("71af32b1", "9be79702"),
 )
-#tldr[`2p-graph-m-1` beats fr3 56.5% with both raw nets reading every hand (@exp:arch-graph-m-2p-lr). Before it could replace fr3 on OpenHex: the same comparison with the fair raw bot, and with search at equal time per move, since `graph-m` costs more per simulation. Approved by Marco on 10 November; deploying still waits for his go. Running on the GPU since 10 November.]
+#tldr[`2p-graph-m-1` beats fr3 56.5% with both raw nets reading every hand (@exp:arch-graph-m-2p-lr). Before it could replace fr3 on OpenHex: the same comparison with the fair raw bot, and with search at equal time per move, since `graph-m` costs more per simulation. Approved by Marco on 10 November. Both rows pass: 55.0% as the fair raw bot and 54.3% inside the search at 300 sims against fr3's 1,024. By the rule fixed before launch `graph-m` is a deploy candidate; deploying waits for Marco's go.]
 
 *Question.* Does `graph-m` still beat fr3 as a fair bot, and inside the deployed search when both get the same time per move?
 
@@ -193,9 +193,12 @@ catanrl openhex deploy/openhex.yaml --check
 - *Decision rule* (fixed before launch). `graph-m` is a deploy candidate if its search row is above 50% at 95% and its fair raw row is not below 50% at 95%.
 - *Cost.* The fair raw row about 30 min. The search row is unmeasured: the AlphaZero gate's 2,000-game rows at 512 sims with one search seat are estimated at 1.15 h, so roughly 4–5 h with two search seats at 1,024.
 
-#lead[Result so far.]
+#lead[Result.]
 - *Fair raw bot.* `graph-m` beats fr3 55.0% #ci[53.6][56.4] over 5,000 games (`71af32b1`), so this half of the rule passes. Reading every hand it scored 56.5% on the same games; the fair bot is 1.5 pp lower, paired (550 games won only as the fair bot, 626 only reading every hand; p = 0.03).
-- *Search.* The first launch ran 960 games at a time. Two search seats with reuse and transpositions kept about 11 MB of trees per seat, and the run reached 21 GB of host RAM. The kernel's out-of-memory killer stopped it at 14:51, just after the raw row finished; nothing else was killed. Relaunched at 14:54 with 256 games in flight: it holds 8.3 GB, and its launcher stops it if free memory falls below 3 GB.
+- *Search.* At equal time per move `graph-m`'s 300-sim search beats fr3's 1,024-sim search 54.3% #ci[52.2][56.5] over 2,000 games (1,087 wins to 913, p = 1e-4; `9be79702`), so this half passes too. By seat: 58.0% moving first, 50.7% second.
+- *Rule.* Both halves pass: `graph-m` is a deploy candidate.
+- *Not covered.* The time match was measured on this box's GPU at 2#super[14] sims and played at about 1,000; the deployed bots search 2#super[17] sims on yang's GTX 1080, where `graph-m` would need a smaller budget or fused kernels for hidden 192 to stay under the 45 s deadline.
+- *Cost.* 9.1 h for the search row, about twice the estimate. The first launch ran 960 games at a time: two search seats with reuse and transpositions kept about 11 MB of trees per seat, the run reached 21 GB of host RAM, and the kernel's out-of-memory killer stopped it at 14:51, just after the raw row finished (nothing else was killed). The relaunch at 14:54 ran 256 games at a time and held 8.3 GB.
 
 #repro(```sh
 # Calibration (batch 1), then the two rows
