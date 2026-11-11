@@ -500,15 +500,15 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 == Mixed precision
 
-=== float16 training at `graph-m-2p-lr`'s start: `fp16-2p` #chip("running") <exp:fp16>
+=== float16 training at `graph-m-2p-lr`'s start: `fp16-2p` #chip("done") <exp:fp16>
 #meta(
-  dates: "2026-11-11 01:49 – (about 05:30)",
+  dates: "2026-11-11 01:49 – 04:40",
   owner: "marco",
   config: "configs/experiments/fp16-2p.yaml",
-  wandb: (("fp16-2p-fp32-4212901e", "fp16-2p/fp32"),),
-  records: (),
+  wandb: (("fp16-2p-fp32-4212901e", "fp16-2p/fp32"), ("fp16-2p-fp16-fab0f386", "fp16-2p/fp16")),
+  records: ("ca1e7112", "5d7b41e3"),
 )
-#tldr[Claude's design, approved by Marco on 2026-11-09. Every run so far trains in float32, and this card (Turing) has fp16 tensor cores but no bf16. `graph-m-2p-lr`'s first 300 epochs twice, in float32 and in float16 with loss scaling: is float16 faster at no cost in strength?]
+#tldr[Claude's design, approved by Marco on 2026-11-09. `graph-m-2p-lr`'s first 300 epochs twice, in float32 and in float16 with loss scaling. float16 trains 1.95× as fast and is stable, but its epoch-300 net scores 16.1% against fr3 where float32's scores 18.3% on the same 5,000 games (−2.3 pp, p = 0.001). By the rule fixed before launch float16 is not adopted. One seed per arm.]
 
 *Question.* Does float16 mixed precision train `graph-m` at least 15% faster without a weaker net?
 
@@ -536,6 +536,23 @@ At about 18% a row is ±1.1 pp. The paired SE of the difference is at most 0.77 
 - float16 runs at 1.91× float32's steps per second, against the 1.15× of rule 1. 20 epochs include compile and warm-up; the run's median over epochs 50–300 decides.
 - Losses are finite in both arms. The loss scale stayed at 32,768. The rollout's log-probs and the update's forward on the same rows agree before any step (KL at most 2.5e-7, largest log-prob gap 0.0034).
 - A subagent's CPU tests (4 threads, niced) run beside the `fp32` arm's first hour; the run uses 12 of the 16 cores, and the rule reads a median, so a few slow epochs don't move it.
+
+#lead[Result.]
+#table(
+  columns: 6,
+  table.header([Arm], [Steps/s #sub[median, epochs 50–300]], [Wall time], [Peak memory], [vs fr3, monitors #sub[epochs 100, 200, 300; 1,000 games]], [vs fr3, final #sub[5,000 games]]),
+  [`fp32`], [6,126], [1 h 49 min], [4.24 GiB], [5.1, 12.6, 18.0%], [18.3%],
+  [`fp16`], [11,939], [57 min], [3.44 GiB], [4.4, 11.2, 16.8%], [16.1%],
+)
++ *Speed: passes.* 1.95× float32's steps per second (each arm's epochs stay within ±3% of its median). The CPU tests beside `fp32`'s first hour cost it about 1% (6,075 against 6,140 steps/s after).
++ *Stability: passes.* No non-finite loss. Three skipped steps of 4,800, two of them after epoch 10 (0.04%). The loss scale moved between 16,384 and 65,536. The rollout's log-probs and the update's forward agree before any step (KL at most 2.7e-6).
++ *Strength: fails.* On the same 5,000 games `fp16` wins 803 and `fp32` 916: −2.3 pp, 542 games won only by `fp16` against 655 only by `fp32`, McNemar p = 0.0012. The monitors are lower at all three epochs.
+- *No run-to-run spread to read it against.* `fp32` reproduced `graph-m-2p-lr` bit for bit: the weights at epochs 100, 200 and 300 have the same hashes, so their final rows are one record. A float32 run of this config is deterministic on this box, and the planned yardstick is zero.
+
+#lead[Reading.]
+- By the rule, new runs stay in float32.
+- The test covers the games, not the training seed: with one seed per arm, a 2.3 pp gap at epoch 300 could be a seed's worth of difference or a real cost of float16 (not measured).
+- At this stage a net gains about 5.4 pp per 100 epochs, so 2.3 pp is about 40 epochs, 13% of the steps, against 48% less time per step. Whether the gap closes, holds or grows over a full run is not measured.
 
 #repro(```sh
 env -u WANDB_API_KEY WANDB_MODE=disabled uv run python tools/fp16_smoke.py --runs /tmp/fp16-smoke   # GPU smoke
