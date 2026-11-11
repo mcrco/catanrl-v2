@@ -500,12 +500,12 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 == Mixed precision
 
-=== float16 training at `graph-m-2p-lr`'s start: `fp16-2p` #chip("queued") <exp:fp16>
+=== float16 training at `graph-m-2p-lr`'s start: `fp16-2p` #chip("running") <exp:fp16>
 #meta(
-  dates: "queued for the GPU after graph-m finishes",
+  dates: "2026-11-11 01:49 – (about 05:30)",
   owner: "marco",
   config: "configs/experiments/fp16-2p.yaml",
-  wandb: (),
+  wandb: (("fp16-2p-fp32-4212901e", "fp16-2p/fp32"),),
   records: (),
 )
 #tldr[Claude's design, approved by Marco on 2026-11-09. Every run so far trains in float32, and this card (Turing) has fp16 tensor cores but no bf16. `graph-m-2p-lr`'s first 300 epochs twice, in float32 and in float16 with loss scaling: is float16 faster at no cost in strength?]
@@ -524,7 +524,18 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 + the final of `fp16` against fr3 is not significantly below that of `fp32` (paired McNemar over the shared games, two-sided 0.05), read against the gap between `fp32` and `graph-m-2p-lr`.
 At about 18% a row is ±1.1 pp. The paired SE of the difference is at most 0.77 pp (independent games), so 80% power for about 2.2 pp; a smaller deficit could go unseen.
 
-#lead[Cost.] About 3.5 h of GPU with the card alone: 1.8 h for `fp32` (300 × 132,096 steps at about 6.1k steps/s), at most 1.6 h for `fp16` if it passes rule 1, about 1.5 minutes of monitors per arm and about 5 minutes of finals. A 15-minute GPU smoke (20 epochs per arm in a scratch directory, W&B off) comes first. A CPU check of the whole path passed.
+#lead[Cost.] About 3.5 h of GPU with the card alone: 1.8 h for `fp32` (300 × 132,096 steps at about 6.1k steps/s), at most 1.6 h for `fp16` if it passes rule 1, about 1.5 minutes of monitors per arm and about 5 minutes of finals. A 15-minute GPU smoke (20 epochs per arm in a scratch directory, W&B off) came first. A CPU check of the whole path passed.
+
+#lead[GPU smoke] (2026-11-11 01:30, 20 epochs per arm, W&B off). Passed, so the A/B launched.
+#table(
+  columns: 5,
+  table.header([Arm], [Steps/s], [Peak memory], [Skipped steps], [Update KL, epoch 1]),
+  [`fp32`], [6,150], [4.24 GiB], [–], [0.0053],
+  [`fp16`], [11,780], [3.44 GiB], [1 of 320, in warm-up], [0.0044],
+)
+- float16 runs at 1.91× float32's steps per second, against the 1.15× of rule 1. 20 epochs include compile and warm-up; the run's median over epochs 50–300 decides.
+- Losses are finite in both arms. The loss scale stayed at 32,768. The rollout's log-probs and the update's forward on the same rows agree before any step (KL at most 2.5e-7, largest log-prob gap 0.0034).
+- A subagent's CPU tests (4 threads, niced) run beside the `fp32` arm's first hour; the run uses 12 of the 16 cores, and the rule reads a median, so a few slow epochs don't move it.
 
 #repro(```sh
 env -u WANDB_API_KEY WANDB_MODE=disabled uv run python tools/fp16_smoke.py --runs /tmp/fp16-smoke   # GPU smoke
