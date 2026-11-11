@@ -291,11 +291,14 @@ def test_the_value_anchor_pulls_a_drifted_critic_back(searched):
 # ---------------------------------------------------------------- runs
 
 
-def test_collect_writes_a_checked_dataset_and_a_fit_trains_the_matched_dose(start):
+def test_collect_writes_a_checked_dataset_and_a_fit_trains_the_matched_dose(start, capsys):
     assert run(variant("positions", start, phase="collect")).status == "finished"
     positions = load_experiment("gate/positions")
     data = distill.Dataset.load("gate/positions")
     meta, a = data.meta, data.arrays
+    searched = [line.split(" positions, ")[0] for line in capsys.readouterr().out.splitlines() if ": search: " in line]
+    assert searched == [f"gate/positions: chunk {i + 1}/2: search: {c['positions']}/{c['positions']}"
+                        for i, c in enumerate(meta["chunks"])]  # the progress line at each search's end
     assert meta["sha256"] == canon.sha256_file(positions.path / distill.DATASET)
     assert not list((positions.path / distill.CHUNKS).glob("*.npz"))  # merged, then removed
     assert meta["games"] == 5 and len(meta["chunks"]) == 2 and len(data) == sum(c["positions"] for c in meta["chunks"])

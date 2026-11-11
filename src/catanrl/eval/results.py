@@ -10,7 +10,8 @@
 ``evaluate(lineup, suite)`` returns the record if it exists. Otherwise it
 locks the id, plays only the games missing from ``<eval_id>.games.jsonl``
 (one appended row per finished game, so a crash resumes exactly) under the
-suite's determinism flags, and writes the record once. Each start appends a
+suite's determinism flags, and writes the record once; meanwhile a line on
+stdout every 30 s says how far it is (:class:`Progress`). Each start appends a
 segment: its execution (device class, CPU capability, torch, numpy, and
 ``infer_rows`` on GPUs) and a provenance capture with patches. Resuming
 under another execution needs ``allow_mixed`` (the record is marked) or
@@ -45,11 +46,12 @@ from __future__ import annotations
 import fcntl
 import fnmatch
 import os
+import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from catanrl import canon
 from catanrl.eval.stats import _paired_comparison, binomial_two_sided, wilson_interval
@@ -81,6 +83,40 @@ def real_llm_slots(key: Mapping[str, Any]) -> list[int]:
     slots = [*key.get("lineup", []), key.get("fill")]
     return [i for i, d in enumerate(slots)
             if d and d.get("key") == "LLM" and not is_stub(str((d.get("params") or {}).get("model", "")))]
+
+
+class Progress:
+    """A long loop's progress on stdout: ``label: done/total unit, rate per minute, elapsed, ETA``
+    every ``every`` seconds (a timer thread: also while nothing finishes) and once at the end.
+    The rate and the ETA are this process's; ``done`` starts above zero on a resumed loop."""
+
+    def __init__(self, label: str, total: int, *, done: int = 0, unit: str = "games", every: float = 30.0) -> None:
+        self.label, self.total, self.done, self.unit, self.every = label, int(total), int(done), unit, float(every)
+        self.first, self.start = self.done, time.time()
+        self._stop = threading.Event()
+        self._timer = threading.Thread(target=self._tick, daemon=True)
+
+    def add(self, count: int = 1) -> None:
+        self.done += count
+
+    def line(self) -> str:
+        elapsed, new = time.time() - self.start, self.done - self.first
+        eta = f"{(self.total - self.done) * elapsed / new / 60:.1f} min" if new else "unknown"
+        return (f"{self.label}: {self.done}/{self.total} {self.unit}, {new * 60 / max(elapsed, 1e-9):.1f} "
+                f"{self.unit}/min, elapsed {elapsed / 60:.1f} min, ETA {eta}")
+
+    def _tick(self) -> None:
+        while not self._stop.wait(self.every):
+            print(self.line(), flush=True)
+
+    def __enter__(self) -> Self:
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        self._timer.join()
+        print(self.line(), flush=True)  # the end, or where a failed loop stopped
 
 
 def play_schedule(*args, **kwargs):  # indirection: tests replace the harness
@@ -574,10 +610,14 @@ def _play(agents, fill_agent, suite, key, eval_id, path, *, harness="native", al
     done = _latest_rows(games_path)
     missing = [g for g in schedule if g.game_id not in done]
     if missing:
-        with _strict(suite):
+        label = f"eval {eval_id}: {' vs '.join(a.label for a in agents)} on {suite.name}"
+        with _strict(suite), Progress(label, len(schedule), done=len(schedule) - len(missing)) as progress:
+            def on_game(row: dict) -> None:
+                canon.append_jsonl(games_path, {**row, "segment": segment})
+                progress.add()
+
             _play_games(agents, fill_agent, missing, suite, harness, device=device, num_envs=num_envs,
-                        threads=threads, infer_rows=infer_rows,
-                        on_game=lambda row: canon.append_jsonl(games_path, {**row, "segment": segment}))
+                        threads=threads, infer_rows=infer_rows, on_game=on_game)
     rows = _latest_rows(games_path)
     if set(rows) != {g.game_id for g in schedule}:
         raise RuntimeError(f"{eval_id}: the harness did not play every scheduled game")
@@ -666,10 +706,15 @@ def verify(record: EvalRecord | str | Path, *, games: int | None = 16, device: s
     infer_rows = int(first.get("infer_rows", 256))
     harness = record.key["harness"]
     found: dict[str, dict] = {}
-    with _strict(suite):
+    label = f"verify {record.eval_id}: {' vs '.join(a.label for a in agents)} on {suite.name}"
+    with _strict(suite), Progress(label, len(chosen)) as progress:
+        def on_game(row: dict) -> None:
+            found[row["game_id"]] = row
+            progress.add()
+
         _play_games(agents, fill_agent, chosen, suite, harness,
                     device=device or ("cpu" if harness == "catanatron" else "auto"), num_envs=num_envs,
-                    threads=threads, infer_rows=infer_rows, on_game=lambda r: found.__setitem__(r["game_id"], r))
+                    threads=threads, infer_rows=infer_rows, on_game=on_game)
     differing = [g.game_id for g in chosen
                  if canon.canonical_json(_strip(found[g.game_id])) != canon.canonical_json(_strip(stored[g.game_id]))]
     return {"identical": len(chosen) - len(differing), "of": len(chosen), "differing": differing}

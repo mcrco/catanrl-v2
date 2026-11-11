@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,6 +64,7 @@ import torch.nn.functional as F
 
 from catanrl import canon
 from catanrl.envs.puffer import plan_env
+from catanrl.eval.results import Progress
 from catanrl.models import CatanModel
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
 from catanrl.seeding import derive_seed, determinism, seed_everything
@@ -240,9 +241,11 @@ def play_games(plan: Any, model: CatanModel, evaluator: BatchEvaluator, *, games
 
 
 def search_positions(pool: Any, evaluator: BatchEvaluator, positions: Sequence[tuple[int, Kept]], *, rows: int,
-                     seed: int, mask: slice) -> tuple[dict[str, np.ndarray], int]:
+                     seed: int, mask: slice, searched: Callable[[int], None] | None = None,
+                     ) -> tuple[dict[str, np.ndarray], int]:
     """Search every ``(game id, Kept)`` once, ``rows`` searches in lockstep; the dataset's arrays of
-    them (all but the game outcome's) and the leaf rows evaluated."""
+    them (all but the game outcome's) and the leaf rows evaluated. ``searched(n)`` hears of every
+    finished wave of ``n`` positions."""
     out: dict[str, list] = {name: [] for name in ("obs", "start_value", "root_value", "search_value", "depth",
                                                   "max_depth", "game", "seat", "turn", "decision", "num_legal",
                                                   *EDGE_ARRAYS)}
@@ -273,6 +276,8 @@ def search_positions(pool: Any, evaluator: BatchEvaluator, positions: Sequence[t
                     ("visits", pool.visits(sid)[edges]), ("q", pool.q(sid)[edges]), ("engine", engine[edges]),
                 ):
                     out[name].append(item_value)
+            if searched is not None:
+                searched(len(wave))
         finally:
             if pool.pending:
                 pool.cancel()
@@ -532,8 +537,10 @@ def _collect(cfg: Mapping[str, Any], writer: Any, train: Mapping[str, Any], runt
             seed=derive_seed(seed, "collect", chunk), threads=threads)
         played = time.time() - start
         positions = [(first_id + env, item) for env, items in enumerate(kept) for item in items]
-        arrays, leaves = search_positions(pool, evaluator, positions, rows=int(train["search_rows"]), seed=seed,
-                                          mask=mask)
+        # ~9 min a chunk in az-gate-2p (10,240 positions at 2,048 sims): a line every 30 s meanwhile
+        with Progress(f"{writer.ref}: chunk {chunk + 1}/{chunks}: search", len(positions), unit="positions") as progress:
+            arrays, leaves = search_positions(pool, evaluator, positions, rows=int(train["search_rows"]), seed=seed,
+                                              mask=mask, searched=progress.add)
         searched = time.time() - start - played
         local = arrays["game"] - first_id
         arrays.update({"decisions": decisions[local].astype(np.int32), "winner": winner[local].astype(np.int8),
