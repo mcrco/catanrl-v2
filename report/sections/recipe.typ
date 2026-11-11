@@ -552,7 +552,7 @@ At about 18% a row is ±1.1 pp. The paired SE of the difference is at most 0.77 
 #lead[Reading.]
 - By the rule, new runs stay in float32.
 - The test covers the games, not the training seed: with one seed per arm, a 2.3 pp gap at epoch 300 could be a seed's worth of difference or a real cost of float16 (not measured).
-- At this stage a net gains about 5.4 pp per 100 epochs, so 2.3 pp is about 40 epochs, 13% of the steps, against 48% less time per step. Whether the gap closes, holds or grows over a full run is not measured.
+- At this stage a net gains about 5.4 pp per 100 epochs, so 2.3 pp is about 40 epochs, 13% of the steps, against 49% less time per step. Whether the gap closes, holds or grows over a full run is not measured.
 
 #repro(```sh
 env -u WANDB_API_KEY WANDB_MODE=disabled uv run python tools/fp16_smoke.py --runs /tmp/fp16-smoke   # GPU smoke
