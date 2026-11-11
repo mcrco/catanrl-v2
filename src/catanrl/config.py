@@ -402,19 +402,25 @@ def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) 
     the trainer's come only after the run dir exists, and its failed folder then holds the variant."""
     if train["root"] not in ("puct", "gumbel"):
         raise ConfigError(f"train.root must be puct or gumbel, not {train['root']!r}")
-    if train["policy_target"] not in ("engine", "gumbel"):
-        raise ConfigError(f"train.policy_target must be engine or gumbel, not {train['policy_target']!r}")
+    if train["policy_target"] not in ("engine", "gumbel", "pruned"):
+        raise ConfigError(f"train.policy_target must be engine, gumbel or pruned, not {train['policy_target']!r}")
     if train["policy_target"] == "gumbel" and train["root"] != "gumbel":
         raise ConfigError("train.policy_target: gumbel rebuilds a Gumbel root's improved policy; a PUCT root's "
-                          "target is its visits (policy_target: engine)")
+                          "target is its visits (policy_target: engine or pruned)")
+    if train["policy_target"] == "pruned" and train["root"] != "puct":
+        raise ConfigError("train.policy_target: pruned prunes a PUCT root's visits by its PUCT scores; a Gumbel "
+                          "root's target is its improved policy (policy_target: engine or gumbel)")
+    if train["policy_target"] == "pruned" and train["dets"] > 1:
+        raise ConfigError("train.policy_target: pruned reads one root world's prior, visits and Q; with dets > 1 "
+                          "every world's tree runs PUCT on its own and the pool reports their sums (dets 0 or 1)")
     if not (train["target_c_visit"] >= 0.0 and train["target_c_scale"] >= 0.0):
         raise ConfigError("train.target_c_visit and train.target_c_scale must be non-negative")
     if not train["target_prior_temperature"] > 0.0:
         raise ConfigError("train.target_prior_temperature must be positive")
     constants = ("target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature")
-    if train["policy_target"] == "engine" and any(train[k] != base[k] for k in constants):
+    if train["policy_target"] != "gumbel" and any(train[k] != base[k] for k in constants):
         raise ConfigError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
-                          "has the search's own sigma (set policy_target: gumbel)")
+                          "has the search's own sigma and a pruned one has none (set policy_target: gumbel)")
     if train["pending"] < 1 or train["fast_pending"] < 1:
         raise ConfigError("train.pending and train.fast_pending count a search's leaves per network round (>= 1)")
     if train["kernels"] not in ("torch", "fused"):

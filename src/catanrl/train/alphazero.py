@@ -31,7 +31,11 @@
    temperature on its prior term (``target_prior_temperature``: a sharp prior
    otherwise keeps a move the deeper search plays near zero). The search
    itself (Sequential Halving, the move played) keeps the engine's sigma and
-   priors either way.
+   priors either way. With ``policy_target: pruned`` (PUCT roots) it is the
+   visit distribution without the visits that the root's Dirichlet noise
+   forced (:func:`pruned_visits`): an action keeps the visits its value
+   earns under the network's own prior, so the noise still shapes the search
+   and the move played but is not taught back to the network.
    Value: each seat's outcome, seat-relative like the value head (slot k =
    the seat k places after the row's), 1 to the winner and 0 to the others;
    a truncated game gives every seat 1/n (the eval convention) or 0
@@ -53,7 +57,8 @@ iteration). A resume restores the weights, optimizer, replay buffer, counters
 and RNG; games in flight restart.
 
 Every iteration also logs :class:`Monitors` (``oos/*``, ``search/overrule``
-and friends, ``target/*`` with ``policy_target: gumbel``, ``drift/*``):
+and friends, ``target/*`` with ``policy_target: gumbel`` or ``pruned``,
+``drift/*``):
 logging-only health checks that read the network, the searched rows and
 replay and feed nothing back.
 """
@@ -136,19 +141,25 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("train.pending and train.fast_pending count a search's leaves per network round (>= 1)")
     if train["kernels"] not in ("torch", "fused"):
         raise ValueError(f"train.kernels must be torch or fused, not {train['kernels']!r}")
-    if train["policy_target"] not in ("engine", "gumbel"):
-        raise ValueError(f"train.policy_target must be engine or gumbel, not {train['policy_target']!r}")
+    if train["policy_target"] not in ("engine", "gumbel", "pruned"):
+        raise ValueError(f"train.policy_target must be engine, gumbel or pruned, not {train['policy_target']!r}")
     if train["policy_target"] == "gumbel" and train["root"] != "gumbel":
         raise ValueError("train.policy_target: gumbel rebuilds a Gumbel root's improved policy; a PUCT root's "
-                         "target is its visits (policy_target: engine)")
+                         "target is its visits (policy_target: engine or pruned)")
+    if train["policy_target"] == "pruned" and train["root"] != "puct":
+        raise ValueError("train.policy_target: pruned prunes a PUCT root's visits by its PUCT scores; a Gumbel "
+                         "root's target is its improved policy (policy_target: engine or gumbel)")
+    if train["policy_target"] == "pruned" and int(train["dets"]) > 1:
+        raise ValueError("train.policy_target: pruned reads one root world's prior, visits and Q; with dets > 1 "
+                         "every world's tree runs PUCT on its own and the pool reports their sums (dets 0 or 1)")
     if not (float(train["target_c_visit"]) >= 0.0 and float(train["target_c_scale"]) >= 0.0):
         raise ValueError("train.target_c_visit and train.target_c_scale must be non-negative")
     if not float(train["target_prior_temperature"]) > 0.0:
         raise ValueError("train.target_prior_temperature must be positive")
     constants = ("target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature")
-    if train["policy_target"] == "engine" and any(train[k] != ALPHAZERO_KEYS[k] for k in constants):
+    if train["policy_target"] != "gumbel" and any(train[k] != ALPHAZERO_KEYS[k] for k in constants):
         raise ValueError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
-                         "has the search's own sigma (set policy_target: gumbel)")
+                         "has the search's own sigma and a pruned one has none (set policy_target: gumbel)")
     return train
 
 
@@ -189,6 +200,19 @@ def _log_softmax(scores: np.ndarray) -> np.ndarray:
     return scores - top - np.log(np.exp(scores - top).sum(-1, keepdims=True))
 
 
+def _world_log_priors(logits: np.ndarray, edges: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+    """Each root world's log-prior over the root's actions ``edges`` ([W, E], from logits [A]
+    or [W, A]) as the engine's expand builds a node's priors, before any Dirichlet noise: a
+    softmax of ``logits / temperature`` over those actions, in which non-finite logits get
+    nothing; a world without a finite one is uniform. Float64 (the engine stores float32)."""
+    z = np.atleast_2d(np.asarray(logits, dtype=np.float64))[:, edges] / float(temperature)
+    finite = np.isfinite(z)
+    with np.errstate(invalid="ignore"):  # a world without a finite logit: -inf - -inf, replaced below
+        log_prior = _log_softmax(np.where(finite, z, -np.inf))
+    log_prior[~finite.any(1)] = -np.log(len(edges))
+    return log_prior
+
+
 def gumbel_target(logits: np.ndarray, legal: np.ndarray, visits: np.ndarray, q: np.ndarray, root_value: float,
                   *, c_visit: float = 50.0, c_scale: float = 0.1, rescale: bool = True,
                   prior_temperature: float = 1.0) -> np.ndarray:
@@ -221,12 +245,7 @@ def gumbel_target(logits: np.ndarray, legal: np.ndarray, visits: np.ndarray, q: 
     edges = np.flatnonzero(legal)
     if not len(edges):
         return target
-    z = np.atleast_2d(np.asarray(logits, dtype=np.float64))[:, edges] / float(prior_temperature)
-    finite = np.isfinite(z)
-    with np.errstate(invalid="ignore"):  # a world without a finite logit: -inf - -inf, replaced below
-        log_prior = _log_softmax(np.where(finite, z, -np.inf))
-    log_prior[~finite.any(1)] = -np.log(len(edges))
-    log_prior = np.maximum(log_prior, MIN_LOG_PRIOR).mean(0)
+    log_prior = np.maximum(_world_log_priors(logits, edges, prior_temperature), MIN_LOG_PRIOR).mean(0)
     n = np.asarray(visits, dtype=np.float64)[edges]
     seen = n > 0
     completed = np.full(len(edges), float(root_value))
@@ -243,6 +262,60 @@ def gumbel_target(logits: np.ndarray, legal: np.ndarray, visits: np.ndarray, q: 
         completed = np.clip(completed, 0.0, 1.0)
     target[edges] = np.exp(_log_softmax(log_prior + (c_visit + n.max()) * c_scale * completed))
     return target
+
+
+def pruned_visits(logits: np.ndarray, legal: np.ndarray, visits: np.ndarray, q: np.ndarray, *,
+                  c_puct: float) -> np.ndarray:
+    """A searched PUCT root's visit counts without the visits its Dirichlet noise forced, over
+    the codec's index space (float64 [A], zero off ``legal``); ``policy_target: pruned``'s
+    target is their distribution. The idea is KataGo's pruning of forced playouts from its
+    policy targets: the noise still decides where the search looks and which move is played,
+    but an action keeps no more visits than its value earns under the network's own prior.
+
+    With N and Q the root's visits and values, P the network's prior without the noise and T
+    the root's visits in all, an action at n visits has the engine's PUCT score
+    (search_pool.cpp, select_edge) ``Q + c_puct * P * sqrt(T + 1) / (1 + n)``.
+
+    * The most visited action keeps its visits, and its score at them is the bar S. Ties go
+      to the larger P, then to the first in the codec's order: the engine's rule (``select``
+      at temperature 0), except that the engine's tie-breaking prior is the noised one it
+      searched with.
+    * Another visited action a whose Q alone reaches S keeps its visits. Otherwise it keeps
+      at most the fewest visits at which its score is no higher than S,
+      ``ceil(max(0, c_puct * P_a * sqrt(T + 1) / (S - Q_a) - 1))``, and an action that this
+      cuts to one visit or none keeps none.
+
+    * ``logits``: the network's policy logits at the root, [A] or [1, A]; P is the engine's
+      root prior before the noise (:func:`_world_log_priors`). One root world only (``dets``
+      0 or 1): with more, each world's tree runs PUCT on its own prior, visits and Q, of
+      which the pool reports the sums, so several rows of logits are refused.
+    * ``legal``: the root's actions (bool [A]); ``visits`` and ``q``: the pool's
+      ``visits(id)`` and ``q(id)`` (NaN where unvisited, never read there).
+    * ``c_puct``: the search's (``SearchConfig.c_puct``, engine units).
+
+    A root without a visit gives zeros, as the engine's target does. The arithmetic is float64.
+    """
+    legal = np.asarray(legal, dtype=bool)
+    kept = np.zeros(legal.shape, dtype=np.float64)
+    edges = np.flatnonzero(legal)
+    n = np.asarray(visits, dtype=np.float64)[edges]
+    if not n.sum():
+        return kept
+    log_prior = _world_log_priors(logits, edges)
+    if len(log_prior) != 1:
+        raise ValueError(f"pruned_visits reads one root world's logits, not {len(log_prior)}")
+    prior = np.exp(log_prior[0])
+    values = np.asarray(q, dtype=np.float64)[edges]
+    most = np.flatnonzero(n == n.max())
+    best = most[np.argmax(prior[most])]
+    exploration = float(c_puct) * np.sqrt(n.sum() + 1.0)
+    gap = values[best] + exploration * prior[best] / (1.0 + n[best]) - values  # S - Q
+    with np.errstate(divide="ignore", invalid="ignore"):  # no gap, or NaN at an unvisited action: not cut
+        earned = np.ceil(np.maximum(exploration * prior / gap - 1.0, 0.0))
+    cut = (gap > 0.0) & (earned < n)
+    cut[best] = False
+    kept[edges] = np.where(cut & (earned > 1.0), earned, np.where(cut, 0.0, n))
+    return kept
 
 
 # ---------------------------------------------------------------- replay
@@ -429,8 +502,8 @@ class SelfPlay:
         noise = bool(train["dirichlet_noise"]) and train["root"] == "puct"
         self.full_pool = pool(int(train["sims"]), self.leaves[0], noise)
         self.fast_pool = pool(int(train["fast_sims"]), self.leaves[1], False)  # fast searches: no noise (KataGo)
-        #: policy_target: gumbel's sigma constants (None: the engine's target).
-        self.sigma = None if train["policy_target"] == "engine" else {
+        #: policy_target: gumbel's sigma constants (None: the engine's target, or the pruned one).
+        self.sigma = None if train["policy_target"] != "gumbel" else {
             "c_visit": float(train["target_c_visit"]), "c_scale": float(train["target_c_scale"]),
             "rescale": bool(train["target_rescale"]), "prior_temperature": float(train["target_prior_temperature"])}
         self.mask = slice(model.mask_offset, model.mask_offset + model.num_actions)
@@ -475,8 +548,9 @@ class SelfPlay:
         full = rng.random(len(acting)) < float(self.train["full_search_prob"])
         searches = []
         targets = []  # the full searches' own policy targets (pool.policy_target), in acting order, for the monitor
-        rebuilt = []  # policy_target: gumbel's targets of the same searches (the ones trained on), for the monitor
-        roots = RootOutputs(self.full_pool, self.mask) if self.sigma is not None else None
+        rebuilt = []  # policy_target: gumbel's or pruned's targets of the same searches (the ones trained on), and
+        pruned = []  # pruned's share of each of those searches' root visits that it removed, for the monitor
+        roots = RootOutputs(self.full_pool, self.mask) if self.train["policy_target"] != "engine" else None
         try:
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
@@ -500,8 +574,16 @@ class SelfPlay:
                         targets.append(policy)
                     else:  # the root's actions: the real game's (the row's mask) that every world offers
                         legal, logits, value = roots.root(sid)
-                        policy = gumbel_target(logits, legal & (b["observations"][row, self.mask] > 0),
-                                               pool.visits(sid), pool.q(sid), value, **self.sigma).astype(np.float16)
+                        legal = legal & (b["observations"][row, self.mask] > 0)
+                        if self.sigma is not None:
+                            policy = gumbel_target(logits, legal, pool.visits(sid), pool.q(sid), value,
+                                                   **self.sigma).astype(np.float16)
+                        else:  # policy_target: pruned, at the c_puct the search scored its edges with
+                            visits = pool.visits(sid)
+                            kept = pruned_visits(logits, legal, visits, pool.q(sid), c_puct=pool.config.c_puct)
+                            policy = (kept / max(kept.sum(), 1.0)).astype(np.float16)
+                            total = float(visits[legal].sum())
+                            pruned.append(1.0 - kept.sum() / total if total else 0.0)
                         rebuilt.append(policy)
                         if self.monitor is not None:  # search/* keep reading the search's own target
                             targets.append(pool.policy_target(sid).astype(np.float16))
@@ -525,7 +607,7 @@ class SelfPlay:
         self.decisions += len(acting)
         if self.monitor is not None and targets:  # before step() rewrites rows
             self.monitor.searched(b["observations"][acting[full]], np.stack(targets),
-                                  np.stack(rebuilt) if rebuilt else None)
+                                  np.stack(rebuilt) if rebuilt else None, np.array(pruned) if pruned else None)
         self.vec.step()
         self._finish(replay)
 
@@ -665,8 +747,10 @@ class Monitors:
       rows (:func:`policy_stats`, learn()'s train/* definitions, here out of sample);
       ``overrule_rows``. The target is the search's own (``pool.policy_target``) under either
       ``policy_target``, so these series compare across runs.
-    * ``target/*`` (self-play, ``policy_target: gumbel`` only): ``overrule``, ``entropy`` and
-      ``kl_net``, the same three on the same rows for the rebuilt targets the network trains on.
+    * ``target/*`` (self-play, ``policy_target: gumbel`` or ``pruned``): ``overrule``, ``entropy``
+      and ``kl_net``, the same three on the same rows for the rebuilt or pruned targets the
+      network trains on; with ``pruned`` also ``pruned``, the share of a search's root visits
+      that the pruning removed (the mean over those searches).
     * ``drift/*`` (after learn(), so epoch e is checkpoint e's network): ``kl_init``, the mean
       KL(init || net), and ``agree_init``, the argmax agreement, on a fixed probe set, overall
       and per phase (``_{phase}`` of :data:`PHASES`, with ``rows_{phase}``). The probe is up to
@@ -689,7 +773,8 @@ class Monitors:
     def begin(self) -> None:
         """Clear the iteration's sums and time."""
         self.searches = np.zeros(5)  # rows, overruled, target entropy, net entropy, KL(target || net)
-        self.rebuilt = np.zeros(5)  # the same for policy_target: gumbel's targets
+        self.rebuilt = np.zeros(5)  # the same for policy_target: gumbel's or pruned's targets
+        self.pruned = np.zeros(2)  # policy_target: pruned: rows, their shares of root visits removed
         self.seconds = 0.0
 
     def _forward(self, obs: np.ndarray, head: str) -> torch.Tensor:
@@ -705,9 +790,11 @@ class Monitors:
 
     # ------------------------------------------------------------ self-play
 
-    def searched(self, obs: np.ndarray, targets: np.ndarray, rebuilt: np.ndarray | None = None) -> None:
+    def searched(self, obs: np.ndarray, targets: np.ndarray, rebuilt: np.ndarray | None = None,
+                 pruned: np.ndarray | None = None) -> None:
         """One self-play step's full-budget searches: their roots' rows, the searches' own float16
-        targets and (``policy_target: gumbel``) the rebuilt ones."""
+        targets, (``policy_target: gumbel`` or ``pruned``) the rebuilt or pruned ones and
+        (``pruned``) each search's share of root visits removed."""
         start = time.time()
         keep = (obs[:, self.mask] > 0).sum(1) > 1  # VecEnv plays forced moves itself: normally every row
         if keep.any():
@@ -720,6 +807,8 @@ class Monitors:
                 entropies = policy_stats(target, logp, logp.exp())
                 overruled = (target.argmax(1) != logp.argmax(1)).sum()
                 sums += [int(keep.sum()), float(overruled), *(float(value.sum()) for value in entropies)]
+            if pruned is not None:
+                self.pruned += [int(keep.sum()), float(pruned[keep].sum())]
         self.seconds += time.time() - start
 
     # ------------------------------------------------------------ before and after learn()
@@ -738,6 +827,9 @@ class Monitors:
         if rows:
             logs.update({"target/overrule": float(overruled / rows), "target/entropy": float(target_entropy / rows),
                          "target/kl_net": float(kl / rows)})
+        rows, share = self.pruned
+        if rows:
+            logs["target/pruned"] = float(share / rows)
         count = min(int(count), replay.size)
         if count:
             index = (replay.next - count + np.arange(count)) % replay.capacity

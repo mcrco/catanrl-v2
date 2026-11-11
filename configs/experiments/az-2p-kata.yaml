@@ -2,12 +2,14 @@
 # visit-count targets").
 #
 # Self-play: PUCT roots. A quarter of the moves get a full search of 600 visits with Dirichlet noise
-# at the root; they are the only moves recorded, with the root's visit distribution as the policy
-# target (policy_target: engine; checked on CPU with pending 24: the target is visits / 600 to
-# float32 rounding, no in-flight visit left in it). The rest get a fast search of 100 visits without
-# noise and are only played (record_fast: false). The search is on the true game (dets: 0): fr3 is a
-# full-level network, trained on rows that show every hand, and the oracle search's nodes are such
-# rows. The evals search fairly (dets=1).
+# at the root; they are the only moves recorded. The policy target is the root's visit distribution
+# without the visits the noise forced (policy_target: pruned): the most visited move keeps its
+# visits, and any other keeps only those its value earns against that move's PUCT score under fr3's
+# own prior. The plain visit distribution (policy_target: engine) sat ~10 nats of KL from fr3's
+# saturated policy, and five learning steps on it took the net in the search from 52.7% to 27.0%.
+# The rest get a fast search of 100 visits without noise and are only played (record_fast: false).
+# The search is on the true game (dets: 0): fr3 is a full-level network, trained on rows that show
+# every hand, and the oracle search's nodes are such rows. The evals search fairly (dets=1).
 # Doses: 512 games x 64 steps = 32,768 moves per iteration, ~8,192 recorded; 64 updates x 512 rows =
 # 32,768 samples, about 4 uses per recorded position.
 # Speed: a search sends up to 24 (fast: 4) leaves per network round, so a step is ~27 rounds, not
@@ -26,9 +28,9 @@
 # Not measured yet (the GPU smoke): the time of an iteration and of a select; checkpoint_interval
 # and select.every are placeholders until then. The run stops at the time limit (checked between
 # iterations; the finals then need a relaunch or `catanrl finish`).
-# Memory: a replay position is 5,773 bytes (float16 full-level 2p rows), 5.8 GB at capacity in RAM;
-# the trainer state holds the replay, so up to 5.8 GB on disk, rewritten at every checkpoint with a
-# second copy in RAM while it is written.
+# Memory: a replay position is 5,773 bytes (float16 full-level 2p rows), 2.9 GB at capacity in RAM;
+# the trainer state holds the replay, so up to 2.9 GB on disk, rewritten at every checkpoint with a
+# second copy in RAM while it is written (1M positions and those copies did not fit this box).
 # `--smoke` cannot run this config: it forces the CPU (the fused kernels are CUDA only) and turns
 # @e4350 into @latest under the pinned sha.
 name: az-2p-kata
@@ -57,8 +59,8 @@ train:
   temperature_end: 0.0
   temperature_moves: 30
   truncation_value: share
-  policy_target: engine         # a PUCT root's: the visit distribution
-  replay_capacity: 1_000_000    # ~122 iterations of recorded positions; 5.8 GB of RAM
+  policy_target: pruned         # the visit distribution without the visits the noise forced
+  replay_capacity: 500_000      # ~61 iterations of recorded positions; 2.9 GB of RAM
   min_replay: 50_000            # ~6 iterations of recorded positions (filed when their games end)
   updates_per_iteration: 64     # x 512 = 32,768 samples per ~8,192 new positions
   minibatch_size: 512

@@ -28,6 +28,7 @@ from catanrl.train.alphazero import (
     _Pending,
     check_train,
     gumbel_target,
+    pruned_visits,
     temperature,
     train_alphazero,
     value_targets,
@@ -345,11 +346,13 @@ def test_fused_kernels_follow_the_weights(monkeypatch):
 # ---------------------------------------------------------------- monitors
 
 
-@pytest.mark.parametrize("target", [{}, {"policy_target": "gumbel", "target_c_scale": 0.01}], ids=["engine", "gumbel"])
+@pytest.mark.parametrize("target", [{}, {"policy_target": "gumbel", "target_c_scale": 0.01},
+                                    {"policy_target": "pruned", "root": "puct", "sims": 16}],
+                         ids=["engine", "gumbel", "pruned"])
 def test_monitors_are_logging_only(target):
     """With and without the monitors: the same replay rows and targets, weights, optimizer,
-    RNG and logged training values, bit for bit; with a rebuilt target too, whose monitors also
-    read the searches' own targets."""
+    RNG and logged training values, bit for bit; with a rebuilt or pruned target too, whose
+    monitors also read the searches' own targets."""
     run(variant("on", **target))
     run(variant("off", **target), monitors=False)
     on, off = load_experiment("az/on"), load_experiment("az/off")
@@ -370,7 +373,8 @@ def test_monitors_are_logging_only(target):
              "selfplay/games_per_hour")
     for x, y in zip(on.metrics(), off.metrics(), strict=True):
         assert "train/policy_loss" in x and "drift/kl_init" in x and "search/overrule" in x
-        assert ("target/entropy" in x) == bool(target)
+        assert ("target/entropy" in x) == ("target/kl_net" in x) == bool(target)
+        assert ("target/pruned" in x) == (target.get("policy_target") == "pruned")
         assert {k: v for k, v in x.items() if not k.startswith(added)} == {
             k: v for k, v in y.items() if not k.startswith(added)}
 
@@ -446,6 +450,15 @@ def test_the_overrule_rate_compares_targets_with_the_raw_argmax():
     assert {k: v for k, v in logged.items() if k.startswith("search/")} == pytest.approx(logs, rel=1e-6)
     assert logged["target/overrule"] == 1.0 and logged["target/entropy"] == pytest.approx(0.0, abs=1e-6)
     assert logged["target/kl_net"] == pytest.approx(float(-logp[torch.arange(n), other].mean()), rel=1e-5)
+    assert "target/pruned" not in logged
+    # policy_target: pruned hands each search's pruned share too: target/pruned is their mean (forced rows left out).
+    both.begin()
+    shares = np.linspace(0.0, 0.5, n + 1)
+    both.searched(np.concatenate([rows, forced]), np.concatenate([targets, forced_target]),
+                  np.concatenate([rebuilt, forced_target]), shares)
+    pruned = both.before_learn(ReplayBuffer(5, rows.shape[1], model.num_actions, 2), 0)
+    assert pruned["target/pruned"] == pytest.approx(shares[:n].mean())
+    assert {k: v for k, v in pruned.items() if k != "target/pruned"} == pytest.approx(logged, rel=1e-6)
     monitors.begin()
     assert monitors.before_learn(ReplayBuffer(5, rows.shape[1], model.num_actions, 2), 0) == {}
     both.begin()
@@ -558,8 +571,15 @@ def test_the_target_constants_default_to_the_engines_and_never_reach_the_search(
 
 def test_check_train_refuses_targets_it_cannot_build():
     assert check_train(ALPHAZERO_KEYS)["policy_target"] == "engine"
-    for bad, match in (({"policy_target": "visits"}, "engine or gumbel"),
-                       ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root"),
+    for dets in (0, 1):
+        pruned = {**ALPHAZERO_KEYS, "policy_target": "pruned", "root": "puct", "dets": dets}
+        assert check_train(pruned)["policy_target"] == "pruned"
+    for bad, match in (({"policy_target": "visits"}, "engine, gumbel or pruned"),
+                       ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root's improved policy; a PUCT"),
+                       ({"policy_target": "pruned"}, "PUCT root's visits"),  # the default root is gumbel
+                       ({"policy_target": "pruned", "root": "puct", "dets": 2}, "dets 0 or 1"),
+                       ({"policy_target": "pruned", "root": "puct", "target_c_scale": 0.01},
+                        "set policy_target: gumbel"),
                        ({"policy_target": "gumbel", "target_c_scale": -0.1}, "non-negative"),
                        ({"policy_target": "gumbel", "target_prior_temperature": 0.0}, "positive"),
                        ({"pending": 0}, "leaves per network round"), ({"fast_pending": 0}, "leaves per network round"),
@@ -697,3 +717,194 @@ def test_the_rebuilt_target_on_az_2p_2048s_start():
     engine_top, soft_top, engine_entropy, soft_entropy = np.array(two).T
     assert len(two) >= 10 and (engine_top >= 0.99).mean() > (soft_top >= 0.99).mean()
     assert soft_entropy.mean() > engine_entropy.mean()
+
+
+# ---------------------------------------------------------------- pruned visit targets
+
+
+def hand_root(weights: dict[int, float], visits: dict[int, int], q: dict[int, float], size: int = 9):
+    """A root over ``size`` codec indices whose legal actions are ``weights``' keys, with priors
+    proportional to the weights (the logits off them are high, and never read)."""
+    legal = np.zeros(size, dtype=bool)
+    legal[list(weights)] = True
+    logits = np.full(size, 50.0)
+    logits[list(weights)] = np.log(list(weights.values()))
+    prior = np.zeros(size)
+    prior[list(weights)] = np.array(list(weights.values())) / sum(weights.values())
+    n = np.zeros(size, dtype=np.uint32)
+    n[list(visits)] = list(visits.values())
+    values = np.full(size, np.nan)
+    values[list(q)] = list(q.values())
+    return logits, legal, n, values, prior
+
+
+def test_pruned_visits_keep_what_the_value_earns_under_the_networks_prior():
+    """A hand-made root of 600 visits at c_puct 0.75. Action 0, the most visited, keeps its
+    visits and sets the bar S, its PUCT score. Of the others: 1 (no prior to speak of, a worse
+    Q: visits only noise explains) loses all; 2 (a real prior, a slightly worse Q) is cut to
+    the fewest visits at which its score is no higher than S; 4 (Q above S) keeps all; 5 is
+    cut to one visit, so to none; 7 has the one visit it earns and keeps it; 8 is unvisited."""
+    c = 0.75
+    weights = {0: 0.88, 1: 1e-12, 2: 0.08, 4: 0.015, 5: 0.01, 7: 0.01, 8: 0.005}
+    visits = {0: 500, 1: 55, 2: 30, 4: 9, 5: 5, 7: 1}
+    q = {0: 0.60, 1: 0.40, 2: 0.58, 4: 0.75, 5: 0.50, 7: 0.50}
+    logits, legal, n, values, prior = hand_root(weights, visits, q)
+    total = sum(visits.values())
+    assert total == 600
+
+    def score(action: int, count: float) -> float:
+        return q[action] + c * prior[action] * np.sqrt(total + 1.0) / (1.0 + count)
+
+    bar = score(0, 500)
+    kept = pruned_visits(logits, legal, n, values, c_puct=c)
+    assert kept.dtype == np.float64 and np.all(kept[~legal] == 0) and kept[8] == 0
+    assert kept[0] == 500 and kept[1] == 0
+    assert q[4] >= bar and kept[4] == 9
+    assert kept[2] == 28 and score(2, 28) <= bar < score(2, 27)
+    assert score(5, 1) <= bar < score(5, 0) and kept[5] == 0  # cut from 5 to 1: dropped
+    assert score(7, 1) <= bar < score(7, 0) and kept[7] == 1  # not cut
+    assert kept.sum() == 500 + 28 + 9 + 1
+    target = (kept / kept.sum()).astype(np.float16)
+    assert float(target.astype(np.float64).sum()) == pytest.approx(1.0, abs=2e-3) and np.all(target[~legal] == 0)
+    assert np.array_equal(kept, pruned_visits(logits[None], legal, n, values, c_puct=c))  # [1, A] logits
+    # the cut scales with the exploration constant: none of it, and no visit but the value's is earned
+    greedy = pruned_visits(logits, legal, n, values, c_puct=0.0)
+    assert greedy[[0, 4]].tolist() == [500, 9] and greedy.sum() == 509
+
+
+def test_pruned_visits_at_the_edges():
+    weights = {1: 0.3, 3: 0.7, 6: 1e-9}
+    # one action visited: one-hot
+    logits, legal, n, values, _ = hand_root(weights, {6: 40}, {6: 0.2})
+    kept = pruned_visits(logits, legal, n, values, c_puct=0.75)
+    assert kept.tolist() == [0, 0, 0, 0, 0, 0, 40, 0, 0]
+    # no visit at all: zeros, like the engine's target of such a root
+    assert not pruned_visits(logits, legal, np.zeros(9, np.uint32), np.full(9, np.nan), c_puct=0.75).any()
+    assert not pruned_visits(logits, np.zeros(9, bool), n, values, c_puct=0.75).any()
+    # equal Q everywhere: the visits PUCT's own prior term gives are kept, whole
+    logits, legal, n, values, _ = hand_root(weights, {1: 30, 3: 70}, {1: 0.5, 3: 0.5})
+    assert pruned_visits(logits, legal, n, values, c_puct=0.75).tolist() == n.tolist()
+    # a tie in visits goes to the larger prior, which keeps its visits; the other is cut against it:
+    # 0.3 / (1 + n) <= 0.7 / 101 first at n = 43
+    logits, legal, n, values, _ = hand_root(weights, {1: 100, 3: 100}, {1: 0.5, 3: 0.5})
+    assert pruned_visits(logits, legal, n, values, c_puct=0.75).tolist() == [0, 43, 0, 100, 0, 0, 0, 0, 0]
+    # equal priors too: the first in the codec's order
+    logits, legal, n, values, _ = hand_root({1: 0.5, 3: 0.5}, {1: 100, 3: 100}, {1: 0.5, 3: 0.4})
+    kept = pruned_visits(logits, legal, n, values, c_puct=0.75)
+    assert kept[1] == 100 and 1 < kept[3] < 100
+    # a non-finite logit has no prior: its visits go unless its Q reaches the bar
+    logits, legal, n, values, _ = hand_root(weights, {1: 20, 3: 70, 6: 10}, {1: 0.5, 3: 0.5, 6: 0.45})
+    logits[6] = -np.inf
+    assert pruned_visits(logits, legal, n, values, c_puct=0.75)[6] == 0
+    # several root worlds each ran their own PUCT: refused
+    with pytest.raises(ValueError, match="one root world"):
+        pruned_visits(np.stack([logits, logits]), legal, n, values, c_puct=0.75)
+
+
+class Sharp(BatchEvaluator):
+    """The network with its policy logits scaled up: a saturated prior, like a long-trained PPO
+    network's, on which the root's Dirichlet noise decides most of the side visits."""
+
+    def __call__(self, observations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        logits, values = super().__call__(observations)
+        return logits * np.float32(4000.0), values
+
+
+class Seen:
+    """SelfPlay's monitor hook: keeps what each step hands it."""
+
+    def __init__(self) -> None:
+        self.steps: list[tuple] = []
+
+    def searched(self, obs, targets, rebuilt=None, pruned=None) -> None:
+        self.steps.append((obs.copy(), targets, rebuilt, pruned))
+
+
+def total_variation(p: np.ndarray, q: np.ndarray) -> np.ndarray:
+    return 0.5 * np.abs(p.astype(np.float64) - q).sum(-1)
+
+
+@pytest.mark.parametrize("dets", [0, 1])
+def test_a_pruned_target_drops_noise_visits_and_plays_the_same_moves(dets, monkeypatch):
+    """Real PUCT searches with Dirichlet noise from a saturated prior, through SelfPlay.step (true
+    game, and one tracker world; several leaves a round). The same seeds under policy_target:
+    engine and pruned play the same moves and file the same rows; the pruned targets are
+    distributions over the visited legal actions that keep the most visited one, sit closer to
+    the network's prior than the visit distributions, and are zero on some actions that the prior
+    all but rules out and the noise had the search visit."""
+    common = {"root": "puct", "sims": 64, "fast_sims": 8, "pending": 4, "full_search_prob": 0.5, "dets": dets,
+              "temperature_moves": 6}
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Sharp)
+    plays, seen, boards = {}, {}, {}
+    for name in ("engine", "pruned"):
+        torch.manual_seed(0)  # the same weights
+        play, replay, _ = selfplay(policy_target=name, **common)
+        assert play.full_pool.config.dirichlet_alpha > 0 and play.full_pool.config.c_puct == 0.75
+        play.monitor = seen[name] = Seen()
+        rng, stats = np.random.default_rng(1), {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+        boards[name] = []
+        for step in range(30):
+            play.step(0, step, rng, replay, stats)
+            boards[name].append(play.buffers["observations"].copy())
+        plays[name] = (play, replay)
+    for a, b in zip(boards["engine"], boards["pruned"], strict=True):
+        assert np.array_equal(a, b)  # the same moves: the next rows are the same
+    (play, replay), other = plays["pruned"], plays["engine"][1]
+    assert replay.size == other.size > 0 and play.games == plays["engine"][0].games
+    for key in ("obs", "has_policy", "value", "present"):
+        assert np.array_equal(getattr(replay, key)[: replay.size], getattr(other, key)[: other.size])
+    assert all(r is None and p is None for _, _, r, p in seen["engine"].steps)
+    obs, raw, pruned, share = (np.concatenate(part) for part in zip(*seen["pruned"].steps, strict=True))
+    for (_, engine_raw, _, _), (_, pruned_raw, _, _) in zip(seen["engine"].steps, seen["pruned"].steps, strict=True):
+        assert np.array_equal(engine_raw, pruned_raw)  # search/* read the same targets either way
+    assert len(obs) > 30
+    legal = obs[:, play.mask] > 0
+    logits, _ = play.evaluator(obs)
+    z = np.where(legal, logits.astype(np.float64), -np.inf)
+    prior = np.exp(z - z.max(1, keepdims=True))
+    prior /= prior.sum(1, keepdims=True)
+    raw, pruned = raw.astype(np.float64), pruned.astype(np.float64)
+    assert np.all(pruned[~legal] == 0) and np.allclose(pruned.sum(1), 1.0, atol=2e-3)
+    assert np.all(pruned[raw == 0] == 0)  # nothing is added
+    rows = np.arange(len(raw))
+    top = np.where(raw == raw.max(1, keepdims=True), prior, -1.0).argmax(1)  # most visited, then the larger prior
+    assert np.all(pruned[rows, top] >= raw[rows, top])  # keeps its visits
+    assert np.all((share >= 0) & (share < 1)) and share.mean() > 0.05
+    assert total_variation(pruned, prior).mean() < 0.5 * total_variation(raw, prior).mean()
+    noise_only = (raw > 0) & (prior < 1e-6)
+    assert noise_only.any() and (pruned[noise_only] == 0).mean() > 0.5
+    assert np.all((pruned[noise_only] == 0) | (raw[noise_only] > 0))
+
+
+def test_a_pruned_target_changes_the_targets_and_nothing_else(monkeypatch):
+    """policy_target: pruned leaves the searches and their moves as the engine target's run has them
+    (no updates here, which read the targets): every replay row, value target and game. Its targets
+    are distributions inside the visit distributions' supports; target/* read them and search/* keep
+    reading the searches' own."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Sharp)
+    common = {"root": "puct", "sims": 32, "pending": 4, "full_search_prob": 1.0, "min_replay": 10**9, "iterations": 1}
+    for name in ("engine", "pruned"):
+        run(variant(name, policy_target=name, **common))
+    states = {name: torch.load(load_experiment(f"az/{name}").path / "trainer_state.pt", weights_only=True)
+              for name in ("engine", "pruned")}
+    engine, pruned = states["engine"], states["pruned"]
+    has = engine["replay"]["has_policy"]
+    assert int(has.sum()) > 50 and (pruned["games"], pruned["decisions"]) == (engine["games"], engine["decisions"])
+    for key in ("obs", "has_policy", "value", "present"):
+        assert torch.equal(pruned["replay"][key], engine["replay"][key])
+    visits, kept = engine["replay"]["policy"][has].float(), pruned["replay"]["policy"][has].float()
+    assert torch.allclose(kept.sum(1), torch.ones(len(kept)), atol=2e-3) and bool((kept[visits == 0] == 0).all())
+    assert not torch.equal(kept, visits)
+    metrics = {name: load_experiment(f"az/{name}").metrics() for name in ("engine", "pruned")}
+    assert [m["search/target_entropy"] for m in metrics["pruned"]] == [
+        m["search/target_entropy"] for m in metrics["engine"]]
+    assert [m["search/kl_target_net"] for m in metrics["pruned"]] == [
+        m["search/kl_target_net"] for m in metrics["engine"]]
+    assert not any(k.startswith("target/") for m in metrics["engine"] for k in m)
+    for m in metrics["pruned"]:
+        assert 0.0 < m["target/pruned"] < 1.0 and m["target/entropy"] != m["search/target_entropy"]
+        assert 0.0 <= m["target/overrule"] <= 1.0 and m["target/kl_net"] >= 0.0

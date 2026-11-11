@@ -66,9 +66,14 @@ def test_alphazero_policy_targets_are_refused_at_resolution(tmp_path):
     az = {"algo": "alphazero"}
     soft = {**az, "policy_target": "gumbel", "target_c_scale": 0.15, "target_prior_temperature": 10}
     assert load_plan(write(tmp_path, train=soft)).variants[0].config["train"]["target_prior_temperature"] == 10.0
+    pruned = {**az, "policy_target": "pruned", "root": "puct"}
+    assert load_plan(write(tmp_path, train=pruned)).variants[0].config["train"]["policy_target"] == "pruned"
     for bad, match in (({"root": "mcts"}, "puct or gumbel"),
-                       ({"policy_target": "visits"}, "engine or gumbel"),
-                       ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root"),
+                       ({"policy_target": "visits"}, "engine, gumbel or pruned"),
+                       ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root's improved policy; a PUCT"),
+                       ({"policy_target": "pruned"}, "PUCT root's visits"),  # the default root is gumbel
+                       ({**pruned, "dets": 2}, "dets 0 or 1"),
+                       ({**pruned, "target_rescale": False}, "set policy_target: gumbel"),
                        ({"policy_target": "gumbel", "target_c_visit": -1}, "non-negative"),
                        ({"policy_target": "gumbel", "target_prior_temperature": 0}, "positive"),
                        ({"target_c_scale": 0.01}, "set policy_target: gumbel"),  # silently unused otherwise
