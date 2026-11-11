@@ -1,0 +1,157 @@
+smoke start 04:41:49
+mem 04:41:49 avail_kB=21801444 gpu_MiB=1
+== az-2p-kata/main
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/home/marco/dev/catanrl-v2/.venv/lib/python3.11/site-packages/torch/jit/_script.py:1491: FutureWarning: `torch.jit.script` is deprecated. Please switch to `torch.compile` or `torch.export`.
+  warnings.warn(
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 0.5 min, ETA unknown
+mem 04:42:50 avail_kB=14373480 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 1.0 min, ETA unknown
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 1.5 min, ETA unknown
+mem 04:43:50 avail_kB=14424772 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 2.0 min, ETA unknown
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 2.5 min, ETA unknown
+mem 04:44:50 avail_kB=14410864 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 3.0 min, ETA unknown
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 3.5 min, ETA unknown
+mem 04:45:50 avail_kB=14447532 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 4.0 min, ETA unknown
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 4.5 min, ETA unknown
+mem 04:46:50 avail_kB=14462420 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 5.0 min, ETA unknown
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 5.5 min, ETA unknown
+mem 04:47:50 avail_kB=14450104 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 6.0 min, ETA unknown
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 6.5 min, ETA unknown
+mem 04:48:50 avail_kB=14457848 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 7.0 min, ETA unknown
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 2/256 games, 0.3 games/min, elapsed 7.5 min, ETA 952.5 min
+mem 04:49:50 avail_kB=14489512 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 5/256 games, 0.6 games/min, elapsed 8.0 min, ETA 401.6 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 5/256 games, 0.6 games/min, elapsed 8.5 min, ETA 426.7 min
+mem 04:50:50 avail_kB=14450036 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 8/256 games, 0.9 games/min, elapsed 9.0 min, ETA 279.0 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 11/256 games, 1.2 games/min, elapsed 9.5 min, ETA 211.6 min
+mem 04:51:50 avail_kB=14484532 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 15/256 games, 1.5 games/min, elapsed 10.0 min, ETA 160.7 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 20/256 games, 1.9 games/min, elapsed 10.5 min, ETA 123.9 min
+mem 04:52:50 avail_kB=14459400 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 24/256 games, 2.2 games/min, elapsed 11.0 min, ETA 106.3 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 32/256 games, 2.8 games/min, elapsed 11.5 min, ETA 80.5 min
+mem 04:53:50 avail_kB=14476036 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 37/256 games, 3.1 games/min, elapsed 12.0 min, ETA 71.0 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 44/256 games, 3.5 games/min, elapsed 12.5 min, ETA 60.2 min
+mem 04:54:50 avail_kB=14500328 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 60/256 games, 4.6 games/min, elapsed 13.0 min, ETA 42.5 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 66/256 games, 4.9 games/min, elapsed 13.5 min, ETA 38.9 min
+mem 04:55:50 avail_kB=14495236 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 76/256 games, 5.4 games/min, elapsed 14.0 min, ETA 33.2 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 89/256 games, 6.1 games/min, elapsed 14.5 min, ETA 27.2 min
+mem 04:56:50 avail_kB=14488640 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 111/256 games, 7.4 games/min, elapsed 15.0 min, ETA 19.6 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 137/256 games, 8.8 games/min, elapsed 15.5 min, ETA 13.5 min
+mem 04:57:50 avail_kB=14502392 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 172/256 games, 10.7 games/min, elapsed 16.0 min, ETA 7.8 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 217/256 games, 13.2 games/min, elapsed 16.5 min, ETA 3.0 min
+mem 04:58:50 avail_kB=14518648 gpu_MiB=864
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 256/256 games, 15.1 games/min, elapsed 17.0 min, ETA 0.0 min
+eval f12712123f90eec7: MCTS:az-2p-kata/main@e0 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 256/256 games, 15.1 games/min, elapsed 17.0 min, ETA 0.0 min
+mem 04:59:50 avail_kB=14390480 gpu_MiB=1432
+mem 05:00:50 avail_kB=14351784 gpu_MiB=1434
+mem 05:01:50 avail_kB=14471504 gpu_MiB=1434
+az-2p-kata/main: iteration 1/8: 0 games (+0), 0 positions (+0), 0 games/h, 37375 leaves/s, 199 s, ETA 0.4 h
+mem 05:02:50 avail_kB=14462940 gpu_MiB=1574
+mem 05:03:50 avail_kB=14464608 gpu_MiB=1574
+mem 05:04:50 avail_kB=14421176 gpu_MiB=1574
+az-2p-kata/main: iteration 2/8: 60 games (+60), 1709 positions (+1709), 1071 games/h, 36604 leaves/s, 202 s, ETA 0.3 h
+mem 05:05:50 avail_kB=14454164 gpu_MiB=1574
+mem 05:06:50 avail_kB=14404440 gpu_MiB=1574
+mem 05:07:50 avail_kB=14349356 gpu_MiB=1574
+mem 05:08:50 avail_kB=14392268 gpu_MiB=1574
+az-2p-kata/main: iteration 3/8: 342 games (+282), 13191 positions (+11482), 5081 games/h, 35946 leaves/s, 203 s, ETA 0.3 h
+mem 05:09:50 avail_kB=14251612 gpu_MiB=1916
+mem 05:10:50 avail_kB=14186112 gpu_MiB=1916
+mem 05:11:50 avail_kB=14285076 gpu_MiB=1916
+az-2p-kata/main: iteration 4/8: 525 games (+183), 22575 positions (+9384), 3333 games/h, 36486 leaves/s, 201 s, ETA 0.2 h
+mem 05:12:50 avail_kB=14167904 gpu_MiB=2274
+mem 05:13:50 avail_kB=14193304 gpu_MiB=2276
+mem 05:14:50 avail_kB=14189684 gpu_MiB=2276
+az-2p-kata/main: iteration 5/8: 680 games (+155), 28601 positions (+6026), 2837 games/h, 36728 leaves/s, 200 s, ETA 0.2 h
+mem 05:15:50 avail_kB=14184548 gpu_MiB=2216
+mem 05:16:50 avail_kB=14135976 gpu_MiB=2276
+mem 05:17:50 avail_kB=14164084 gpu_MiB=2276
+mem 05:18:50 avail_kB=14134600 gpu_MiB=2276
+az-2p-kata/main: iteration 6/8: 901 games (+221), 37981 positions (+9380), 4052 games/h, 36432 leaves/s, 199 s, ETA 0.1 h
+mem 05:19:50 avail_kB=14142480 gpu_MiB=2216
+mem 05:20:50 avail_kB=14082364 gpu_MiB=2276
+mem 05:21:50 avail_kB=14099272 gpu_MiB=2276
+az-2p-kata/main: iteration 7/8: 1078 games (+177), 45966 positions (+7985), 3204 games/h, 36323 leaves/s, 202 s, ETA 0.1 h
+mem 05:22:50 avail_kB=14099492 gpu_MiB=2254
+mem 05:23:50 avail_kB=14080508 gpu_MiB=2276
+mem 05:24:50 avail_kB=14092340 gpu_MiB=2276
+az-2p-kata/main: iteration 8/8: 1249 games (+171), 53294 positions (+7328), 3125 games/h, 36664 leaves/s, 200 s, ETA 0.0 h
+mem 05:25:51 avail_kB=13550952 gpu_MiB=1886
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 0.5 min, ETA unknown
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 1.0 min, ETA unknown
+mem 05:26:51 avail_kB=8310652 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 1.5 min, ETA unknown
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 2.0 min, ETA unknown
+mem 05:27:51 avail_kB=8312480 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 2.5 min, ETA unknown
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 3.0 min, ETA unknown
+mem 05:28:51 avail_kB=8350436 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 3.5 min, ETA unknown
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 4.0 min, ETA unknown
+mem 05:29:51 avail_kB=8372600 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 4.5 min, ETA unknown
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 5.0 min, ETA unknown
+mem 05:30:51 avail_kB=8324436 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 5.5 min, ETA unknown
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 6.0 min, ETA unknown
+mem 05:31:51 avail_kB=8339340 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 6.5 min, ETA unknown
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 0/256 games, 0.0 games/min, elapsed 7.0 min, ETA unknown
+mem 05:32:51 avail_kB=8332016 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 1/256 games, 0.1 games/min, elapsed 7.5 min, ETA 1912.6 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 1/256 games, 0.1 games/min, elapsed 8.0 min, ETA 2040.1 min
+mem 05:33:51 avail_kB=8337936 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 2/256 games, 0.2 games/min, elapsed 8.5 min, ETA 1079.5 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 4/256 games, 0.4 games/min, elapsed 9.0 min, ETA 567.0 min
+mem 05:34:51 avail_kB=8340720 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 5/256 games, 0.5 games/min, elapsed 9.5 min, ETA 476.9 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 8/256 games, 0.8 games/min, elapsed 10.0 min, ETA 310.0 min
+mem 05:35:51 avail_kB=8348236 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 16/256 games, 1.5 games/min, elapsed 10.5 min, ETA 157.5 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 21/256 games, 1.9 games/min, elapsed 11.0 min, ETA 123.1 min
+mem 05:36:51 avail_kB=8362184 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 23/256 games, 2.0 games/min, elapsed 11.5 min, ETA 116.5 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 32/256 games, 2.7 games/min, elapsed 12.0 min, ETA 84.0 min
+mem 05:37:51 avail_kB=8347072 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 38/256 games, 3.0 games/min, elapsed 12.5 min, ETA 71.7 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 48/256 games, 3.7 games/min, elapsed 13.0 min, ETA 56.3 min
+mem 05:38:51 avail_kB=8344544 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 59/256 games, 4.4 games/min, elapsed 13.5 min, ETA 45.1 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 68/256 games, 4.9 games/min, elapsed 14.0 min, ETA 38.7 min
+mem 05:39:51 avail_kB=8349196 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 87/256 games, 6.0 games/min, elapsed 14.5 min, ETA 28.2 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 108/256 games, 7.2 games/min, elapsed 15.0 min, ETA 20.6 min
+mem 05:40:51 avail_kB=8345892 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 123/256 games, 7.9 games/min, elapsed 15.5 min, ETA 16.8 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 157/256 games, 9.8 games/min, elapsed 16.0 min, ETA 10.1 min
+mem 05:41:51 avail_kB=8365376 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 185/256 games, 11.2 games/min, elapsed 16.5 min, ETA 6.3 min
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 235/256 games, 13.8 games/min, elapsed 17.0 min, ETA 1.5 min
+mem 05:42:51 avail_kB=8361820 gpu_MiB=2112
+eval f5a1f41a80b5a7c3: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on smoke-select-128: 256/256 games, 14.9 games/min, elapsed 17.2 min, ETA 0.0 min
+eval b70b8d981de2bc9f: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on heldout-2p-fr: 0/32 games, 0.0 games/min, elapsed 0.5 min, ETA unknown
+mem 05:43:51 avail_kB=9863288 gpu_MiB=2096
+eval b70b8d981de2bc9f: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on heldout-2p-fr: 0/32 games, 0.0 games/min, elapsed 1.0 min, ETA unknown
+eval b70b8d981de2bc9f: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on heldout-2p-fr: 6/32 games, 4.0 games/min, elapsed 1.5 min, ETA 6.5 min
+mem 05:44:51 avail_kB=10118356 gpu_MiB=2096
+eval b70b8d981de2bc9f: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on heldout-2p-fr: 20/32 games, 10.0 games/min, elapsed 2.0 min, ETA 1.2 min
+eval b70b8d981de2bc9f: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on heldout-2p-fr: 26/32 games, 10.4 games/min, elapsed 2.5 min, ETA 0.6 min
+eval b70b8d981de2bc9f: MCTS:az-2p-kata/main@e8 vs BELIEF:ppo-2p-fr3/full@e4350 on heldout-2p-fr: 32/32 games, 12.1 games/min, elapsed 2.6 min, ETA 0.0 min
+az-2p-kata/main: MCTS:ckpt=az-2p-kata/main@e8#4991873ba321:sims=1024:dets=1:oracle=false:root=puct:c_puct=0.75:gumbel_m=16:temperature=0.0:noise=false:allow_drift=false:tracker=pool:reuse=true:transpositions=true:kernels=fused on heldout-2p-fr: 0.562 (n=32) b70b8d981de2bc9f
+smoke done rc=0 05:45:51
