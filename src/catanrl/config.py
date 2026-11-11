@@ -61,7 +61,7 @@ from catanrl.canon import digest
 from catanrl.games import CONFIG_DIR
 
 #: Version of the config schema; bump it with a MIGRATIONS entry per new key.
-SCHEMA = 7
+SCHEMA = 8
 #: (schema that added it, dotted key, the value configs written before it meant, and its
 #: scope: for a ``train.*`` key the algo it belongs to, for a ``model.args.*`` key (a class
 #: default, which resolution fills in) the model class, or None for every algo / class).
@@ -81,6 +81,10 @@ MIGRATIONS: list[tuple[int, str, Any, str | None]] = [
     (6, "train.freeze", [], "ppo"),
     # runtime is not hashed: this keeps a stored config's runtime whole (null = no Canopy build pinned).
     (7, "runtime.canopy_dir", None, None),
+    (8, "train.pending", 1, "alphazero"),
+    (8, "train.fast_pending", 1, "alphazero"),
+    (8, "train.record_fast", True, "alphazero"),
+    (8, "train.kernels", "torch", "alphazero"),
 ]
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
 KINDS = ("train", "eval")
@@ -411,6 +415,10 @@ def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) 
     if train["policy_target"] == "engine" and any(train[k] != base[k] for k in constants):
         raise ConfigError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
                           "has the search's own sigma (set policy_target: gumbel)")
+    if train["pending"] < 1 or train["fast_pending"] < 1:
+        raise ConfigError("train.pending and train.fast_pending count a search's leaves per network round (>= 1)")
+    if train["kernels"] not in ("torch", "fused"):
+        raise ConfigError(f"train.kernels must be torch or fused, not {train['kernels']!r}")
 
 
 def check_distill(train: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> None:
