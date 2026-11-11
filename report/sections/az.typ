@@ -350,3 +350,62 @@ The raw screen is read alongside the harness, never alone.
 catanrl run configs/experiments/az-gate-2p.yaml   # positions (then the baseline row), engine, canopy, canopy-anchor
 uv run python tools/search_probe.py --pair <a fit's harness record> <the baseline record>
 ```)
+
+== KataGo's way of spending compute
+
+=== Self-play from fr3 at KataGo's visit counts: `az-2p-kata` #chip("parked") <exp:az-kata>
+#meta(
+  dates: "2026-11-11 00:18 – 01:24",
+  dates-label: "smoke",
+  owner: "marco",
+  config: "configs/experiments/az-2p-kata.yaml",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco's idea (2026-11-10): the earlier runs trained on 605 to 5,120 games where KataGo used 4.2M, so spend the compute KataGo's way, from fr3. Not launched. The GPU smoke plays about 3,300 games an hour (`az-2p-2048`: 190), but five learning steps took the net inside the search from 52.7% to 27.0% against fr3's raw policy (256 games each). fr3's policy is saturated: the visit counts of a root with Dirichlet noise sit 10 nats of KL from it, and fitting them breaks the net. Waiting for Marco's call on the target.]
+
+*Question.* Does AlphaZero from fr3 improve it once the data scale is closer to KataGo's?
+
+#lead[Setup.]
+- *Start.* fr3 (`2p-graph-s-3`, `ppo-2p-fr3/full@e4350`), actor and critic, on `base-2p-fr` and its own 4,096 training boards.
+- *Self-play.* 512 games in flight, PUCT roots (`c_puct` 0.75) on the true game (`dets: 0`). A quarter of the moves get 600 visits with Dirichlet noise at the root (α 0.3, weight 0.25) and are the only ones recorded. The rest get 100 visits without noise and are only played. Moves are sampled at temperature 1 falling to 0 over the first 30.
+- *Target.* The root's visit distribution, and the game's outcome for the value head.
+- *Learning.* An iteration is 64 steps (32,768 moves, about 8,200 recorded) and 64 updates of 512 rows: about 4 uses per position, KataGo's ratio. AdamW, learning rate 5e-5. Replay of 1M positions; learning starts at 50,000.
+- *Trainer changes* (merged): a search sends up to 24 leaves per network round (4 in a fast search), so a step costs about 50 rounds, not 601; the forwards run on the fused kernels, rebuilt after every learning step and checked against the torch module.
+- *Evals* (Marco's rule). Each checkpoint inside the deployed search (1,024 sims, `dets=1`, tree reuse, transpositions) against fr3's fair raw bot (`BELIEF:worlds=16`), 2,000 games a row (±2.2 pp). The start in the same search is the baseline.
+- *Smoke.* The same config for 8 iterations with learning from 3,000 positions (iteration 3 on, five learning steps), a 256-game row before and after, W&B off, in a scratch directory. Metrics and both records are in `report/data/az-kata-smoke/`.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, right),
+    header: ([Network inside the 1,024-sim search], [Score vs fr3's fair raw bot], [Wins of 256]),
+    [fr3, the start (e0)], [52.7 #ci[46.6][58.8]], [135],
+    [After 8 iterations (e8)], [27.0 #ci[21.9][32.7]], [69],
+  ),
+  caption: [The smoke's select rows: 128 boards in both seat orders, the same games in both rows.],
+)
+- *Speed.* 199 s an iteration, 3 s of it learning and the kernel rebuild; 36,000–37,500 leaves a second (`az-2p-2048`: 23,600); about 180 games and 8,100 recorded positions an iteration once games finish, 3,300 games an hour. 600 iterations would take 33 h; 24 h is about 430 iterations, 78,000 games and 3.5M positions.
+- *Strength.* The start scores 52.7% and e8 27.0%: 26 points lost in 320 updates.
+- *What moved.* Against fr3's own policy, the visit targets of the first iteration have 0.59 nats of entropy where fr3 has 0.05, a KL of 10.0 nats, and a different top move at 0.9% of positions. After five learning steps the net's entropy is 0.5–0.6 nats, it agrees with fr3's top move at 65.8% of 4,096 probe positions (KL from fr3 1.47), and the search overrules it at 9.1% of positions. The policy loss fell from 12.2 to 2.8.
+- *Why.* fr3's policy is saturated. On the probe positions with a choice, the top move has probability above 0.999997 at three quarters of them, the second move's median log-probability is −31 and the median other legal move's is −86. The noise makes the search visit such moves, the visits enter the target, and fitting them means moving logits by tens of nats through the shared trunk.
+- *Eval cost.* A 256-game row took 17.0 min at 256 games in flight, so about 2 h for 2,000 games (an estimate from the row's finish times). The e0 row, three selects and two finals would add about 12 h to a run.
+- *Memory.* The host's free memory fell from 22.2 to 14.6 GB in self-play and to 9.7 GB during the second row; the GPU held at most 2.9 of 8 GB. A full 1M replay is another 5.8 GB, copied once more at each checkpoint, so the run needs a 500,000-position replay on this box.
+
+#lead[Reading.]
+- The data scale is fixed: 17× the games per hour of `az-2p-2048`. The target is the problem. KataGo's nets learn from visit counts from their first game and never saturate; a PPO policy at 0.05 nats is far from any visit distribution a noisy root produces.
+- The smoke learns from a small replay (3.3 uses per position by e8 against about 4 planned), but the targets in fresh self-play are as far from the net as the replayed ones (KL 1.8 and 2.1 at e8), so this is not overfitting, and the full run would start the same way.
+- Without the noise the search would explore only where fr3 is unsure, since PUCT's exploration term scales with the prior (not measured).
+
+#lead[Options] (Claude's suggestions, not queued):
+- Keep the noise for play but prune it from the recorded target: cut a move's visits back to what its value supports under fr3's own prior, as KataGo prunes its forced playouts. Rerun this smoke (1.1 h) as the gate: go on only if e8 holds near e0. The targets would then differ from fr3 at about 1% of positions, so learning would be slow.
+- Train from scratch, as KataGo did. At 3,300 games an hour a day is 78,000 games, against about 1.6M in fr3's PPO run.
+- Park AlphaZero from fr3 and go on with the queue.
+
+#repro(```sh
+# the smoke (W&B off, a scratch runs dir)
+CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
+  --set train.iterations=8 --set train.min_replay=3000 --set train.checkpoint_interval=8 --set eval.select.every=8 \
+  --set 'eval.select.suite={name: smoke-select-128, purpose: select, seed: 123, boards: 128, scenarios: [{game: base-2p-fr}], turn_limit: 500}'
+```)

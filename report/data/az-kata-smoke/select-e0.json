@@ -1,0 +1,250 @@
+{
+ "allow_drift": false,
+ "created": 1794386202.4683144,
+ "critics": [
+  null,
+  null
+ ],
+ "eval_id": "f12712123f90eec7",
+ "fair": [
+  true,
+  true
+ ],
+ "fill": null,
+ "games_sha256": "641bf19200659021e19171e2062c5c6fd7735f6158561bc7df4f7e35191cf121",
+ "key": {
+  "code": {
+   "catanrl": "ce66055648644e08",
+   "engine": "a9b40d9ca81fefcf"
+  },
+  "determinism": "strict",
+  "fill": null,
+  "harness": "native",
+  "lineup": [
+   {
+    "checkpoint": {
+     "allow_drift": false,
+     "dims": {
+      "max_edges": 72,
+      "max_nodes": 54,
+      "max_players": 2,
+      "max_tiles": 19
+     },
+     "levels": {
+      "critic_level": "full",
+      "level": "full"
+     },
+     "model": {
+      "args": {
+       "aux": false,
+       "global_hidden": 64,
+       "head_hidden": 128,
+       "hidden": 96,
+       "layers": 3,
+       "shared": true
+      },
+      "class": "graph",
+      "preset": "graph-s"
+     },
+     "weights_sha256": "43eca7ffdd413671654cb7fa6419656f39acc5e5cfed4c7d1a3dd9bd1dbb3c5d"
+    },
+    "harness": "native",
+    "key": "MCTS",
+    "params": {
+     "allow_drift": false,
+     "c_puct": 0.75,
+     "dets": 1,
+     "gumbel_m": 16,
+     "kernels": "fused",
+     "noise": false,
+     "oracle": false,
+     "reuse": true,
+     "root": "puct",
+     "sims": 1024,
+     "temperature": 0.0,
+     "tracker": "pool",
+     "transpositions": true
+    },
+    "search": {
+     "c_puct": 0.75,
+     "determinizations": 1,
+     "dirichlet_alpha": 0.0,
+     "dirichlet_fraction": 0.25,
+     "fpu_reduction": 0.0,
+     "fpu_value": -1.0,
+     "gumbel_c_scale": 0.1,
+     "gumbel_c_visit": 50.0,
+     "gumbel_considered": 16,
+     "gumbel_rescale_values": true,
+     "gumbel_scale": 1.0,
+     "max_pending": 64,
+     "max_players": 2,
+     "release_games": true,
+     "root": "PUCT",
+     "simulations": 1024,
+     "skip_forced": true,
+     "transpositions": true
+    }
+   },
+   {
+    "checkpoint": {
+     "allow_drift": false,
+     "dims": {
+      "max_edges": 72,
+      "max_nodes": 54,
+      "max_players": 2,
+      "max_tiles": 19
+     },
+     "levels": {
+      "critic_level": "full",
+      "level": "full"
+     },
+     "model": {
+      "args": {
+       "aux": false,
+       "global_hidden": 64,
+       "head_hidden": 128,
+       "hidden": 96,
+       "layers": 3,
+       "shared": true
+      },
+      "class": "graph",
+      "preset": "graph-s"
+     },
+     "weights_sha256": "43eca7ffdd413671654cb7fa6419656f39acc5e5cfed4c7d1a3dd9bd1dbb3c5d"
+    },
+    "harness": "native",
+    "key": "BELIEF",
+    "params": {
+     "aggregate": "mean_prob",
+     "allow_drift": false,
+     "tracker": "pool",
+     "worlds": 16
+    }
+   }
+  ],
+  "schema": 1,
+  "suite": {
+   "boards": 128,
+   "determinism": "strict",
+   "purpose": "select",
+   "scenarios": [
+    {
+     "game": {
+      "development_deck": {
+       "knight": 14,
+       "monopoly": 2,
+       "road_building": 2,
+       "victory_point": 5,
+       "year_of_plenty": 2
+      },
+      "dice_mode": "balanced",
+      "discard_limit": 9,
+      "friendly_robber": true,
+      "map": {
+       "type": "BASE"
+      },
+      "num_players": 2,
+      "pieces": {
+       "cities": 4,
+       "roads": 15,
+       "settlements": 5
+      },
+      "resource_bank": {
+       "brick": 19,
+       "ore": 19,
+       "sheep": 19,
+       "wheat": 19,
+       "wood": 19
+      },
+      "victory_points_to_win": 15
+     },
+     "turn_limit": 500
+    }
+   ],
+   "schedule_hash": "3ad42088b66e4491",
+   "seed": 123,
+   "turn_limit": 500
+  }
+ },
+ "labels": [
+  "MCTS:az-2p-kata/main@e0",
+  "BELIEF:ppo-2p-fr3/full@e4350"
+ ],
+ "mixed": false,
+ "predictors": [
+  null,
+  null
+ ],
+ "refs": [
+  "az-2p-kata/main@e0#43eca7ffdd41",
+  "ppo-2p-fr3/full@e4350#43eca7ffdd41"
+ ],
+ "segments": [
+  {
+   "dirty": true,
+   "execution": {
+    "device_class": "NVIDIA GeForce RTX 2070 SUPER",
+    "infer_rows": 512,
+    "numpy": "1.26.4",
+    "torch": "2.14.1+cu130"
+   },
+   "git": "b3abf8d8114c5656fce4c0a4c8d76df2cc128c22",
+   "provenance": "provenance/f12712123f90eec7.start0.json",
+   "segment": 0,
+   "time": 1794385182.0052967
+  }
+ ],
+ "specs": [
+  "MCTS:ckpt=az-2p-kata/main@e0#43eca7ffdd41:sims=1024:dets=1:oracle=false:root=puct:c_puct=0.75:gumbel_m=16:temperature=0.0:noise=false:allow_drift=false:tracker=pool:reuse=true:transpositions=true:kernels=fused",
+  "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16:aggregate=mean_prob:allow_drift=false:tracker=pool"
+ ],
+ "suite": "smoke-select-128",
+ "summary": {
+  "forfeits": 0,
+  "games": 256,
+  "score_rate": 0.52734375,
+  "slots": [
+   {
+    "decided": 256,
+    "expected": 0.5,
+    "games": 256,
+    "label": "MCTS:az-2p-kata/main@e0",
+    "per_seat": {
+     "0": 0.6171875,
+     "1": 0.4375
+    },
+    "score_rate": 0.52734375,
+    "wilson": [
+     0.4662346942501266,
+     0.5876443136015835
+    ],
+    "win_share_p": 0.4165571874932156,
+    "wins": 135
+   },
+   {
+    "decided": 256,
+    "expected": 0.5,
+    "games": 256,
+    "label": "BELIEF:ppo-2p-fr3/full@e4350",
+    "per_seat": {
+     "0": 0.5625,
+     "1": 0.3828125
+    },
+    "score_rate": 0.47265625,
+    "wilson": [
+     0.4123556863984164,
+     0.5337653057498734
+    ],
+    "win_share_p": 0.4165571874932156,
+    "wins": 121
+   }
+  ],
+  "truncated": 0,
+  "wilson": [
+   0.4662346942501266,
+   0.5876443136015835
+  ]
+ },
+ "valid": true
+}

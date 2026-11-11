@@ -1,0 +1,12 @@
+smoke start 00:18:39
+== az-2p-kata/main
+az-2p-kata/main: iteration 1/8: 0 games (+0), 0 positions (+0), 0 games/h, 37462 leaves/s, 198 s, ETA 0.4 h
+az-2p-kata/main: iteration 2/8: 60 games (+60), 1709 positions (+1709), 1078 games/h, 36834 leaves/s, 201 s, ETA 0.3 h
+az-2p-kata/main: iteration 3/8: 342 games (+282), 13191 positions (+11482), 5116 games/h, 36194 leaves/s, 202 s, ETA 0.3 h
+az-2p-kata/main: iteration 4/8: 522 games (+180), 22535 positions (+9344), 3290 games/h, 36622 leaves/s, 200 s, ETA 0.2 h
+az-2p-kata/main: iteration 5/8: 681 games (+159), 28546 positions (+6011), 2922 games/h, 36912 leaves/s, 199 s, ETA 0.2 h
+az-2p-kata/main: iteration 6/8: 852 games (+171), 35886 positions (+7340), 3136 games/h, 36784 leaves/s, 199 s, ETA 0.1 h
+az-2p-kata/main: iteration 7/8: 1029 games (+177), 44728 positions (+8842), 3256 games/h, 37079 leaves/s, 199 s, ETA 0.1 h
+az-2p-kata/main: iteration 8/8: 1146 games (+117), 50377 positions (+5649), 2152 games/h, 37181 leaves/s, 199 s, ETA 0.0 h
+az-2p-kata/main: MCTS:ckpt=az-2p-kata/main@e8#2f08726fcdfe:sims=1024:dets=1:oracle=false:root=puct:c_puct=0.75:gumbel_m=16:temperature=0.0:noise=false:allow_drift=false:tracker=pool:reuse=true:transpositions=true:kernels=fused on heldout-2p-fr: 0.125 (n=32) b062f3df7df0ae09
+smoke done rc=0 01:23:51
