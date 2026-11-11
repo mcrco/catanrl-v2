@@ -361,7 +361,7 @@ uv run python tools/search_probe.py --pair <a fit's harness record> <the baselin
   wandb: (("az-2p-kata-main-2e3b1866", "az-2p-kata/main"),),
   records: (),
 )
-#tldr[Marco's idea (2026-11-10): the earlier runs trained on 605 to 5,120 games where KataGo used 4.2M, so spend the compute KataGo's way, from fr3. Self-play now plays about 3,300 games an hour (`az-2p-2048`: 190). In a first smoke, five learning steps on the root's visit counts took the net inside the search from 52.7% to 27.0% against fr3's raw policy: fr3's policy is saturated, and the visits forced by Dirichlet noise sit 10 nats of KL from it. With those visits pruned from the target (Marco's choice) the same smoke holds, 52.7% to 55.1% on the same 256 games, at the same learning rate. The long run is training: 300 iterations, about 54,000 games, results about midday 2026-11-12.]
+#tldr[Marco's idea (2026-11-10): the earlier runs trained on 605 to 5,120 games where KataGo used 4.2M, so spend the compute KataGo's way, from fr3. Self-play now plays about 3,300 games an hour (`az-2p-2048`: 190). In a first smoke, five learning steps on the root's visit counts took the net inside the search from 52.7% to 27.0% against fr3's raw policy: fr3's policy is saturated, and the visits forced by Dirichlet noise sit 10 nats of KL from it. With those visits pruned from the target (Marco's choice) the same smoke holds, 52.7% to 55.1% on the same 256 games, at the same learning rate. The long run is training: 300 iterations, about 54,000 games, results about 20:00 on 2026-11-12.]
 
 *Question.* Does AlphaZero from fr3 improve it once the data scale is closer to KataGo's?
 
@@ -401,7 +401,12 @@ uv run python tools/search_probe.py --pair <a fit's harness record> <the baselin
 - The first smoke learned from a small replay (3.3 uses per position by e8 against about 4 planned), but the targets in fresh self-play were as far from the net as the replayed ones (KL 1.8 and 2.1 at e8), so it was not overfitting.
 - The pruned targets differ from fr3 at about 1% of positions, so the policy will learn slowly; whether 54,000 games move the net inside the search is what the long run measures (±2.2 pp a row).
 
-#lead[Status] (2026-11-11 06:05). Launched at 05:59 from commit `c021778`; the e0 select is running. Marco chose the pruned target over two other options Claude put forward (training from scratch, parking). Set by Claude from the smokes' costs and open to change: `dets: 0` in self-play, 300 iterations, a select every 100.
+#lead[Status] (2026-11-11 13:10). Launched at 05:59 from commit `c021778`; at iteration 73 of 300 (13,273 games, 586,000 positions).
+- *Baseline.* The start inside the search (e0) scores 51.75% #ci[49.6][53.9] over the 2,000 select games (`aa1df609`; 131 min).
+- *Net so far* (learning since iteration 8). It agrees with fr3's top move at 94.9% of the probe positions (KL from fr3 0.14), and its entropy rose from 0.05 to 0.07 nats. The pruned targets' KL from the net fell from 0.42 to about 0.2, and the policy loss from 0.47 to 0.31. The value loss is flat (0.39), on fresh games too (0.38–0.45).
+- *Speed.* Iterations took 200 s up to iteration 37 and about 283 s from iteration 44 on (26,000 leaves a second, down from 36,000), with the same leaves, rounds and depth per step. Cause unknown: nothing else uses the GPU or a CPU core, and the host is not swapping.
+- *Schedule.* At this pace the 28 h guard stops the run near iteration 283 (09:59 on 12 November); a relaunch then finishes the iterations, e300's select and the finals, about 20:00. The e100 select ends about 17:25 today.
+- Marco chose the pruned target over two other options Claude put forward (training from scratch, parking). Set by Claude from the smokes' costs and open to change: `dets: 0` in self-play, 300 iterations, a select every 100.
 
 #repro(```sh
 catanrl run az-2p-kata
