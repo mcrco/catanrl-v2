@@ -258,7 +258,9 @@ def test_smoke_maps_epoch_refs_to_latest():
 #: 5's hashes: graph-tiny-s42.ppo d1bd50a558dcb0d1, graph-tiny-s42.g1 700cfba93f2a4e09,
 #: mlp-s43.ppo 3666bf72fc1f3b1f, mlp-s43.g1 94da3f005acf8a95, s16-oracle 03c620ea32b0d5f2,
 #: s64-d4 32c708b2b94de072); schema 7 added runtime.canopy_dir, which moves no hash (runtime is
-#: not hashed; stored configs get null, the default).
+#: not hashed; stored configs get null, the default); schema 8 added AlphaZero's pending,
+#: fast_pending, record_fast and kernels, which move no fixture here (the stored AlphaZero
+#: hashes are pinned below).
 #: Stored schema-1 to schema-5 runs migrate to the hashes below.
 GOLDEN = {
     "fx-lineage": {
@@ -338,7 +340,8 @@ def test_schema_4_alphazero_configs_migrate_to_schema_5_hashes():
     new = load_plan("az-2p-2048").variant("main")
     stored = json.loads(json.dumps(new.config))
     assert stored["train"]["policy_target"] == "engine"
-    for key in ("policy_target", "target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature"):
+    for key in ("policy_target", "target_c_visit", "target_c_scale", "target_rescale", "target_prior_temperature",
+                "pending", "fast_pending", "record_fast", "kernels"):  # the last four: schema 8's
         del stored["train"][key]
     assert config_hash(stored) == "7e569a674327d715"
     assert config_hash(migrate(stored, from_schema=4)) == new.config_hash
@@ -363,6 +366,35 @@ def test_schema_5_ppo_configs_migrate_to_schema_6_hashes():
     az = load_plan("az-2p-2048-soft").variant("main").config
     assert "freeze" not in az["train"]
     assert config_hash(migrate(json.loads(json.dumps(az)), from_schema=5)) == config_hash(az)
+
+
+def test_schema_7_alphazero_configs_migrate_to_schema_8_hashes():
+    """An AlphaZero run stored under schema 7 (no pending, fast_pending, record_fast or kernels:
+    every AlphaZero run before 2026-11-10) hashed as schema 7 did and migrates to the current
+    resolution's hash, so it still resumes; a PPO config keeps its hash."""
+    schema_7 = {("az-2p-2048", "main"): "445ab0d7d2ba84f9", ("az-2p-2048-soft", "main"): "8105fbb18c996dca",
+                ("az-from-ppo", "main.az"): "bb778461448d36ab"}
+    for (name, variant), old_hash in schema_7.items():
+        new = load_plan(name).variant(variant)
+        stored = json.loads(json.dumps(new.config))
+        assert [stored["train"][k] for k in ("pending", "fast_pending", "record_fast", "kernels")] == [1, 1, True, "torch"]
+        for key in ("pending", "fast_pending", "record_fast", "kernels"):
+            del stored["train"][key]
+        assert config_hash(stored) == old_hash
+        assert config_hash(migrate(stored, from_schema=7)) == new.config_hash
+    ppo = load_plan("aux-hidden-4p").variant("plain").config
+    assert "pending" not in ppo["train"]
+    assert config_hash(migrate(json.loads(json.dumps(ppo)), from_schema=7)) == config_hash(ppo)
+
+
+def test_alphazero_leaves_per_round_and_kernels_are_checked(tmp_path):
+    az = {"algo": "alphazero", "root": "puct"}
+    cfg = load_plan(write(tmp_path, train={**az, "pending": 24, "fast_pending": 4, "kernels": "fused"})).variants[0].config
+    assert (cfg["train"]["pending"], cfg["train"]["fast_pending"], cfg["train"]["kernels"]) == (24, 4, "fused")
+    for bad, match in (({"pending": 0}, "leaves per network round"), ({"fast_pending": 0}, "leaves per network round"),
+                       ({"kernels": "cuda"}, "torch or fused")):
+        with pytest.raises(ConfigError, match=match):
+            load_plan(write(tmp_path, train={**az, **bad}))
 
 
 def test_freeze_and_split_shared_are_checked(tmp_path):

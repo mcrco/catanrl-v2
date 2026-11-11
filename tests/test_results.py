@@ -73,6 +73,36 @@ def test_a_partial_record_plays_only_missing_games(monkeypatch):
     assert [s["segment"] for s in record.data["segments"]] == [0, 1] and not record.data["mixed"]
 
 
+def test_playing_reports_progress_and_the_record_is_the_same(monkeypatch, capsys):
+    """The lines are stdout only: the pinned id and the rows are those of the tests above. A
+    resumed record counts the games it already has; the rate is the new games'."""
+    use(monkeypatch, FakeHarness(fail_after=3))
+    with pytest.raises(KeyboardInterrupt):
+        evaluate(["R", "F"], SUITE)
+    stopped = capsys.readouterr().out.splitlines()
+    assert len(stopped) == 1 and stopped[0].startswith("eval 499785eb59c85e27: R vs F on fake: 3/8 games, ")
+    use(monkeypatch, FakeHarness())
+    record = evaluate(["R", "F"], SUITE)
+    done = capsys.readouterr().out.splitlines()
+    assert len(done) == 1 and done[0].startswith("eval 499785eb59c85e27: R vs F on fake: 8/8 games, ")
+    assert done[0].endswith(" min, ETA 0.0 min") and " games/min, elapsed " in done[0]
+    assert record.eval_id == "499785eb59c85e27" and record.summary["games"] == 8
+    evaluate(["R", "F"], SUITE)  # cached: nothing is played, nothing printed
+    assert capsys.readouterr().out == ""
+
+
+def test_progress_ticks_while_nothing_finishes(capsys):
+    import time
+
+    with results.Progress("row", 4, done=1, every=0.01) as progress:
+        time.sleep(0.1)
+        waiting = capsys.readouterr().out.splitlines()
+        progress.add(2)
+    assert waiting and all(line.startswith("row: 1/4 games, 0.0 games/min, elapsed ") for line in waiting)
+    assert all(line.endswith(", ETA unknown") for line in waiting)
+    assert capsys.readouterr().out.splitlines()[-1].startswith("row: 3/4 games, ")
+
+
 def test_mixed_execution_needs_allow_mixed_or_a_restart(monkeypatch):
     machine = {"device_class": "A"}
     monkeypatch.setattr(results, "_execution", lambda device, infer_rows: dict(machine))

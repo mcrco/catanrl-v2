@@ -1,0 +1,96 @@
+# AlphaZero from fr3 with KataGo's self-play recipe (Marco, 2026-11-10: "start from fr3" and "KataGo
+# visit-count targets").
+#
+# Self-play: PUCT roots. A quarter of the moves get a full search of 600 visits with Dirichlet noise
+# at the root; they are the only moves recorded, with the root's visit distribution as the policy
+# target (policy_target: engine; checked on CPU with pending 24: the target is visits / 600 to
+# float32 rounding, no in-flight visit left in it). The rest get a fast search of 100 visits without
+# noise and are only played (record_fast: false). The search is on the true game (dets: 0): fr3 is a
+# full-level network, trained on rows that show every hand, and the oracle search's nodes are such
+# rows. The evals search fairly (dets=1).
+# Doses: 512 games x 64 steps = 32,768 moves per iteration, ~8,192 recorded; 64 updates x 512 rows =
+# 32,768 samples, about 4 uses per recorded position.
+# Speed: a search sends up to 24 (fast: 4) leaves per network round, so a step is ~27 rounds, not
+# 601 (counted on CPU, opening positions, a graph-tiny network: selfplay/rounds logs the real
+# number); the forwards run on the fused kernels, rebuilt after every learning step.
+#
+# Evals, all in the deployed search (1,024 sims, dets 1, pending 64, tree reuse, transpositions, fused
+# kernels) against the start's fair raw policy, BELIEF(fr3, 16 worlds); 2,000 games a row, +-2.2 pp
+# at 50%:
+#   select, at every checkpoint: the checkpoint in that search on 1,000 select boards x 2 seats
+#     (select-2p-fr's seed and purpose: its 500 boards and 500 more). e0 holds the start's weights:
+#     the baseline row, and best first.
+#   finals, on heldout-2p-fr's first 1,000 boards x 2 seats: best, the last checkpoint and the start,
+#     each in that search.
+#
+# Not measured yet (the GPU smoke): the time of an iteration and of a select; checkpoint_interval
+# and select.every are placeholders until then. The run stops at the time limit (checked between
+# iterations; the finals then need a relaunch or `catanrl finish`).
+# Memory: a replay position is 5,773 bytes (float16 full-level 2p rows), 5.8 GB at capacity in RAM;
+# the trainer state holds the replay, so up to 5.8 GB on disk, rewritten at every checkpoint with a
+# second copy in RAM while it is written.
+# `--smoke` cannot run this config: it forces the CPU (the fused kernels are CUDA only) and turns
+# @e4350 into @latest under the pinned sha.
+name: az-2p-kata
+seed: 42                        # fr3's: its training pool (map_pool from the seed)
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]   # fr3's own scenario and pool
+  num_envs: 512                 # games in flight
+obs: {level: full}
+model: {preset: graph-s, args: {shared: true}}
+init_from: {ckpt: "ppo-2p-fr3/full@e4350#43eca7ffdd41", parts: [actor, critic]}   # 2p-graph-s-3
+train:
+  algo: alphazero
+  iterations: 600
+  steps_per_iteration: 64       # x 512 games = 32,768 searched moves, ~8,192 of them recorded
+  root: puct
+  sims: 600                     # a full search (recorded)
+  fast_sims: 100                # the other moves (played only)
+  pending: 24                   # leaves per round of a full search
+  fast_pending: 4               # and of a fast one
+  full_search_prob: 0.25
+  record_fast: false            # only full searches enter replay
+  dets: 0                       # the true game (fr3 reads it whole)
+  c_puct: 0.75
+  dirichlet_noise: true         # full searches only
+  temperature_start: 1.0        # az-2p-2048's schedule
+  temperature_end: 0.0
+  temperature_moves: 30
+  truncation_value: share
+  policy_target: engine         # a PUCT root's: the visit distribution
+  replay_capacity: 1_000_000    # ~122 iterations of recorded positions; 5.8 GB of RAM
+  min_replay: 50_000            # ~6 iterations of recorded positions (filed when their games end)
+  updates_per_iteration: 64     # x 512 = 32,768 samples per ~8,192 new positions
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  value_coef: 1.0
+  max_grad_norm: 1.0
+  search_rows: 512              # rows per forward (a round of up to 4,608 leaves goes in chunks)
+  kernels: fused
+  checkpoint_interval: 25       # placeholder: to be set from the GPU smoke's measured select cost
+eval:
+  select:
+    suite: {name: select-2p-fr-1000, purpose: select, seed: 123, boards: 1000, scenarios: [{game: base-2p-fr}], turn_limit: 500}
+    lineup:
+      - "MCTS:ckpt=${self}:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+      - "BELIEF:ckpt=${init}:worlds=16"
+    every: 25                   # every checkpoint (e0 first)
+    metric: score_rate
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup:
+        - "MCTS:ckpt=${run}@best:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+        - "BELIEF:ckpt=${init}:worlds=16"
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup:
+        - "MCTS:ckpt=${run}@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+        - "BELIEF:ckpt=${init}:worlds=16"
+    - suite: {name: heldout-2p-fr, boards: 1000}   # the baseline row: the start in the same search
+      lineup:
+        - "MCTS:ckpt=${init}:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+        - "BELIEF:ckpt=${init}:worlds=16"
+# num_envs, infer_rows: the evals' games in flight (the deploy check's: its trees fit in RAM at 256)
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512, time_limit_hours: 24}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

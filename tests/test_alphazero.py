@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 
 import cppanatron as cpp
@@ -15,13 +16,14 @@ from catanrl.config import Variant, config_hash, resolve
 from catanrl.envs.encoding import encoder_dims
 from catanrl.envs.puffer import plan_env
 from catanrl.runs import RunWriter, load_experiment
-from catanrl.search import run_pools
+from catanrl.search import BatchEvaluator, run_pools
 from catanrl.train.alphazero import (
     ALPHAZERO_KEYS,
     PROBE_ROWS,
     Monitors,
     ReplayBuffer,
     RootOutputs,
+    Rounds,
     SelfPlay,
     _Pending,
     check_train,
@@ -244,6 +246,102 @@ def test_self_play_and_learning_are_deterministic():
     assert load_experiment("az/c").checkpoints()[-1].weights_sha256 != shas[0][-1]
 
 
+# ---------------------------------------------------------------- leaves per round, recorded moves, kernels
+
+
+@pytest.mark.train
+def test_the_defaults_train_the_weights_from_before_the_keys():
+    """pending, fast_pending, record_fast and kernels at their defaults: the checkpoints this tiny
+    run wrote before the keys existed (main e57b88a; they move with the torch build)."""
+    run(variant())
+    shas = [c.weights_sha256[:12] for c in load_experiment("az/t").checkpoints()]
+    assert shas == ["4bd9521fd942", "337abc40ae6b", "2bfb0524faff"]
+
+
+def test_record_fast_false_stores_only_the_full_searches():
+    play, replay, _ = selfplay(full_search_prob=0.5, record_fast=False)
+    stats = {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+    rng = np.random.default_rng(0)
+    for step in range(60):
+        play.step(0, step, rng, replay, stats)
+    waiting = [r for rows in play.pending for r in rows]
+    assert 0 < replay.size and replay.added + len(waiting) == stats["full"] < play.decisions  # every move counts
+    assert play.games > 0 and replay.has_policy[: replay.size].all() and all(r.policy is not None for r in waiting)
+    assert np.allclose(replay.policy[: replay.size].astype(np.float32).sum(1), 1.0, atol=2e-3)
+
+
+@pytest.mark.train
+def test_a_run_that_records_only_full_searches_learns_and_logs(capsys):
+    run(variant(record_fast=False))
+    run_ = load_experiment("az/t")
+    state = torch.load(run_.path / "trainer_state.pt", weights_only=False)
+    last = run_.metrics()[-1]
+    assert state["replay"]["has_policy"].all() and 0 < last["positions"] == state["replay"]["added"] < last["decisions"]
+    assert last["games"] > 0 and last["replay"] == state["replay"]["size"]
+    assert "train/policy_loss" in last and "oos/value_bce" in last and "search/overrule" in last  # the monitors too
+    assert last["selfplay/rounds"] == 5.0  # the root and 4 sims (the fast searches end after 3 rounds)
+    line = [row for row in capsys.readouterr().out.splitlines() if row.startswith("az/t: iteration 2/2: ")]
+    assert len(line) == 1 and f"{last['games']} games (+" in line[0] and f"{last['positions']} positions (+" in line[0]
+    assert all(part in line[0] for part in (" games/h, ", " leaves/s, ", " s, ETA 0.0 h"))
+
+
+def test_pending_cuts_the_rounds_and_keeps_the_visit_counts():
+    """One leaf a search per round: the root, then ``sims`` rounds. With ``pending`` leaves a round
+    the same visits take a fraction of the rounds, the target is still the visit distribution and
+    nothing is left in flight."""
+    rounds = {}
+    for pending in (1, 8):
+        play = selfplay(root="puct", sims=48, pending=pending, fast_pending=pending)[0]
+        assert play.full_pool.config.max_pending == play.fast_pool.config.max_pending == pending
+        b, pool = play.buffers, play.full_pool
+        acting = np.flatnonzero(b["acting"])
+        sids = [pool.add(play.vec.game(int(b["env_index"][row])), seed=int(row)) for row in acting]
+        evaluator = Rounds(play.evaluator)
+        run_pools([pool], evaluator, batch_rows=[len(sids) * pending])
+        rounds[pending] = evaluator.count
+        assert pool.pending == 0
+        for sid in sids:
+            visits = np.asarray(pool.visits(sid), np.float64)
+            assert visits.sum() == 48 and visits[pool.select(sid, 0.0)] == visits.max()
+            assert np.allclose(pool.policy_target(sid), visits / 48, atol=1e-6)
+    assert rounds[1] == 49 and rounds[8] <= 12
+    play, replay, _ = selfplay(sims=48, fast_sims=12, pending=8, fast_pending=4)
+    stats = {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+    play.step(0, 0, np.random.default_rng(0), replay, stats)  # both pools, a call of the evaluator per round
+    assert stats["rounds"] <= 12 and stats["leaves"] >= 13 * play.decisions
+
+
+def test_fast_searches_get_no_dirichlet_noise():
+    play = selfplay(root="puct", dirichlet_noise=True)[0]
+    assert play.full_pool.config.dirichlet_alpha > 0 and play.fast_pool.config.dirichlet_alpha == 0
+    quiet = selfplay(root="puct", dirichlet_noise=False)[0]
+    assert quiet.full_pool.config.dirichlet_alpha == 0 and repr(quiet.fast_pool.config) == repr(play.fast_pool.config)
+
+
+class Copies(BatchEvaluator):
+    """The fused kernels' contract on the CPU: built from a copy of the weights (FusedGraph's
+    buffers), so it evaluates the weights of the moment it was built."""
+
+    def __init__(self, model, *, kernels, **kwargs):
+        super().__init__(copy.deepcopy(model) if kernels == "fused" else model, **kwargs)
+
+
+def test_fused_kernels_follow_the_weights(monkeypatch):
+    """The evaluator is rebuilt after every learn(): self-play searches with the weights the
+    module has (the same run as ``kernels: torch``). Left on its first weights, the check before
+    the next iteration's self-play stops the run."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Copies)
+    run(variant("torch"))
+    run(variant("fused", kernels="fused"))
+    shas = [[c.weights_sha256 for c in load_experiment(f"az/{name}").checkpoints()] for name in ("torch", "fused")]
+    assert shas[0] == shas[1] and len(set(shas[0])) == 3
+    monkeypatch.setattr(az.SelfPlay, "refresh", lambda self: None)
+    with pytest.raises(RuntimeError, match="stale"):
+        run(variant("stale", kernels="fused", learning_rate=0.01))
+
+
 # ---------------------------------------------------------------- monitors
 
 
@@ -464,6 +562,8 @@ def test_check_train_refuses_targets_it_cannot_build():
                        ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root"),
                        ({"policy_target": "gumbel", "target_c_scale": -0.1}, "non-negative"),
                        ({"policy_target": "gumbel", "target_prior_temperature": 0.0}, "positive"),
+                       ({"pending": 0}, "leaves per network round"), ({"fast_pending": 0}, "leaves per network round"),
+                       ({"kernels": "cuda"}, "torch or fused"),
                        ({"target_c_scale": 0.01}, "set policy_target: gumbel"),  # silently unused otherwise
                        ({"target_prior_temperature": 10.0}, "set policy_target: gumbel")):
         with pytest.raises(ValueError, match=match):

@@ -5,7 +5,9 @@
 1. **Self-play.** A VecEnv (auto-reset, the ``env`` scenarios as in PPO:
    mixed maps and player counts) plays games; every acting row is searched
    with a SearchPool, all searches in lockstep with their leaves evaluated in
-   shared GPU batches (the eval's BatchEvaluator and CUDA graphs). Search is
+   shared GPU batches (the eval's BatchEvaluator and CUDA graphs; with
+   ``kernels: fused`` on the fused CUDA kernels, rebuilt from the weights
+   after every learning step, which they copy). Search is
    on the true game (``dets: 0``, fast) or on worlds sampled from the deciding
    seat's hand tracker (``dets: K``, fair; ``VecEnv(trackers=True)``). The
    move played is sampled from the search policy at a temperature that decays
@@ -14,7 +16,11 @@
    which also add Gumbel noise themselves; PUCT roots can add Dirichlet noise).
    Playout cap randomization (KataGo): a ``full_search_prob`` fraction of
    moves get ``sims`` simulations and become policy targets, the rest get
-   ``fast_sims`` and serve as value targets only.
+   ``fast_sims``, without the Dirichlet noise, and serve as value targets
+   only, or with ``record_fast: false`` are played but not stored (KataGo
+   records its full searches only). A search sends up to ``pending``
+   (``fast_pending``) leaves to the network per round, counted as visits
+   while they wait; at 1 a step takes ``sims + 1`` rounds of one leaf a search.
 2. **Targets.** Policy: the search's ``policy_target`` (the visit
    distribution, or Gumbel's improved policy), over legal actions; or, with
    ``policy_target: gumbel`` (Gumbel roots), Gumbel's improved policy rebuilt
@@ -81,7 +87,10 @@ ALPHAZERO_KEYS: dict[str, Any] = {
     "root": "gumbel",
     "sims": 64,
     "fast_sims": 16,
+    "pending": 1,
+    "fast_pending": 1,
     "full_search_prob": 0.25,
+    "record_fast": True,
     "dets": 0,
     "c_puct": 0.75,
     "gumbel_m": 16,
@@ -104,6 +113,7 @@ ALPHAZERO_KEYS: dict[str, Any] = {
     "value_coef": 1.0,
     "max_grad_norm": 1.0,
     "search_rows": 512,
+    "kernels": "torch",
     "checkpoint_interval": 10,
 }
 
@@ -122,6 +132,10 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("train.full_search_prob must be in (0, 1]")
     if int(train["sims"]) < 1 or int(train["fast_sims"]) < 1 or int(train["dets"]) < 0:
         raise ValueError("train.sims and train.fast_sims must be positive and train.dets non-negative")
+    if int(train["pending"]) < 1 or int(train["fast_pending"]) < 1:
+        raise ValueError("train.pending and train.fast_pending count a search's leaves per network round (>= 1)")
+    if train["kernels"] not in ("torch", "fused"):
+        raise ValueError(f"train.kernels must be torch or fused, not {train['kernels']!r}")
     if train["policy_target"] not in ("engine", "gumbel"):
         raise ValueError(f"train.policy_target must be engine or gumbel, not {train['policy_target']!r}")
     if train["policy_target"] == "gumbel" and train["root"] != "gumbel":
@@ -365,6 +379,20 @@ class RootOutputs:
         return legal, np.stack([logits for _, logits, _ in rows]), value
 
 
+class Rounds:
+    """An evaluator for :func:`run_pools` that counts its calls: one per round of leaves."""
+
+    def __init__(self, evaluator: BatchEvaluator) -> None:
+        self.evaluator, self.count = evaluator, 0
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.evaluator, name)
+
+    def __call__(self, observations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        self.count += 1
+        return self.evaluator(observations)
+
+
 @dataclass
 class _Pending:
     obs: np.ndarray
@@ -387,16 +415,20 @@ class SelfPlay:
         self.buffers = self.vec.allocate()
         self.vec.reset(self.seed)
         self.players = int(self.vec.max_players)
-        self.evaluator = BatchEvaluator(model, device=device, infer_rows=int(train["search_rows"]), mode=mode)
+        self.model, self.device, self.mode = model, device, mode
+        self.evaluator = self._evaluator()
 
-        def pool(sims: int) -> cpp.SearchPool:
+        def pool(sims: int, pending: int, noise: bool) -> cpp.SearchPool:
             params = {"sims": sims, "dets": self.dets, "oracle": self.dets == 0, "root": train["root"],
-                      "c_puct": train["c_puct"], "gumbel_m": train["gumbel_m"],
-                      "noise": bool(train["dirichlet_noise"]) and train["root"] == "puct"}
+                      "c_puct": train["c_puct"], "gumbel_m": train["gumbel_m"], "pending": pending, "noise": noise}
             config = search_config(params, max_players=self.players, threads=threads)
             return make_pool(self.dims, levels["level"], config, critic_level=levels["critic_level"])
 
-        self.full_pool, self.fast_pool = pool(int(train["sims"])), pool(int(train["fast_sims"]))
+        #: Leaves a search sends per round, by pool (full, fast).
+        self.leaves = int(train["pending"]), int(train["fast_pending"])
+        noise = bool(train["dirichlet_noise"]) and train["root"] == "puct"
+        self.full_pool = pool(int(train["sims"]), self.leaves[0], noise)
+        self.fast_pool = pool(int(train["fast_sims"]), self.leaves[1], False)  # fast searches: no noise (KataGo)
         #: policy_target: gumbel's sigma constants (None: the engine's target).
         self.sigma = None if train["policy_target"] == "engine" else {
             "c_visit": float(train["target_c_visit"]), "c_scale": float(train["target_c_scale"]),
@@ -408,6 +440,32 @@ class SelfPlay:
         self.games = 0
         #: Sees each step's full-budget searches (rows and targets); logging only.
         self.monitor: Monitors | None = None
+
+    def _evaluator(self) -> BatchEvaluator:
+        return BatchEvaluator(self.model, device=self.device, infer_rows=int(self.train["search_rows"]),
+                              mode=self.mode, kernels=self.train["kernels"])
+
+    def refresh(self) -> None:
+        """After the weights changed (learn(), a resume). The module's forward reads them in place;
+        the fused kernels read copies made when the evaluator was built (FusedGraph), so
+        ``kernels: fused`` rebuilds it, its CUDA graphs included."""
+        if self.train["kernels"] == "fused":
+            self.evaluator = None  # its graphs and static rows go before the new ones are captured
+            self.evaluator = self._evaluator()
+
+    def check_kernels(self, rows: int = 64) -> None:
+        """``kernels: fused``: the evaluator's values against the module's own on acting rows. The
+        kernels are within 1e-6 of the module (graph_kernels.py); an evaluator left on older weights
+        is not, and self-play would search with them unnoticed."""
+        if self.train["kernels"] != "fused":
+            return
+        obs = self.buffers["observations"][np.flatnonzero(self.buffers["acting"])[:rows]]
+        with torch.inference_mode():
+            want = self.model(torch.from_numpy(obs).to(self.device))[1].float().cpu().numpy()
+        gap = float(np.abs(self.evaluator(obs)[1] - want).max()) if len(obs) else 0.0
+        if gap > 1e-4:
+            raise RuntimeError(f"kernels: fused: the evaluator's values are {gap:.2g} from the network's "
+                               "(its weights are stale: refresh() after every change)")
 
     def step(self, iteration: int, step: int, rng: np.random.Generator, replay: ReplayBuffer,
              stats: dict[str, float]) -> None:
@@ -428,8 +486,10 @@ class SelfPlay:
                 searches.append((pool, pool.add(self.vec.game(env), seed=seed, tracker=tracker)))
                 if roots is not None and full[i]:
                     roots.expect(searches[-1][1])
-            leaves = run_pools([self.full_pool if roots is None else roots, self.fast_pool], self.evaluator,
-                               batch_rows=[int(full.sum()), int((~full).sum())])
+            evaluator = Rounds(self.evaluator)
+            # a round's rows: every search's quota (collect caps a search by the room left in its buffer)
+            leaves = run_pools([self.full_pool if roots is None else roots, self.fast_pool], evaluator,
+                               batch_rows=[int(full.sum()) * self.leaves[0], int((~full).sum()) * self.leaves[1]])
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
                 pool, sid = searches[i]
@@ -449,8 +509,9 @@ class SelfPlay:
                     stats["depth"] += search.mean_depth
                     stats["max_depth"] += search.max_depth
                 b["actions"][row] = pool.select(sid, temperature(self.train, int(self.ply[env])))
-                self.pending[env].append(_Pending(b["observations"][row].astype(np.float16), policy, seat,
-                                                  int(b["num_players"][env])))
+                if full[i] or self.train["record_fast"]:
+                    self.pending[env].append(_Pending(b["observations"][row].astype(np.float16), policy, seat,
+                                                      int(b["num_players"][env])))
                 self.ply[env] += 1
         finally:
             for pool in (self.full_pool, self.fast_pool):
@@ -459,6 +520,7 @@ class SelfPlay:
                 for sid in pool.ids:
                     pool.remove(sid)
         stats["leaves"] += leaves
+        stats["rounds"] = stats.get("rounds", 0.0) + evaluator.count
         stats["full"] += int(full.sum())
         self.decisions += len(acting)
         if self.monitor is not None and targets:  # before step() rewrites rows
@@ -835,6 +897,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         iteration = int(state["epoch"])
         selfplay.decisions, selfplay.games = int(state["decisions"]), int(state["games"])
         set_rng_state(state["rng"])
+        selfplay.refresh()
         if monitors is not None:
             monitors.restore(state.get("monitors") or {})
         selector.restore()
@@ -846,6 +909,8 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
     selector.catch_up(model)
 
     status, saved = "finished", iteration
+    launched, first, total = time.time(), iteration, int(train["iterations"])  # this launch, for the ETA
+    limit = runtime.get("time_limit_hours")
     while iteration < int(train["iterations"]):
         if writer.should_stop():
             status = writer.stop_reason or "interrupted"
@@ -853,9 +918,10 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         start = time.time()
         rng = np.random.default_rng(derive_seed(seed, "selfplay", iteration))
         decisions, games = selfplay.decisions, selfplay.games
-        stats = {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+        stats = {"leaves": 0.0, "rounds": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
         added = replay.added
         model.eval()
+        selfplay.check_kernels()
         if monitors is not None:
             monitors.begin()
         for step in range(int(train["steps_per_iteration"])):
@@ -866,6 +932,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         if replay.size >= int(train["min_replay"]):
             learned = learn(model, optimizer, replay, train, device,
                             np.random.default_rng(derive_seed(seed, "replay", iteration)))
+            selfplay.refresh()
         if monitors is not None:
             health.update(monitors.drift())
             health["throughput/monitor_s"] = monitors.seconds
@@ -879,6 +946,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             "selfplay/decisions_per_s": new / played, "selfplay/leaves_per_s": stats["leaves"] / played,
             "selfplay/games_per_hour": (selfplay.games - games) * 3600.0 / played,
             "selfplay/full_fraction": stats["full"] / max(new, 1),
+            "selfplay/rounds": stats["rounds"] / int(train["steps_per_iteration"]),  # network rounds per step
             "search/mean_depth": stats["depth"] / full, "search/max_depth": stats["max_depth"] / full,
             "environment/episodes": episodes["episodes"], "environment/truncated": episodes["truncated"],
             "environment/length": episodes["length"], "environment/learner_win": episodes["learner_win"],
@@ -886,6 +954,15 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             **{f"train/{k}": v for k, v in learned.items()}, **health, "map_pool": plan.pool["hash"],
         }
         writer.log(logs, selfplay.decisions)
+        # one line per iteration; the ETA is this launch's pace (checkpoints and selects included)
+        # over the iterations left, or the time limit if that comes first
+        eta, end = (time.time() - launched) / (iteration - first) * (total - iteration), ""
+        if limit is not None and launched + float(limit) * 3600 - time.time() < eta:
+            eta, end = max(launched + float(limit) * 3600 - time.time(), 0.0), " (time limit)"
+        print(f"{writer.ref}: iteration {iteration}/{total}: {selfplay.games} games (+{selfplay.games - games}), "
+              f"{replay.added} positions (+{replay.added - added}), {logs['selfplay/games_per_hour']:.0f} games/h, "
+              f"{logs['selfplay/leaves_per_s']:.0f} leaves/s, {logs['throughput/iteration_s']:.0f} s, "
+              f"ETA {eta / 3600:.1f} h{end}", flush=True)
         if iteration % int(train["checkpoint_interval"]) == 0:
             save()
             saved = iteration
