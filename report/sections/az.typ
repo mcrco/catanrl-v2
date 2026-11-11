@@ -353,7 +353,7 @@ uv run python tools/search_probe.py --pair <a fit's harness record> <the baselin
 
 == KataGo's way of spending compute
 
-=== Self-play from fr3 at KataGo's visit counts: `az-2p-kata` #chip("parked") <exp:az-kata>
+=== Self-play from fr3 at KataGo's visit counts: `az-2p-kata` #chip("queued") <exp:az-kata>
 #meta(
   dates: "2026-11-11 00:18 – 01:24",
   dates-label: "smoke",
@@ -398,10 +398,14 @@ uv run python tools/search_probe.py --pair <a fit's harness record> <the baselin
 - The smoke learns from a small replay (3.3 uses per position by e8 against about 4 planned), but the targets in fresh self-play are as far from the net as the replayed ones (KL 1.8 and 2.1 at e8), so this is not overfitting, and the full run would start the same way.
 - Without the noise the search would explore only where fr3 is unsure, since PUCT's exploration term scales with the prior (not measured).
 
-#lead[Options] (Claude's suggestions, not queued):
-- Keep the noise for play but prune it from the recorded target: cut a move's visits back to what its value supports under fr3's own prior, as KataGo prunes its forced playouts. Rerun this smoke (1.1 h) as the gate: go on only if e8 holds near e0. The targets would then differ from fr3 at about 1% of positions, so learning would be slow.
-- Train from scratch, as KataGo did. At 3,300 games an hour a day is 78,000 games, against about 1.6M in fr3's PPO run.
-- Park AlphaZero from fr3 and go on with the queue.
+#lead[Learning rate] (Marco asked whether it is too high, and whether this is a collapse).
+- The learning rate is 5e-5 with the gradient norm clipped at 1.0, the same as `az-2p-2048`. After 256 updates on Gumbel targets (about 2 nats from the net) that run agreed with its start's top move at 89.4% of probe positions (KL 0.37); here, after 320 updates on targets 10 nats away, 65.8% (KL 1.47).
+- It is a collapse and not a fit of a better policy: the targets' top move differs from fr3's at 0.9% of positions, and the net's top move changed at 34%.
+- Not measured: whether a lower learning rate avoids it, and whether the policy or the value head costs the 26 points. The gate below separates the two without another arm. With the noise pruned the policy targets are close to fr3's own policy, so a drop that remains comes from the value loss or the step size.
+
+#lead[Next] (Marco, 2026-11-11: the first of three options Claude put forward; the others were training from scratch and parking).
+- Keep the noise for play but prune it from the recorded target (`policy_target: pruned`): cut a move's visits back to what its value supports under the net's own prior without noise, as KataGo prunes its forced playouts. Being built in `wt/az-prune`.
+- Gate: this smoke again (1.1 h, after `fp16-2p`). The long run follows only if e8 holds near e0. The targets will then differ from fr3 at about 1% of positions, so learning will be slow.
 
 #repro(```sh
 # the smoke (W&B off, a scratch runs dir)

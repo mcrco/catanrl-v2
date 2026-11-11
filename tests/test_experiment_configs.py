@@ -346,3 +346,72 @@ def test_az_2p_2048_had_two_learning_steps_by_its_e6_select():
     learned = [row["epoch"] for row in run.metrics() if "train/policy_loss" in row and row["epoch"] <= 6]
     assert learned == [5, 6]
     assert run.config["train"]["updates_per_iteration"] == 64
+
+
+def test_fp16_2p_is_graph_m_2p_lr_for_300_epochs_in_both_precisions():
+    """The fp16 A/B (approved 2026-11-09): graph-m-2p-lr's run exactly, stopped after epoch 300 on
+    its whole budget's cosine, once in float32 and once in float16 (precision and amp the only
+    hashed difference); the champion monitor only; the finals all on heldout-2p-fr's 5,000 games
+    against fr3, plus graph-m-2p-lr's own e300 (pinned) as the run-to-run yardstick."""
+    import math
+
+    import torch
+
+    from catanrl.config import config_diff, hashed_part
+    from catanrl.train.puffer import amp_dtype, puffer_config
+
+    ref = load_plan("graph-m-2p-lr").variants[0].config
+    plan = load_plan("fp16-2p")
+    assert [v.name for v in plan.variants] == ["fp32", "fp16"] and all(v.depends_on == () for v in plan.variants)
+    fp32, fp16 = (v.config for v in plan.variants)
+    assert config_diff(hashed_part(fp32), hashed_part(fp16)) == [
+        "train.amp: False -> True", "train.precision: 'float32' -> 'float16'"]
+    diff = config_diff(hashed_part(ref), hashed_part(fp32))
+    assert [d.split(":")[0] for d in diff] == ["eval.monitor", "train.stop_epoch"], diff
+    assert fp32["train"]["stop_epoch"] == 300 and fp32["train"]["max_minibatch_size"] == 2048
+    assert fp32["runtime"] == ref["runtime"] and fp32["meta"]["wandb"] == ref["meta"]["wandb"]
+
+    champion = "ppo-2p-fr3/full@e4350#43eca7ffdd41"
+    assert fp32["eval"]["champion"] == champion == ref["eval"]["champion"]
+    monitor = {"name": "champion", "suite": "select-2p-fr", "every": 100, "metric": "score_rate",
+               "lineup": ["POLICY:ckpt=${self}", "POLICY:ckpt=${champion}"]}
+    for cfg in (fp32, fp16):
+        assert cfg["eval"]["monitor"] == [monitor] and cfg["eval"]["select"]["from"] == "champion"
+    finals = {v.name: [(e["suite"], e["lineup"]) for e in v.config["eval"]["final"]] for v in plan.variants}
+    vs_fr3 = "POLICY:ckpt=${champion}"
+    assert finals == {
+        "fp32": [("heldout-2p-fr", ["POLICY:ckpt=fp16-2p/fp32@latest", vs_fr3]),
+                 ("heldout-2p-fr", ["POLICY:ckpt=graph-m-2p-lr/main@e300#21153dbc209c", vs_fr3])],
+        "fp16": [("heldout-2p-fr", ["POLICY:ckpt=fp16-2p/fp16@latest", vs_fr3])]}
+
+    # 132,096 agent steps an epoch, 16 optimizer steps of 8 micro-batches (one left over, as in
+    # graph-m-2p-lr), the cosine over the whole budget: e300 is 1.3% of it, the lr 99.96% of peak.
+    config = puffer_config(fp32["train"], fp32["runtime"], rows=2 * fp32["env"]["num_envs"], seed=0, data_dir=".")
+    epochs = config["total_timesteps"] // config["batch_size"]
+    assert config["batch_size"] == 132_096 and epochs == 22_710 and "stop_epoch" not in config
+    micro = config["update_epochs"] * config["batch_size"] // config["max_minibatch_size"]
+    assert (micro, micro // (config["minibatch_size"] // config["max_minibatch_size"])) == (129, 16)
+    lr = config["min_lr_ratio"] + (1 - config["min_lr_ratio"]) * (1 + math.cos(math.pi * 300 / epochs)) / 2
+    assert 0.9995 < lr < 1.0
+    half = puffer_config(fp16["train"], fp16["runtime"], rows=2 * fp16["env"]["num_envs"], seed=0, data_dir=".")
+    assert {k: v for k, v in half.items() if k not in ("precision", "amp")} == \
+        {k: v for k, v in config.items() if k not in ("precision", "amp")}
+    assert (half["precision"], half["amp"]) == ("float32", False)  # PuffeRL's autocast off; catanrl's on
+    assert amp_dtype(fp16["train"], "cpu") is torch.float16 and amp_dtype(fp32["train"], "cpu") is None
+
+    smoke = load_plan("fp16-2p", smoke=True)
+    assert [v.config["train"]["stop_epoch"] for v in smoke.variants] == [2, 2]
+    assert "stop_epoch" not in load_plan("graph-m-2p-lr", smoke=True).variants[0].config["train"]
+
+
+@pytest.mark.runs
+def test_fp16_2p_pins_graph_m_2p_lrs_own_e300():
+    from catanrl.runs import RunError, load_experiment
+
+    try:
+        run = load_experiment("graph-m-2p-lr/main")
+    except RunError:
+        pytest.skip("graph-m-2p-lr/main is not in the runs directory")
+    ref = run.resolve("e300#21153dbc209c")
+    assert ref.epoch == 300 and ref.agent_steps == 300 * 132_096
+    assert run.config_hash == load_plan("graph-m-2p-lr").variants[0].config_hash

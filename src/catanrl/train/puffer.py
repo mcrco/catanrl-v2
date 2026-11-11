@@ -35,6 +35,27 @@ docs/experiments-implementation.md are handled here:
   (:func:`check_frozen_init`).
 * ``init_from`` loads whenever a launch starts fresh (:func:`starts_fresh`): a
   new run, or a resume whose earlier launches all died before their e0 commit.
+* ``train.precision: float16`` (with ``train.amp: true``) is mixed precision
+  owned by catanrl, not PuffeRL (whose ``amp_context`` it enters every
+  minibatch and never exits, and which has no loss scaling): PuffeRL gets
+  float32 with amp off, :class:`PufferPolicy` runs only the network's calls
+  under ``torch.autocast(float16)``, each in its own ``with`` block, and
+  returns float32 logits and values, and :class:`CatanPuffeRL` scales every
+  micro-batch's loss with a ``torch.amp.GradScaler`` and steps through
+  :func:`scaled_step` (unscale, clip, step or skip, update) with autocast off.
+  Weights, gradients, the optimizer (Muon's Newton-Schulz included) and the
+  losses stay float32. Each epoch logs ``amp/scale``, ``amp/optimizer_steps``,
+  ``amp/skipped_steps`` (non-finite gradients) and ``amp/skipped_total``, and
+  the probe of the rollout's log-probs against the training forward on the
+  same rows before any update (``amp/probe_kl``, ``amp/probe_logprob_gap``,
+  ``amp/probe_logprob_gap_max``). The scaler's state rides in the trainer
+  state. float16 needs fp16 tensor cores on CUDA (compute capability 7.0+)
+  or the CPU (smoke runs and tests); float32 and bfloat16 are untouched.
+* ``train.stop_epoch`` (optional, :data:`catanrl.config.TRAIN_OPTIONAL`) ends
+  the run after that epoch: its checkpoint, status finished (so the runner
+  plays the finals and a relaunch does not resume it). The learning-rate
+  schedule is still the whole ``total_timesteps``' (PuffeRL's cosine), so the
+  run follows the first ``stop_epoch`` epochs of the full run's.
 """
 
 from __future__ import annotations
@@ -77,13 +98,53 @@ RUNNER_KEYS = frozenset({
 })
 #: Keys of the ``train`` section that catanrl reads and PuffeRL does not.
 CATANRL_TRAIN_KEYS = frozenset({"algo", "lr_schedule", "kl_target", "lr_min", "lr_max", "log_interval",
-                                "muon_exclude", "muon_exclude_lr", "aux_coef", "freeze"})
+                                "muon_exclude", "muon_exclude_lr", "aux_coef", "freeze", "stop_epoch"})
 
 
 def resolve_device(device: str) -> str:
     if device == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     return device
+
+
+def amp_dtype(train: Mapping[str, Any], device: str) -> torch.dtype | None:
+    """The dtype :class:`PufferPolicy` autocasts the network's calls to: ``torch.float16`` for
+    ``train.precision: float16`` (with ``train.amp``), else None (float32; bfloat16 stays PuffeRL's
+    own autocast). float16 needs fp16 tensor cores on CUDA, compute capability 7.0+ (Volta, Turing
+    and later: a Pascal card runs float16 arithmetic at a small fraction of its float32 rate), or
+    runs on the CPU (slowly: smoke runs and tests)."""
+    if train.get("precision", "float32") != "float16":
+        return None
+    if train.get("amp") is not True:
+        raise ValueError("train.precision float16 is mixed precision and needs train.amp: true")
+    if device.startswith("cuda"):
+        capability = tuple(torch.cuda.get_device_capability(device))
+        if capability < (7, 0):
+            raise ValueError(f"train.precision float16 needs fp16 tensor cores (CUDA compute capability 7.0+); "
+                             f"{torch.cuda.get_device_name(device)} is sm_{capability[0]}{capability[1]}: "
+                             "train in float32")
+    elif device != "cpu":
+        raise ValueError(f"train.precision float16 runs on CUDA or the CPU, not {device!r}")
+    return torch.float16
+
+
+def scaled_step(scaler: torch.amp.GradScaler, optimizer: torch.optim.Optimizer, parameters: Any,
+                max_grad_norm: float, device_type: str) -> bool:
+    """float16's optimizer step at the end of an accumulation, on the summed scaled gradients:
+    unscale them (to their float32 values) before the norm clip, step unless one is not finite
+    (``GradScaler.step`` skips the step, and ``update`` then halves the scale), update the scale,
+    zero the gradients. Returns whether the optimizer stepped (the scale did not back off).
+
+    Runs with autocast off on ``device_type``, so the optimizer's own matrix products (Muon's
+    Newton-Schulz, float32 on float32 gradients) are never cast down, whatever is around it."""
+    with torch.autocast(device_type, enabled=False):
+        before = scaler.get_scale()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(parameters, max_grad_norm)
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+    return scaler.get_scale() >= before
 
 
 def rollout_bytes(rows: int, horizon: int, obs_size: int) -> int:
@@ -118,6 +179,10 @@ def puffer_config(train: Mapping[str, Any], runtime: Mapping[str, Any], *, rows:
         compile_mode="default",
         batch_size=int(rows) * int(config["bptt_horizon"]),
     )
+    if config.get("precision") == "float16":
+        # catanrl's mixed precision (amp_dtype, scaled_step): PuffeRL's own autocast stays off,
+        # since it enters it every minibatch and never exits (it would reach the optimizer step).
+        config.update(precision="float32", amp=False)
     missing = PUFFERL_KEYS - set(config)
     unknown = set(config) - PUFFERL_KEYS
     if missing or unknown:
@@ -149,7 +214,7 @@ class CatanPuffeRL(pufferl.PuffeRL):
                  select: Mapping[str, Any] | None = None, eval_runtime: Mapping[str, Any] | None = None,
                  monitors: Sequence[Mapping[str, Any]] | None = None, lr_schedule: Mapping[str, Any] | None = None,
                  muon_exclude: Sequence[str] = (), muon_exclude_lr: float | None = None,
-                 frozen: Sequence[str] = ()) -> None:
+                 frozen: Sequence[str] = (), amp_dtype: torch.dtype | None = None) -> None:
         self.writer = writer
         self.selector = Selector(select, writer, eval_runtime or {}, monitors=monitors)
         self.lr_schedule = dict(lr_schedule or {"kind": "constant"})
@@ -161,6 +226,15 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.extra_state: dict[str, Any] = {}
         self.capture = _CaptureLogger()
         self.msg = ""
+        #: float16: the loss scaler (None: float32 or bfloat16, PuffeRL's own backward and step).
+        self.scaler: torch.amp.GradScaler | None = None
+        self.amp_device = torch.device(config["device"]).type
+        self.amp_steps = self.amp_skipped = self.amp_skipped_total = 0
+        if amp_dtype is not None:
+            if config.get("amp") or config["precision"] != "float32":
+                raise ValueError("float16 is catanrl's autocast: PuffeRL's config must be float32 with amp off "
+                                 "(puffer_config)")
+            self.scaler = torch.amp.GradScaler(self.amp_device)
         super().__init__(config, vecenv, policy, logger=self.capture)
         try:  # a refusal here must stop PuffeRL's non-daemon utilization thread, or the process never exits
             if frozen:
@@ -185,6 +259,11 @@ class CatanPuffeRL(pufferl.PuffeRL):
 
         runtime = {"torch": torch_runtime(), "advantage_cuda": bool(pufferl.ADVANTAGE_CUDA),
                    "amp": config.get("amp"), "precision": config["precision"]}
+        if self.scaler is not None:
+            runtime.update(amp=True, precision="float16", autocast="policy (catanrl)", grad_scaler={
+                "init_scale": self.scaler.get_scale(), "growth_factor": self.scaler.get_growth_factor(),
+                "backoff_factor": self.scaler.get_backoff_factor(),
+                "growth_interval": self.scaler.get_growth_interval()})
         if frozen:
             runtime["frozen"] = {"parts": list(frozen), "trained_parameters": sum(
                 p.numel() for group in self.optimizer.param_groups for p in group["params"])}
@@ -212,6 +291,8 @@ class CatanPuffeRL(pufferl.PuffeRL):
             "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
             "rng": rng,
             **self.extra_state,
+            **({"grad_scaler": self.scaler.state_dict(), "amp_skipped_total": self.amp_skipped_total}
+               if self.scaler is not None else {}),
         }
 
     def restore(self, state: Mapping[str, Any]) -> None:
@@ -226,6 +307,9 @@ class CatanPuffeRL(pufferl.PuffeRL):
         rng = state.get("rng")
         if rng is not None:
             set_rng_state(rng)
+        if self.scaler is not None and state.get("grad_scaler") is not None:  # none: a fork of a float32 run
+            self.scaler.load_state_dict(state["grad_scaler"])
+            self.amp_skipped_total = int(state.get("amp_skipped_total", 0))
 
     # ------------------------------------------------------------ checkpoints
 
@@ -250,6 +334,53 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.vecenv.close()
         self.utilization.stop()
 
+    # ------------------------------------------------------------ float16
+
+    def backward(self, loss: torch.Tensor) -> None:
+        """PuffeRL's backward of one micro-batch: float16 scales the loss first."""
+        if self.scaler is None:
+            super().backward(loss)
+            return
+        self.scaler.scale(loss).backward()
+
+    def optimizer_step(self) -> None:
+        """PuffeRL's step at the end of an accumulation: float16's goes through :func:`scaled_step`."""
+        if self.scaler is None:
+            super().optimizer_step()
+            return
+        stepped = scaled_step(self.scaler, self.optimizer, self.policy.parameters(),
+                              float(self.config["max_grad_norm"]), self.amp_device)
+        self.amp_steps += 1
+        if not stepped:
+            self.amp_skipped += 1
+            self.amp_skipped_total += 1
+
+    def probe_rollout(self) -> dict[str, float]:
+        """The training forward on a fixed sample of this epoch's stored steps, before any
+        update, against the log-probs the rollout stored for the same actions: the mean and
+        largest absolute log-ratio over acting steps and the approximate KL PuffeRL logs,
+        ``(r - 1) - log r``. Both forwards use the same weights; they run different batch
+        shapes, so float16 rounds them differently (float32 agrees to ~1e-6). One
+        minibatch's worth of segments, every k-th (alternating seats), no RNG."""
+        n = min(self.minibatch_segments, self.segments)
+        stride = self.segments // n
+        k = torch.arange(n, device=self.logprobs.device)
+        idx = k * stride + k % stride
+        obs, actions, stored = self.observations[idx], self.actions[idx], self.logprobs[idx]
+        rows = obs if self.config["use_rnn"] else obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+        state = {"action": actions, "lstm_h": None, "lstm_c": None, "idx": idx, "terminals": self.terminals[idx]}
+        with torch.no_grad():
+            logits, _ = self.policy(rows, state)
+            _, logprob, _ = pufferl.pufferlib.pytorch.sample_logits(logits, action=actions)
+            logratio = logprob.reshape(stored.shape) - stored
+            acting = self.uncompiled_policy.acting_mask(obs)
+            gap = logratio[acting].abs()
+            kl = ((logratio.exp() - 1.0) - logratio)[acting]
+        if not gap.numel():
+            return {}
+        return {"amp/probe_kl": float(kl.mean()), "amp/probe_logprob_gap": float(gap.mean()),
+                "amp/probe_logprob_gap_max": float(gap.max()), "amp/probe_steps": int(gap.numel())}
+
     # ------------------------------------------------------------ one epoch
 
     def step_epoch(self) -> dict[str, Any] | None:
@@ -265,6 +396,8 @@ class CatanPuffeRL(pufferl.PuffeRL):
         self.capture.logs = None
         self._in_train, self._checkpoint_due = True, False
         self.uncompiled_policy.snapshot_values(self.values)
+        probe = self.probe_rollout() if self.scaler is not None else {}
+        self.amp_steps = self.amp_skipped = 0
         try:
             self.train()
         finally:
@@ -290,6 +423,10 @@ class CatanPuffeRL(pufferl.PuffeRL):
         logs.update({f"environment/{k}": v for k, v in env.take_stats().items()})
         logs.update({f"critic/{k}": v for k, v in self.uncompiled_policy.pop_calibration().items()})
         logs.update({f"aux/{k}": v for k, v in self.uncompiled_policy.pop_aux().items()})
+        if self.scaler is not None:
+            logs.update(probe)
+            logs.update({"amp/scale": self.scaler.get_scale(), "amp/optimizer_steps": self.amp_steps,
+                         "amp/skipped_steps": self.amp_skipped, "amp/skipped_total": self.amp_skipped_total})
         self._adapt_lr(logs)
         if self._checkpoint_due:
             self.save_checkpoint()
@@ -516,6 +653,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
         if "actor" in frozen:
             check_policy_frozen(model, [spec.game for spec in plan.specs])
     device = resolve_device(runtime.get("device", "auto"))
+    half = amp_dtype(train, device)  # float16's device check, before the VecEnv's threads start
     model.to(device)
 
     obs = cfg.get("obs") or {}
@@ -528,9 +666,13 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     )
     critic_gamma = train["critic_gamma"] if train["critic_gamma"] is not None else float(train["gamma"])
     policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)),
-                          critic_gamma=critic_gamma, aux_coef=_aux_coef(train, model))
+                          critic_gamma=critic_gamma, aux_coef=_aux_coef(train, model), amp_dtype=half)
     config = puffer_config(train, runtime, rows=vecenv.num_agents, seed=rollout_seed,
                            data_dir=str(getattr(writer, "path", ".")), strict=strict, recurrent=policy.recurrent)
+    stop_epoch = train.get("stop_epoch")
+    if stop_epoch is not None and int(stop_epoch) > config["total_timesteps"] // config["batch_size"]:
+        raise ValueError(f"train.stop_epoch {stop_epoch} is past the budget's "
+                         f"{config['total_timesteps'] // config['batch_size']} epochs")
     buffer = rollout_bytes(vecenv.num_agents, config["bptt_horizon"], vecenv.single_observation_space.shape[0])
     if device.startswith("cuda") and buffer > torch.cuda.get_device_properties(device).total_memory:
         raise ValueError(f"the rollout buffer needs {buffer / 2**30:.1f} GiB: lower env.num_envs or "
@@ -541,7 +683,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     trainer = CatanPuffeRL(config, vecenv, policy, writer=writer, select=select, monitors=monitors,
                            eval_runtime=eval_runtime,
                            lr_schedule=_lr_schedule(train), muon_exclude=train["muon_exclude"],
-                           muon_exclude_lr=train["muon_exclude_lr"], frozen=frozen)
+                           muon_exclude_lr=train["muon_exclude_lr"], frozen=frozen, amp_dtype=half)
     status = "finished"
     try:  # from here on, close() stops PuffeRL's non-daemon utilization thread
         trainer.extra_state["map_pool"] = plan.pool["hash"]
@@ -560,6 +702,8 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
         trainer.selector.catch_up(model)
 
         while trainer.global_step < config["total_timesteps"]:
+            if stop_epoch is not None and trainer.epoch >= int(stop_epoch):
+                break  # finished, after stop_epoch epochs of the whole budget's schedule
             if writer.should_stop():
                 status = getattr(writer, "stop_reason", None) or "interrupted"
                 break
