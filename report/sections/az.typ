@@ -361,7 +361,7 @@ uv run python tools/search_probe.py --pair <a fit's harness record> <the baselin
   wandb: (("az-2p-kata-main-2e3b1866", "az-2p-kata/main"),),
   records: (),
 )
-#tldr[Marco's idea (2026-11-10): the earlier runs trained on 605 to 5,120 games where KataGo used 4.2M, so spend the compute KataGo's way, from fr3. Self-play now plays about 3,300 games an hour (`az-2p-2048`: 190). In a first smoke, five learning steps on the root's visit counts took the net inside the search from 52.7% to 27.0% against fr3's raw policy: fr3's policy is saturated, and the visits forced by Dirichlet noise sit 10 nats of KL from it. With those visits pruned from the target (Marco's choice) the same smoke holds, 52.7% to 55.1% on the same 256 games, at the same learning rate. The long run is training (300 iterations, about 54,000 games): on the 2,000 select games the search with the trained net scores 56.1% at e100 and 56.6% at e200 against the start's 51.75% (paired +4.4 and +4.8 pp, p = 0.0003 and 0.0002). Finals about 17:00 on 2026-11-12.]
+#tldr[Marco's idea (2026-11-10): the earlier runs trained on 605 to 5,120 games where KataGo used 4.2M, so spend the compute KataGo's way, from fr3. Self-play now plays about 3,300 games an hour (`az-2p-2048`: 190). In a first smoke, five learning steps on the root's visit counts took the net inside the search from 52.7% to 27.0% against fr3's raw policy: fr3's policy is saturated, and the visits forced by Dirichlet noise sit 10 nats of KL from it. With those visits pruned from the target (Marco's choice) the same smoke holds, 52.7% to 55.1% on the same 256 games, at the same learning rate. The long run trained for 300 iterations (55,143 games): on the 2,000 select games the search with the trained net scores 56.1%, 56.6% and 57.9% at e100, e200 and e300 against the start's 51.75% (paired +4.4, +4.8 and +6.2 pp; p = 0.0003, 0.0002 and 0.000006). The held-out finals end about 14:00 on 2026-11-12.]
 
 *Question.* Does AlphaZero from fr3 improve it once the data scale is closer to KataGo's?
 
@@ -401,7 +401,7 @@ uv run python tools/search_probe.py --pair <a fit's harness record> <the baselin
 - The first smoke learned from a small replay (3.3 uses per position by e8 against about 4 planned), but the targets in fresh self-play were as far from the net as the replayed ones (KL 1.8 and 2.1 at e8), so it was not overfitting.
 - The pruned targets differ from fr3 at about 1% of positions, so the policy will learn slowly; whether 54,000 games move the net inside the search is what the long run measures (±2.2 pp a row).
 
-#lead[Status] (2026-11-12 01:55). Launched at 05:59 on 11 November from commit `c021778`; at iteration 209 of 300 (38,406 games, 1.70M positions).
+#lead[Status] (2026-11-12 10:05). Training finished at 06:49 on 12 November: 300 iterations, 55,143 games, 2.45M recorded positions (launched 05:59 on 11 November from commit `c021778`). The finals are running.
 #figure(
   btable(
     columns: (1fr, auto, auto, auto, auto),
@@ -410,14 +410,15 @@ uv run python tools/search_probe.py --pair <a fit's harness record> <the baselin
     [fr3, the start (e0)], [51.75 #ci[49.6][53.9]], [1,035], [], [],
     [e100 (18,400 games)], [56.10 #ci[53.9][58.3]], [1,122], [+4.35 pp (329 vs 242)], [0.0003],
     [e200 (36,700 games)], [56.55 #ci[54.4][58.7]], [1,131], [+4.80 pp (374 vs 278)], [0.0002],
+    [e300 (55,100 games)], [57.90 #ci[55.7][60.0]], [1,158], [+6.15 pp (425 vs 302)], [0.000006],
   ),
-  caption: [The select rows so far (`aa1df609`, `efdaab77`, `8e47f012`): the same 2,000 games in every row, McNemar's exact test on the games only one of the pair won. e200 against e100: 253 vs 244, p = 0.72.],
+  caption: [The select rows (`aa1df609`, `efdaab77`, `8e47f012`, `b7f9c1f4`): the same 2,000 games in every row, McNemar's exact test on the games only one of the pair won. Between checkpoints: e200 against e100 253 vs 244 (p = 0.72), e300 against e200 244 vs 217 (p = 0.23), e300 against e100 337 vs 301 (p = 0.17).],
 )
-- *Strength.* The trained net makes the search stronger than the start does: +4.35 pp at e100 and +4.80 pp at e200 on the select games. e200 is level with e100. These are select boards; the finals on `heldout-2p-fr` are the test.
-- *Net.* At iteration 209 it agrees with fr3's top move at 91.6% of the probe positions (KL from fr3 0.26) and its entropy is 0.17 nats (start 0.05). The pruned targets' KL from the net fell from 0.42 to 0.10, and the policy loss from 0.47 to 0.24. The value loss is flat (0.38–0.39), on fresh games too (0.35–0.43).
-- *Speed.* Iterations took 200 s up to iteration 37, about 280 s from iteration 44 to 100, about 200 s again after e100's select, and 227–238 s since e200's, with the same leaves, rounds and depth per step. Cause unknown: nothing else uses the GPU or a CPU core, and the host is not swapping.
-- *Schedule.* Iteration 300 is due about 07:40 on 12 November, inside the 28 h guard (09:59), so no relaunch; e300's select ends about 10:00 and the finals about 17:00.
-- Marco chose the pruned target over two other options Claude put forward (training from scratch, parking). Set by Claude from the smokes' costs and open to change: `dets: 0` in self-play, 300 iterations, a select every 100.
+- *Strength.* The trained net makes the search stronger than the start does: +4.35, +4.80 and +6.15 pp at e100, e200 and e300 on the select games. e300 is the best checkpoint; the steps between checkpoints are not significant on their own. These are select boards; the finals on `heldout-2p-fr` are the test.
+- *Net.* At iteration 300 it agrees with fr3's top move at 90.2% of the probe positions (KL from fr3 0.29) and its entropy is 0.20 nats (start 0.05). The pruned targets' KL from the net fell from 0.42 to 0.08, and the policy loss from 0.47 to 0.24. The value loss is flat (0.38–0.39), on fresh games too (0.35–0.43).
+- *Speed.* Iterations took 200 s up to iteration 37, about 280 s from iteration 44 to 100, about 200 s again after e100's select, 227–238 s for a while after e200's, then 194–197 s to the end, with the same leaves, rounds and depth per step. Cause unknown: nothing else used the GPU or a CPU core, and the host was not swapping.
+- *Finals.* e300 is both best and last, so two rows: e300 (ends about 11:40) and the start (about 14:00), each in the search on `heldout-2p-fr`'s first 1,000 boards.
+- Marco chose the pruned target over two other options Claude put forward (training from scratch, parking). Set by Claude from the smokes' costs: `dets: 0` in self-play, 300 iterations, a select every 100.
 
 #repro(```sh
 catanrl run az-2p-kata
