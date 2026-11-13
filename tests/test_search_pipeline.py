@@ -226,6 +226,8 @@ def test_a_flagged_chunk_is_evaluated_again_or_refused():
     def build(cls, **flags):
         evaluator = cls(MODEL, device="cpu", infer_rows=8, mode="fast")
         evaluator.flags = {int(n): flag for n, flag in flags.items()}
+        if cls is Recomputing:
+            evaluator.kernels = "fused16"  # the kernels whose flag has a way out
         return Pipeline(evaluator)
 
     def run(pipeline, rows=ROWS[:21]):

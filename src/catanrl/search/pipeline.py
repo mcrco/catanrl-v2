@@ -190,15 +190,14 @@ class Pipeline:
         evaluated again here, synchronously (write ``batch._logits`` and ``batch._values``
         ``[start:start + rows]``), or refused. What ``BatchEvaluator._run`` does with the flag:
 
-        - bit 2 (``kernels=fused16``: a half overflowed in the forward) with an evaluator that
-          has ``_exact``: the chunk again on the float32 kernels, counted in the evaluator's
-          ``exact_forwards``; the flag is then the one that forward returns;
+        - bit 2 with ``kernels=fused16`` (a half overflowed in the forward): the chunk again on
+          the float32 kernels (the evaluator's ``_exact``), counted in its ``exact_forwards``;
+          the flag is then the one that forward returns;
         - any flag left (bit 1: a node with more neighbours than the kernels take) raises."""
         ev = self.evaluator
-        exact = getattr(ev, "_exact", None)
-        if flag & 2 and exact is not None:
+        if flag & 2 and ev.kernels == "fused16":
             ev.exact_forwards += 1
-            results = exact(batch.observations[start : start + rows], ev.bucket(rows))
+            results = ev._exact(batch.observations[start : start + rows], ev.bucket(rows))
             batch._logits.numpy()[start : start + rows] = results[0]
             batch._values.numpy()[start : start + rows] = results[1]
             flag = int(np.any(results[-1]))
