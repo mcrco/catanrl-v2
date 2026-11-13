@@ -21,6 +21,11 @@ PyTorch module (both CUDA graphs). The outputs differ from the module's in the l
 (summation order: logits within 1e-3 at a scale of 1e3, values within 1e-6), so an agent
 using the kernels keys them (``MctsParams.kernels``). Built on first use with
 ``torch.utils.cpp_extension`` (nvcc on PATH; cached under ``~/.cache/torch_extensions``).
+
+:class:`FusedGraph16` runs the same forward with its large GEMMs in half precision, for
+self-play search (``train.kernels: fused16``): its outputs are within half's rounding of
+these, not their bits, so the eval's agents and the deployed search stay on
+:class:`FusedGraph`.
 """
 
 from __future__ import annotations
@@ -203,3 +208,107 @@ class FusedGraph:
                                     rt, rv, *self.robber_out, vl)
         return logits, values, overflow
 
+
+
+class FusedGraph16(FusedGraph):
+    """:class:`FusedGraph` with its large GEMMs in half precision (cuBLAS's tensor-core
+    kernels), for self-play search: float32 logits and values in the same conventions, within
+    rounding of :class:`FusedGraph`'s. On 26,000 self-play rows each of two base-2p networks
+    (logits reaching 290 and 1,090): mean KL of the masked policies 1.6e-6 and 3.8e-6, the
+    same best action on 99.98% and 99.97% of rows, legal logits within 0.09 and 0.49, values
+    within 1.5e-3 and 1e-3. On an RTX 2070 Super beside a training run a row of 512 takes
+    about 16 us against 25 (CUDA graphs; the graph's replay alone 12 against 21). The weights
+    are the float32 ones, rounded when this is built.
+
+    Half are the layers' GEMMs (their inputs, the LayerNorm outputs and neighbour means, are
+    of order 1 to 10, and their outputs, the updates, of order 100) and the settlement, city,
+    road and robber heads' hidden layers (hidden units up to about 1e3). Float32 are:
+
+    * the residual stream: it carries every layer's sum, so its rounding would add up, and the
+      pooled state and the value head read it;
+    * LayerNorm's mean and variance, the neighbour means, the pooling and each head's last
+      dot product (sums of many terms, some cancelling), in the kernels;
+    * the logits, their masks and the values' sigmoid: a logit near 1e3 has a half spacing of
+      0.5, and the masks' -1e9 is past half's range;
+    * what runs once per row (the global projection, the injections' global part, the
+      ``other`` head, the players and the value head) and the first projections of the raw
+      features with their injection GEMMs (in half they would add as much error as two more
+      layers to save a twentieth of the forward).
+
+    A half cannot hold more than 65504 (the networks above stay under 1,100). The kernels flag
+    (bit 2 of ``overflow``; bit 1 is the topology's) any half that is not finite, read from a
+    GEMM or written by them, and any legal logit or value that is not: such a forward is not
+    to be used, and :meth:`exact` is the float32 one (BatchEvaluator runs it for that batch).
+    """
+
+    def __init__(self, model) -> None:
+        super().__init__(model)
+        h = lambda t: t.half()
+        self.layers16 = [{k: h(L[k]) for k in ("wnT", "wtT", "weT")} for L in self.layers]
+        pair = lambda layer: (h(layer[0]), h(layer[1]))
+        self.sc1h, self.roadh, self.rth = pair(self.sc1), [pair(layer) for layer in self.road], pair(self.rt)
+
+    def exact(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The float32 forward (:class:`FusedGraph`'s) of the same weights."""
+        return super().forward(obs)
+
+    @torch.inference_mode()
+    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        K = kernels()
+        obs = obs.float().contiguous()
+        B, H, N, T, E = obs.shape[0], self.H, self.N, self.T, self.E
+        (xn, xt, xe, vn, vt, ve, nn, nnc, ne, nec, nt, ntc, tn, tnc, en, enc, overflow) = K.topo(obs, self.layout)
+        glob = torch.relu_(torch.addmm(self.bg, obs[:, self.g_span[0]: self.g_span[1]], self.wgT))
+        gb = torch.addmm(self.bi, glob, self.wigT)
+        types = ("nodes", "tiles", "edges")
+        us = [torch.mm(torch.relu_(torch.addmm(self.proj[b]["b"], r, self.proj[b]["wT"])), self.proj[b]["wiT"])
+              for b, r in zip(types, (xn, xt, xe))]
+        x = [obs.new_empty(B * n, H) for n in (N, T, E)]
+        half = lambda *shape: torch.empty(*shape, dtype=torch.half, device=obs.device)
+        XN, XT, XE = half(B * N, 4 * H), half(B * T, 2 * H), half(B * E, 2 * H)
+        Z, zs = [XN, XT, XE], [4 * H, 2 * H, 2 * H]
+        valid, per_row = [vn, vt, ve], [N, T, E]
+        names = ("node", "tile", "edge")
+        none = [None] * 3
+
+        def norms(i):
+            ln = [self.layers[i]["ln"][k] for k in names]
+            return [a[0] for a in ln], [a[1] for a in ln], [a[2] for a in ln]
+
+        K.entities16(x, none, us, none, [gb.narrow(1, k * H, H) for k in range(3)], [3 * H] * 3,
+                     [self.proj[b]["ln"][0] for b in types], [self.proj[b]["ln"][1] for b in types],
+                     [self.proj[b]["ln"][2] for b in types], valid, Z, zs, *norms(0), per_row, overflow)
+        # The heads' half inputs, written by the last layer: the nodes, the tiles and the road
+        # head's [edge | sum of its two ends].
+        nodes, tiles, XR = half(B * N, H), half(B * T, H), half(B * E, 2 * H)
+        for i, (L, L16) in enumerate(zip(self.layers, self.layers16)):
+            K.gathers16([XN, XT, XE, XN, XN], [4 * H, 2 * H, 2 * H, 4 * H, 4 * H], [N, T, E, N, N],
+                        [XN.narrow(1, H, H), XN.narrow(1, 2 * H, H), XN.narrow(1, 3 * H, H), XT.narrow(1, H, H),
+                         XE.narrow(1, H, H)], [4 * H, 4 * H, 4 * H, 2 * H, 2 * H], [N, N, N, T, E],
+                        [nn, nt, ne, tn, en], [nnc, ntc, nec, tnc, enc], [1] * 5, overflow)
+            u = [torch.mm(XN, L16["wnT"]), torch.mm(XT, L16["wtT"]), torch.mm(XE, L16["weT"])]
+            bias = [L["bn"], L["bt"], L["be"]]
+            if i < len(self.layers) - 1:
+                K.entities16(x, u, none, bias, none, [0] * 3, none, none, [0.0] * 3, valid, Z, zs, *norms(i + 1),
+                             per_row, overflow)
+            else:
+                K.entities16(x, u, none, bias, none, [0] * 3, none, none, [0.0] * 3, valid, [nodes, tiles, XR],
+                             [H, H, 2 * H], none, none, [0.0] * 3, per_row, overflow)
+        pooled = K.pool(*x, vn, vt, ve, glob, N, T, E)
+        other = self._mlp(pooled, self.other)
+        sch = torch.addmm(self.sc1h[1], nodes, self.sc1h[0])  # the hidden layers' relus: in assemble16
+        K.gathers16([nodes], [H], [N], [XR.narrow(1, H, H)], [2 * H], [E], [en], [enc], [0], overflow)
+        roadh = torch.addmm(self.roadh[1][1], torch.relu_(torch.addmm(self.roadh[0][1], XR, self.roadh[0][0])),
+                            self.roadh[1][0])
+        rt = torch.addmm(self.rth[1], tiles, self.rth[0])
+        players_raw = obs[:, self.spans["players"][0]: self.spans["players"][0] + self.P * self.spans["players"][1][1]]
+        players_raw = players_raw.reshape(B, self.P, -1)
+        present = players_raw[..., self.present]
+        players = torch.relu(F.linear(players_raw, self.wp) + self.bp) * present.unsqueeze(-1)
+        victims = torch.cat((self.nobody.expand(B, 1, -1), players[:, 1: self.robber_slots]), 1)
+        rv = torch.matmul(victims, self.rvT).contiguous()
+        vin = torch.cat((pooled.unsqueeze(1).expand(-1, self.vP, -1), players[:, : self.vP]), -1)
+        vl = self._mlp(vin.reshape(B * self.vP, -1), self.value)
+        logits, values = K.assemble16(obs, self.alayout, other.contiguous(), sch, *self.sc_out, roadh, *self.road_out,
+                                      rt, rv, *self.robber_out, vl, overflow)
+        return logits, values, overflow
