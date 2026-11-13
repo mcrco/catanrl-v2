@@ -21,6 +21,9 @@
    records its full searches only). A search sends up to ``pending``
    (``fast_pending``) leaves to the network per round, counted as visits
    while they wait; at 1 a step takes ``sims + 1`` rounds of one leaf a search.
+   ``runtime.search_groups`` (unset: 2) splits a step's searches into groups
+   that take turns on the GPU while the engine collects and applies the
+   others' leaves (:mod:`catanrl.search.pipeline`); 1 is the serial loop.
 2. **Targets.** Policy: the search's ``policy_target`` (the visit
    distribution, or Gumbel's improved policy), over legal actions; or, with
    ``policy_target: gumbel`` (Gumbel roots), Gumbel's improved policy rebuilt
@@ -80,6 +83,7 @@ from catanrl.envs.encoding import critic_level_of, encoder_dims, info_level
 from catanrl.envs.puffer import plan_env
 from catanrl.models import CatanModel, feature_names
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
+from catanrl.search.pipeline import Group, Pipeline, run_groups
 from catanrl.seeding import derive_seed, determinism, rng_state, seed_everything, set_rng_state
 from catanrl.train.puffer import build_policy_model, check_bindable, resolve_device, starts_fresh
 from catanrl.train.select import Selector
@@ -121,6 +125,10 @@ ALPHAZERO_KEYS: dict[str, Any] = {
     "kernels": "torch",
     "checkpoint_interval": 10,
 }
+
+#: ``runtime.search_groups`` when a config leaves it unset: self-play's searches in two groups
+#: that take turns on the device (SelfPlay; 1 is the serial loop, run_pools).
+SEARCH_GROUPS = 2
 
 
 def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
@@ -475,10 +483,18 @@ class _Pending:
 
 
 class SelfPlay:
-    """The VecEnv, two search pools (full and fast budgets) and the games' pending positions."""
+    """The VecEnv, two search pools (full and fast budgets) and the games' pending positions.
+
+    ``groups`` (``runtime.search_groups``) splits the games into that many search groups, each
+    with its own two pools (game e searches in group e % groups), and runs a step's searches
+    with :func:`~catanrl.search.pipeline.run_groups`: the device evaluates one group's leaves
+    while the engine collects and applies the others'. One group is ``run_pools``. The searches
+    are the same either way (pipeline.py says to which bits)."""
 
     def __init__(self, plan: Any, train: Mapping[str, Any], *, model: CatanModel, num_envs: int, threads: int,
-                 seed: int, device: str, mode: str) -> None:
+                 seed: int, device: str, mode: str, groups: int = 1) -> None:
+        if int(groups) < 1:
+            raise ValueError("runtime.search_groups must be at least 1")
         self.train = dict(train)
         self.seed = int(seed)
         self.dims = dict(plan.dims)
@@ -502,6 +518,11 @@ class SelfPlay:
         noise = bool(train["dirichlet_noise"]) and train["root"] == "puct"
         self.full_pool = pool(int(train["sims"]), self.leaves[0], noise)
         self.fast_pool = pool(int(train["fast_sims"]), self.leaves[1], False)  # fast searches: no noise (KataGo)
+        #: Each search group's (full, fast) pools; the first group's are the two above.
+        self.groups = [(self.full_pool, self.fast_pool)] + [
+            (pool(int(train["sims"]), self.leaves[0], noise), pool(int(train["fast_sims"]), self.leaves[1], False))
+            for _ in range(int(groups) - 1)]
+        self.batches: dict = {}  # run_groups' page-locked rows, kept across steps and evaluators
         #: policy_target: gumbel's sigma constants (None: the engine's target, or the pruned one).
         self.sigma = None if train["policy_target"] != "gumbel" else {
             "c_visit": float(train["target_c_visit"]), "c_scale": float(train["target_c_scale"]),
@@ -550,20 +571,29 @@ class SelfPlay:
         targets = []  # the full searches' own policy targets (pool.policy_target), in acting order, for the monitor
         rebuilt = []  # policy_target: gumbel's or pruned's targets of the same searches (the ones trained on), and
         pruned = []  # pruned's share of each of those searches' root visits that it removed, for the monitor
-        roots = RootOutputs(self.full_pool, self.mask) if self.train["policy_target"] != "engine" else None
+        groups = len(self.groups)
+        roots = ([RootOutputs(pools[0], self.mask) for pools in self.groups]
+                 if self.train["policy_target"] != "engine" else None)
         try:
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
-                pool = self.full_pool if full[i] else self.fast_pool
+                pool = self.groups[env % groups][0 if full[i] else 1]
                 tracker = self.vec.tracker(env, seat) if self.dets else None
                 seed = derive_seed(self.seed, "selfplay", iteration, step, env)
                 searches.append((pool, pool.add(self.vec.game(env), seed=seed, tracker=tracker)))
                 if roots is not None and full[i]:
-                    roots.expect(searches[-1][1])
+                    roots[env % groups].expect(searches[-1][1])
             evaluator = Rounds(self.evaluator)
             # a round's rows: every search's quota (collect caps a search by the room left in its buffer)
-            leaves = run_pools([self.full_pool if roots is None else roots, self.fast_pool], evaluator,
-                               batch_rows=[int(full.sum()) * self.leaves[0], int((~full).sum()) * self.leaves[1]])
+            if groups == 1:
+                leaves = run_pools([self.full_pool if roots is None else roots[0], self.fast_pool], evaluator,
+                                   batch_rows=[int(full.sum()) * self.leaves[0], int((~full).sum()) * self.leaves[1]])
+            else:
+                of = b["env_index"][acting] % groups
+                leaves, evaluator.count = run_groups(
+                    [Group([pools[0] if roots is None else roots[g], pools[1]],
+                           [int((full & (of == g)).sum()) * self.leaves[0], int((~full & (of == g)).sum()) * self.leaves[1]])
+                     for g, pools in enumerate(self.groups)], Pipeline(self.evaluator, self.batches))
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
                 pool, sid = searches[i]
@@ -573,7 +603,7 @@ class SelfPlay:
                         policy = pool.policy_target(sid).astype(np.float16)
                         targets.append(policy)
                     else:  # the root's actions: the real game's (the row's mask) that every world offers
-                        legal, logits, value = roots.root(sid)
+                        legal, logits, value = roots[env % groups].root(sid)
                         legal = legal & (b["observations"][row, self.mask] > 0)
                         if self.sigma is not None:
                             policy = gumbel_target(logits, legal, pool.visits(sid), pool.q(sid), value,
@@ -596,7 +626,7 @@ class SelfPlay:
                                                       int(b["num_players"][env])))
                 self.ply[env] += 1
         finally:
-            for pool in (self.full_pool, self.fast_pool):
+            for pool in (pool for pools in self.groups for pool in pools):
                 if pool.pending:
                     pool.cancel()
                 for sid in pool.ids:
@@ -958,7 +988,8 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
                                   weight_decay=float(train["weight_decay"]))
     selfplay = SelfPlay(plan, train, model=model, num_envs=int(env_cfg["num_envs"]),
                         threads=int(runtime.get("threads", 1)), seed=derive_seed(seed, "rollout", launch),
-                        device=device, mode="strict" if strict else "fast")
+                        device=device, mode="strict" if strict else "fast",
+                        groups=int(runtime.get("search_groups") or SEARCH_GROUPS))
     replay = ReplayBuffer(int(train["replay_capacity"]), selfplay.vec.observation_size, selfplay.vec.action_size,
                           selfplay.players)
     monitors = Monitors(model, device=device, rows=int(train["search_rows"])) if monitoring else None
