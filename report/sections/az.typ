@@ -436,11 +436,11 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
 #meta(
   dates: "2026-11-13 01:18 –",
   owner: "marco",
-  config: "runs/az-2p-kata/main+600/config.json (a fork of configs/experiments/az-2p-kata.yaml)",
-  wandb: (("az-2p-kata-main-600-6ffee9f3", "az-2p-kata/main+600"),),
+  config: "runs/az-2p-kata/main+600/config.json, then runs/az-2p-kata/main+600-fast/config.json (forks of configs/experiments/az-2p-kata.yaml)",
+  wandb: (("az-2p-kata-main-600-6ffee9f3", "az-2p-kata/main+600"), ("az-2p-kata-main-600-fast-a21eb778", "az-2p-kata/main+600-fast")),
   records: (),
 )
-#tldr[Marco (2026-11-13): keep the KataGo-style training going for about two days and see how it goes. This run continues @exp:az-kata from e300 with nothing changed, to iteration 900 (three times the games). It ends late on 2026-11-14.]
+#tldr[Marco (2026-11-13): keep the KataGo-style training going for about two days and see how it goes. This run continues @exp:az-kata from e300 with nothing changed, to iteration 900 (three times the games). At e410 (2026-11-13 08:23) Marco had it stopped and continued as `main+600-fast` on the faster self-play of @exp:az-speed: the same visit counts, targets and learning rate, 82 s an iteration instead of 197 s. It should end on the morning of 2026-11-14.]
 
 *Question.* Does the search keep improving with more of the same self-play, or was e300 the plateau?
 
@@ -448,6 +448,9 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
 - *Run.* A fork of `az-2p-kata/main` at e300: the weights, the optimizer state and the replay buffer carry over, and the recipe is the same (pruned targets, 600 and 100 visits, learning rate 5e-5). 600 more iterations, about 110,000 more games.
 - *Eval.* The first run's, so its rows are the baseline: the checkpoint in the 1,024-sim search against fr3's fair raw bot on the same 2,000 select games at e450, e600, e750 and e900 (e300 scored 57.90%, the start 51.75%), paired by game. Finals for the best and the last checkpoint on the same 2,000 held-out games (e300 57.70%, the start 53.85%). A paired comparison on 2,000 games detects about 3.4 pp at 80% power.
 - *Cost.* 600 iterations at about 200 s (33 h), four selects (9 h), finals 2–4 h: about 46 h. The time limit is a 60 h guard.
+- *Switch at e410* (Marco: "kill the current run and continue from latest checkpoint possible"). `main+600` was stopped at iteration 410 (75,282 games) and forked as `main+600-fast` with `train.reuse: true`, `train.kernels: fused16` and two search groups; weights, optimizer and replay carry over again. Iterations 411–413 took 82–86 s at 69,000 leaves a second, with 46% of searches starting from a kept tree; policy loss 0.26–0.27 and value loss 0.38–0.39, as in the last iterations before the switch. The 490 iterations left take about 11 h, the selects 9 h and the finals 4–5 h.
+- *What the switch changes for the question.* From e411 the games come from searches on reused trees and fp16 forwards, so a change in the trend after e410 could be either more self-play or the new self-play. The evals are the same search on the same games (unchanged bit for bit), and e450's select is the first to include the new games (40 of its 450 iterations).
+- *Finals.* The fork's finals are the best and the last checkpoint only: the start's row is not played again (the merge changed the eval code id), and both pair by game with the stored row (fr3 in the search, 53.85%).
 - *Fix on the way.* `catanrl fork` failed on an AlphaZero run from a network: it resolved the stored config again, where each scenario holds the game's definition instead of its name. Fixed in `50236e3`, with a test.
 - Set by Claude: 900 iterations and a select every 150, to fit Marco's two days.
 - *Where the time goes* (read off the live run at iteration 313, nothing profiled). Self-play is 194 s of each 197 s iteration. A step is 46.5 network rounds of about 2,430 leaves, 65 ms a round, 27 µs a leaf. The GPU is busy 64% of the time (about 40 ms a round, the 16 µs a leaf of @exp:search-depth-2p); in the other 25 ms the CPU walks the trees and moves the rows, and each side waits for the other. The process uses 3.0 of 16 hardware threads: the main thread a whole one (it spins while the GPU works), the 22 workers 6–12% each. Forwards are already 512 rows, about five to a round.
@@ -456,4 +459,60 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
 catanrl fork az-2p-kata/main --as main+600 --set train.iterations=900 --set eval.select.every=150 \
   --set runtime.time_limit_hours=60
 catanrl run az-2p-kata/main+600
+# at e410: stop it (SIGINT saves a checkpoint at the current iteration), then
+catanrl fork az-2p-kata/main+600 --as main+600-fast --set train.reuse=true --set train.kernels=fused16 \
+  --set 'eval.final=[<the best and latest rows of the parent, with the fork's name>]'
+catanrl run az-2p-kata/main+600-fast
+```)
+
+=== Faster self-play: tree reuse, half-precision kernels, pipelined rounds #chip("done") <exp:az-speed>
+#meta(
+  dates: "2026-11-13",
+  owner: "marco",
+  config: "train.reuse, train.kernels: fused16, runtime.search_groups (src/catanrl/train/alphazero.py, src/catanrl/search/pipeline.py)",
+  wandb: (),
+  records: (),
+)
+#tldr[Three changes to AlphaZero self-play, proposed by Claude from the timing in @exp:az-kata-more and approved by Marco: keep a game's search tree between its decisions, run the network's large matrix products in half precision, and let two groups of games take turns on the GPU so it works while the CPU walks the other group's trees. Together an iteration of the KataGo-style run takes 82 s instead of 197 s (2.4×). Old configs, their hashes and every existing code path are bit for bit unchanged. What the changes do to learning is not measured yet: the run's next selects are the first evidence.]
+
+*Question.* The GPU was busy 64% of each round and every decision searched from an empty tree. How much faster can the same self-play run on this box?
+
+#lead[What changed.]
+- *Tree reuse* (`train.reuse: true`; off by default). The tree of a game's last search is kept, and the next search starts from the child the played move leads to when the game is where that child says it is. The visit count becomes a cap: a search that carries _n_ visits adds 600 − _n_ (100 − _n_ in a fast search). Full searches still get fresh Dirichlet noise at the root, and the pruned target still reads the root's priors without noise. Only with `root: puct`, `dets: 0` and the `engine` or `pruned` targets. Trees are dropped at a game's end and at the end of each iteration's steps. The engine gained per-search options, `reroot` and `root_priors` (cppanatron `b926970`).
+- *Half-precision kernels* (`train.kernels: fused16`). The fused forward with its large matrix products in fp16; a forward whose halves overflow is flagged and evaluated again in float32 (counted in `exact_forwards`). Evals keep `kernels=fused`.
+- *Pipelined rounds with pinned buffers* (`runtime.search_groups`, default 2, not hashed). Game _e_ searches in group _e_ mod 2. While the GPU evaluates one group's leaves the CPU collects the other's, straight into page-locked memory, with non-blocking copies both ways.
+
+#lead[Measured] (each piece alone, on e300's net, beside the live run, so indicative).
+#figure(
+  btable(
+    columns: (auto, 1fr, auto),
+    align: (left, left, right),
+    header: ([Piece], [Measure], [Gain]),
+    [Tree reuse], [leaves per decision 224.9 → 171.3 (32 games, 16,000 decisions an arm)], [1.31×],
+    [fp16 kernels], [a 512-row forward 25.7 → 17.2 µs a row; 1.18–1.24× on a whole step, where the CPU is the limit], [1.5×],
+    [Two groups], [a network round 86–88 → 55–57 ms], [1.5–1.6×],
+    [All three], [an iteration of the run, GPU to itself: 197 → 82 s], [2.4×],
+  ),
+  caption: [The last row is the live run before and after the switch at e410 (@exp:az-kata-more): 69,000 leaves a second against 37,300, and fewer leaves per decision.],
+)
+- *Reuse covers under half the searches.* 43–45% of searches start from a kept tree: the environment plays the dice roll itself, so a tree only survives between decisions of the same turn and in initial placement. A kept tree brings 16% of a full search's cap and 40% of a fast one's; 15–16% of fast searches need no new visits at all. Re-rooting through the roll (a chance node) is not built.
+- *fp16 agrees with float32.* On the same rows against `fused`: mean KL 1.6e-6 and 3.8e-6 on two position sets, the same top move at 99.98% and 99.97%, values within 1.4e-3.
+- *Three groups, a thread per group and larger forwards* did not help.
+- *Memory.* Kept trees are about 0.7 MB a game. The 512-game pre-flight peaked at 3.7 GB of RAM without the replay and 1.6 GB of GPU memory.
+
+#lead[Checks.]
+- With the new options off, nothing moves: 38,340 engine arrays, 336 arrays from the eval harness's search, self-play and short training runs, and 20 GPU evaluator outputs are bit for bit those of the build before the merge. `az-2p-kata`'s config hash is unchanged (`2e3b1866f7a37e4a`, asserted in a test).
+- Reuse in one, two and three groups plays and records the same games (strict mode, CPU). On CUDA in fast mode two groups are deterministic but not bit-equal to one, because the forwards' sizes differ.
+- Pre-flight before the switch: a fork of a copy of the live run at e325 with all three on ran two iterations at 122–129 s beside the live run, policy loss 0.257 and value loss 0.384 (the live run then: 0.26–0.27 and 0.38–0.39).
+- Tests on the merged build: the CPU suite (999 tests) passes except one bridge test that failed once under load and passes alone; the 47 GPU tests pass; of the 81 train-marked tests five `test_smoke` cases fail, as they do on main (their scratch runs dir lacks `ppo-2p-fr3/full`). The first full run also caught a pipeline test that the merge with the fp16 kernels broke (fixed in `f0e65a7`).
+- *Eval records.* The merge changes the eval code id, so cached rows are not found again: new rows are played again and old ones paired by hand. The eval search itself is unchanged bit for bit.
+
+#lead[Caveats.]
+- No evidence yet that training on reused trees and fp16 forwards learns as well. With reuse a full search's 600 visits include carried ones that were chosen without this root's noise, and the target's visit counts start from them.
+- PyTorch 2.14.1 frees cuBLAS workspaces that a captured CUDA graph still uses; `fused16` clears them around each capture. `fused` is left as it was, and its evaluator's workspace grows by about 1 GiB over a run.
+
+#repro(```sh
+catanrl run az-2p-kata --set train.reuse=true --set train.kernels=fused16   # two groups is the default
+catanrl run az-2p-kata --set runtime.search_groups=1                        # the old round loop
+pytest tests/test_search_pipeline.py tests/test_alphazero.py tests/test_graph_kernels.py -q
 ```)
