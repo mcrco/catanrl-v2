@@ -431,3 +431,28 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
   --set train.iterations=8 --set train.min_replay=3000 --set train.checkpoint_interval=8 --set eval.select.every=8 \
   --set 'eval.select.suite={name: smoke-select-128, purpose: select, seed: 123, boards: 128, scenarios: [{game: base-2p-fr}], turn_limit: 500}'
 ```)
+
+=== 600 more iterations from e300: `az-2p-kata/main+600` #chip("running") <exp:az-kata-more>
+#meta(
+  dates: "2026-11-13 01:18 –",
+  owner: "marco",
+  config: "runs/az-2p-kata/main+600/config.json (a fork of configs/experiments/az-2p-kata.yaml)",
+  wandb: (("az-2p-kata-main-600-6ffee9f3", "az-2p-kata/main+600"),),
+  records: (),
+)
+#tldr[Marco (2026-11-13): keep the KataGo-style training going for about two days and see how it goes. This run continues @exp:az-kata from e300 with nothing changed, to iteration 900 (three times the games). It ends late on 2026-11-14.]
+
+*Question.* Does the search keep improving with more of the same self-play, or was e300 the plateau?
+
+#lead[Setup.]
+- *Run.* A fork of `az-2p-kata/main` at e300: the weights, the optimizer state and the replay buffer carry over, and the recipe is the same (pruned targets, 600 and 100 visits, learning rate 5e-5). 600 more iterations, about 110,000 more games.
+- *Eval.* The first run's, so its rows are the baseline: the checkpoint in the 1,024-sim search against fr3's fair raw bot on the same 2,000 select games at e450, e600, e750 and e900 (e300 scored 57.90%, the start 51.75%), paired by game. Finals for the best and the last checkpoint on the same 2,000 held-out games (e300 57.70%, the start 53.85%). A paired comparison on 2,000 games detects about 3.4 pp at 80% power.
+- *Cost.* 600 iterations at about 200 s (33 h), four selects (9 h), finals 2–4 h: about 46 h. The time limit is a 60 h guard.
+- *Fix on the way.* `catanrl fork` failed on an AlphaZero run from a network: it resolved the stored config again, where each scenario holds the game's definition instead of its name. Fixed in `50236e3`, with a test.
+- Set by Claude: 900 iterations and a select every 150, to fit Marco's two days.
+
+#repro(```sh
+catanrl fork az-2p-kata/main --as main+600 --set train.iterations=900 --set eval.select.every=150 \
+  --set runtime.time_limit_hours=60
+catanrl run az-2p-kata/main+600
+```)
