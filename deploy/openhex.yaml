@@ -80,6 +80,8 @@ bots:
     version: 1v1-search-v3
     spec: MCTS:ckpt=az-2p-kata/main@e300#513d0caac817:sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45
     key_env: OPENHEX_KEY_1V1_SEARCH_V3
+    bot_id: 1154c5f058024665
+    deployed: 2026-11-13
     tag: openhex-1v1-v3
     evidence: [e917f9bb47b8ad4c, 809619df11e87cc8, b7f9c1f46488c4b0]
     retired: false
