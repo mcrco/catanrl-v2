@@ -35,6 +35,12 @@ models:
     from: scratch
     steps: 500_115_456
     use: g1; the from-scratch graph-s baseline on OpenHex's 1v1 rules (gamma 1)
+  2p-graph-s-5:
+    ref: "az-2p-kata/main@e300#513d0caac817"
+    rules: base-2p-fr
+    from: 2p-graph-s-3
+    steps: 2_030_899_200
+    use: fr3 after 300 iterations of AlphaZero self-play (9.8M searched moves); in the 1,024-sim search 57.7% vs fr3's raw bot against 53.85% with fr3's net; the net of OpenHex 1v1-search-v3
   2p-graph-m-1:
     ref: "graph-m-2p-lr/main@e22711#673425d606b5"
     rules: base-2p-fr
