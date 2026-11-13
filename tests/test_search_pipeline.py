@@ -389,6 +389,7 @@ def played(groups: int, steps=40, level="private", **train):
     for step in range(steps):
         play.step(0, step, rng, replay, stats)
         actions.append(play.buffers["actions"].copy())
+    play.drop_trees()  # reuse: the trees kept for the next step
     assert all(len(pool) == 0 for pools in play.groups for pool in pools) and len(play.groups) == groups
     n = replay.size
     return (np.stack(actions), replay.obs[:n].copy(), replay.policy[:n].copy(), replay.value[:n].copy(),
@@ -420,6 +421,18 @@ def test_self_play_in_groups_is_the_serial_loops(train):
         assert all(same(a, b) for a, b in zip(played(groups, **train), reference)), groups
     with pytest.raises(ValueError, match="search_groups"):
         played(0, steps=0)
+
+
+def test_reuse_in_groups_is_the_serial_loops():
+    """train.reuse: a group has one pool for both budgets and a game stays in its group, so its
+    kept tree is re-rooted in the pool that holds it; one group, two and three play, record and
+    count (the re-rooted searches and their carried visits too) the same."""
+    train = {"reuse": True, "root": "puct", "dets": 0, "sims": 12, "fast_sims": 6, "pending": 3, "fast_pending": 2,
+             "policy_target": "pruned"}
+    reference = played(1, level="full", **train)
+    assert reference[-1]["reused"] > 20 and reference[-1]["carried_full"] > 0 and len(reference[1]) > 20
+    for groups in (2, 3):
+        assert all(same(a, b) for a, b in zip(played(groups, level="full", **train), reference)), groups
 
 
 def variant(name: str, **runtime) -> Variant:
