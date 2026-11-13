@@ -1,6 +1,7 @@
 # AlphaZero / expert iteration (catanrl.train.alphazero): self-play with
 # batched SearchPool searches, a replay buffer and Adam(W) on policy
-# cross-entropy plus per-seat value BCE. Exactly catanrl's ALPHAZERO_KEYS.
+# cross-entropy plus per-seat value BCE. Exactly catanrl's ALPHAZERO_KEYS
+# (and the optional reuse, below).
 # Evals: a variant that starts from a network (init_from) is evaluated head to
 # head against it, ${init}, unless it sets its own (catanrl.config.alphazero_evals).
 algo: alphazero
@@ -41,3 +42,6 @@ search_rows: 512               # leaf rows per network call (CUDA graphs at powe
 kernels: torch                 # torch | fused: self-play's forwards on the fused CUDA kernels (shared-trunk graph,
                                # hidden 96, nvcc on PATH), rebuilt from the weights after every learning step
 checkpoint_interval: 10        # iterations
+# reuse: true                  # optional (root: puct, dets: 0): a game keeps its search tree between decisions; a
+                               # search re-rooted at the action played counts the visits it carries towards its
+                               # budget (sims or fast_sims as a cap on the root's visits), full ones with new noise

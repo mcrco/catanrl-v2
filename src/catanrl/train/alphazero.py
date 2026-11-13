@@ -21,6 +21,18 @@
    records its full searches only). A search sends up to ``pending``
    (``fast_pending``) leaves to the network per round, counted as visits
    while they wait; at 1 a step takes ``sims + 1`` rounds of one leaf a search.
+   With ``reuse: true`` (optional; PUCT roots on the true game) a game keeps
+   its search tree from one decision to the next, whichever seat moves: when
+   the game moved by exactly the action played, and that action was searched
+   and deterministic, the next search starts from that action's subtree
+   (``SearchPool.reroot``) and the visits the subtree carries count towards
+   its budget (KataGo's visit cap): a full search tops its root up to
+   ``sims`` visits, a fast one to ``fast_sims``, and a root that has them
+   already is played from as it is. Every full search still draws its own
+   Dirichlet noise, over the root's priors as the network gave them. A chance
+   action (a roll, a bought card, a steal), a move the VecEnv played by
+   itself (forced), the end of the game and the end of the iteration (the
+   network changes) drop the tree, and the next search starts empty.
 2. **Targets.** Policy: the search's ``policy_target`` (the visit
    distribution, or Gumbel's improved policy), over legal actions; or, with
    ``policy_target: gumbel`` (Gumbel roots), Gumbel's improved policy rebuilt
@@ -35,7 +47,9 @@
    visit distribution without the visits that the root's Dirichlet noise
    forced (:func:`pruned_visits`): an action keeps the visits its value
    earns under the network's own prior, so the noise still shapes the search
-   and the move played but is not taught back to the network.
+   and the move played but is not taught back to the network. With ``reuse``
+   a target counts every visit of its root, carried and new, and the pruned
+   one reads the prior from the tree (``SearchPool.root_priors``).
    Value: each seat's outcome, seat-relative like the value head (slot k =
    the seat k places after the row's), 1 to the winner and 0 to the others;
    a truncated game gives every seat 1/n (the eval convention) or 0
@@ -76,10 +90,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from catanrl.envs.encoding import critic_level_of, encoder_dims, info_level
+from catanrl.envs.encoding import critic_level_of, encoder_dims, info_level, make_encoder
 from catanrl.envs.puffer import plan_env
 from catanrl.models import CatanModel, feature_names
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
+from catanrl.search.pool import DIRICHLET_ALPHA
 from catanrl.seeding import derive_seed, determinism, rng_state, seed_everything, set_rng_state
 from catanrl.train.puffer import build_policy_model, check_bindable, resolve_device, starts_fresh
 from catanrl.train.select import Selector
@@ -122,10 +137,14 @@ ALPHAZERO_KEYS: dict[str, Any] = {
     "checkpoint_interval": 10,
 }
 
+#: Optional ``train`` keys and the values that mean "unset" (catanrl.config.TRAIN_OPTIONAL: absent
+#: from configs/train/alphazero.yaml, and a config without them hashes as it did before they existed).
+ALPHAZERO_OPTIONAL: dict[str, Any] = {"reuse": False}
+
 
 def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
     missing = sorted(set(ALPHAZERO_KEYS) - set(train))
-    unknown = sorted(set(train) - set(ALPHAZERO_KEYS))
+    unknown = sorted(set(train) - set(ALPHAZERO_KEYS) - set(ALPHAZERO_OPTIONAL))
     if missing or unknown:
         raise ValueError(f"alphazero train keys: missing {missing}, unknown {unknown}")
     train = dict(train)
@@ -160,6 +179,15 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
     if train["policy_target"] != "gumbel" and any(train[k] != ALPHAZERO_KEYS[k] for k in constants):
         raise ValueError(f"train.{', '.join(constants)} shape policy_target: gumbel; the engine's target "
                          "has the search's own sigma and a pruned one has none (set policy_target: gumbel)")
+    reuse = train.get("reuse", ALPHAZERO_OPTIONAL["reuse"])
+    if reuse is not True and reuse is not False:
+        raise ValueError(f"train.reuse must be true or false, not {reuse!r}")
+    if reuse and train["root"] != "puct":
+        raise ValueError("train.reuse counts the visits a re-rooted tree carries towards a PUCT search's "
+                         "budget; a Gumbel root plans its visits from an empty root (root: puct)")
+    if reuse and int(train["dets"]) > 0:
+        raise ValueError("train.reuse keeps one tree per game on the true game (dets: 0); sampled worlds "
+                         "hold one seat's knowledge and do not carry over to the next seat's decision")
     return train
 
 
@@ -316,6 +344,16 @@ def pruned_visits(logits: np.ndarray, legal: np.ndarray, visits: np.ndarray, q: 
     cut[best] = False
     kept[edges] = np.where(cut & (earned > 1.0), earned, np.where(cut, 0.0, n))
     return kept
+
+
+def root_log_priors(pool: cpp.SearchPool, sid: int) -> np.ndarray:
+    """The log of search ``sid``'s root priors before any Dirichlet noise, one row per root world
+    ([W, A], -inf off the root's actions): ``logits`` for :func:`pruned_visits` at a root the
+    network was not asked about in this search (``reuse``: a re-rooted root was evaluated as a
+    leaf of an earlier one). The tree's own float32 priors (``SearchPool.root_priors``), so
+    within float32 rounding of the softmax of the network's logits that built them."""
+    with np.errstate(divide="ignore"):  # zero off the root's actions
+        return np.log(pool.root_priors(sid).astype(np.float64))
 
 
 # ---------------------------------------------------------------- replay
@@ -475,7 +513,8 @@ class _Pending:
 
 
 class SelfPlay:
-    """The VecEnv, two search pools (full and fast budgets) and the games' pending positions."""
+    """The VecEnv, two search pools (full and fast budgets) and the games' pending positions.
+    With ``reuse`` one pool for both budgets, each search with its own, and every game's tree."""
 
     def __init__(self, plan: Any, train: Mapping[str, Any], *, model: CatanModel, num_envs: int, threads: int,
                  seed: int, device: str, mode: str) -> None:
@@ -501,7 +540,19 @@ class SelfPlay:
         self.leaves = int(train["pending"]), int(train["fast_pending"])
         noise = bool(train["dirichlet_noise"]) and train["root"] == "puct"
         self.full_pool = pool(int(train["sims"]), self.leaves[0], noise)
-        self.fast_pool = pool(int(train["fast_sims"]), self.leaves[1], False)  # fast searches: no noise (KataGo)
+        #: reuse: a game's tree serves full and fast searches alike, so both run in one pool, each
+        #: search with its own budget, leaves per round and noise (``options``: full, fast).
+        self.reuse = bool(train.get("reuse", False))
+        self.fast_pool = self.full_pool if self.reuse else \
+            pool(int(train["fast_sims"]), self.leaves[1], False)  # fast searches: no noise (KataGo)
+        self.pools = [self.full_pool] if self.reuse else [self.full_pool, self.fast_pool]
+        self.options = tuple(
+            {"simulations": int(train[sims]), "max_pending": leaves, "dirichlet_alpha": DIRICHLET_ALPHA * noisy}
+            for sims, leaves, noisy in (("sims", self.leaves[0], noise), ("fast_sims", self.leaves[1], False)))
+        #: reuse: each game's last search, kept for its next decision: (pool, search id, the game
+        #: it searched, the action played).
+        self.trees: dict[int, tuple[cpp.SearchPool, int, cpp.Game, int]] = {}
+        self.codec = make_encoder(self.dims, levels["level"]).action_space if self.reuse else None
         #: policy_target: gumbel's sigma constants (None: the engine's target, or the pruned one).
         self.sigma = None if train["policy_target"] != "gumbel" else {
             "c_visit": float(train["target_c_visit"]), "c_scale": float(train["target_c_scale"]),
@@ -540,6 +591,43 @@ class SelfPlay:
             raise RuntimeError(f"kernels: fused: the evaluator's values are {gap:.2g} from the network's "
                                "(its weights are stale: refresh() after every change)")
 
+    def pool_of(self, env: int, full: bool) -> cpp.SearchPool:
+        """The pool that searches game ``env`` at the full or the fast budget."""
+        return self.full_pool if full else self.fast_pool
+
+    def _search(self, pool: cpp.SearchPool, env: int, full: bool, seed: int, stats: dict[str, float]) -> int:
+        """``reuse``: game ``env``'s search for the decision it is at. Its kept tree, re-rooted at the
+        action it played, when the game is that tree's game plus the action and nothing else (a
+        chance outcome, a forced move the VecEnv played, a reset) and the engine re-roots there (a
+        searched, deterministic action); a new search otherwise, the kept tree dropped. Either way
+        with this decision's budget and noise: a re-rooted root's visits count towards the budget."""
+        game, options = self.vec.game(env), self.options[0 if full else 1]
+        kept = self.trees.pop(env, None)
+        sid = None
+        if kept is not None:
+            owner, sid, previous, chosen = kept
+            expected = previous.copy()
+            expected.execute(self.codec.decode(previous, chosen))
+            if owner is pool and expected.search_equivalent(game) and pool.reroot(sid, chosen, **options):
+                carried = min(int(pool.visits(sid).sum()), options["simulations"]) / options["simulations"]
+                stats["reused"] = stats.get("reused", 0.0) + 1.0
+                key = "carried_full" if full else "carried_fast"
+                stats[key] = stats.get(key, 0.0) + carried
+            else:
+                owner.remove(sid)
+                sid = None
+        if sid is None:
+            sid = pool.add(game, seed=seed, **options)
+        self.trees[env] = (pool, sid, game, -1)  # the action: once it is chosen
+        return sid
+
+    def drop_trees(self) -> None:
+        """``reuse``: forget every game's tree (the end of an iteration: the network that built
+        them is about to change), so each game's next search starts empty."""
+        for pool, sid, _, _ in self.trees.values():
+            pool.remove(sid)
+        self.trees.clear()
+
     def step(self, iteration: int, step: int, rng: np.random.Generator, replay: ReplayBuffer,
              stats: dict[str, float]) -> None:
         """Search every acting row, play the chosen moves and file finished games."""
@@ -550,31 +638,41 @@ class SelfPlay:
         targets = []  # the full searches' own policy targets (pool.policy_target), in acting order, for the monitor
         rebuilt = []  # policy_target: gumbel's or pruned's targets of the same searches (the ones trained on), and
         pruned = []  # pruned's share of each of those searches' root visits that it removed, for the monitor
-        roots = RootOutputs(self.full_pool, self.mask) if self.train["policy_target"] != "engine" else None
+        rebuild = self.train["policy_target"] != "engine"
+        # reuse: a re-rooted root is not evaluated again, so its prior is read from the tree instead
+        roots = RootOutputs(self.full_pool, self.mask) if rebuild and not self.reuse else None
         try:
+            rows = {id(pool): 0 for pool in self.pools}
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
-                pool = self.full_pool if full[i] else self.fast_pool
+                pool = self.pool_of(env, bool(full[i]))
+                rows[id(pool)] += self.leaves[0 if full[i] else 1]
                 tracker = self.vec.tracker(env, seat) if self.dets else None
                 seed = derive_seed(self.seed, "selfplay", iteration, step, env)
+                if self.reuse:
+                    searches.append((pool, self._search(pool, env, bool(full[i]), seed, stats)))
+                    continue
                 searches.append((pool, pool.add(self.vec.game(env), seed=seed, tracker=tracker)))
                 if roots is not None and full[i]:
                     roots.expect(searches[-1][1])
             evaluator = Rounds(self.evaluator)
             # a round's rows: every search's quota (collect caps a search by the room left in its buffer)
-            leaves = run_pools([self.full_pool if roots is None else roots, self.fast_pool], evaluator,
-                               batch_rows=[int(full.sum()) * self.leaves[0], int((~full).sum()) * self.leaves[1]])
+            leaves = run_pools([roots if roots is not None and pool is self.full_pool else pool for pool in self.pools],
+                               evaluator, batch_rows=[rows[id(pool)] for pool in self.pools])
             for i, row in enumerate(acting):
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
                 pool, sid = searches[i]
                 policy = None
                 if full[i]:
-                    if roots is None:
+                    if not rebuild:
                         policy = pool.policy_target(sid).astype(np.float16)
                         targets.append(policy)
                     else:  # the root's actions: the real game's (the row's mask) that every world offers
-                        legal, logits, value = roots.root(sid)
-                        legal = legal & (b["observations"][row, self.mask] > 0)
+                        if roots is None:  # reuse (pruned; the true game is the one world)
+                            legal, logits = b["observations"][row, self.mask] > 0, root_log_priors(pool, sid)
+                        else:
+                            legal, logits, value = roots.root(sid)
+                            legal = legal & (b["observations"][row, self.mask] > 0)
                         if self.sigma is not None:
                             policy = gumbel_target(logits, legal, pool.visits(sid), pool.q(sid), value,
                                                    **self.sigma).astype(np.float16)
@@ -591,16 +689,23 @@ class SelfPlay:
                     stats["depth"] += search.mean_depth
                     stats["max_depth"] += search.max_depth
                 b["actions"][row] = pool.select(sid, temperature(self.train, int(self.ply[env])))
+                if self.reuse:
+                    self.trees[env] = (*self.trees[env][:3], int(b["actions"][row]))
                 if full[i] or self.train["record_fast"]:
                     self.pending[env].append(_Pending(b["observations"][row].astype(np.float16), policy, seat,
                                                       int(b["num_players"][env])))
                 self.ply[env] += 1
+        except BaseException:
+            self.trees.clear()  # a step that failed keeps no tree: the searches go below
+            raise
         finally:
-            for pool in (self.full_pool, self.fast_pool):
+            kept = {(id(pool), sid) for pool, sid, _, _ in self.trees.values()}
+            for pool in self.pools:
                 if pool.pending:
                     pool.cancel()
                 for sid in pool.ids:
-                    pool.remove(sid)
+                    if (id(pool), sid) not in kept:
+                        pool.remove(sid)
         stats["leaves"] += leaves
         stats["rounds"] = stats.get("rounds", 0.0) + evaluator.count
         stats["full"] += int(full.sum())
@@ -619,6 +724,9 @@ class SelfPlay:
             self.pending[env] = []
             self.ply[env] = 0
             self.games += 1
+            if int(env) in self.trees:  # reuse: the game is over (won or truncated) and reset
+                pool, sid, _, _ = self.trees.pop(int(env))
+                pool.remove(sid)
             if not rows:
                 continue
             rewards = b["rewards"][env * players : (env + 1) * players]
@@ -1018,6 +1126,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             monitors.begin()
         for step in range(int(train["steps_per_iteration"])):
             selfplay.step(iteration, step, rng, replay, stats)
+        selfplay.drop_trees()  # reuse: no tree outlives the network that built it
         played = time.time() - start
         health = monitors.before_learn(replay, replay.added - added) if monitors is not None else {}
         learned = {}
@@ -1045,6 +1154,12 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             "throughput/selfplay_s": played, "throughput/iteration_s": time.time() - start,
             **{f"train/{k}": v for k, v in learned.items()}, **health, "map_pool": plan.pool["hash"],
         }
+        if selfplay.reuse:
+            # searches that started from a kept tree, and the share of its visit cap a search started
+            # with (0 for a new tree), over the full and over the fast searches
+            logs["selfplay/reused"] = stats.get("reused", 0.0) / max(new, 1)
+            logs["selfplay/carried_full"] = stats.get("carried_full", 0.0) / full
+            logs["selfplay/carried_fast"] = stats.get("carried_fast", 0.0) / max(new - stats["full"], 1.0)
         writer.log(logs, selfplay.decisions)
         # one line per iteration; the ETA is this launch's pace (checkpoints and selects included)
         # over the iterations left, or the time limit if that comes first

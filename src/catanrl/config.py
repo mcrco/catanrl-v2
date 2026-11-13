@@ -30,7 +30,8 @@ deciding nothing. ``eval.select: {from: NAME}`` makes monitor NAME the select
 eval (resolution copies its suite, lineup, every, metric and fill into
 ``eval.select``), so ``best`` follows it. A PPO variant's ``train.stop_epoch``
 is optional the same way (:data:`TRAIN_OPTIONAL`): absent from
-``configs/train/ppo.yaml``, so a config without it keeps its hash.
+``configs/train/ppo.yaml``, so a config without it keeps its hash. So is an
+AlphaZero variant's ``train.reuse`` (absent from ``configs/train/alphazero.yaml``).
 
 An AlphaZero variant that starts from a network (``init_from`` with the
 actor) gets :func:`alphazero_evals` as a layer between the defaults and the
@@ -109,7 +110,9 @@ OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None}
 #: means "unset": like :data:`OPTIONAL`, a config without them (or with them unset, dropped at
 #: resolution) hashes as it did before they existed. ``stop_epoch``: end the run after that
 #: epoch (its checkpoint, then the finals) with the schedule still the whole budget's.
-TRAIN_OPTIONAL: dict[str, dict[str, Any]] = {"ppo": {"stop_epoch": None}}
+#: ``reuse`` (AlphaZero): self-play keeps a game's search tree from one decision to the next
+#: (catanrl.train.alphazero).
+TRAIN_OPTIONAL: dict[str, dict[str, Any]] = {"ppo": {"stop_epoch": None}, "alphazero": {"reuse": False}}
 #: train.precision of a PPO run: float32; bfloat16 (PuffeRL's own autocast, with train.amp);
 #: float16 (needs train.amp: catanrl.train.puffer's autocast and GradScaler).
 PRECISIONS = ("float32", "bfloat16", "float16")
@@ -400,6 +403,7 @@ def _check_train(train: Any) -> dict:
         _check_stop_epoch(out.get("stop_epoch"))
     if algo == "alphazero":
         _check_alphazero_targets(out, base)
+        _check_alphazero_reuse(out)
     if algo == "distill":
         check_distill(out, base)
     return out
@@ -433,6 +437,19 @@ def _check_stop_epoch(stop: Any) -> None:
     if isinstance(stop, bool) or not isinstance(stop, int) or stop < 1:
         raise ConfigError(f"train.stop_epoch is a positive epoch (the run ends after it, finished) or null, "
                           f"not {stop!r}")
+
+
+def _check_alphazero_reuse(train: Mapping[str, Any]) -> None:
+    """train.reuse (optional, hashed when true): alphazero.check_train's refusals, at resolution."""
+    reuse = train.get("reuse", False)
+    if not isinstance(reuse, bool):
+        raise ConfigError(f"train.reuse: expected bool, got {type(reuse).__name__}")
+    if reuse and train["root"] != "puct":
+        raise ConfigError("train.reuse counts the visits a re-rooted tree carries towards a PUCT search's "
+                          "budget; a Gumbel root plans its visits from an empty root (root: puct)")
+    if reuse and train["dets"] > 0:
+        raise ConfigError("train.reuse keeps one tree per game on the true game (dets: 0); sampled worlds "
+                          "hold one seat's knowledge and do not carry over to the next seat's decision")
 
 
 def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) -> None:

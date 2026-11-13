@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 
 from catanrl import canon
-from catanrl.config import Variant, config_hash, resolve
+from catanrl.config import ConfigError, Variant, config_hash, load_plan, resolve
 from catanrl.envs.encoding import encoder_dims
 from catanrl.envs.puffer import plan_env
 from catanrl.runs import RunWriter, load_experiment
@@ -29,6 +29,7 @@ from catanrl.train.alphazero import (
     check_train,
     gumbel_target,
     pruned_visits,
+    root_log_priors,
     temperature,
     train_alphazero,
     value_targets,
@@ -908,3 +909,230 @@ def test_a_pruned_target_changes_the_targets_and_nothing_else(monkeypatch):
     for m in metrics["pruned"]:
         assert 0.0 < m["target/pruned"] < 1.0 and m["target/entropy"] != m["search/target_entropy"]
         assert 0.0 <= m["target/overrule"] <= 1.0 and m["target/kl_net"] >= 0.0
+
+
+# ---------------------------------------------------------------- tree reuse (train.reuse)
+
+
+def test_reuse_is_optional_hashed_and_refused_where_it_cannot_work():
+    """Absent from ALPHAZERO_KEYS and alphazero.yaml, so configs without it hash as before it
+    existed (az-2p-kata's pinned hash); true only on PUCT roots on the true game."""
+    assert "reuse" not in ALPHAZERO_KEYS and "reuse" not in check_train(ALPHAZERO_KEYS)
+    puct = {**ALPHAZERO_KEYS, "root": "puct"}
+    assert check_train({**puct, "reuse": True})["reuse"] is True
+    assert check_train({**puct, "reuse": False, "dets": 1})["reuse"] is False
+    assert check_train({**puct, "reuse": True, "policy_target": "pruned"})["policy_target"] == "pruned"
+    for bad, match in (({"root": "gumbel"}, "root: puct"), ({"dets": 1}, "dets: 0"), ({"reuse": 1}, "true or false"),
+                       ({"reuse": "yes"}, "true or false")):
+        with pytest.raises(ValueError, match=match):
+            check_train({**puct, "reuse": True, **bad})
+    plain = variant("plain", root="puct")
+    assert "reuse" not in plain.config["train"]
+    unset = variant("plain", root="puct", reuse=False)
+    assert unset.config_hash == plain.config_hash and unset.config["train"] == plain.config["train"]
+    kept = variant("plain", root="puct", reuse=True)
+    assert kept.config["train"]["reuse"] is True and kept.config_hash != plain.config_hash
+    for bad, match in (({"reuse": True}, "root: puct"), ({"root": "puct", "dets": 1, "reuse": True}, "dets: 0"),
+                       ({"root": "puct", "reuse": "yes"}, "expected bool"), ({"root": "puct", "reuses": True}, "reuse")):
+        with pytest.raises(ConfigError, match=match):
+            variant(**bad)
+    kata = load_plan("az-2p-kata").variants[0]
+    assert kata.config_hash == "2e3b1866f7a37e4a" and "reuse" not in kata.config["train"]
+
+
+@pytest.mark.parametrize("target", ["engine", "pruned"])
+def test_reuse_with_every_tree_dropped_is_self_play_without_it(target, monkeypatch):
+    """A new search under reuse (one pool, each search with its own budget, leaves and noise) is
+    the search of the two pools: with the trees dropped before every step the same seeds play the
+    same moves and file the same rows and targets. The pruned target then reads the prior from the
+    tree instead of the root's logits, which is the same prior up to float32."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Sharp)
+    common = {"root": "puct", "sims": 32, "fast_sims": 8, "pending": 4, "fast_pending": 2, "full_search_prob": 0.5,
+              "policy_target": target, "temperature_moves": 6}
+    boards, replays, counts = {}, {}, {}
+    for reuse in (False, True):
+        torch.manual_seed(0)  # the same weights
+        play, replay, _ = selfplay(**common, **({"reuse": True} if reuse else {}))
+        assert play.reuse is reuse and len(play.pools) == (1 if reuse else 2)
+        rng, stats = np.random.default_rng(1), {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+        boards[reuse] = []
+        for step in range(24):
+            play.drop_trees()
+            play.step(0, step, rng, replay, stats)
+            boards[reuse].append(play.buffers["observations"].copy())
+        replays[reuse], counts[reuse] = replay, (stats, play.games, play.decisions)
+    for a, b in zip(boards[False], boards[True], strict=True):
+        assert np.array_equal(a, b)
+    assert counts[True][0].get("reused", 0.0) == 0.0 and counts[True][1:] == counts[False][1:]
+    assert all(counts[True][0][key] == counts[False][0][key] for key in ("leaves", "rounds", "full", "depth"))
+    off, on = replays[False], replays[True]
+    assert on.size == off.size > 0 and int(off.has_policy[: off.size].sum()) > 10
+    for key in ("obs", "has_policy", "value", "present"):
+        assert np.array_equal(getattr(on, key)[: on.size], getattr(off, key)[: off.size])
+    if target == "engine":
+        assert np.array_equal(on.policy[: on.size], off.policy[: off.size])
+    else:  # float16 targets from priors that agree to float32
+        assert np.allclose(on.policy[: on.size].astype(np.float32), off.policy[: off.size].astype(np.float32), atol=1e-3)
+
+
+def test_reuse_tops_a_kept_tree_up_to_the_visit_cap(monkeypatch):
+    """Real self-play with reuse (Dirichlet noise, a saturated prior, pruned targets, short games).
+    A search re-roots only where the game moved by exactly the action played, never after a game
+    ended; its root's visits end at the cap (``sims``, ``fast_sims``), or stay what they were when
+    it carried that many; a new search has the cap's. Every root's clean prior is the network's
+    at that very position, noised or carried, so no tree sits on a position that is not its own
+    and no earlier noise is left in it; the pruned target is pruned_visits of those totals and the
+    engine's is their distribution. Re-rooted full searches still explore by new noise and fast
+    ones get none."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Sharp)
+    torch.manual_seed(0)
+    caps = {True: 48, False: 12}
+    play, replay, _ = selfplay(root="puct", reuse=True, sims=48, fast_sims=12, pending=4, fast_pending=2,
+                               full_search_prob=0.5, policy_target="pruned", temperature_moves=6)
+    pool = play.full_pool
+    assert play.fast_pool is pool and play.pools == [pool] and play.pool_of(0, True) is play.pool_of(0, False)
+    assert [o["dirichlet_alpha"] for o in play.options] == [pool.config.dirichlet_alpha, 0.0]
+    assert pool.config.dirichlet_alpha > 0
+    play.monitor = seen = Seen()
+    started, ended = {}, {}
+    search, finish = play._search, play._finish
+
+    def tracked(pool, env, full, seed, stats):  # what each search started with
+        kept, was = play.trees.get(env), stats.get("reused", 0.0)
+        sid = search(pool, env, full, seed, stats)
+        moved = False
+        if kept is not None:
+            expected = kept[2].copy()
+            expected.execute(play.codec.decode(kept[2], kept[3]))
+            moved = expected.search_equivalent(play.vec.game(env))
+        started[env] = (full, int(pool.visits(sid).sum()), stats.get("reused", 0.0) > was, moved)
+        return sid
+
+    def snapshot(replay):  # every search as it ended, before the finished games' trees go
+        ended.clear()
+        for env, (_, sid, _, chosen) in play.trees.items():
+            ended[env] = (np.asarray(pool.visits(sid), np.float64), np.asarray(pool.q(sid), np.float64),
+                          pool.root_priors(sid), root_log_priors(pool, sid), chosen)
+        finish(replay)
+
+    play._search, play._finish = tracked, snapshot
+    rng, stats = np.random.default_rng(1), {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+    b, over = play.buffers, set()
+    rows = []  # (full, re-rooted, carried, visits on actions the prior rules out, new visits)
+    for step in range(40):
+        acting = np.flatnonzero(b["acting"])
+        envs, obs = b["env_index"][acting].tolist(), b["observations"][acting].copy()
+        assert sorted(envs) == list(range(4))
+        play.step(0, step, rng, replay, stats)
+        logits, _ = play.evaluator(obs)
+        raw, rebuilt = iter(seen.steps[-1][1]), iter(seen.steps[-1][2])
+        for k, env in enumerate(envs):
+            full, carried, rerooted, moved = started[env]
+            visits, q, priors, log_priors, chosen = ended[env]
+            assert not rerooted or (moved and env not in over)
+            assert carried == 0 or rerooted
+            assert visits.sum() == max(carried, caps[full])
+            legal = obs[k, play.mask] > 0
+            z = np.where(legal, logits[k].astype(np.float64), -np.inf)
+            prior = np.exp(z - z.max()) / np.exp(z - z.max()).sum()
+            assert priors.shape == (1, play.vec.action_size) and np.allclose(priors[0], prior, atol=1e-6)
+            assert np.array_equal(np.isfinite(log_priors[0]), priors[0] > 0)
+            assert visits[~legal].sum() == 0 and legal[chosen]
+            if full:
+                kept = pruned_visits(logits[k], legal, visits, q, c_puct=pool.config.c_puct)
+                assert np.allclose(next(rebuilt), kept / kept.sum(), atol=1e-3)
+                assert np.allclose(next(raw), visits / visits.sum(), atol=1e-3)
+            rows.append((full, rerooted, carried, visits[legal & (prior < 1e-6)].sum(), visits.sum() - carried))
+        over = set(np.flatnonzero(b["terminals"].reshape(-1, play.players)[:, 0]).tolist())
+        assert set(play.trees) == set(envs) - over  # a finished game's tree is gone, the others' kept
+        assert sorted(pool.ids) == sorted(sid for _, sid, _, _ in play.trees.values()) and pool.pending == 0
+    rows = np.array(rows, dtype=np.float64)
+    full, rerooted, carried, noise, new = rows.T
+    assert play.games > 5 and stats["reused"] == rerooted.sum() > 40
+    assert 0 < (rerooted == 0).sum() and carried[rerooted == 0].sum() == 0
+    for kind, key in ((1.0, "carried_full"), (0.0, "carried_fast")):  # the share of the cap carried
+        cap = caps[bool(kind)]
+        assert stats[key] == pytest.approx((np.minimum(carried, cap) / cap)[full == kind].sum())
+        assert ((full == kind) & (rerooted == 1) & (carried > 0) & (carried < cap)).sum() > 5
+    met = (full == 0) & (carried >= caps[False])
+    assert met.sum() > 5 and new[met].sum() == 0  # a fast search that carried its cap runs nothing
+    topped = (full == 1) & (rerooted == 1) & (new > 0)
+    assert noise[topped].sum() > 0.03 * new[topped].sum()  # new noise at re-rooted roots
+    assert noise[full == 0].sum() < 0.25 * noise[topped].sum() / new[topped].sum() * max(new[full == 0].sum(), 1.0)
+    has = replay.has_policy[: replay.size]
+    targets = replay.policy[: replay.size].astype(np.float32)
+    masks = replay.obs[: replay.size].astype(np.float32)[:, play.mask] > 0
+    assert has.sum() > 20 and np.allclose(targets[has].sum(1), 1.0, atol=2e-3) and np.all(targets[~masks] == 0)
+    play.drop_trees()
+    assert not play.trees and len(pool) == 0
+
+
+class Broken:
+    """An evaluator that fails from its ``after``-th call on."""
+
+    def __init__(self, evaluator, after: int) -> None:
+        self.evaluator, self.after, self.calls = evaluator, after, 0
+
+    def __getattr__(self, name):
+        return getattr(self.evaluator, name)
+
+    def __call__(self, observations):
+        self.calls += 1
+        if self.calls >= self.after:
+            raise RuntimeError("the evaluator broke")
+        return self.evaluator(observations)
+
+
+def test_a_failed_step_keeps_no_tree():
+    play, replay, _ = selfplay(root="puct", reuse=True, sims=16, fast_sims=4, pending=2)
+    pool, rng = play.full_pool, np.random.default_rng(0)
+    stats = {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+    for step in range(3):
+        play.step(0, step, rng, replay, stats)
+    assert len(play.trees) == len(pool) == 4
+    working, decisions = play.evaluator, play.decisions
+    play.evaluator = Broken(working, after=2)
+    with pytest.raises(RuntimeError, match="the evaluator broke"):
+        play.step(0, 3, rng, replay, stats)
+    assert not play.trees and len(pool) == 0 and pool.pending == 0 and play.decisions == decisions
+    play.evaluator, reused = working, stats.get("reused", 0.0)
+    play.step(0, 4, rng, replay, stats)  # every game searched from an empty tree
+    assert stats.get("reused", 0.0) == reused and len(play.trees) == len(pool) == 4
+
+
+def test_a_reuse_run_drops_its_trees_before_learning_and_logs_them(monkeypatch):
+    """Through RunWriter: no tree outlives an iteration (the learning step changes the network that
+    built it), the run is as deterministic as one without reuse, and selfplay/reused and
+    selfplay/carried_* are logged with reuse only."""
+    import catanrl.train.alphazero as az
+
+    plays, learned = [], []
+    init, learn = SelfPlay.__init__, az.learn
+
+    def built(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        plays.append(self)
+
+    def checked(*args, **kwargs):
+        learned.append((dict(plays[-1].trees), len(plays[-1].full_pool)))
+        return learn(*args, **kwargs)
+
+    monkeypatch.setattr(SelfPlay, "__init__", built)
+    monkeypatch.setattr(az, "learn", checked)
+    common = {"root": "puct", "sims": 16, "fast_sims": 4, "pending": 2}
+    for name in ("a", "b"):
+        run(variant(name, reuse=True, **common))
+    assert len(plays) == 2 and all(play.reuse for play in plays) and learned == [({}, 0)] * 4
+    shas = [[c.weights_sha256 for c in load_experiment(f"az/{name}").checkpoints()] for name in ("a", "b")]
+    assert shas[0] == shas[1] and len(shas[0]) == 3
+    for m in load_experiment("az/a").metrics():
+        assert 0.0 < m["selfplay/reused"] < 1.0 and m["selfplay/leaves_per_s"] > 0 and m["selfplay/rounds"] > 0
+        assert 0.0 < m["selfplay/carried_full"] < 1.0 and 0.0 < m["selfplay/carried_fast"] < 1.0
+    run(variant("off", **common))
+    off = load_experiment("az/off")
+    assert not any(k in m for m in off.metrics() for k in ("selfplay/reused", "selfplay/carried_full"))
+    assert off.checkpoints()[-1].weights_sha256 != shas[0][-1] and off.config_hash != load_experiment("az/a").config_hash
