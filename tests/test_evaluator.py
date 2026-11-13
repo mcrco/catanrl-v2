@@ -92,6 +92,19 @@ def emulate_graphs(evaluator: BatchEvaluator, monkeypatch) -> BatchEvaluator:
     return evaluator
 
 
+def test_exact_is_the_call_unless_the_kernels_are_half():
+    """exact() is kernels=fused16's float32 forward (test_graph_kernels.py, on a GPU); the other
+    kernels have nothing rounded to hold against it. fused16 is CUDA only, as fused."""
+    evaluator = BatchEvaluator(MODEL, device="cpu", infer_rows=8, mode="fast")
+    for exact, called in zip(evaluator.exact(ROWS), evaluator(ROWS)):
+        assert np.array_equal(exact, called)
+    assert evaluator.exact_forwards == 0
+    with pytest.raises(ValueError, match="kernels=fused16 .* CUDA"):
+        BatchEvaluator(MODEL, device="cpu", infer_rows=8, kernels="fused16")
+    with pytest.raises(ValueError, match="torch, fused or fused16"):
+        BatchEvaluator(MODEL, device="cpu", infer_rows=8, kernels="half")
+
+
 @pytest.mark.parametrize("model", [MODEL, LSTM], ids=["graph", "lstm"])
 def test_graph_replays_read_their_static_inputs(model, monkeypatch):
     """The graph path emulated on CPU (fast mode, so the buckets pad and chunk)."""

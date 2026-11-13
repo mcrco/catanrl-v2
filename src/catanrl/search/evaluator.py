@@ -15,6 +15,10 @@ model's device:
 ``kernels="fused"`` runs a shared-trunk graph network on custom CUDA kernels
 (:class:`~catanrl.models.graph_kernels.FusedGraph`): the same outputs to the last
 bits, 2.5x faster on a GTX 1080. Its rows are as batch-independent as the module's.
+``kernels="fused16"`` runs their half-precision variant
+(:class:`~catanrl.models.graph_kernels.FusedGraph16`, for self-play search: the outputs
+within half's rounding in the trunk, about 1.5x faster again on an RTX 2070 Super);
+a chunk in which a half overflowed is evaluated again by the float32 kernels.
 
 On CPU there are no graphs, and strict mode evaluates rows one at a time:
 CPU GEMM kernels make a row's result depend (in the last bits) on its
@@ -50,7 +54,7 @@ class BatchEvaluator:
         mode: Literal["strict", "fast"] = "strict",
         cuda_graphs: bool = True,
         heads: Heads = "both",
-        kernels: Literal["torch", "fused"] = "torch",
+        kernels: Literal["torch", "fused", "fused16"] = "torch",
     ) -> None:
         if infer_rows < 1:
             raise ValueError("infer_rows must be positive")
@@ -74,16 +78,18 @@ class BatchEvaluator:
         else:
             self.num_actions = int(model.num_actions)
         self.use_graphs = bool(cuda_graphs) and self.device.type == "cuda"
-        if kernels not in ("torch", "fused"):
-            raise ValueError(f"kernels must be torch or fused, not {kernels!r}")
+        if kernels not in ("torch", "fused", "fused16"):
+            raise ValueError(f"kernels must be torch, fused or fused16, not {kernels!r}")
         self.kernels = kernels
         self.fused = None
-        if kernels == "fused":
+        #: kernels=fused16: chunks evaluated again in float32 (a half overflowed in their forward).
+        self.exact_forwards = 0
+        if kernels != "torch":
             if self.device.type != "cuda" or self.recurrent or heads != "both":
-                raise ValueError("kernels=fused evaluates both heads of a stateless network on a CUDA device")
-            from catanrl.models.graph_kernels import FusedGraph
+                raise ValueError(f"kernels={kernels} evaluates both heads of a stateless network on a CUDA device")
+            from catanrl.models.graph_kernels import FusedGraph, FusedGraph16
 
-            self.fused = FusedGraph(self.model)
+            self.fused = (FusedGraph16 if kernels == "fused16" else FusedGraph)(self.model)
         self._graphs: dict[int, tuple[torch.cuda.CUDAGraph, tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]] = {}
         self.hidden_size = int(getattr(model, "hidden_size", 0)) if self.recurrent else 0
         self.rows = 0
@@ -141,9 +147,24 @@ class BatchEvaluator:
                 forward()
         torch.cuda.current_stream(self.device).wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
+        if self.kernels == "fused16":
+            self._own_workspace()
         with torch.inference_mode(), torch.cuda.graph(graph):
             outputs = forward()
+        if self.kernels == "fused16":
+            self._own_workspace()
         return graph, outputs
+
+    @staticmethod
+    def _own_workspace() -> None:
+        """kernels=fused16, around a capture. torch (2.14) keeps one cuBLAS workspace per stream,
+        allocates the capture stream's in the pool of the first graph that needs one and frees it
+        with that graph, while the GEMMs of every graph captured after it hold its address: once
+        the first is gone and the cache emptied (any later capture does), their replays are an
+        illegal memory access. Forgotten before a capture, the workspace is allocated again in
+        this graph's own pool, which lives as long as the graph; forgotten after it, no later
+        graph borrows this one's."""
+        torch._C._cuda_clearCublasWorkspaces()
 
     # ------------------------------------------------------------ evaluation
 
@@ -220,8 +241,35 @@ class BatchEvaluator:
                 outputs = self._forward(batch[0], tuple(batch[1:]) if memory is not None else None)
             results = tuple(out[:k].float().cpu().numpy() for out in outputs)
         if self.fused is not None:
+            if self.kernels == "fused16" and int(results[-1][0]) & 2:
+                self.exact_forwards += 1
+                results = self._exact(chunk, size)
             if results[-1].any():
                 raise RuntimeError("kernels=fused: a node with more than three neighbours, edges or tiles "
                                    "(hex boards only); play this board with kernels=torch")
             results = results[:-1]
         return results
+
+    def _exact(self, chunk: np.ndarray, size: int) -> tuple[np.ndarray, ...]:
+        """kernels=fused16: a chunk whose forward flagged a half that is not finite (bit 2 of the
+        kernels' flag: a value past half's range), evaluated by the float32 kernels, eagerly."""
+        k = len(chunk)
+        with torch.inference_mode():
+            batch = torch.from_numpy(chunk).to(self.device)
+            if size > k:
+                batch = torch.cat((batch, batch[:1].expand(size - k, -1)), dim=0)
+            return tuple(out[:k].float().cpu().numpy() for out in self.fused.exact(batch))
+
+    def exact(self, observations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """kernels=fused16: the float32 kernels' (logits, values) on the weights the halves were
+        converted from, what SelfPlay.check_kernels holds against the module's; with other kernels
+        ``self(observations)``."""
+        if self.kernels != "fused16":
+            return self(observations)
+        obs = np.ascontiguousarray(observations, dtype=np.float32)
+        logits = np.empty((len(obs), self.num_actions), dtype=np.float32)
+        values = np.empty((len(obs), self.num_players), dtype=np.float32)
+        for start in range(0, len(obs), self.infer_rows):
+            chunk = obs[start:start + self.infer_rows]
+            logits[start:start + len(chunk)], values[start:start + len(chunk)] = self._exact(chunk, len(chunk))[:2]
+        return logits, values
