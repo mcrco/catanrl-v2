@@ -438,7 +438,7 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
   owner: "marco",
   config: "runs/az-2p-kata/main+600/config.json, then runs/az-2p-kata/main+600-fast/config.json (forks of configs/experiments/az-2p-kata.yaml)",
   wandb: (("az-2p-kata-main-600-6ffee9f3", "az-2p-kata/main+600"), ("az-2p-kata-main-600-fast-a21eb778", "az-2p-kata/main+600-fast")),
-  records: ("1ab3df393252cacd",),
+  records: ("1ab3df39",),
 )
 #tldr[Marco (2026-11-13): keep the KataGo-style training going for about two days and see how it goes. This run continues @exp:az-kata from e300 with nothing changed, to iteration 900 (three times the games). At e410 (2026-11-13 08:23) Marco had it stopped and continued as `main+600-fast` on the faster self-play of @exp:az-speed: the same visit counts, targets and learning rate, 82 s an iteration instead of 197 s. It should end on the morning of 2026-11-14. First select: e450 scores 58.55%, level with e300's 57.90% on the same games (p = 0.59).]
 
