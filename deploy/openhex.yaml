@@ -68,12 +68,13 @@ bots:
     deployed: 2026-11-04
     tag: openhex-1v1-v3
     evidence: [cbba2d1098a7be6c, 507970d71e8d6566, 7c0d2f67135e7aad]
-    retired: false
+    retired: true
+    retired_at: 2026-11-13  # replaced by catanrl-1v1-search-v3 (Marco: enough other bots are live)
   # v3 (2026-11-13): az-2p-kata/main@e300 (2p-graph-s-5), fr3's net after 300 iterations of
   # AlphaZero self-play from fr3 (55,143 games, pruned visit-count targets), in search-v2's
   # search. Measured at 1,024 sims against fr3's fair raw bot, 2,000 heldout-2p-fr games each:
   # 57.70% with this net, 53.85% with fr3's (paired +3.85 pp, p = 0.003). Not measured at 2^17
-  # sims or against search-v2 itself; search-v2 stays on the ladder beside it for that.
+  # sims or against search-v2 itself. It replaces search-v2 (Marco).
   - name: catanrl-1v1-search-v3
     mode: 1v1
     version: 1v1-search-v3

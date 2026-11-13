@@ -19,7 +19,7 @@ The bots that play people are in @tab:deploy-bots. To serve a 1v1 net raw, use t
     [`catanrl-4p`], [`POLICY:ckpt=ppo-4p/main@e3650`],
     [`catanrl-1v1-search`], [`MCTS:ckpt=puffer-graph2/full@e3350:sims=65536:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused`],
     [`catanrl-1v1-v2`], [`BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16`],
-    [`catanrl-1v1-search-v2` \ #sub[live since 2026-11-04]], [`MCTS:ckpt=ppo-2p-fr3/full@e4350:sims=131072:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`],
+    [`catanrl-1v1-search-v2` \ #sub[live since 2026-11-04; retired once search-v3 runs]], [`MCTS:ckpt=ppo-2p-fr3/full@e4350:sims=131072:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`],
     [`catanrl-1v1-search-v3` \ #sub[released 2026-11-13; not registered yet (@exp:deploy-openhex-search-v3)]], [`MCTS:ckpt=az-2p-kata/main@e300:` the same search],
   ),
   caption: [The deploy files in this checkout, sha pins omitted. `@best` is e3350 for `puffer-graph2/full`, e3650 for `ppo-4p/main` and e3550 for `ppo-mixed/main`.],
@@ -224,7 +224,7 @@ catanrl run configs/experiments/deploy-check-2p-graph-m.yaml
 - *Why this net.* In the 1,024-sim search against fr3's fair raw bot it scores 57.70% on 2,000 held-out games, where fr3's own net scores 53.85% (paired +3.85 pp, p = 0.003; @exp:az-kata). Not measured: 2#super[17] sims, and the two searches head to head.
 - *Spec.* search-v2's with the checkpoint swapped: `MCTS:ckpt=az-2p-kata/main@e300#513d0caac817:sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`.
 - *Release.* Tag `openhex-1v1-v3` at `46cf640` carries every running entry (one checkout runs them all). Since `openhex-1v1-v2.2` the catanatron and PufferLib submodules moved, so yang needs `git submodule update` and `uv sync`; the engine did not move. A fetch of the published release into an empty directory resolved all four checkpoints.
-- *Overlap.* search-v2 stays on the ladder beside it (Claude's choice, the handoff's overlap step; `retired: true` takes it off). They share yang's GPU and will often be matched with each other, which is the head-to-head at 2#super[17] sims.
+- *No overlap.* search-v3 replaces search-v2, which is retired in the file (Marco, 2026-11-13: enough other bots are live). The retirement is one commit past the tag and touches only `deploy/`, so yang checks out `main`.
 
 #lead[The baseline: search-v2's record] (OpenHex's public data, 2026-11-13 09:21 UTC).
 #figure(
@@ -240,13 +240,13 @@ catanrl run configs/experiments/deploy-check-2p-graph-m.yaml
   caption: [`catanrl-1v1-search-v2` since its deploy: 241 of 462 (52.2%), Elo 1445. 45 of its 47 aborted games are from 4–10 November.],
 )
 - Since 11 November it has won 60 of 181 (33%), against opponents that are new or have changed (`hexn-4d.0` went from 33 of 75 to 48 of 140). Whether yang's searches are also being cut short cannot be seen from here: the `cut` counts in yang's `games.jsonl` would say.
-- So a day of search-v3's games is compared with search-v2's games of the same days and opponents, not with its 4–10 November record.
+- So a day of search-v3's games is compared, opponent by opponent, with search-v2's games since 11 November, not with its 4–10 November record.
 
 #repro(```sh
 # Here: build, tag, publish (done 2026-11-13)
 catanrl openhex release deploy/openhex.yaml openhex-1v1-v3
 # On yang
-git fetch --tags && git checkout openhex-1v1-v3 && git submodule update --init && uv sync
+git fetch --tags origin && git checkout origin/main && git submodule update --init && uv sync
 catanrl openhex fetch deploy/openhex.yaml
 catanrl openhex deploy/openhex.yaml --check --device cuda
 catanrl openhex deploy/openhex.yaml --describe catanrl-1v1-search-v3 > /tmp/body.json   # then register (handoff, step 7)
