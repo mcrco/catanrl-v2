@@ -32,6 +32,8 @@ eval (resolution copies its suite, lineup, every, metric and fill into
 is optional the same way (:data:`TRAIN_OPTIONAL`): absent from
 ``configs/train/ppo.yaml``, so a config without it keeps its hash. So is an
 AlphaZero variant's ``train.reuse`` (absent from ``configs/train/alphazero.yaml``).
+``runtime.search_groups`` is optional too (``runtime`` is not hashed; unset,
+the AlphaZero trainer takes its default).
 
 An AlphaZero variant that starts from a network (``init_from`` with the
 actor) gets :func:`alphazero_evals` as a layer between the defaults and the
@@ -106,6 +108,9 @@ ENTRY_LISTS = ("eval.final", "eval.monitor")
 #: Keys a config may set that defaults.yaml leaves out, with the value that means "unset": a
 #: config without them (or with them at that value, dropped at resolution) hashes as before.
 OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None}
+#: ``runtime.search_groups`` (unhashed like all of ``runtime``; unset: the trainer's default): the
+#: groups AlphaZero self-play splits its searches into (catanrl.search.pipeline; 1: the serial loop).
+OPTIONAL["runtime.search_groups"] = None
 #: Train keys of an algo that its ``configs/train/<algo>.yaml`` leaves out, with the value that
 #: means "unset": like :data:`OPTIONAL`, a config without them (or with them unset, dropped at
 #: resolution) hashes as it did before they existed. ``stop_epoch``: end the run after that
