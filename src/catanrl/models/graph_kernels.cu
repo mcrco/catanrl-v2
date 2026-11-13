@@ -8,6 +8,7 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 namespace {
 
@@ -245,6 +246,173 @@ __global__ void assemble_kernel(Assemble s) {
 
 const float* ptr(const c10::optional<torch::Tensor>& t) { return t ? t->data_ptr<float>() : nullptr; }
 
+// ---------------------------------------------------------------- half precision (FusedGraph16)
+// The same kernels around half GEMMs: what a GEMM reads or writes (the LayerNorm outputs and
+// their neighbour means, the updates, the head layers' hidden units) is half; the residual
+// stream, every reduction (LayerNorm, the means, the heads' dot products), the logits, the
+// masks and the values are float. A half that is not finite (a GEMM's output past 65504, or a
+// float these kernels cannot store) sets bit NONFINITE of the flag: its forward is not to be
+// trusted (a nan update would pass the relu as 0), and BatchEvaluator evaluates the batch again
+// with the float kernels.
+
+constexpr float HALF_MAX = 65504.f;
+constexpr int NONFINITE = 2;  // topo_kernel's flag is bit 1
+
+__device__ __forceinline__ float from_half(__half h, bool& bad) {
+  const float v = __half2float(h);
+  bad |= !(fabsf(v) <= HALF_MAX);  // inf and nan
+  return v;
+}
+
+__device__ __forceinline__ __half to_half(float v, bool& bad) {
+  bad |= !(fabsf(v) <= HALF_MAX);
+  return __float2half(v);
+}
+
+struct Entity16 {
+  float* x;            // [count, H] the entity's embedding (float, updated in place)
+  const __half* u;     // [count, H] update from the half GEMM, or null
+  const float* uf;     // [count, H] the injection's input (float GEMM), with gb
+  const float* ub;     // [H] the update's bias, or null
+  const float* gb;     // injection: [B, gbs] glob part (bias in), or null for a residual step
+  int gbs;
+  const float* inj_g; const float* inj_b;
+  const float* valid;  // [count]
+  __half* z; int zs;   // LayerNorm output, or x itself when g is null (row stride zs), or null
+  const float* g; const float* bt;
+  float eps, inj_eps;
+  int count; int per_row;
+};
+
+// entity_kernel with half updates in and half outputs: z = LN(x), or z = x for the heads.
+__global__ void entity16_kernel(Entity16 a0, Entity16 a1, Entity16 a2, int* flag) {
+  const Entity16 a = blockIdx.y == 0 ? a0 : blockIdx.y == 1 ? a1 : a2;
+  const int w = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  const int lane = threadIdx.x & 31;
+  if (w >= a.count) return;
+  float v[HPL];
+  bool bad = false;
+  const float m = a.valid[w];
+  if (a.gb) {
+    const float* gb = a.gb + (w / a.per_row) * a.gbs;
+    for (int k = 0; k < HPL; ++k) { const int h = lane + 32 * k; v[k] = a.uf[w * H + h] + gb[h]; }
+    layer_norm(v, a.inj_g, a.inj_b, a.inj_eps, lane);
+    for (int k = 0; k < HPL; ++k) v[k] = fmaxf(v[k], 0.f) * m;
+  } else {
+    for (int k = 0; k < HPL; ++k) {
+      const int h = lane + 32 * k;
+      v[k] = a.x[w * H + h];
+      if (a.u) v[k] = (v[k] + fmaxf(from_half(a.u[w * H + h], bad) + (a.ub ? a.ub[h] : 0.f), 0.f)) * m;
+    }
+  }
+  if (a.gb || a.u)
+    for (int k = 0; k < HPL; ++k) a.x[w * H + lane + 32 * k] = v[k];
+  if (a.z) {
+    if (a.g) layer_norm(v, a.g, a.bt, a.eps, lane);
+    for (int k = 0; k < HPL; ++k) a.z[w * a.zs + lane + 32 * k] = to_half(v[k], bad);
+  }
+  if (bad) atomicOr(flag, NONFINITE);
+}
+
+struct Gather16 {
+  const __half* src; int ss; int src_per_row;
+  __half* dst; int ds; int dst_per_row;
+  const int* idx; const int* cnt; int maxd;
+  int count;
+  int mean;  // 1: mean over the list (clamped count), 0: sum
+};
+
+// gather_kernel on half rows (summed in float).
+__global__ void gather16_kernel(Gather16 g0, Gather16 g1, Gather16 g2, Gather16 g3, Gather16 g4, int* flag) {
+  const int y = blockIdx.y;
+  const Gather16 g = y == 0 ? g0 : y == 1 ? g1 : y == 2 ? g2 : y == 3 ? g3 : g4;
+  const int w = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  const int lane = threadIdx.x & 31;
+  if (w >= g.count) return;
+  const int b = w / g.dst_per_row;
+  const int c = g.cnt[w];
+  float acc[HPL] = {0.f, 0.f, 0.f};
+  for (int j = 0; j < c && j < g.maxd; ++j) {
+    const __half* s = g.src + (b * g.src_per_row + g.idx[w * g.maxd + j]) * g.ss;
+    for (int k = 0; k < HPL; ++k) acc[k] += __half2float(s[lane + 32 * k]);
+  }
+  const float scale = g.mean ? 1.f / fmaxf((float)c, 1.f) : 1.f;
+  bool bad = false;
+  for (int k = 0; k < HPL; ++k) g.dst[w * g.ds + lane + 32 * k] = to_half(acc[k] * scale, bad);
+  if (bad) atomicOr(flag, NONFINITE);
+}
+
+struct Assemble16 {
+  const float* obs; int R, off_mask, A, G, N, T, E, RS, Hh, P;
+  const float* other;   // [B, G]
+  const __half* sch; int Hs;  // [B*N, 2*Hs] settlement | city hidden (before the relu)
+  const float* ws2; const float* wc2; const float* bsc;  // [Hs], [Hs], [2]
+  const __half* roadh; int Hr; const float* wr3; const float* br3;  // [B*E, Hr] road hidden (before the relu)
+  const __half* rt;     // [B*T, Hh] robber_tile(tiles) (bias in)
+  const float* rv;      // [B, RS, Hh] robber_victim(victims)
+  const float* wro; const float* bro;
+  const float* vl;      // [B*P] value MLP output
+  int off_players, wp, present;
+  float* logits; float* values;
+  int* flag;
+};
+
+__device__ __forceinline__ float warp_dot_relu16(const __half* a, const float* w, int n, int lane, bool& bad) {
+  float acc = 0.f;
+  for (int h = lane; h < n; h += 32) acc += fmaxf(from_half(a[h], bad), 0.f) * w[h];
+  return warp_sum(acc);
+}
+
+// assemble_kernel on half hidden units (their relu here), the dot products and all after in float.
+__global__ void assemble16_kernel(Assemble16 s) {
+  const int b = blockIdx.x;
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, warps = blockDim.x >> 5;
+  const float* row = s.obs + (long)b * s.R;
+  bool bad = false;
+  for (int j = warp; j < s.A; j += warps) {
+    float v;
+    int k = j;
+    if (k < s.G) v = s.other[(long)b * s.G + k];
+    else if ((k -= s.G) < 2 * s.N) {  // settlement then city
+      const int city = k >= s.N, i = city ? k - s.N : k;
+      const __half* hrow = s.sch + ((long)b * s.N + i) * 2 * s.Hs + (city ? s.Hs : 0);
+      v = warp_dot_relu16(hrow, city ? s.wc2 : s.ws2, s.Hs, lane, bad) + s.bsc[city];
+    } else if ((k -= 2 * s.N) < s.E) {
+      v = warp_dot_relu16(s.roadh + ((long)b * s.E + k) * s.Hr, s.wr3, s.Hr, lane, bad) + s.br3[0];
+    } else if ((k -= s.E) < s.T * s.RS) {
+      const int t = k / s.RS, p = k % s.RS;
+      const __half* rt = s.rt + ((long)b * s.T + t) * s.Hh;
+      const float* rv = s.rv + ((long)b * s.RS + p) * s.Hh;
+      float acc = 0.f;
+      for (int h = lane; h < s.Hh; h += 32) acc += fmaxf(from_half(rt[h], bad) + rv[h], 0.f) * s.wro[h];
+      v = warp_sum(acc) + s.bro[0];
+    } else v = 0.f;  // the no-op
+    if (lane == 0) {
+      const bool legal = row[s.off_mask + j] > 0.f;
+      bad |= legal && !isfinite(v);
+      s.logits[(long)b * s.A + j] = legal ? v : -1e9f;
+    }
+  }
+  if (threadIdx.x == 0) {
+    float n = 0.f;
+    for (int p = 0; p < s.P; ++p) n += row[s.off_players + p * s.wp + s.present];
+    const float prior = -logf(fmaxf(n, 2.f) - 1.f);
+    for (int p = 0; p < s.P; ++p) {
+      const float present = row[s.off_players + p * s.wp + s.present];
+      const float value = present / (1.f + expf(-(s.vl[(long)b * s.P + p] + prior)));
+      bad |= !isfinite(value);
+      s.values[(long)b * s.P + p] = value;
+    }
+  }
+  if (bad) atomicOr(s.flag, NONFINITE);
+}
+
+__half* half_ptr(const torch::Tensor& t) {
+  TORCH_CHECK(t.scalar_type() == torch::kHalf, "the half kernels read half tensors here");
+  return (__half*)t.data_ptr();
+}
+__half* half_ptr(const c10::optional<torch::Tensor>& t) { return t ? half_ptr(*t) : nullptr; }
+
 }  // namespace
 
 std::vector<torch::Tensor> topo(torch::Tensor obs, std::vector<int64_t> l) {
@@ -336,6 +504,67 @@ std::vector<torch::Tensor> assemble(torch::Tensor obs, std::vector<int64_t> l, t
 }
 
 
+// entities with half updates and outputs. Per type: x, u? (half), uf? (float, the injection's),
+// then as entities; z is half, the LayerNorm's output or (g absent) x itself. flag: topo's.
+void entities16(std::vector<c10::optional<torch::Tensor>> x, std::vector<c10::optional<torch::Tensor>> u,
+                std::vector<c10::optional<torch::Tensor>> uf, std::vector<c10::optional<torch::Tensor>> ub,
+                std::vector<c10::optional<torch::Tensor>> gb, std::vector<int64_t> gbs,
+                std::vector<c10::optional<torch::Tensor>> inj_g, std::vector<c10::optional<torch::Tensor>> inj_b,
+                std::vector<double> inj_eps, std::vector<torch::Tensor> valid,
+                std::vector<c10::optional<torch::Tensor>> z, std::vector<int64_t> zs,
+                std::vector<c10::optional<torch::Tensor>> g, std::vector<c10::optional<torch::Tensor>> bt,
+                std::vector<double> eps, std::vector<int64_t> per_row, torch::Tensor flag) {
+  Entity16 a[3];
+  int most = 0;
+  for (int t = 0; t < 3; ++t) {
+    a[t] = Entity16{x[t]->data_ptr<float>(), half_ptr(u[t]), ptr(uf[t]), ptr(ub[t]), ptr(gb[t]), (int)gbs[t],
+                    ptr(inj_g[t]), ptr(inj_b[t]), valid[t].data_ptr<float>(), half_ptr(z[t]), (int)zs[t], ptr(g[t]),
+                    ptr(bt[t]), (float)eps[t], (float)inj_eps[t], (int)valid[t].numel(), (int)per_row[t]};
+    most = std::max(most, a[t].count);
+  }
+  const int threads = 256;
+  const dim3 blocks((most * 32 + threads - 1) / threads, 3);
+  entity16_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(a[0], a[1], a[2], flag.data_ptr<int>());
+}
+
+// gathers on half rows.
+void gathers16(std::vector<torch::Tensor> src, std::vector<int64_t> ss, std::vector<int64_t> spr,
+               std::vector<torch::Tensor> dst, std::vector<int64_t> ds, std::vector<int64_t> dpr,
+               std::vector<torch::Tensor> idx, std::vector<torch::Tensor> cnt, std::vector<int64_t> mean,
+               torch::Tensor flag) {
+  Gather16 g[5] = {};
+  const int n = (int)src.size();
+  int most = 0;
+  for (int i = 0; i < n; ++i) {
+    g[i] = Gather16{half_ptr(src[i]), (int)ss[i], (int)spr[i], half_ptr(dst[i]), (int)ds[i],
+                    (int)dpr[i], idx[i].data_ptr<int>(), cnt[i].data_ptr<int>(), (int)idx[i].size(1),
+                    (int)cnt[i].numel(), (int)mean[i]};
+    most = std::max(most, g[i].count);
+  }
+  const int threads = 256;
+  const dim3 blocks((most * 32 + threads - 1) / threads, n);
+  gather16_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(g[0], g[1], g[2], g[3], g[4],
+                                                                            flag.data_ptr<int>());
+}
+
+// assemble on half hidden units: sch and roadh before their relu, rt as in assemble.
+std::vector<torch::Tensor> assemble16(torch::Tensor obs, std::vector<int64_t> l, torch::Tensor other, torch::Tensor sch,
+                                      torch::Tensor ws2, torch::Tensor wc2, torch::Tensor bsc, torch::Tensor roadh,
+                                      torch::Tensor wr3, torch::Tensor br3, torch::Tensor rt, torch::Tensor rv,
+                                      torch::Tensor wro, torch::Tensor bro, torch::Tensor vl, torch::Tensor flag) {
+  const int B = obs.size(0);
+  auto logits = torch::empty({B, l[1]}, obs.options());
+  auto values = torch::empty({B, l[8]}, obs.options());
+  Assemble16 s{obs.data_ptr<float>(), (int)obs.size(1), (int)l[0], (int)l[1], (int)l[2], (int)l[3], (int)l[4],
+               (int)l[5], (int)l[6], (int)l[7], (int)l[8], other.data_ptr<float>(), half_ptr(sch),
+               (int)(sch.size(1) / 2), ws2.data_ptr<float>(), wc2.data_ptr<float>(), bsc.data_ptr<float>(),
+               half_ptr(roadh), (int)roadh.size(1), wr3.data_ptr<float>(), br3.data_ptr<float>(), half_ptr(rt),
+               rv.data_ptr<float>(), wro.data_ptr<float>(), bro.data_ptr<float>(), vl.data_ptr<float>(), (int)l[9],
+               (int)l[10], (int)l[11], logits.data_ptr<float>(), values.data_ptr<float>(), flag.data_ptr<int>()};
+  assemble16_kernel<<<B, 512, 0, at::cuda::getCurrentCUDAStream()>>>(s);
+  return {logits, values};
+}
+
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("topo", &topo);
@@ -343,5 +572,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gathers", &gathers);
   m.def("pool", &pool);
   m.def("assemble", &assemble);
+  m.def("entities16", &entities16);
+  m.def("gathers16", &gathers16);
+  m.def("assemble16", &assemble16);
   m.attr("hidden") = H;
 }

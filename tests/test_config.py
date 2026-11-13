@@ -398,8 +398,9 @@ def test_alphazero_leaves_per_round_and_kernels_are_checked(tmp_path):
     az = {"algo": "alphazero", "root": "puct"}
     cfg = load_plan(write(tmp_path, train={**az, "pending": 24, "fast_pending": 4, "kernels": "fused"})).variants[0].config
     assert (cfg["train"]["pending"], cfg["train"]["fast_pending"], cfg["train"]["kernels"]) == (24, 4, "fused")
+    assert load_plan(write(tmp_path, train={**az, "kernels": "fused16"})).variants[0].config["train"]["kernels"] == "fused16"
     for bad, match in (({"pending": 0}, "leaves per network round"), ({"fast_pending": 0}, "leaves per network round"),
-                       ({"kernels": "cuda"}, "torch or fused")):
+                       ({"kernels": "cuda"}, "torch, fused or fused16")):
         with pytest.raises(ConfigError, match=match):
             load_plan(write(tmp_path, train={**az, **bad}))
 

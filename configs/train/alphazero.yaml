@@ -39,7 +39,7 @@ weight_decay: 1.0e-4           # AdamW (decoupled L2)
 value_coef: 1.0
 max_grad_norm: 1.0
 search_rows: 512               # leaf rows per network call (CUDA graphs at powers of two up to this)
-kernels: torch                 # torch | fused: self-play's forwards on the fused CUDA kernels (shared-trunk graph,
+kernels: torch                 # torch | fused | fused16 (fused with half-precision GEMMs): self-play's forwards on the fused CUDA kernels (shared-trunk graph,
                                # hidden 96, nvcc on PATH), rebuilt from the weights after every learning step
 checkpoint_interval: 10        # iterations
 # reuse: true                  # optional (root: puct, dets: 0): a game keeps its search tree between decisions; a

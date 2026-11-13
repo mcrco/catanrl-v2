@@ -325,7 +325,7 @@ class Copies(BatchEvaluator):
     buffers), so it evaluates the weights of the moment it was built."""
 
     def __init__(self, model, *, kernels, **kwargs):
-        super().__init__(copy.deepcopy(model) if kernels == "fused" else model, **kwargs)
+        super().__init__(copy.deepcopy(model) if kernels != "torch" else model, **kwargs)
 
 
 def test_fused_kernels_follow_the_weights(monkeypatch):
@@ -342,6 +342,58 @@ def test_fused_kernels_follow_the_weights(monkeypatch):
     monkeypatch.setattr(az.SelfPlay, "refresh", lambda self: None)
     with pytest.raises(RuntimeError, match="stale"):
         run(variant("stale", kernels="fused", learning_rate=0.01))
+
+
+def test_half_kernels_follow_the_weights_too(monkeypatch):
+    """``kernels: fused16`` is rebuilt and checked as fused is. (Copies evaluates in float32, so
+    this run is the torch one; the half kernels' own rounding is test_graph_kernels.py's.)"""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Copies)
+    run(variant("torch"))
+    run(variant("fused16", kernels="fused16"))
+    shas = [[c.weights_sha256 for c in load_experiment(f"az/{name}").checkpoints()] for name in ("torch", "fused16")]
+    assert shas[0] == shas[1] and len(set(shas[0])) == 3
+    monkeypatch.setattr(az.SelfPlay, "refresh", lambda self: None)
+    with pytest.raises(RuntimeError, match="kernels: fused16: .* stale"):
+        run(variant("stale", kernels="fused16", learning_rate=0.01))
+
+
+class Off:
+    """An evaluator whose float32 values are ``stale`` away from the module's, its own a further ``rounding``."""
+
+    def __init__(self, model, stale, rounding):
+        self.model, self.stale, self.rounding = model, stale, rounding
+
+    def exact(self, obs):
+        with torch.inference_mode():
+            return None, self.model(torch.from_numpy(obs))[1].float().numpy() + self.stale
+
+    def __call__(self, obs):
+        return None, self.exact(obs)[1] + self.rounding
+
+
+def test_the_check_tells_half_rounding_from_stale_weights(monkeypatch):
+    """fused16's check: the float32 values on the evaluator's copies (exact) within 1e-4 of the
+    module's, as fused's; the half values within 1e-2 (rounding moves them by about 1e-3)."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Copies)
+    play, _, model = selfplay(kernels="fused16")
+    assert play.buffers["acting"].any()
+    play.check_kernels()
+    for stale, rounding, match in ((0.0, 1.5e-3, None), (2e-4, 0.0, "kernels: fused16: .* stale"),
+                                   (0.0, 2e-2, "half-precision values")):
+        play.evaluator = Off(model, stale, rounding)
+        if match is None:
+            play.check_kernels()
+        else:
+            with pytest.raises(RuntimeError, match=match):
+                play.check_kernels()
+    fused = selfplay(kernels="fused")[0]
+    fused.evaluator = Off(model, 0.0, 1.5e-3)  # fused's own values: within 1e-4
+    with pytest.raises(RuntimeError, match="kernels: fused: .* stale"):
+        fused.check_kernels()
 
 
 # ---------------------------------------------------------------- monitors
@@ -575,6 +627,7 @@ def test_check_train_refuses_targets_it_cannot_build():
     for dets in (0, 1):
         pruned = {**ALPHAZERO_KEYS, "policy_target": "pruned", "root": "puct", "dets": dets}
         assert check_train(pruned)["policy_target"] == "pruned"
+    assert check_train({**ALPHAZERO_KEYS, "kernels": "fused16"})["kernels"] == "fused16"
     for bad, match in (({"policy_target": "visits"}, "engine, gumbel or pruned"),
                        ({"policy_target": "gumbel", "root": "puct"}, "Gumbel root's improved policy; a PUCT"),
                        ({"policy_target": "pruned"}, "PUCT root's visits"),  # the default root is gumbel
@@ -584,7 +637,7 @@ def test_check_train_refuses_targets_it_cannot_build():
                        ({"policy_target": "gumbel", "target_c_scale": -0.1}, "non-negative"),
                        ({"policy_target": "gumbel", "target_prior_temperature": 0.0}, "positive"),
                        ({"pending": 0}, "leaves per network round"), ({"fast_pending": 0}, "leaves per network round"),
-                       ({"kernels": "cuda"}, "torch or fused"),
+                       ({"kernels": "cuda"}, "torch, fused or fused16"),
                        ({"target_c_scale": 0.01}, "set policy_target: gumbel"),  # silently unused otherwise
                        ({"target_prior_temperature": 10.0}, "set policy_target: gumbel")):
         with pytest.raises(ValueError, match=match):

@@ -7,7 +7,8 @@
    with a SearchPool, all searches in lockstep with their leaves evaluated in
    shared GPU batches (the eval's BatchEvaluator and CUDA graphs; with
    ``kernels: fused`` on the fused CUDA kernels, rebuilt from the weights
-   after every learning step, which they copy). Search is
+   after every learning step, which they copy; ``kernels: fused16`` on their
+   half-precision variant, self-play only). Search is
    on the true game (``dets: 0``, fast) or on worlds sampled from the deciding
    seat's hand tracker (``dets: K``, fair; ``VecEnv(trackers=True)``). The
    move played is sampled from the search policy at a temperature that decays
@@ -158,8 +159,8 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("train.sims and train.fast_sims must be positive and train.dets non-negative")
     if int(train["pending"]) < 1 or int(train["fast_pending"]) < 1:
         raise ValueError("train.pending and train.fast_pending count a search's leaves per network round (>= 1)")
-    if train["kernels"] not in ("torch", "fused"):
-        raise ValueError(f"train.kernels must be torch or fused, not {train['kernels']!r}")
+    if train["kernels"] not in ("torch", "fused", "fused16"):
+        raise ValueError(f"train.kernels must be torch, fused or fused16, not {train['kernels']!r}")
     if train["policy_target"] not in ("engine", "gumbel", "pruned"):
         raise ValueError(f"train.policy_target must be engine, gumbel or pruned, not {train['policy_target']!r}")
     if train["policy_target"] == "gumbel" and train["root"] != "gumbel":
@@ -572,24 +573,37 @@ class SelfPlay:
     def refresh(self) -> None:
         """After the weights changed (learn(), a resume). The module's forward reads them in place;
         the fused kernels read copies made when the evaluator was built (FusedGraph), so
-        ``kernels: fused`` rebuilds it, its CUDA graphs included."""
-        if self.train["kernels"] == "fused":
+        ``kernels: fused`` rebuilds it, its CUDA graphs included (``fused16`` too: its halves
+        are converted from those copies)."""
+        if self.train["kernels"] != "torch":
             self.evaluator = None  # its graphs and static rows go before the new ones are captured
             self.evaluator = self._evaluator()
 
     def check_kernels(self, rows: int = 64) -> None:
         """``kernels: fused``: the evaluator's values against the module's own on acting rows. The
         kernels are within 1e-6 of the module (graph_kernels.py); an evaluator left on older weights
-        is not, and self-play would search with them unnoticed."""
-        if self.train["kernels"] != "fused":
+        is not, and self-play would search with them unnoticed.
+
+        ``kernels: fused16``: the same check on the float32 kernels over the copies its halves were
+        converted from (the evaluator's ``exact``), as sharp as fused's, then the half-precision
+        values themselves, which rounding moves by more (at most 1.5e-3 on 53,000 real rows of two
+        networks; graph_kernels.py): within 1e-2."""
+        kernels = self.train["kernels"]
+        if kernels == "torch":
             return
         obs = self.buffers["observations"][np.flatnonzero(self.buffers["acting"])[:rows]]
         with torch.inference_mode():
             want = self.model(torch.from_numpy(obs).to(self.device))[1].float().cpu().numpy()
-        gap = float(np.abs(self.evaluator(obs)[1] - want).max()) if len(obs) else 0.0
+        exact = self.evaluator(obs)[1] if kernels == "fused" else self.evaluator.exact(obs)[1]
+        gap = float(np.abs(exact - want).max()) if len(obs) else 0.0
         if gap > 1e-4:
-            raise RuntimeError(f"kernels: fused: the evaluator's values are {gap:.2g} from the network's "
+            raise RuntimeError(f"kernels: {kernels}: the evaluator's values are {gap:.2g} from the network's "
                                "(its weights are stale: refresh() after every change)")
+        if kernels == "fused16":
+            gap = float(np.abs(self.evaluator(obs)[1] - want).max()) if len(obs) else 0.0
+            if gap > 1e-2:
+                raise RuntimeError(f"kernels: fused16: the half-precision values are {gap:.2g} from the "
+                                   "network's (rounding moves them by about 1e-3: train with kernels: fused)")
 
     def pool_of(self, env: int, full: bool) -> cpp.SearchPool:
         """The pool that searches game ``env`` at the full or the fast budget."""
