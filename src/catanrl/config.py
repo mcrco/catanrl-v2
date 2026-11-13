@@ -677,7 +677,9 @@ def _default_suites(scenarios: Sequence[Any]) -> tuple[int, str] | None:
     heldout suites (``base-4p`` -> ``select-4p``, ``random-4p`` -> ``select-random-4p``)."""
     from catanrl.games import load_game
 
-    names = {e.get("game") if isinstance(e, Mapping) else e for e in scenarios}
+    games = [e.get("game") if isinstance(e, Mapping) else e for e in scenarios]
+    # a stored config (catanrl fork) holds each game's full definition: its name stands for it
+    names = {g.get("name") if isinstance(g, Mapping) else g for g in games}
     if len(names) != 1 or not isinstance(next(iter(names)), str):
         return None
     name = next(iter(names))

@@ -193,6 +193,8 @@ def test_alphazero_from_a_network_evaluates_head_to_head_against_it(tmp_path):
     # From scratch there is no start to play: the global defaults.
     scratch = load_plan(write(tmp_path, train=az["train"])).variants[0].config
     assert scratch["eval"] == {"select": None, "final": []}
+    # A stored config (what catanrl fork resolves again) holds each game's definition, not its name.
+    assert config.resolve(cfg, experiment="exp", variant="main")["eval"] == cfg["eval"]
 
 
 def test_alphazero_head_to_head_follows_the_player_count(tmp_path):
