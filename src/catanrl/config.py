@@ -461,8 +461,8 @@ def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) 
                           "has the search's own sigma and a pruned one has none (set policy_target: gumbel)")
     if train["pending"] < 1 or train["fast_pending"] < 1:
         raise ConfigError("train.pending and train.fast_pending count a search's leaves per network round (>= 1)")
-    if train["kernels"] not in ("torch", "fused"):
-        raise ConfigError(f"train.kernels must be torch or fused, not {train['kernels']!r}")
+    if train["kernels"] not in ("torch", "fused", "fused16"):
+        raise ConfigError(f"train.kernels must be torch, fused or fused16, not {train['kernels']!r}")
 
 
 def check_distill(train: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> None:
