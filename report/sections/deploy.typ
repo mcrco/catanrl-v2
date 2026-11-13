@@ -19,8 +19,8 @@ The bots that play people are in @tab:deploy-bots. To serve a 1v1 net raw, use t
     [`catanrl-4p`], [`POLICY:ckpt=ppo-4p/main@e3650`],
     [`catanrl-1v1-search`], [`MCTS:ckpt=puffer-graph2/full@e3350:sims=65536:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused`],
     [`catanrl-1v1-v2`], [`BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16`],
-    [`catanrl-1v1-search-v2` \ #sub[live since 2026-11-04; retired once search-v3 runs]], [`MCTS:ckpt=ppo-2p-fr3/full@e4350:sims=131072:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`],
-    [`catanrl-1v1-search-v3` \ #sub[released 2026-11-13; not registered yet (@exp:deploy-openhex-search-v3)]], [`MCTS:ckpt=az-2p-kata/main@e300:` the same search],
+    [`catanrl-1v1-search-v2` \ #sub[2026-11-04 to 2026-11-13; retired for search-v3]], [`MCTS:ckpt=ppo-2p-fr3/full@e4350:sims=131072:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`],
+    [`catanrl-1v1-search-v3` \ #sub[bot `1154c5f058024665`, live since 2026-11-13 (@exp:deploy-openhex-search-v3)]], [`MCTS:ckpt=az-2p-kata/main@e300:` the same search],
   ),
   caption: [The deploy files in this checkout, sha pins omitted. `@best` is e3350 for `puffer-graph2/full`, e3650 for `ppo-4p/main` and e3550 for `ppo-mixed/main`.],
 ) <tab:deploy-bots>
@@ -211,13 +211,13 @@ catanrl run configs/experiments/deploy-check-2p-graph-m.yaml
 
 === OpenHex search-v3: the AlphaZero-trained net #chip("running") <exp:deploy-openhex-search-v3>
 #meta(
-  dates: "2026-11-13 (released; not registered yet)",
+  dates: "2026-11-13 –",
   owner: "marco",
   config: "deploy/openhex.yaml at tag openhex-1v1-v3",
   wandb: (("az-2p-kata-main-2e3b1866", "az-2p-kata/main"),),
   records: ("e917f9bb", "809619df", "b7f9c1f4"),
 )
-#tldr[`az-2p-kata/main@e300` (`2p-graph-s-5`) is released on GitHub as #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v3")[`openhex-1v1-v3`] for a new bot, `catanrl-1v1-search-v3` (Marco's name): `catanrl-1v1-search-v2`'s search with the net AlphaZero trained. Marco registers and runs it on yang, then looks at a day of its games. The bot it replaces has won 29 of its last 101 games, so the ladder has moved more than this net's 4 pp.]
+#tldr[`az-2p-kata/main@e300` (`2p-graph-s-5`) is released on GitHub as #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v3")[`openhex-1v1-v3`] for a new bot, `catanrl-1v1-search-v3` (Marco's name): `catanrl-1v1-search-v2`'s search with the net AlphaZero trained. Marco registered it (bot `1154c5f058024665`) and runs it on yang since 2026-11-13 (`c12a046`); a day of its games is the evidence. The bot it replaces has won 29 of its last 101 games, so the ladder has moved more than this net's 4 pp.]
 
 *Question.* Does the trained net look better than fr3 on OpenHex's ladder, at the deployed 2#super[17] sims?
 
