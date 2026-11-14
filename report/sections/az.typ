@@ -436,11 +436,11 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
 #meta(
   dates: "2026-11-13 01:18 –",
   owner: "marco",
-  config: "runs/az-2p-kata/main+600/config.json, then runs/az-2p-kata/main+600-fast/config.json (forks of configs/experiments/az-2p-kata.yaml)",
-  wandb: (("az-2p-kata-main-600-6ffee9f3", "az-2p-kata/main+600"), ("az-2p-kata-main-600-fast-a21eb778", "az-2p-kata/main+600-fast")),
-  records: ("1ab3df39", "c7276581"),
+  config: "runs/az-2p-kata/main+600/config.json, then main+600-fast and main+600-fast-noselect (forks of configs/experiments/az-2p-kata.yaml)",
+  wandb: (("az-2p-kata-main-600-6ffee9f3", "az-2p-kata/main+600"), ("az-2p-kata-main-600-fast-a21eb778", "az-2p-kata/main+600-fast"), ("az-2p-kata-main-600-fast-noselect-69e27214", "az-2p-kata/main+600-fast-noselect")),
+  records: ("1ab3df39", "c7276581", "a28af73d"),
 )
-#tldr[Marco (2026-11-13): keep the KataGo-style training going for about two days and see how it goes. This run continues @exp:az-kata from e300 with nothing changed, to iteration 900 (three times the games). At e410 (2026-11-13 08:23) Marco had it stopped and continued as `main+600-fast` on the faster self-play of @exp:az-speed: the same visit counts, targets and learning rate, 82 s an iteration instead of 197 s. It should end on the morning of 2026-11-14. Selects so far: e450 scores 58.55%, level with e300's 57.90% on the same games (p = 0.59); e600 scores 60.85%, +2.95 pp over e300 (p = 0.015).]
+#tldr[Marco (2026-11-13): keep the KataGo-style training going for about two days and see how it goes. This run continues @exp:az-kata from e300 with nothing changed, to iteration 900 (three times the games). At e410 (2026-11-13 08:23) Marco had it stopped and continued as `main+600-fast` on the faster self-play of @exp:az-speed: the same visit counts, targets and learning rate, 82 s an iteration instead of 197 s. Selects: e450 scores 58.55%, level with e300's 57.90% on the same games (p = 0.59); e600 60.85%, +2.95 pp over e300 (p = 0.015); e750 59.60%, +1.70 pp over e300 (p = 0.18) and level with e600 (p = 0.26). Every checkpoint is well past the start (e750: +7.85 pp, p = 2e-8). At e750 Marco had the selects removed (they were half of the wall-clock): the last 150 iterations run as `main+600-fast-noselect` and end about 06:15 on 2026-11-14 with one held-out row for e900.]
 
 *Question.* Does the search keep improving with more of the same self-play, or was e300 the plateau?
 
@@ -451,10 +451,11 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
 - *Switch at e410* (Marco: "kill the current run and continue from latest checkpoint possible"). `main+600` was stopped at iteration 410 (75,282 games) and forked as `main+600-fast` with `train.reuse: true`, `train.kernels: fused16` and two search groups; weights, optimizer and replay carry over again. Iterations 411–413 took 82–86 s at 69,000 leaves a second, with 46% of searches starting from a kept tree; policy loss 0.26–0.27 and value loss 0.38–0.39, as in the last iterations before the switch. The 490 iterations left take about 11 h, the selects 9 h and the finals 4–5 h.
 - *What the switch changes for the question.* From e411 the games come from searches on reused trees and fp16 forwards, so a change in the trend after e410 could be either more self-play or the new self-play. The evals are the same search on the same games (unchanged bit for bit), and e450's select is the first to include the new games (40 of its 450 iterations).
 - *Finals.* The fork's finals are the best and the last checkpoint only: the start's row is not played again (the merge changed the eval code id), and both pair by game with the stored row (fr3 in the search, 53.85%).
+- *No selects after e750* (Marco, 2026-11-13: "can we remove the evals then or at least do them more rarely? i think it's safe to say the method works."). From e410 to e750 the three selects took 7.5 h and the self-play 7.8 h. `main+600-fast` was stopped when e750's select ended (2026-11-13 23:58) and forked as `main+600-fast-noselect` with `eval.select` removed: 150 iterations (3.4 h), then one final row, e900 in the search on the 2,000 held-out games (2.5 h), paired with the stored rows of e300 and the start. No `best` is picked in this fork. Set by Claude: keeping that one row, and letting e750's select (two-thirds played when the change was made) finish.
 - *Fix on the way.* `catanrl fork` failed on an AlphaZero run from a network: it resolved the stored config again, where each scenario holds the game's definition instead of its name. Fixed in `50236e3`, with a test.
 - Set by Claude: 900 iterations and a select every 150, to fit Marco's two days.
 
-#lead[Result so far] (selects; filled in as they land).
+#lead[Result so far] (the selects; the held-out row of e900 is to come).
 #figure(
   btable(
     columns: (1fr, auto, auto, auto, auto),
@@ -464,11 +465,13 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
     [e300 (55,100 games)], [57.90 #ci[55.7][60.0]], [1,158], [], [],
     [e450 (82,500 games)], [58.55 #ci[56.4][60.7]], [1,171], [+0.65 pp (254 vs 241)], [0.59],
     [e600 (110,200 games)], [60.85 #ci[58.7][63.0]], [1,217], [+2.95 pp (316 vs 257)], [0.015],
+    [e750 (137,900 games)], [59.60 #ci[57.4][61.7]], [1,192], [+1.70 pp (317 vs 283)], [0.18],
   ),
-  caption: [`select-2p-fr-1000`, the same 2,000 games in every row; McNemar's exact test on the games only one of the pair won. Against the start: e450 +6.80 pp (446 vs 310, p = 9e-7), e600 +9.10 pp (474 vs 292, p = 5e-11). e600 against e450: +2.30 pp (282 vs 236, p = 0.048). The faster self-play played e450's last 40 iterations and all of e600's since.],
+  caption: [`select-2p-fr-1000`, the same 2,000 games in every row; McNemar's exact test on the games only one of the pair won. Against the start: e450 +6.80 pp (446 vs 310, p = 9e-7), e600 +9.10 pp (474 vs 292, p = 5e-11), e750 +7.85 pp (468 vs 311, p = 2e-8). e600 against e450: +2.30 pp (282 vs 236, p = 0.048). e750 against e600: −1.25 pp (213 vs 238, p = 0.26); against e450: +1.05 pp (308 vs 287, p = 0.41). The faster self-play played e450's last 40 iterations and everything since.],
 )
 - *e450.* 58.55%, level with e300 (+0.65 pp, p = 0.59): 150 more iterations (27,400 games) did not move the search by an amount this eval can see (it detects about 3.4 pp). Against e100 and e200 it is +2.45 pp (p = 0.06) and +2.00 pp (p = 0.11).
 - *e600.* 60.85%, the first checkpoint past e300 on these games: +2.95 pp (p = 0.015, not corrected for the two looks so far). The search is still improving with more self-play, and 190 iterations on reused trees and fp16 forwards did not stop it. The net keeps moving away from fr3 slowly: it agrees with fr3's top move at 88.3% of the probe positions (90.2% at e300; KL 0.32 from 0.29).
+- *e750.* 59.60%, between e450 and e600 and level with both; `best` stays e600. Against e300 it is +1.70 pp (p = 0.18), so e600's +2.95 pp is not repeated at the next checkpoint: the three looks since e300 are +0.65, +2.95 and +1.70 pp, all positive, one significant on its own. The search has gained since e300, by an amount at the edge of what a 2,000-game row detects (about 3.4 pp). The net agrees with fr3's top move at 87.7% of the probe positions (KL 0.33).
 - *Where the time goes* (read off the live run at iteration 313, nothing profiled). Self-play is 194 s of each 197 s iteration. A step is 46.5 network rounds of about 2,430 leaves, 65 ms a round, 27 µs a leaf. The GPU is busy 64% of the time (about 40 ms a round, the 16 µs a leaf of @exp:search-depth-2p); in the other 25 ms the CPU walks the trees and moves the rows, and each side waits for the other. The process uses 3.0 of 16 hardware threads: the main thread a whole one (it spins while the GPU works), the 22 workers 6–12% each. Forwards are already 512 rows, about five to a round.
 
 #repro(```sh
@@ -479,6 +482,10 @@ catanrl run az-2p-kata/main+600
 catanrl fork az-2p-kata/main+600 --as main+600-fast --set train.reuse=true --set train.kernels=fused16 \
   --set 'eval.final=[<the best and latest rows of the parent, with the fork's name>]'
 catanrl run az-2p-kata/main+600-fast
+# at e750, after its select: stop it, then
+catanrl fork az-2p-kata/main+600-fast --as main+600-fast-noselect --set eval.select=null \
+  --set 'eval.final=[<the latest row only, with the fork's name>]'
+catanrl run az-2p-kata/main+600-fast-noselect
 ```)
 
 === Faster self-play: tree reuse, half-precision kernels, pipelined rounds #chip("done") <exp:az-speed>
