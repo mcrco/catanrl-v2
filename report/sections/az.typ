@@ -438,9 +438,9 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
   owner: "marco",
   config: "runs/az-2p-kata/main+600/config.json, then runs/az-2p-kata/main+600-fast/config.json (forks of configs/experiments/az-2p-kata.yaml)",
   wandb: (("az-2p-kata-main-600-6ffee9f3", "az-2p-kata/main+600"), ("az-2p-kata-main-600-fast-a21eb778", "az-2p-kata/main+600-fast")),
-  records: ("1ab3df39",),
+  records: ("1ab3df39", "c7276581"),
 )
-#tldr[Marco (2026-11-13): keep the KataGo-style training going for about two days and see how it goes. This run continues @exp:az-kata from e300 with nothing changed, to iteration 900 (three times the games). At e410 (2026-11-13 08:23) Marco had it stopped and continued as `main+600-fast` on the faster self-play of @exp:az-speed: the same visit counts, targets and learning rate, 82 s an iteration instead of 197 s. It should end on the morning of 2026-11-14. First select: e450 scores 58.55%, level with e300's 57.90% on the same games (p = 0.59).]
+#tldr[Marco (2026-11-13): keep the KataGo-style training going for about two days and see how it goes. This run continues @exp:az-kata from e300 with nothing changed, to iteration 900 (three times the games). At e410 (2026-11-13 08:23) Marco had it stopped and continued as `main+600-fast` on the faster self-play of @exp:az-speed: the same visit counts, targets and learning rate, 82 s an iteration instead of 197 s. It should end on the morning of 2026-11-14. Selects so far: e450 scores 58.55%, level with e300's 57.90% on the same games (p = 0.59); e600 scores 60.85%, +2.95 pp over e300 (p = 0.015).]
 
 *Question.* Does the search keep improving with more of the same self-play, or was e300 the plateau?
 
@@ -463,10 +463,12 @@ CATANRL_RUNS_DIR=<scratch> WANDB_MODE=disabled catanrl run az-2p-kata \
     [fr3, the start (e0)], [51.75 #ci[49.6][53.9]], [1,035], [], [],
     [e300 (55,100 games)], [57.90 #ci[55.7][60.0]], [1,158], [], [],
     [e450 (82,500 games)], [58.55 #ci[56.4][60.7]], [1,171], [+0.65 pp (254 vs 241)], [0.59],
+    [e600 (110,200 games)], [60.85 #ci[58.7][63.0]], [1,217], [+2.95 pp (316 vs 257)], [0.015],
   ),
-  caption: [`select-2p-fr-1000`, the same 2,000 games in every row; McNemar's exact test on the games only one of the pair won. e450 against the start: +6.80 pp (446 vs 310, p = 9e-7). e450's last 40 iterations are the faster self-play's.],
+  caption: [`select-2p-fr-1000`, the same 2,000 games in every row; McNemar's exact test on the games only one of the pair won. Against the start: e450 +6.80 pp (446 vs 310, p = 9e-7), e600 +9.10 pp (474 vs 292, p = 5e-11). e600 against e450: +2.30 pp (282 vs 236, p = 0.048). The faster self-play played e450's last 40 iterations and all of e600's since.],
 )
 - *e450.* 58.55%, level with e300 (+0.65 pp, p = 0.59): 150 more iterations (27,400 games) did not move the search by an amount this eval can see (it detects about 3.4 pp). Against e100 and e200 it is +2.45 pp (p = 0.06) and +2.00 pp (p = 0.11).
+- *e600.* 60.85%, the first checkpoint past e300 on these games: +2.95 pp (p = 0.015, not corrected for the two looks so far). The search is still improving with more self-play, and 190 iterations on reused trees and fp16 forwards did not stop it. The net keeps moving away from fr3 slowly: it agrees with fr3's top move at 88.3% of the probe positions (90.2% at e300; KL 0.32 from 0.29).
 - *Where the time goes* (read off the live run at iteration 313, nothing profiled). Self-play is 194 s of each 197 s iteration. A step is 46.5 network rounds of about 2,430 leaves, 65 ms a round, 27 µs a leaf. The GPU is busy 64% of the time (about 40 ms a round, the 16 µs a leaf of @exp:search-depth-2p); in the other 25 ms the CPU walks the trees and moves the rows, and each side waits for the other. The process uses 3.0 of 16 hardware threads: the main thread a whole one (it spins while the GPU works), the 22 workers 6–12% each. Forwards are already 512 rows, about five to a round.
 
 #repro(```sh
