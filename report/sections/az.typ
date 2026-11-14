@@ -496,6 +496,28 @@ catanrl fork az-2p-kata/main+600-fast --as main+600-fast-noselect --set eval.sel
 catanrl run az-2p-kata/main+600-fast-noselect
 ```)
 
+=== 900 more iterations from e900: `az-2p-kata/main+1500` #chip("running") <exp:az-kata-1800>
+#meta(
+  dates: "2026-11-14 –",
+  owner: "marco",
+  config: "runs/az-2p-kata/main+1500/config.json (a fork of main+600-fast-noselect at e900)",
+  wandb: (("az-2p-kata-main-1500-22e5f5af", "az-2p-kata/main+1500"),),
+)
+#tldr[Marco (2026-11-14): keep training. The run of @exp:az-kata-more continues from e900 to iteration 1,800 with nothing changed, about 165,000 more games in 20.5 h, with no evals on the way and one held-out row for e1800 at the end.]
+
+*Question.* Does the search keep gaining with twice the self-play again, and at what rate? From e300 to e900 it gained 2.60 pp on the held-out games.
+
+#lead[Setup.]
+- *Run.* A fork of `az-2p-kata/main+600-fast-noselect` at e900: weights, optimizer and replay carry over; the recipe and the faster self-play of @exp:az-speed are unchanged (82 s an iteration).
+- *Eval.* One row: e1800 in the 1,024-sim search against fr3's fair raw bot on the 2,000 held-out games, paired by game with the stored rows of e900 (60.30%), e300 (57.70%) and the start (53.85%). A paired comparison on 2,000 games detects about 3.4 pp at 80% power, so a gain over e900 at the earlier rate (2.6 pp per 600 iterations) may not be significant on its own; the comparison with e300 will be.
+- *Cost.* 900 iterations at 82 s (20.5 h) and the final row (2.2 h): about 23 h. No selects (Marco, @exp:az-kata-more), so no `best`: the row is for the last checkpoint. A stop at any iteration keeps a checkpoint there.
+- Set by Claude: 900 more iterations and the single final row.
+
+#repro(```sh
+catanrl fork az-2p-kata/main+600-fast-noselect --as main+1500 --set train.iterations=1800
+catanrl run az-2p-kata/main+1500
+```)
+
 === Faster self-play: tree reuse, half-precision kernels, pipelined rounds #chip("done") <exp:az-speed>
 #meta(
   dates: "2026-11-13",
