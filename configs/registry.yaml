@@ -41,6 +41,12 @@ models:
     from: 2p-graph-s-3
     steps: 2_030_899_200
     use: fr3 after 300 iterations of AlphaZero self-play (9.8M searched moves); in the 1,024-sim search 57.7% vs fr3's raw bot against 53.85% with fr3's net; the net of OpenHex 1v1-search-v3
+  2p-graph-s-6:
+    ref: "az-2p-kata/main+1500@e1800#7c44ec80540a"
+    rules: base-2p-fr
+    from: 2p-graph-s-5
+    steps: 2_080_051_200
+    use: fr3 after 1,800 iterations of AlphaZero self-play (329,221 games, 59M searched moves); in the 1,024-sim search 62.95% vs fr3's raw bot against 57.7% with 2p-graph-s-5 and 53.85% with fr3's net; the net of OpenHex 1v1-search-v3.1
   2p-graph-m-1:
     ref: "graph-m-2p-lr/main@e22711#673425d606b5"
     rules: base-2p-fr

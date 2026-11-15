@@ -16,7 +16,7 @@ bots:
     key_env: OPENHEX_KEY_1V1
     bot_id: 05c4a25c6c0e46e1
     deployed: 2026-10-17
-    tag: openhex-1v1-v3
+    tag: openhex-1v1-v3.1
     retired: false
   - name: catanrl-4p
     mode: 4p
@@ -25,7 +25,7 @@ bots:
     key_env: OPENHEX_KEY_4P
     bot_id: 068460ec188f4a2c
     deployed: 2026-10-17
-    tag: openhex-1v1-v3
+    tag: openhex-1v1-v3.1
     retired: false
   - name: catanrl-1v1-search
     mode: 1v1
@@ -84,4 +84,19 @@ bots:
     deployed: 2026-11-13
     tag: openhex-1v1-v3
     evidence: [e917f9bb47b8ad4c, 809619df11e87cc8, b7f9c1f46488c4b0]
+    retired: true
+    retired_at: 2026-11-15  # replaced by catanrl-1v1-search-v3.1 (the same run, 1,500 iterations later)
+  # v3.1 (2026-11-15, Marco): az-2p-kata/main+1500@e1800 (2p-graph-s-6), search-v3's net after
+  # 1,500 more iterations of the same self-play (329,221 games in all), in the same search.
+  # Measured at 1,024 sims against fr3's fair raw bot on the same 2,000 heldout-2p-fr games:
+  # 62.95% with this net, 60.30% at e900, 57.70% with search-v3's (e300; paired +5.25 pp,
+  # p = 7e-5) and 53.85% with fr3's. Not measured at 2^17 sims or against search-v3 itself.
+  - name: catanrl-1v1-search-v3.1
+    mode: 1v1
+    version: 1v1-search-v3.1
+    spec: MCTS:ckpt=az-2p-kata/main+1500@e1800#7c44ec80540a:sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45
+    key_env: OPENHEX_KEY_1V1_SEARCH_V3_1
+    deployed: 2026-11-15
+    tag: openhex-1v1-v3.1
+    evidence: [ea2574432c1ce3fc, 4411825addefb873, e917f9bb47b8ad4c, 809619df11e87cc8]
     retired: false
