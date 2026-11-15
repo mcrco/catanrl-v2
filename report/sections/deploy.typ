@@ -20,7 +20,8 @@ The bots that play people are in @tab:deploy-bots. To serve a 1v1 net raw, use t
     [`catanrl-1v1-search`], [`MCTS:ckpt=puffer-graph2/full@e3350:sims=65536:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused`],
     [`catanrl-1v1-v2`], [`BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16`],
     [`catanrl-1v1-search-v2` \ #sub[2026-11-04 to 2026-11-13; retired for search-v3]], [`MCTS:ckpt=ppo-2p-fr3/full@e4350:sims=131072:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`],
-    [`catanrl-1v1-search-v3` \ #sub[bot `1154c5f058024665`, live since 2026-11-13 (@exp:deploy-openhex-search-v3)]], [`MCTS:ckpt=az-2p-kata/main@e300:` the same search],
+    [`catanrl-1v1-search-v3` \ #sub[bot `1154c5f058024665`, live since 2026-11-13 (@exp:deploy-openhex-search-v3); retired in the file for search-v3.1 on 2026-11-15]], [`MCTS:ckpt=az-2p-kata/main@e300:` the same search],
+    [`catanrl-1v1-search-v3.1` \ #sub[released 2026-11-15, not registered yet (@exp:deploy-openhex-search-v3-1)]], [`MCTS:ckpt=az-2p-kata/main+1500@e1800:` the same search],
   ),
   caption: [The deploy files in this checkout, sha pins omitted. `@best` is e3350 for `puffer-graph2/full`, e3650 for `ppo-4p/main` and e3550 for `ppo-mixed/main`.],
 ) <tab:deploy-bots>
@@ -209,15 +210,15 @@ uv run python tools/search_probe.py "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d
 catanrl run configs/experiments/deploy-check-2p-graph-m.yaml
 ```)
 
-=== OpenHex search-v3: the AlphaZero-trained net #chip("running") <exp:deploy-openhex-search-v3>
+=== OpenHex search-v3: the AlphaZero-trained net #chip("done") <exp:deploy-openhex-search-v3>
 #meta(
-  dates: "2026-11-13 –",
+  dates: "2026-11-13 – 2026-11-15",
   owner: "marco",
   config: "deploy/openhex.yaml at tag openhex-1v1-v3",
   wandb: (("az-2p-kata-main-2e3b1866", "az-2p-kata/main"),),
   records: ("e917f9bb", "809619df", "b7f9c1f4"),
 )
-#tldr[`az-2p-kata/main@e300` (`2p-graph-s-5`) is released on GitHub as #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v3")[`openhex-1v1-v3`] for a new bot, `catanrl-1v1-search-v3` (Marco's name): `catanrl-1v1-search-v2`'s search with the net AlphaZero trained. Marco registered it (bot `1154c5f058024665`) and runs it on yang since 2026-11-13 (`c12a046`); a day of its games is the evidence. The bot it replaces has won 29 of its last 101 games, so the ladder has moved more than this net's 4 pp.]
+#tldr[`az-2p-kata/main@e300` (`2p-graph-s-5`) is released on GitHub as #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v3")[`openhex-1v1-v3`] for a new bot, `catanrl-1v1-search-v3` (Marco's name): `catanrl-1v1-search-v2`'s search with the net AlphaZero trained. Marco registered it (bot `1154c5f058024665`) and runs it on yang since 2026-11-13 (`c12a046`). In two days it won 108 of 201 games (53.7%, Elo 1632); search-v2 won 60 of 183 in its last three days (Elo 1425), mostly against a bot search-v3 never met. On the four opponents both met it is 33 of 92 against 12 of 43 (p = 0.43): too few games to separate the nets. Retired in the file on 2026-11-15 for search-v3.1 (@exp:deploy-openhex-search-v3-1).]
 
 *Question.* Does the trained net look better than fr3 on OpenHex's ladder, at the deployed 2#super[17] sims?
 
@@ -242,6 +243,30 @@ catanrl run configs/experiments/deploy-check-2p-graph-m.yaml
 - Since 11 November it has won 60 of 181 (33%), against opponents that are new or have changed (`hexn-4d.0` went from 33 of 75 to 48 of 140). Whether yang's searches are also being cut short cannot be seen from here: the `cut` counts in yang's `games.jsonl` would say.
 - So a day of search-v3's games is compared, opponent by opponent, with search-v2's games since 11 November, not with its 4–10 November record.
 
+#lead[Result: two days of search-v3] (OpenHex's public data, 2026-11-15 19:23 UTC).
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, right),
+    header: ([Opponent], [search-v2, 11–13 November], [search-v3, 13–15 November]),
+    [`oversized-pig`], [5 of 16], [16 of 48],
+    [`Pattern`], [1 of 5], [13 of 30],
+    [`Gaz`], [4 of 18], [3 of 9],
+    [`puma-ppo-864m`], [2 of 4], [1 of 5],
+    [*The four both met*], [*12 of 43 (27.9%)*], [*33 of 92 (35.9%)*],
+    [`hexn-4d.0`], [48 of 140], [–],
+    [`HexN`], [–], [23 of 40],
+    [`2s-Rules-L8`], [–], [20 of 22],
+    [`Pattern-Rollouts3`], [–], [12 of 20],
+    [`Rehex`, `2s-NN-Large-Greedy`, `Pattern-Rollouts2`, `Pattern-Rollouts`], [–], [20 of 27],
+    [All], [60 of 183 (32.8%)], [108 of 201 (53.7%)],
+  ),
+  caption: [Wins of finished games by opponent. Elo now: search-v2 1425, search-v3 1632.],
+)
+- *Same opponents.* +8.0 pp for search-v3 on the four both met, Fisher p = 0.43. With 43 and 92 games only a gap of about 25 pp would show, and the nets differ by 4 pp at eval depth.
+- *Overall.* 53.7% against 32.8%, but the opponents differ: 140 of search-v2's 183 games were against `hexn-4d.0`, which search-v3 did not meet, and 109 of search-v3's 201 were against bots search-v2 did not meet. The Elo gap (207) carries the same mix.
+- *Not looked at.* 9 of search-v3's 201 games were aborted (search-v2: 2 of 183). Whose deadline it was is in yang's `games.jsonl`.
+
 #repro(```sh
 # Here: build, tag, publish (done 2026-11-13)
 catanrl openhex release deploy/openhex.yaml openhex-1v1-v3
@@ -250,7 +275,40 @@ git fetch --tags origin && git checkout origin/main && git submodule update --in
 catanrl openhex fetch deploy/openhex.yaml
 catanrl openhex deploy/openhex.yaml --check --device cuda
 catanrl openhex deploy/openhex.yaml --describe catanrl-1v1-search-v3 > /tmp/body.json   # then register (handoff, step 7)
-# Anywhere: both bots' records by opponent over the same days
+# Anywhere: both bots' records by opponent (the table above)
+catanrl openhex stats deploy/openhex.yaml --since 2026-11-11
+```)
+
+=== OpenHex search-v3.1: the same run at 1,800 iterations #chip("queued") <exp:deploy-openhex-search-v3-1>
+#meta(
+  dates: "2026-11-15 (released; not registered yet)",
+  owner: "marco",
+  config: "deploy/openhex.yaml at tag openhex-1v1-v3.1",
+  wandb: (("az-2p-kata-main-1500-22e5f5af", "az-2p-kata/main+1500"),),
+  records: ("ea257443", "4411825a", "e917f9bb", "809619df"),
+)
+#tldr[`az-2p-kata/main+1500@e1800` (`2p-graph-s-6`) is released on GitHub as #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v3.1")[`openhex-1v1-v3.1`] for a new bot, `catanrl-1v1-search-v3.1` (Marco: "release e1800 as v3.1"): search-v3's search with the net 1,500 iterations later. It waits for Marco's registration on yang; search-v3 is retired in the same file.]
+
+*Question.* Does the e1800 net do better on OpenHex's ladder than e300, at the deployed 2#super[17] sims?
+
+- *Why this net.* In the 1,024-sim search against fr3's fair raw bot, on the same 2,000 held-out games: 62.95% with e1800, 57.70% with search-v3's e300 (paired +5.25 pp, p = 7e-5), 53.85% with fr3's net (@exp:az-kata-1800). Not measured: 2#super[17] sims, and e1800 against e300 head to head.
+- *Spec.* search-v3's with the checkpoint swapped: `MCTS:ckpt=az-2p-kata/main+1500@e1800#7c44ec80540a:` \ `sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`.
+- *Release.* Tag `openhex-1v1-v3.1` at `3abe244`. The play source moved since `openhex-1v1-v3` (the self-play speed-ups of @exp:az-speed in `src/`, and the engine submodule to `b926970`), so the old tag no longer holds for a running bot: `catanrl-1v1` and `catanrl-4p` carry the new tag too, and yang needs `git submodule update` and `uv sync` (which rebuilds the engine). A fetch of the published release into an empty directory resolved all three checkpoints, and `--check` there reports only the unset keys.
+- *No overlap.* search-v3.1 replaces search-v3 (as search-v3 replaced search-v2). To run both for a head-to-head, set search-v3's `retired: false` and its tag to `openhex-1v1-v3.1`.
+- *Baseline.* search-v3's two days (@exp:deploy-openhex-search-v3): 108 of 201, and 33 of 92 against `oversized-pig`, `Pattern`, `Gaz` and `puma-ppo-864m`. A 5 pp gap needs about 1,500 games a side on the same opponents (80% power), so two days will only show a large change.
+
+#repro(```sh
+# Here: build, tag, publish (done 2026-11-15)
+catanrl openhex release deploy/openhex.yaml openhex-1v1-v3.1
+git tag openhex-1v1-v3.1 && git push origin main openhex-1v1-v3.1   # then the printed gh release create
+# On yang
+git fetch --tags origin && git checkout origin/main && git submodule update --init && uv sync --extra cu126
+catanrl openhex fetch deploy/openhex.yaml
+catanrl openhex deploy/openhex.yaml --check --device cuda
+catanrl openhex deploy/openhex.yaml --describe catanrl-1v1-search-v3.1 > /tmp/body.json   # then register (handoff, step 7)
+# key into /etc/catanrl/openhex.env as OPENHEX_KEY_1V1_SEARCH_V3_1; bot_id into deploy/openhex.yaml
+catanrl openhex deploy/openhex.yaml --check --keys --device cuda
+# Anywhere: both bots' records by opponent
 catanrl openhex stats deploy/openhex.yaml --since 2026-11-13
 ```)
 
