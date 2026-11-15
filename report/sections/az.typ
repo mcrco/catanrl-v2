@@ -496,14 +496,15 @@ catanrl fork az-2p-kata/main+600-fast --as main+600-fast-noselect --set eval.sel
 catanrl run az-2p-kata/main+600-fast-noselect
 ```)
 
-=== 900 more iterations from e900: `az-2p-kata/main+1500` #chip("running") <exp:az-kata-1800>
+=== 900 more iterations from e900: `az-2p-kata/main+1500` #chip("done") <exp:az-kata-1800>
 #meta(
-  dates: "2026-11-14 –",
+  dates: "2026-11-14 11:55 – 2026-11-15 11:12",
   owner: "marco",
   config: "runs/az-2p-kata/main+1500/config.json (a fork of main+600-fast-noselect at e900)",
   wandb: (("az-2p-kata-main-1500-22e5f5af", "az-2p-kata/main+1500"),),
+  records: ("ea257443",),
 )
-#tldr[Marco (2026-11-14): keep training. The run of @exp:az-kata-more continues from e900 to iteration 1,800 with nothing changed, about 165,000 more games in 20.5 h, with no evals on the way and one held-out row for e1800 at the end.]
+#tldr[Marco (2026-11-14): keep training. The run of @exp:az-kata-more continues from e900 to iteration 1,800 with nothing changed, 164,000 more games in 21 h, with no evals on the way and one held-out row at the end. e1800 (329,221 games of self-play) scores 62.95% on the 2,000 held-out games: +2.65 pp over e900 (p = 0.031), +5.25 pp over e300 (p = 7e-5) and +9.10 pp over the start's net (p = 4e-11). The search is still gaining, at about half the rate per game: 2.6 pp for the 110,000 games from e300 to e900, and 2.65 pp for the 164,000 from e900 to e1800.]
 
 *Question.* Does the search keep gaining with twice the self-play again, and at what rate? From e300 to e900 it gained 2.60 pp on the held-out games.
 
@@ -512,6 +513,25 @@ catanrl run az-2p-kata/main+600-fast-noselect
 - *Eval.* One row: e1800 in the 1,024-sim search against fr3's fair raw bot on the 2,000 held-out games, paired by game with the stored rows of e900 (60.30%), e300 (57.70%) and the start (53.85%). A paired comparison on 2,000 games detects about 3.4 pp at 80% power, so a gain over e900 at the earlier rate (2.6 pp per 600 iterations) may not be significant on its own; the comparison with e300 will be.
 - *Cost.* 900 iterations at 82 s (20.5 h) and the final row (2.2 h): about 23 h. No selects (Marco, @exp:az-kata-more), so no `best`: the row is for the last checkpoint. A stop at any iteration keeps a checkpoint there.
 - Set by Claude: 900 more iterations and the single final row.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Network inside the 1,024-sim search], [Score vs fr3's fair raw bot], [Wins of 2,000], [e1800 paired against it], [p]),
+    [fr3, the start], [53.85 #ci[51.7][56.0]], [1,077], [+9.10 pp (471 vs 289)], [4e-11],
+    [e300 (55,100 games)], [57.70 #ci[55.5][59.8]], [1,154], [+5.25 pp (398 vs 293)], [0.00007],
+    [e900 (165,300 games)], [60.30 #ci[58.1][62.4]], [1,206], [+2.65 pp (317 vs 264)], [0.031],
+    [e1800 (329,200 games)], [62.95 #ci[60.8][65.0]], [1,259], [], [],
+  ),
+  caption: [`heldout-2p-fr`, first 1,000 boards in both seat orders, the same 2,000 games in every row; McNemar's exact test on the games only one of the pair won.],
+)
+- *Strength.* 62.95% (67.8% moving first, 58.1% second). Each doubling of the self-play has added to the search on games no checkpoint was picked on: +3.85 pp by e300, +2.60 pp more by e900, +2.65 pp more by e1800. The two later steps are each significant at 5% on their own (p = 0.041 and 0.031), neither by much; together, e1800 over e300 is +5.25 pp (p = 7e-5).
+- *Rate.* Per game the gain is falling: 3.85 pp for the first 55,000 games, 2.60 pp for the next 110,000, 2.65 pp for the next 164,000. No plateau is visible at 1,800 iterations.
+- *Net.* It agrees with fr3's top move at 84.3% of the probe positions (86.8% at e900; KL 0.42 from 0.35). Policy loss 0.29 and value loss 0.38, flat since e300; fresh targets are as close to the net as replayed ones (KL 0.036 and 0.037).
+- *Time.* 23.3 h: 21.0 h of self-play (84 s an iteration with checkpoints) and 2.3 h for the row.
+- *Not measured.* e1800 against e900 or fr3 search against search, any depth past 1,024 sims, and the raw policy without search.
 
 #repro(```sh
 catanrl fork az-2p-kata/main+600-fast-noselect --as main+1500 --set train.iterations=1800
