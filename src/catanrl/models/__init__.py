@@ -23,6 +23,10 @@ illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
   victory points and the turns left), which only the AlphaZero trainer's losses run:
   ``forward`` / ``heads`` and so every agent, evaluator and kernel are the network
   without it;
+* ``seat``: :mod:`catanrl.models.seat` (dims-agnostic): the graph network with the seats
+  as a set (shared weights for every seat, the seats a fourth entity type of the message
+  passing, attention between them), behind the graph network's heads and with its
+  options (``shared``, ``aux``, ``outcome``, a separate critic level). No fused kernels;
 * ``mlp``: :mod:`catanrl.models.mlp` (padded dims only);
 * ``cnn``: :mod:`catanrl.models.cnn` (v1's cross-dimensional CNN; the BASE board only);
 * ``lstm``: :mod:`catanrl.models.lstm` (dims-agnostic, recurrent: the graph
@@ -67,14 +71,16 @@ from catanrl.models.rows import (
     mask_logits,
     value_prior,
 )
+from catanrl.models.seat import SEAT_DEFAULTS, SEAT_OPTIONAL, SeatNetwork
 
 MODEL_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "models"
 CLASSES: dict[str, dict[str, Any]] = {
     "graph": GRAPH_DEFAULTS, "mlp": MLP_DEFAULTS, "cnn": CNN_DEFAULTS, "lstm": LSTM_DEFAULTS,
+    "seat": SEAT_DEFAULTS,
 }
 #: Per class, the args a spec may leave out, with the value that means "unset": an unset one is
 #: not in the resolved spec, so the specs (and config hashes) from before it existed stand.
-OPTIONAL_ARGS: dict[str, dict[str, Any]] = {"graph": GRAPH_OPTIONAL}
+OPTIONAL_ARGS: dict[str, dict[str, Any]] = {"graph": GRAPH_OPTIONAL, "seat": SEAT_OPTIONAL}
 
 __all__ = ["MODEL_CLASSES", "CatanModel", "build_model", "load_preset", "normalize_levels", "resolve_spec"]
 
@@ -163,6 +169,8 @@ def aux_targets_from_block(model: CatanModel, reader: RowReader, obs: torch.Tens
 
 class GraphModel(CatanModel):
     dims_agnostic = True
+    #: The network of a trunk and its heads (a subclass with another trunk names its own).
+    network: type[torch.nn.Module] = GraphNetwork
 
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__(spec, dims, levels, layout)
@@ -183,7 +191,7 @@ class GraphModel(CatanModel):
             if self.has_critic_block and not self.aux:
                 raise ValueError("a shared trunk cannot read a separate critic level")
             hidden = hidden_feature_indices(canonical["players"]) if self.aux else []
-            net = GraphNetwork(actor_reader, action_layout, args=args, num_players=self.num_players,
+            net = self.network(actor_reader, action_layout, args=args, num_players=self.num_players,
                                policy=True, value=True, aux_features=len(hidden), outcome=self.outcome)
             self.backbone, self.policy_head, self.value_head = net.trunk, net.policy, net.value
             self.parts = {"actor": ["backbone.", "policy_head."], "critic": ["value_head."]}
@@ -200,9 +208,9 @@ class GraphModel(CatanModel):
         else:
             critic_names = feature_names(dims, levels["critic_level"], dice)
             critic_reader = RowReader(layout, critic_names, players=self.critic_players, canonical=canonical)
-            self.actor = GraphNetwork(actor_reader, action_layout, args=args, num_players=self.num_players,
+            self.actor = self.network(actor_reader, action_layout, args=args, num_players=self.num_players,
                                       policy=True, value=False)
-            self.critic = GraphNetwork(critic_reader, action_layout, args=args, num_players=self.num_players,
+            self.critic = self.network(critic_reader, action_layout, args=args, num_players=self.num_players,
                                        policy=False, value=True)
             self.parts = {"actor": ["actor."], "critic": ["critic."]}
         self.shared = bool(args["shared"])
@@ -266,6 +274,13 @@ class GraphModel(CatanModel):
         features read from the critic block (the players block at ``critic_level``), and
         which of those seats the game has. Training only: a row without the block raises."""
         return aux_targets_from_block(self, self.backbone.reader, obs)
+
+
+class SeatModel(GraphModel):
+    """The graph model on the seat-set trunk (:mod:`catanrl.models.seat`): the seats as a set
+    with shared weights, behind the graph network's heads, parts and options."""
+
+    network = SeatNetwork
 
 
 class MlpModel(CatanModel):
@@ -420,7 +435,7 @@ class LstmModel(CatanModel):
 
 #: Model class name -> the :class:`CatanModel` subclass (the ``class`` of a spec).
 MODEL_CLASSES: dict[str, type[CatanModel]] = {
-    "graph": GraphModel, "mlp": MlpModel, "cnn": CnnModel, "lstm": LstmModel,
+    "graph": GraphModel, "mlp": MlpModel, "cnn": CnnModel, "lstm": LstmModel, "seat": SeatModel,
 }
 
 

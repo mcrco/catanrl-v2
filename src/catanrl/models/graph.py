@@ -266,6 +266,12 @@ class GraphTrunk(nn.Module):
         return Embeddings(nodes, tiles, edges, players, pooled, topo)
 
 
+def _seat_width(trunk) -> int:
+    """The width of a trunk's seat embeddings (``Embeddings.players``): its entity width, unless
+    the trunk has seats of another (``seat_hidden``: :class:`catanrl.models.seat.SeatTrunk`)."""
+    return getattr(trunk, "seat_hidden", trunk.hidden)
+
+
 def _mlp(inputs: int, hidden: int, outputs: int, depth: int, out_gain: float) -> nn.Sequential:
     layers: list[nn.Module] = []
     width = inputs
@@ -313,9 +319,9 @@ class GraphPolicyHead(nn.Module):
         self.city = _mlp(h, head_hidden, 1, 1, POLICY_OUTPUT_GAIN)
         self.road = _mlp(2 * h, head_hidden, 1, 2, POLICY_OUTPUT_GAIN)
         self.robber_tile = nn.Linear(h, head_hidden)
-        self.robber_victim = nn.Linear(h, head_hidden, bias=False)
+        self.robber_victim = nn.Linear(_seat_width(trunk), head_hidden, bias=False)
         self.robber_output = nn.Linear(head_hidden, 1)
-        self.nobody = nn.Parameter(torch.zeros(h))
+        self.nobody = nn.Parameter(torch.zeros(_seat_width(trunk)))
         orthogonal_(self.robber_tile, HIDDEN_GAIN)
         orthogonal_(self.robber_victim, HIDDEN_GAIN)
         orthogonal_(self.robber_output, POLICY_OUTPUT_GAIN)
@@ -345,7 +351,7 @@ class GraphValueHead(nn.Module):
     def __init__(self, trunk: GraphTrunk, *, head_hidden: int, num_players: int) -> None:
         super().__init__()
         self.num_players = num_players
-        self.mlp = _mlp(trunk.pooled_dim + trunk.hidden, head_hidden, 1, 2, VALUE_OUTPUT_GAIN)
+        self.mlp = _mlp(trunk.pooled_dim + _seat_width(trunk), head_hidden, 1, 2, VALUE_OUTPUT_GAIN)
 
     def forward(self, emb: Embeddings, present: torch.Tensor) -> torch.Tensor:
         players = emb.players[:, : self.num_players]
@@ -364,7 +370,7 @@ class GraphAuxHead(nn.Module):
             raise ValueError("the aux head predicts at least one feature of at least one other seat")
         self.num_players = num_players
         self.num_features = num_features
-        self.mlp = _mlp(trunk.pooled_dim + trunk.hidden, head_hidden, num_features, 2, AUX_OUTPUT_GAIN)
+        self.mlp = _mlp(trunk.pooled_dim + _seat_width(trunk), head_hidden, num_features, 2, AUX_OUTPUT_GAIN)
 
     def forward(self, emb: Embeddings) -> torch.Tensor:
         """[B, P-1, F]: slot k+1's features from row k of the output."""
@@ -384,7 +390,7 @@ class GraphOutcomeHead(nn.Module):
     def __init__(self, trunk: GraphTrunk, *, head_hidden: int, num_players: int) -> None:
         super().__init__()
         self.num_players = num_players
-        self.vp = _mlp(trunk.pooled_dim + trunk.hidden, head_hidden, 1, 2, OUTCOME_OUTPUT_GAIN)
+        self.vp = _mlp(trunk.pooled_dim + _seat_width(trunk), head_hidden, 1, 2, OUTCOME_OUTPUT_GAIN)
         self.turns = _mlp(trunk.pooled_dim, head_hidden, 1, 2, OUTCOME_OUTPUT_GAIN)
 
     def forward(self, emb: Embeddings) -> tuple[torch.Tensor, torch.Tensor]:

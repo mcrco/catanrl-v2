@@ -1,0 +1,13 @@
+preset: graph-seat-s
+class: seat
+args:
+  hidden: 96
+  global_hidden: 64
+  layers: 3
+  head_hidden: 128
+  shared: false
+  seat_hidden: 48
+  relation_hidden: 4
+  attention: true
+  attention_hidden: 24
+  attention_heads: 4
