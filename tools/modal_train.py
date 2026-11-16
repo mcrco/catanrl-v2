@@ -572,6 +572,14 @@ def _supervise(spec: dict) -> dict:
     else:
         phase = "failed"
     state["idle_segments"] = idle
+    for name in spec.get("ships", []):  # an eval-only config files its records under its first agent's run
+        src, dst = Path(LOCAL_RUNS) / name / "evals", Path(VOL) / "runs" / name / "evals"
+        new = [p for p in sorted(src.rglob("*")) if p.is_file() and not _skip(p.relative_to(src))
+               and not (dst / p.relative_to(src)).exists()]
+        for path in new:
+            _put_file(path, dst / path.relative_to(src))
+        if new:
+            print(f"[modal_train] {len(new)} new eval files of {name} to the Volume", flush=True)
     sync(phase)
     print(f"[modal_train] trainer exit {code}, run status {status}, phase {phase}, "
           f"{left:.0f} s of the budget left", flush=True)
