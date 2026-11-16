@@ -1,40 +1,50 @@
-"""The dice input (``obs.dice_odds``, approved by Marco 2026-11-10): each seat's next-roll odds,
-``Game.roll_probabilities``, 11 per seat in the global block, seats relative to the observer.
+"""The dice input (``obs.dice_state``): the balanced dice state in the global block and on each
+tile (:data:`catanrl.envs.encoding.DICE_STATE`), seats relative to the observer.
 
-* the features against ``roll_probabilities`` on real balanced games, in observer order;
-* off, rows, layouts, levels, checkpoint headers and config hashes are as before;
-* the config key and the checkpoint's ``obs.dice_odds`` round-trip, and the self-test pins
+* the features against the game's ``BalancedDice`` on real balanced games, in observer order,
+  and the constants of random dice;
+* off, rows (against digests from main's build), layouts, levels, checkpoint headers and
+  config hashes are as before;
+* the config key and the checkpoint's ``obs.dice_state`` round-trip, and the self-test pins
   declared balanced dice states;
 * ``init_from.zero_new_inputs`` copies every weight and zeroes only the new inputs', so the
-  warm-started network gives its source's logits and values on real rows;
+  warm-started network gives its source's logits and values on real rows, bit for bit;
 * POLICY, BELIEF and MCTS (torch kernels) build their rows, worlds and leaves with the input
-  from the checkpoint alone, the harness plays a dice network against one without it in
-  either slot, and the fused kernels fold the input into their global projection;
-* the training env's rows carry it, and a tiny PPO run from a checkpoint without it logs
-  ``dice/*``, starts as its source and moves the dice weights off zero.
+  from the checkpoint alone and, warm-started, choose as their source; the harness plays a
+  dice network against one without it in either slot; the fused kernels keep the plain
+  projections' GEMMs as the source's and read the dice features through two of their own
+  (CPU, stub kernels; the whole forward on the device evaluators is marked ``gpu``);
+* the training env's rows carry it, a tiny PPO run from a checkpoint without it logs
+  ``dice/*``, starts as its source and moves the dice weights off zero, and the probe's fair
+  rows are a fresh state's (tests/test_alphazero_dice.py has the AlphaZero trainer).
 """
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json
 import random
+import shutil
 from types import SimpleNamespace
 
 import cppanatron as cpp
 import numpy as np
 import pytest
 import torch
+from dice_features import DiceColumns, global_names, tile_names
 
 from catanrl import checkpoint as ck
 from catanrl.agents.native import make_native_agent
 from catanrl.agents.spec import resolve_agent
 from catanrl.config import ConfigError, config_hash, resolve
 from catanrl.envs.encoding import (
+    DICE_ODDS_SCALE,
     DICE_PREFIX,
     FAIR_ODDS,
     action_size,
     dims_for,
+    fresh_dice_features,
     make_encoder,
     row_layout,
 )
@@ -48,7 +58,7 @@ DIMS = dims_for([GAME])
 
 def model_of(dice: bool, *, level: str = "full", shared: bool = True, seed: int = 0, preset: str = "graph-tiny"):
     torch.manual_seed(seed)
-    levels = {"level": level, **({"dice_odds": True} if dice else {})}
+    levels = {"level": level, **({"dice_state": True} if dice else {})}
     return build_model({"preset": preset, "args": {"shared": shared}}, dims=DIMS, levels=levels,
                        num_actions=action_size(DIMS), layout=row_layout(DIMS, level, None, dice)).eval()
 
@@ -74,40 +84,77 @@ def balanced_games(n: int = 6, steps: int = 500, every: int = 23):
     return out
 
 
-def odds_block(names, row, offset, players):
-    first = names.index(f"{DICE_PREFIX}0_2")
-    return row[offset + first: offset + first + 11 * players].reshape(players, 11)
+# ---------------------------------------------------------------- the features
 
 
-# ---------------------------------------------------------------- the feature
-
-
-def test_the_features_are_each_seats_roll_probabilities_in_observer_order():
+def test_the_features_are_the_games_balanced_dice_in_observer_order():
     encoder = make_encoder(DIMS, "full", True)
-    names = list(encoder.feature_names("global"))
-    assert names[-22:] == [f"{DICE_PREFIX}{k}_{t}" for k in range(2) for t in range(2, 13)]
-    offset = encoder.layout()["global"][0]
-    differ = unfair = 0
+    plain = make_encoder(DIMS, "full")
+    columns = DiceColumns(encoder)
+    assert len(columns.global_dice) == 14 * 2 + 23 == 51 and len(columns.tile_dice) == 2 + 2
+    assert encoder.size == plain.size + 51 + 19 * 4 == plain.size + 127
+    differ = unfair = aged = sevens = window = 0
     for game, _ in balanced_games():
+        dice = game.balanced_dice
         for observer in range(2):
-            odds = odds_block(names, encoder.encode(game, observer), offset, 2)
+            row = encoder.encode(game, observer)
+            columns.check(game, observer, row)
+            glob = dict(zip(columns.global_dice, columns.glob(row)))
             own = np.array(game.roll_probabilities(observer), dtype=np.float32)
             other = np.array(game.roll_probabilities(1 - observer), dtype=np.float32)
-            assert np.array_equal(odds[0], own) and np.array_equal(odds[1], other)  # slot 0 is the observer
-            assert abs(float(odds[0].sum()) - 1.0) < 1e-5
+            odds = np.array([[glob[f"dice_odds_{k}_{t}"] for t in range(2, 13)] for k in range(2)])
+            assert np.allclose(odds[0], own * DICE_ODDS_SCALE) and np.allclose(odds[1], other * DICE_ODDS_SCALE)
+            assert abs(float(odds[0].sum()) - DICE_ODDS_SCALE) < 1e-4  # slot 0 is the observer
+            assert glob["dice_sevens_0"] == np.float32(min(dice.sevens[observer] / 10.0, 1.0))
+            assert all(0.0 <= value <= 2.5 for value in columns.all(row))  # of order 1
             differ += not np.array_equal(own, other)
             unfair += not np.allclose(own, FAIR_ODDS)
-    assert differ > 0 and unfair > 0  # the seats' odds differ (seven balancing), and they are not fair
+            aged += glob["dice_draws_left"] < 1.0
+            sevens += glob["dice_seven_share_0"] > 0
+            window += max(glob[f"dice_recent_{t}"] for t in range(2, 13)) > 0.5
+    # the seats' odds differ (seven balancing) and are not fair; decks age, windows repeat
+    assert min(differ, unfair, aged, sevens, window) > 0
 
 
-def test_canonical_names_pad_six_seats_and_fair_dice_read_fair():
-    canonical = canonical_feature_names(dice_odds=True)["global"]
-    plain = canonical_feature_names()["global"]
-    assert canonical == plain + [f"{DICE_PREFIX}{k}_{t}" for k in range(6) for t in range(2, 13)]
+def test_canonical_names_pad_six_seats():
+    canonical, plain = canonical_feature_names(dice_state=True), canonical_feature_names()
+    assert canonical["global"] == plain["global"] + global_names(6) and len(global_names(6)) == 14 * 6 + 23
+    assert canonical["tiles"] == plain["tiles"] + tile_names(6) and len(tile_names(6)) == 8
+    assert all(canonical[b] == plain[b] for b in plain if b not in ("global", "tiles"))
+
+
+@pytest.mark.parametrize("level", ["private", "full"])
+def test_random_dice_read_a_fresh_state_at_every_roll(level):
+    """Under random dice the dice features are constants: the fair odds for every seat, a full
+    deck, an empty window, no sevens; a tile's odds are its pips feature."""
+    encoder = make_encoder(DIMS, level, True)
+    columns = DiceColumns(encoder)
     game = load_game("base-2p").cppanatron_game(1, 2)  # random dice
-    encoder = make_encoder(DIMS, "private", True)
-    odds = odds_block(list(encoder.feature_names("global")), encoder.encode(game, 1), encoder.layout()["global"][0], 2)
-    assert np.array_equal(odds, np.tile(np.array(FAIR_ODDS, dtype=np.float32), (2, 1)))
+    assert game.balanced_dice is None
+    rng = random.Random(0)
+    fresh = np.array(fresh_dice_features(columns.global_names, 2)[-51:], dtype=np.float32)
+    assert fresh_dice_features(columns.global_names, 2)[:-51] == [None] * (len(columns.global_names) - 51)
+    seen = set()
+    pips = columns.tile_feature_names.index("pips")
+    for step in range(300):
+        if game.winning_color is not None:
+            break
+        if step % 17 == 0:
+            for observer in range(2):
+                row = encoder.encode(game, observer)
+                columns.check(game, observer, row)
+                assert np.array_equal(columns.glob(row), fresh)
+                tiles = row[columns.t0: columns.t0 + columns.num_tiles * columns.tile_width].reshape(
+                    columns.num_tiles, columns.tile_width)
+                numbered = np.array(columns.tile_numbers(row)) > 0
+                assert np.array_equal(columns.tiles(row)[:, 0], tiles[:, pips])  # the fair odds: the pips
+                assert np.array_equal(columns.tiles(row)[:, 1], tiles[:, pips])
+                assert np.array_equal(columns.tiles(row)[:, 2], numbered.astype(np.float32))
+                assert not columns.tiles(row)[:, 3].any()
+                seen.add(columns.all(row).tobytes())
+        game.execute(rng.choice(game.playable_actions))
+    assert len(seen) == 1
+    assert np.allclose(fresh[:22], np.tile(np.array(FAIR_ODDS) * DICE_ODDS_SCALE, 2))
 
 
 # ---------------------------------------------------------------- off is unchanged
@@ -123,35 +170,69 @@ def test_off_is_bit_identical():
         assert feature_names(DIMS, level) == feature_names(DIMS, level, False)
         assert ck.layout_hash(DIMS, level) == ck.layout_hash(DIMS, level, False) != ck.layout_hash(DIMS, level, True)
     assert normalize_levels({"level": "full"}) == {"level": "full", "critic_level": "full"}
-    assert normalize_levels({"level": "full", "dice_odds": False}) == {"level": "full", "critic_level": "full"}
+    assert normalize_levels({"level": "full", "dice_state": False}) == {"level": "full", "critic_level": "full"}
     plain, dice = model_of(False), model_of(True)  # one seed: every shared weight drawn alike
     theirs, mine = plain.state_dict(), dice.state_dict()
-    assert set(mine) - set(theirs) == {"backbone.dice_projection.weight"} and set(theirs) <= set(mine)
+    new = {"backbone.dice_projection.weight", "backbone.tile_dice_projection.weight"}
+    assert set(mine) - set(theirs) == new and set(theirs) <= set(mine)
     assert all(torch.equal(mine[k], theirs[k]) for k in theirs)
-    assert mine["backbone.dice_projection.weight"].shape == (theirs["backbone.global_projection.bias"].shape[0], 66)
-    assert not mine["backbone.dice_projection.weight"].any()  # zero at initialization
-    assert plain.backbone.dice_projection is None and plain.backbone.plain_globals == len(
-        canonical_feature_names()["global"])
+    assert mine["backbone.dice_projection.weight"].shape == (theirs["backbone.global_projection.bias"].shape[0], 107)
+    assert mine["backbone.tile_dice_projection.weight"].shape == (theirs["backbone.tile_projection.bias"].shape[0], 8)
+    assert not any(mine[k].any() for k in new)  # zero at initialization
+    trunk = plain.backbone
+    assert trunk.dice_projection is None and trunk.tile_dice_projection is None
+    assert trunk.plain_globals == len(canonical_feature_names()["global"])
+    assert trunk.plain_tiles == len(canonical_feature_names()["tiles"]) == dice.backbone.plain_tiles
+    assert (dice.backbone.dice_inputs, dice.backbone.tile_dice_inputs) == (107, 8)
+
+
+#: sha256 (16 hex) of the rows without the input along seeded random games, from main's build
+#: before the option existed (3f34b94, engine b926970): balanced dice and random, 2 and 4 seats.
+MAIN_ROWS = {("base-2p-fr", "private"): "8b1ffd4388e1627f", ("base-2p-fr", "full"): "371789ed77ebcde1",
+             ("base-4p", "private"): "cc1a60fdf5d11ca1", ("base-4p", "full"): "c15e847657ae9d74"}
+
+
+@pytest.mark.parametrize("name, level", sorted(MAIN_ROWS))
+def test_rows_without_the_input_are_mains_byte_for_byte(name, level):
+    import hashlib
+
+    config = load_game(name)
+    encoder = make_encoder(dims_for([name]), level)
+    digest = hashlib.sha256()
+    for seed in range(4):
+        game = config.cppanatron_game(seed, 100 + seed)
+        rng = random.Random(seed)
+        for step in range(400):
+            if game.winning_color is not None:
+                break
+            if step % 23 == 7:
+                for seat in range(game.num_players):
+                    digest.update(encoder.encode(game, seat).tobytes())
+            game.execute(rng.choice(game.playable_actions))
+    assert digest.hexdigest()[:16] == MAIN_ROWS[name, level]
 
 
 def test_an_unset_dice_input_keeps_the_config_hash():
     base = {"env": {"scenarios": [{"game": GAME}]}, "model": {"preset": "graph-tiny"}, "train": {"algo": "ppo"},
             "obs": {"level": "full"}}
     plain = resolve(base, experiment="t", variant="v")
-    unset = resolve({**base, "obs": {"level": "full", "dice_odds": False}}, experiment="t", variant="v")
-    on = resolve({**base, "obs": {"level": "full", "dice_odds": True}}, experiment="t", variant="v")
-    assert "dice_odds" not in plain["obs"] and "dice_odds" not in unset["obs"] and on["obs"]["dice_odds"] is True
+    unset = resolve({**base, "obs": {"level": "full", "dice_state": False}}, experiment="t", variant="v")
+    on = resolve({**base, "obs": {"level": "full", "dice_state": True}}, experiment="t", variant="v")
+    assert "dice_state" not in plain["obs"] and "dice_state" not in unset["obs"] and on["obs"]["dice_state"] is True
     assert config_hash(unset) == config_hash(plain) != config_hash(on)
-    with pytest.raises(ConfigError, match="obs.dice_odds is true or false"):
-        resolve({**base, "obs": {"level": "full", "dice_odds": "yes"}}, experiment="t", variant="v")
-    with pytest.raises(ConfigError, match="train.algo ppo"):
-        resolve({**base, "obs": {"level": "full", "dice_odds": True}, "train": {"algo": "alphazero"}},
+    with pytest.raises(ConfigError, match="obs.dice_state is true or false"):
+        resolve({**base, "obs": {"level": "full", "dice_state": "yes"}}, experiment="t", variant="v")
+    with pytest.raises(ConfigError, match="train.algo ppo or alphazero"):
+        resolve({**base, "obs": {"level": "full", "dice_state": True}, "train": {"algo": "imitation"}},
                 experiment="t", variant="v")
+    az = resolve({**base, "obs": {"level": "full", "dice_state": True}, "train": {"algo": "alphazero"}},
+                 experiment="t", variant="v")
+    assert az["obs"]["dice_state"] is True
     init = {"ckpt": "x/y@e1", "zero_new_inputs": True}
-    with pytest.raises(ConfigError, match="set obs.dice_odds: true"):
+    with pytest.raises(ConfigError, match="set obs.dice_state: true"):
         resolve({**base, "init_from": init}, experiment="t", variant="v")
     with pytest.raises(ConfigError, match="restores weights only"):
-        resolve({**base, "obs": {"level": "full", "dice_odds": True}, "init_from": {**init, "restore":
+        resolve({**base, "obs": {"level": "full", "dice_state": True}, "init_from": {**init, "restore":
                  "weights+optimizer"}}, experiment="t", variant="v")
 
 
@@ -161,26 +242,32 @@ def test_an_unset_dice_input_keeps_the_config_hash():
 def test_the_checkpoint_stores_the_input_and_its_self_test_declares_dice_states(tmp_path):
     plain_ref, dice_ref = saved(tmp_path / "plain", model_of(False)), saved(tmp_path / "dice", model_of(True))
     plain, dice = ck.Checkpoint.load(plain_ref.path), ck.Checkpoint.load(dice_ref.path)
-    assert set(plain.header["obs"]) == {"level", "critic_level", "dims", "layout_hash"} and not plain.dice_odds
+    assert set(plain.header["obs"]) == {"level", "critic_level", "dims", "layout_hash"} and not plain.dice_state
     assert plain.levels == {"level": "full", "critic_level": "full"}
-    assert dice.header["obs"]["dice_odds"] is True and dice.dice_odds
-    assert dice.levels == {"level": "full", "critic_level": "full", "dice_odds": True}
+    assert dice.header["obs"]["dice_state"] is True and dice.dice_state
+    assert dice.levels == {"level": "full", "critic_level": "full", "dice_state": True}
     positions = json.loads(dice.header["self_test"]["positions"])
     assert all(p["game"]["dice_mode"] == "balanced" and "dice" in p for p in positions)
     assert len({json.dumps(p["dice"]) for p in positions}) > 4  # states of their own
     assert not any("dice" in p for p in json.loads(plain.header["self_test"]["positions"]))
     model = dice.model("all")
-    assert model.levels["dice_odds"] and model.obs_size == model_of(True).obs_size
+    assert model.levels["dice_state"] and model.obs_size == model_of(True).obs_size
     obs = dice.header["self_test"]["obs"]
+    columns = DiceColumns(make_encoder(DIMS, "full", True))
     names = feature_names(DIMS, "full", True)["global"]
-    odds = obs[:, names.index(f"{DICE_PREFIX}0_2"): names.index(f"{DICE_PREFIX}0_2") + 22]
-    assert not np.allclose(odds.numpy()[1:], np.tile(FAIR_ODDS, 2))  # the self-test reads unfair odds
-    # A drifted dice feature is caught by the self-test.
-    payload = torch.load(dice_ref.path, weights_only=True)
-    payload["self_test"]["obs"][1, names.index(f"{DICE_PREFIX}0_7")] += 0.01
-    torch.save(payload, tmp_path / "drift.pt")
-    with pytest.raises(ck.EncoderDrift):
-        ck.Checkpoint.load(tmp_path / "drift.pt").model("all")
+    fresh = np.array(fresh_dice_features(names, 2)[-51:], dtype=np.float32)
+    states = [columns.glob(row) for row in obs.numpy()]
+    assert sum(not np.allclose(state, fresh) for state in states) > 4  # the self-test reads used decks
+    assert any(columns.tiles(row)[:, 3].any() for row in obs.numpy())  # and tiles whose number just came
+    # A drifted dice feature, global or on a tile, is caught by the self-test.
+    tile = next(t for t, number in enumerate(columns.tile_numbers(obs[1].numpy())) if number)
+    for name, column in (("global", names.index(f"{DICE_PREFIX}odds_0_7")),
+                         ("tile", columns.t0 + (tile + 1) * columns.tile_width - 2)):
+        payload = torch.load(dice_ref.path, weights_only=True)
+        payload["self_test"]["obs"][1, column] += 0.01
+        torch.save(payload, tmp_path / f"drift-{name}.pt")
+        with pytest.raises(ck.EncoderDrift):
+            ck.Checkpoint.load(tmp_path / f"drift-{name}.pt").model("all")
 
 
 # ---------------------------------------------------------------- the warm start
@@ -211,9 +298,9 @@ def test_zero_new_inputs_copies_every_weight_and_plays_as_the_source(tmp_path, s
     ck.load_parts(target, {"ckpt": str(ref.path), "parts": ["actor", "critic"], "zero_new_inputs": True})
     theirs, mine = source.state_dict(), target.state_dict()
     new = sorted(set(mine) - set(theirs))
-    assert new == sorted(ck.dice_input_keys(target)) == (["backbone.dice_projection.weight"] if shared else
-                                                        ["actor.trunk.dice_projection.weight",
-                                                         "critic.trunk.dice_projection.weight"])
+    trunks = ["backbone"] if shared else ["actor.trunk", "critic.trunk"]
+    assert new == sorted(ck.dice_input_keys(target)) == sorted(
+        f"{trunk}.{layer}.weight" for trunk in trunks for layer in ("dice_projection", "tile_dice_projection"))
     assert all(torch.equal(mine[k], theirs[k]) for k in theirs) and not any(mine[k].any() for k in new)
     assert_plays_alike(source, target, real_rows(False), real_rows(True))
     # nothing to zero: refused
@@ -239,9 +326,9 @@ def test_fr3_warm_starts_into_graph_s_with_the_dice_input():
     except (RunError, OSError, ValueError):
         pytest.skip("ppo-2p-fr3/full@e4350 is not in the runs directory")
     source = fr3.model("all")
-    assert source.levels == {"level": "full", "critic_level": "full"} and not fr3.dice_odds
+    assert source.levels == {"level": "full", "critic_level": "full"} and not fr3.dice_state
     torch.manual_seed(0)
-    target = build_model(fr3.header["model"], dims=fr3.dims, levels={"level": "full", "dice_odds": True},
+    target = build_model(fr3.header["model"], dims=fr3.dims, levels={"level": "full", "dice_state": True},
                          num_actions=action_size(fr3.dims), layout=row_layout(fr3.dims, "full", None, True)).eval()
     ck.load_parts(target, {"ckpt": "ppo-2p-fr3/full@e4350#43eca7ffdd41", "parts": ["actor", "critic"],
                            "zero_new_inputs": True})
@@ -279,35 +366,79 @@ class Spy:
         return self.inner(rows)
 
 
+def decide(agent, game, seat, seed=5, spy=True):
+    """The agent's choice for ``seat`` in ``game``, with the row batches its evaluator saw
+    and what it answered."""
+    row = agent.encode(game, seat)
+    watch = Spy(agent.evaluator)
+    agent.evaluator = watch
+    try:
+        choice = agent.act(row[None], row[None, -agent.action_space.size:], np.array([seed], dtype=np.uint64),
+                           games=[game.copy()], trackers=[cpp.HandTracker(game, seat)])
+    finally:
+        agent.evaluator = watch.inner
+    return row, choice, watch
+
+
+SEARCHERS = ("POLICY:ckpt={}", "BELIEF:ckpt={}:worlds=3", "MCTS:ckpt={}:sims=8:dets=1:kernels=torch",
+             "MCTS:ckpt={}:sims=8:oracle=true")
+
+
 def test_policy_belief_and_mcts_read_the_input_from_the_checkpoint(dice_ckpt):
-    names = feature_names(DIMS, "full", True)["global"]
-    first = names.index(f"{DICE_PREFIX}0_2")
+    columns = DiceColumns(make_encoder(DIMS, "full", True))
     game, seat = balanced_games(1, 300, 300)[0]
-    expected = np.concatenate([np.array(game.roll_probabilities((seat + k) % 2), dtype=np.float32)
-                               for k in range(2)])
-    for spec in (f"POLICY:ckpt={dice_ckpt.path}", f"BELIEF:ckpt={dice_ckpt.path}:worlds=3",
-                 f"MCTS:ckpt={dice_ckpt.path}:sims=8:dets=1:kernels=torch", f"MCTS:ckpt={dice_ckpt.path}:sims=8:oracle=true"):
+    for spec in (s.format(dice_ckpt.path) for s in SEARCHERS):
         agent = native(spec)
-        assert agent.dice_odds and agent.encoder.dice_odds and agent.model.levels["dice_odds"], spec
-        row = agent.encode(game, seat)
-        assert row.shape == (agent.model.obs_size,) and np.array_equal(row[first: first + 22], expected)
-        spy = Spy(agent.evaluator)
-        agent.evaluator = spy
-        tracker = cpp.HandTracker(game, seat)
-        agent.act(row[None], row[None, -agent.action_space.size:], np.array([5], dtype=np.uint64),
-                  games=[game.copy()], trackers=[tracker])
+        assert agent.dice_state and agent.encoder.dice_state and agent.model.levels["dice_state"], spec
+        row, _, spy = decide(agent, game, seat)
+        assert row.shape == (agent.model.obs_size,)
+        columns.check(game, seat, row)
         seen = np.concatenate(spy.rows)
         assert seen.shape[1] == agent.model.obs_size and len(seen)
         if agent.key == "POLICY":
             assert np.array_equal(seen[0], row)
         if agent.key == "BELIEF":  # every world is a copy of the game: its dice state too
-            assert all(np.array_equal(r[first: first + 22], expected) for r in seen)
+            assert all(np.array_equal(columns.glob(r), columns.glob(row)) for r in seen)
+            assert all(np.array_equal(columns.tiles(r), columns.tiles(row)) for r in seen)
         if agent.key == "MCTS":
             assert agent.pool.observation_size == agent.model.obs_size
-            assert np.array_equal(seen[0][first: first + 22], expected)  # the root's leaf
-            odds = seen[:, first: first + 22].reshape(-1, 2, 11)
-            assert np.allclose(odds.sum(-1), 1.0, atol=1e-5)  # every leaf reads its own state's odds
-            assert len({o.tobytes() for o in odds}) > 1  # leaves after a roll moved the state on
+            assert np.array_equal(columns.all(seen[0]), columns.all(row))  # the root's leaf
+            odds = np.stack([columns.glob(r)[:22] for r in seen]).reshape(-1, 2, 11)
+            assert np.allclose(odds.sum(-1), DICE_ODDS_SCALE, atol=1e-4)  # every leaf reads its own state
+            assert len({columns.all(r).tobytes() for r in seen}) > 1  # leaves after a roll moved the state on
+            # a leaf's tile features are its own state's: each numbered tile's odds are that number's
+            for r in seen:
+                glob = dict(zip(columns.global_dice, columns.glob(r)))
+                for number, tile in zip(columns.tile_numbers(r), columns.tiles(r)):
+                    want = [glob[f"dice_odds_0_{number}"] * 1.2, glob[f"dice_deck_{number}"]] if number else [0, 0]
+                    assert np.allclose([tile[0], tile[2]], want, atol=1e-5)
+
+
+@pytest.mark.parametrize("spec", SEARCHERS)
+def test_a_warm_started_network_searches_as_its_source(tmp_path, spec):
+    """BELIEF and MCTS on a network warm-started with zero dice weights: the evaluator answers
+    its source's logits and values bit for bit on every world and leaf, so the search visits
+    the same nodes and chooses the same action."""
+    source = model_of(False, seed=11)
+    plain_ref = saved(tmp_path / "plain", source)
+    target = model_of(True, seed=12)
+    ck.load_parts(target, {"ckpt": str(plain_ref.path), "parts": ["actor", "critic"], "zero_new_inputs": True})
+    dice_ref = saved(tmp_path / "dice", target)
+    plain, dice = native(spec.format(plain_ref.path)), native(spec.format(dice_ref.path))
+    assert dice.dice_state and not plain.dice_state
+    answers = 0
+    for game, seat in balanced_games(3, 400, 37):
+        if len(game.playable_actions) < 2:
+            continue
+        (_, a, spy_a), (_, b, spy_b) = decide(plain, game, seat), decide(dice, game, seat)
+        assert np.array_equal(a, b), spec
+        assert len(spy_a.rows) == len(spy_b.rows) > 0
+        for rows_a, rows_b in zip(spy_a.rows, spy_b.rows):
+            assert rows_a.shape[0] == rows_b.shape[0] and rows_b.shape[1] == rows_a.shape[1] + 127
+            for out_a, out_b in zip(plain.evaluator(rows_a), dice.evaluator(rows_b)):
+                assert np.array_equal(np.asarray(out_a), np.asarray(out_b))
+            answers += len(rows_a)
+    assert answers >= 8
 
 
 def test_predict_and_trade_refuse_a_dice_network(dice_ckpt):
@@ -336,7 +467,7 @@ def test_the_harness_plays_a_dice_network_against_one_without(dice_ckpt, plain_c
         def spy(rows, masks, seeds, *, games=None, _agent=agent, _act=act, **kwargs):
             for row, game in zip(rows, games):
                 assert np.array_equal(row, _agent.encode(game, game.current_player_index))
-                checked.append(_agent.dice_odds)
+                checked.append(_agent.dice_state)
             return _act(rows, masks, seeds, games=games, **kwargs)
 
         agent.act = spy
@@ -348,28 +479,120 @@ def test_the_harness_plays_a_dice_network_against_one_without(dice_ckpt, plain_c
     assert len(rows) == 2 and True in checked and False in checked
 
 
-def test_the_fused_kernels_fold_the_dice_inputs_into_the_global_projection(monkeypatch):
-    """kernels=fused reads the raw [global | players] span through weights folded from the
-    canonical ones: with the input, its global projection is the module's (CPU, stub kernels)."""
+def first_projections(fused, rows: torch.Tensor):
+    """FusedGraph's first projections on CPU rows (the topology kernel's contiguous copies of
+    the raw entity blocks made here)."""
+    block = lambda b: rows[:, fused.spans[b][0]: fused.spans[b][0] + fused.spans[b][1][0] * fused.spans[b][1][1]
+                           ].reshape(-1, fused.spans[b][1][1]).contiguous()
+    return fused._first(rows, block("nodes"), block("tiles"), block("edges"))
+
+
+def test_the_fused_kernels_keep_the_plain_gemms_and_read_the_dice_inputs_beside_them(monkeypatch):
+    """kernels=fused reads the raw blocks through weights folded from the canonical ones. With
+    the input the plain features go through the GEMMs of a network without it (the same
+    weights, the same inputs) and the dice features through two of their own: zero dice
+    weights give that network's first projections bit for bit, and trained ones the module's.
+    (CPU, stub kernels: the arithmetic of the weights; tools/dice_input_smoke.py checks the
+    whole forward on the GPU.)"""
     from catanrl.models import graph_kernels
 
     monkeypatch.setattr(graph_kernels, "kernels", lambda: SimpleNamespace(hidden=96))
-    torch.manual_seed(0)
-    model = build_model({"preset": "graph-s", "args": {"shared": True}}, dims=DIMS,
-                        levels={"level": "full", "dice_odds": True}, num_actions=action_size(DIMS),
-                        layout=row_layout(DIMS, "full", None, True)).eval()
+    plain, model = model_of(False, preset="graph-s"), model_of(True, preset="graph-s")  # one seed
+    base, fused = graph_kernels.FusedGraph(plain), graph_kernels.FusedGraph(model)
+    assert not base.dice and fused.dice
+    assert fused.plain == {**base.plain, "global": base.plain["global"], "tiles": base.plain["tiles"]}
+    assert base.plain["tiles"] == fused.spans["tiles"][1][1] - 4
+    assert torch.equal(fused.wgT, base.wgT) and torch.equal(fused.bg, base.bg)
+    assert all(torch.equal(fused.proj[b][k], base.proj[b][k]) for b in base.proj for k in ("wT", "b", "wiT"))
+    assert fused.g_dice.shape == (51, fused.bg.shape[0]) and fused.t_dice.shape == (4, 96)
+    assert not fused.g_dice.any() and not fused.t_dice.any()
+    rows, plain_rows = real_rows(True), real_rows(False)
     with torch.no_grad():
-        model.backbone.dice_projection.weight.normal_()  # zero at initialization
+        (glob, us), (base_glob, base_us) = first_projections(fused, rows), first_projections(base, plain_rows)
+    assert torch.equal(glob, base_glob) and all(torch.equal(a, b) for a, b in zip(us, base_us))
+    with torch.no_grad():
+        model.backbone.dice_projection.weight.normal_()
+        model.backbone.tile_dice_projection.weight.normal_()
     fused = graph_kernels.FusedGraph(model)
-    rows = real_rows(True)
     trunk = model.backbone
     with torch.no_grad():
+        glob, us = first_projections(fused, rows)
         r = trunk.reader(rows)
-        plain = r.glob[:, : trunk.plain_globals]
-        want = (trunk.global_projection(torch.cat((plain, r.players.flatten(1)), dim=1))
-                + trunk.dice_projection(r.glob[:, trunk.plain_globals:]))
-        got = torch.addmm(fused.bg, rows[:, fused.g_span[0]: fused.g_span[1]], fused.wgT)
-    assert torch.allclose(got, want, rtol=1e-5, atol=1e-4)
+        want = torch.relu(trunk.global_projection(torch.cat((r.glob[:, : trunk.plain_globals], r.players.flatten(1)),
+                                                            dim=1))
+                          + trunk.dice_projection(r.glob[:, trunk.plain_globals:]))
+        tiles = torch.relu(trunk.tile_projection(r.tiles[..., : trunk.plain_tiles])
+                           + trunk.tile_dice_projection(r.tiles[..., trunk.plain_tiles:]))
+        want_tiles = tiles.reshape(-1, 96) @ trunk.tile_injection[0].weight[:, :96].T
+    assert torch.allclose(glob, want, rtol=1e-5, atol=1e-4)
+    assert torch.allclose(us[1], want_tiles, rtol=1e-5, atol=1e-4)
+    assert not torch.allclose(glob, base_glob) and not torch.allclose(us[1], base_us[1])  # the inputs are read
+
+
+# ---------------------------------------------------------------- the device evaluators (GPU)
+
+needs_kernels = pytest.mark.skipif(not torch.cuda.is_available() or shutil.which("nvcc") is None,
+                                   reason="needs CUDA and nvcc (the kernels build on first use)")
+
+
+def trained_scale(model):
+    """Random init leaves the logits near zero, where errors hide (tests/test_graph_kernels.py)."""
+    with torch.no_grad():
+        for p in model.parameters():
+            p.mul_(3.0)
+    return model
+
+
+def evaluate(model, rows, kernels: str, mode: str, device: str = "cuda"):
+    from catanrl.search import BatchEvaluator
+
+    return BatchEvaluator(copy.deepcopy(model), device=device, infer_rows=16, mode=mode, kernels=kernels)(rows.numpy())
+
+
+def warm_started(tmp_path, preset: str = "graph-s"):
+    """(a network without the input, the one with it warm-started from it)."""
+    source = trained_scale(model_of(False, seed=3, preset=preset))
+    ref = saved(tmp_path, source)
+    target = model_of(True, seed=4, preset=preset)
+    ck.load_parts(target, {"ckpt": str(ref.path), "parts": ["actor", "critic"], "zero_new_inputs": True})
+    return source, target
+
+
+@pytest.mark.gpu
+@needs_kernels
+@pytest.mark.parametrize("kernels, mode", [("torch", "strict"), ("torch", "fast"), ("fused", "strict"),
+                                           ("fused", "fast"), ("fused16", "strict"), ("fused16", "fast")])
+def test_a_warm_started_network_is_its_source_on_the_device_evaluators(tmp_path, kernels, mode):
+    """The run's e0 (init_from.zero_new_inputs) on the GPU: the module, the fused kernels and
+    their half-precision variant give the source's logits and values, bit for bit."""
+    source, target = warm_started(tmp_path)
+    was, now = evaluate(source, real_rows(False), kernels, mode), evaluate(target, real_rows(True), kernels, mode)
+    assert np.array_equal(was[0], now[0]) and np.array_equal(was[1], now[1])
+
+
+@pytest.mark.gpu
+@needs_kernels
+@pytest.mark.parametrize("mode", ["strict", "fast"])
+def test_the_fused_kernels_with_trained_dice_weights_match_the_module(tmp_path, mode):
+    """tests/test_graph_kernels.py's bounds, for a network that reads the dice input."""
+    _, model = warm_started(tmp_path)
+    zero = evaluate(model, real_rows(True), "fused", mode)
+    with torch.no_grad():
+        for key in ck.dice_input_keys(model):
+            model.state_dict()[key].normal_(std=0.1)
+    rows = real_rows(True)
+    mask = rows.numpy()[:, model.mask_offset: model.mask_offset + model.num_actions] > 0
+    want = evaluate(model, rows, "torch", mode)
+    scale = max(1.0, float(np.abs(want[0][mask]).max()))
+    got = evaluate(model, rows, "fused", mode)
+    assert np.array_equal(got[0] > -1e8, mask) and np.all(got[0][~mask] == want[0][~mask])
+    assert np.abs(got[0][mask] - want[0][mask]).max() <= 2e-6 * scale + 1e-5
+    assert np.abs(got[1] - want[1]).max() <= 1e-5
+    assert np.abs(got[1] - zero[1]).max() > 1e-4  # the kernels read the input
+    half = evaluate(model, rows, "fused16", mode)
+    assert np.isfinite(half[0]).all() and np.isfinite(half[1]).all()
+    assert np.abs(half[0][mask] - got[0][mask]).max() <= 4e-3 * scale
+    assert np.abs(half[1] - got[1]).max() <= 2e-3
 
 
 # ---------------------------------------------------------------- training
@@ -379,9 +602,9 @@ def test_the_training_env_writes_rows_with_the_input():
     from catanrl.envs.puffer import make_vecenv, plan_env
 
     plan = plan_env({"scenarios": [{"game": GAME, "maps": 2}], "num_envs": 2}, pool_seed=0)
-    vec = make_vecenv(plan, num_envs=2, level="full", critic_level=None, threads=1, seed=1, dice_odds=True)
+    vec = make_vecenv(plan, num_envs=2, level="full", critic_level=None, threads=1, seed=1, dice_state=True)
     env = vec.envs[0]
-    assert env.vec.dice_odds and env.single_observation_space.shape[0] == model_of(True).obs_size
+    assert env.vec.dice_state and env.single_observation_space.shape[0] == model_of(True).obs_size
     env.reset(1)
     encoder = make_encoder(plan.dims, "full", True)
     for row in np.flatnonzero(env.acting):
@@ -402,14 +625,14 @@ def test_a_tiny_run_from_a_plain_checkpoint_starts_as_it_and_trains_the_input(tm
     ref = saved(tmp_path, source)
     config = tiny_ppo(seed=4, epochs=4, critic_targets="lambda", critic_gamma=1.0)
     config["env"]["scenarios"] = [{"game": GAME, "maps": 4}]
-    config["obs"] = {"level": "full", "dice_odds": True}
+    config["obs"] = {"level": "full", "dice_state": True}
     config["model"] = {"preset": "graph-tiny", "args": {"shared": True}}
     config["init_from"] = {"ckpt": str(ref.path), "parts": ["actor", "critic"], "zero_new_inputs": True}
     monkeypatch.setattr(dice_probe, "PROBE_EPOCH", 2)  # the batch from epoch 2's rollout (default 10)
     writer = train(train_ppo, config, "dice")
     assert writer.status == "finished"
     e0 = ck.Checkpoint.load(writer.saved[0].path)
-    assert e0.dice_odds
+    assert e0.dice_state
     assert_plays_alike(source, e0.model("all"), real_rows(False), real_rows(True))
     rows = [r for r in writer.rows if "dice/weight_norm" in r]
     assert len(rows) == 4 and [("dice/probe_kl" in r) for r in rows] == [False, True, True, True]
@@ -419,3 +642,50 @@ def test_a_tiny_run_from_a_plain_checkpoint_starts_as_it_and_trains_the_input(tm
     assert all(np.isfinite(r["dice/probe_kl"]) and r["dice/probe_value_gap"] > 0.0 for r in probed)
     state = torch.load(writer.path / "trainer_state.pt", weights_only=False)
     assert state[STATE_KEY].shape == (probed[0]["dice/probe_rows"], model_of(True).obs_size)
+
+
+@pytest.mark.parametrize("game_name", ["base-2p-fr", "base-2p"])
+def test_the_probes_fair_rows_are_a_fresh_states(game_name):
+    """The probe's counterfactual: every dice feature as a fresh balanced state shows it (the
+    row a random-dice game gives), everything else untouched; seat slots a game leaves empty
+    stay zero."""
+    from catanrl.train.dice_probe import FairDice, dice_weight_norms
+
+    dims = dims_for(["base-4p"])
+    torch.manual_seed(0)
+    model = build_model({"preset": "graph-tiny", "args": {"shared": True}}, dims=dims,
+                        levels={"level": "full", "dice_state": True}, num_actions=action_size(dims),
+                        layout=row_layout(dims, "full", None, True)).eval()
+    assert dice_weight_norms(model) == {"dice/weight_norm": 0.0, "dice/weight_norm_global": 0.0,
+                                        "dice/weight_norm_tiles": 0.0}
+    encoder = make_encoder(dims, "full", True)
+    columns = DiceColumns(encoder)
+    fair = FairDice(model)
+    dice_columns = set(fair.columns)
+    assert len(dice_columns) == len(columns.global_dice) + columns.num_tiles * len(columns.tile_dice)
+    game = load_game(game_name).cppanatron_game(3, 4)
+    rng = random.Random(1)
+    fresh = np.array(fresh_dice_features(columns.global_names, 2)[-len(columns.global_dice):], dtype=np.float32)
+    assert not fresh[22:44].any()  # the two empty slots' odds
+    moved = 0
+    for step in range(400):
+        if game.winning_color is not None:
+            break
+        if step % 29 == 5:
+            row = torch.from_numpy(encoder.encode(game, game.current_player_index))[None]
+            out = fair.rows(row)
+            assert np.array_equal(columns.glob(out[0].numpy()), fresh)
+            tiles = columns.tiles(out[0].numpy())
+            numbered = np.array(columns.tile_numbers(row[0].numpy())) > 0
+            pips = row[0].numpy()[columns.t0: columns.t0 + columns.num_tiles * columns.tile_width].reshape(
+                columns.num_tiles, columns.tile_width)[:, columns.tile_feature_names.index("pips")]
+            assert np.array_equal(tiles[:, 0], pips) and np.array_equal(tiles[:, 1], pips)
+            assert not tiles[:, 2:4].any()  # seats 2 and 3 are empty
+            assert np.array_equal(tiles[:, 4], numbered.astype(np.float32)) and not tiles[:, 5].any()
+            others = [c for c in range(row.shape[1]) if c not in dice_columns]
+            assert torch.equal(out[:, others], row[:, others])
+            if game_name == "base-2p":
+                assert torch.equal(out, row)  # random dice: the row is already a fresh state's
+            moved += not torch.equal(out, row)
+        game.execute(rng.choice(game.playable_actions))
+    assert (moved > 0) == (game_name == "base-2p-fr")

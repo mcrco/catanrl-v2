@@ -82,7 +82,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from catanrl.envs.encoding import dice_odds_of
+from catanrl.envs.encoding import dice_state_of
 from catanrl.models.base import CatanModel
 from catanrl.models.rows import feature_names, mask_logits, orthogonal_, value_prior
 
@@ -318,7 +318,7 @@ class CnnModel(CatanModel):
         if board_dims != self.grid.dims:
             raise ValueError(f"the cnn network lays the {self.board} board on a plane: dims must be "
                              f"{self.grid.dims} (any max_players), not {board_dims}")
-        names = feature_names(dims, levels["level"], dice_odds_of(levels))
+        names = feature_names(dims, levels["level"], dice_state_of(levels))
         self.present_index = names["players"].index("present")
         self.players_offset, (_, self.player_width) = layout["players"]
         if args["shared"]:

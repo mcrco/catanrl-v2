@@ -10,8 +10,9 @@ are remapped onto the canonical six-seat feature order of an encoder with
 ``max_players = 6``, zero-filling seats the env does not have, and the
 players block is padded to six slots. Graph networks therefore have the same
 parameters for any ``max_players`` and any map size. Rows with the dice input
-(``dice_odds``) read against the six-seat encoder with it: ``dice_odds_<k>_<t>``
-for six seats, zero-filled the same way.
+(``dice_state``) read against the six-seat encoder with it: its per-seat features
+(``dice_odds_<k>_<t>``, ``dice_sevens_<k>``, a tile's ``dice_odds_<k>``, ...) for
+six seats, zero-filled the same way.
 """
 
 from __future__ import annotations
@@ -28,17 +29,17 @@ from catanrl.envs.encoding import CRITIC_PLAYERS, FEATURE_BLOCKS, MAX_PLAYERS, m
 MASKED_LOGIT = -1e9
 
 
-def canonical_feature_names(level: str = "private", dice_odds: bool = False) -> dict[str, list[str]]:
+def canonical_feature_names(level: str = "private", dice_state: bool = False) -> dict[str, list[str]]:
     """Per-slot feature names of an encoder for six seats (any map dims), with the dice
-    input when ``dice_odds``."""
+    input when ``dice_state``."""
     encoder = make_encoder(
-        {"max_players": MAX_PLAYERS, "max_tiles": 1, "max_nodes": 6, "max_edges": 1}, level, dice_odds
+        {"max_players": MAX_PLAYERS, "max_tiles": 1, "max_nodes": 6, "max_edges": 1}, level, dice_state
     )
     return {block: list(encoder.feature_names(block)) for block in FEATURE_BLOCKS}
 
 
-def feature_names(dims: Mapping[str, int], level: str, dice_odds: bool = False) -> dict[str, list[str]]:
-    encoder = make_encoder(dims, level, dice_odds)
+def feature_names(dims: Mapping[str, int], level: str, dice_state: bool = False) -> dict[str, list[str]]:
+    encoder = make_encoder(dims, level, dice_state)
     return {block: list(encoder.feature_names(block)) for block in FEATURE_BLOCKS}
 
 

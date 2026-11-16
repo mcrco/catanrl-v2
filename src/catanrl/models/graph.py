@@ -21,10 +21,11 @@ Differences from v1's port, all because v2 rows carry the graph explicitly:
   same inputs, the hidden features of every other seat (slots 1..P-1): the
   players-block features a ``private`` row zeroes for them (DESIGN 2), in the
   encoder's scale. Training only; it never feeds the policy or the value;
-* rows with the dice input (``obs.dice_odds``: each seat's next-roll odds, the
-  last global features) feed it through a projection of its own,
-  ``dice_projection`` (no bias, zero at initialization), added to the global
-  projection's pre-activation: a network without the input has exactly its
+* rows with the dice input (``obs.dice_state``: the balanced dice state, the last
+  global features and the last features of each tile) feed it through projections
+  of their own, ``dice_projection`` and ``tile_dice_projection`` (no bias, zero at
+  initialization), added to the global and the tile projections'
+  pre-activations: a network without the input has exactly its
   parameters and function, and one with it starts as that network
   (``init_from.zero_new_inputs`` copies the rest).
 
@@ -174,16 +175,21 @@ class GraphTrunk(nn.Module):
         self.hidden = hidden
         self.global_hidden = global_hidden
         self.pooled_dim = 3 * hidden + global_hidden
-        # The dice input (obs.dice_odds), when the rows have it: the last global features.
+        # The dice input (obs.dice_state), when the rows have it: the last global features and
+        # the last features of each tile.
         dice = [j for j, name in enumerate(reader.canonical["global"]) if name.startswith(DICE_PREFIX)]
-        if dice != list(range(w["global"] - len(dice), w["global"])):
-            raise ValueError("the dice inputs must end the global block")
+        tile_dice = [j for j, name in enumerate(reader.canonical["tiles"]) if name.startswith(DICE_PREFIX)]
+        if (dice != list(range(w["global"] - len(dice), w["global"]))
+                or tile_dice != list(range(w["tiles"] - len(tile_dice), w["tiles"])) or bool(dice) != bool(tile_dice)):
+            raise ValueError("the dice inputs must end the global block and each tile's features")
         self.dice_inputs = len(dice)
         self.plain_globals = w["global"] - len(dice)
+        self.tile_dice_inputs = len(tile_dice)
+        self.plain_tiles = w["tiles"] - len(tile_dice)
         self.global_projection = nn.Linear(self.plain_globals + MAX_PLAYERS * w["players"], global_hidden)
         self.player_projection = nn.Linear(w["players"] + MAX_PLAYERS, hidden)
         self.node_projection = nn.Linear(w["nodes"], hidden)
-        self.tile_projection = nn.Linear(w["tiles"], hidden)
+        self.tile_projection = nn.Linear(self.plain_tiles, hidden)
         self.edge_projection = nn.Linear(w["edges"], hidden)
 
         def injection() -> nn.Sequential:
@@ -196,12 +202,16 @@ class GraphTrunk(nn.Module):
         self.register_buffer("slot_ids", torch.eye(MAX_PLAYERS), persistent=False)
         for module in self.modules():
             orthogonal_(module, HIDDEN_GAIN)
-        #: The dice input's weights (rows with obs.dice_odds only): zero at the start and built
-        #: without drawing from the RNG (skip_init), so every other weight is drawn as without it.
+        #: The dice input's weights (rows with obs.dice_state only), on the global features and on
+        #: each tile's: zero at the start and built without drawing from the RNG (skip_init), so
+        #: every other weight is drawn as without it.
         self.dice_projection = (torch.nn.utils.skip_init(nn.Linear, self.dice_inputs, global_hidden, bias=False)
                                 if dice else None)
-        if self.dice_projection is not None:
+        self.tile_dice_projection = (torch.nn.utils.skip_init(nn.Linear, self.tile_dice_inputs, hidden, bias=False)
+                                     if dice else None)
+        if dice:
             nn.init.zeros_(self.dice_projection.weight)
+            nn.init.zeros_(self.tile_dice_projection.weight)
 
     def forward(self, obs: torch.Tensor, rows: Rows | None = None) -> Embeddings:
         rows = self.reader(obs) if rows is None else rows
@@ -222,7 +232,12 @@ class GraphTrunk(nn.Module):
             return module(torch.cat((x, g), dim=-1)) * valid
 
         nodes = inject(self.node_injection, torch.relu(self.node_projection(rows.nodes)), topo.node_valid)
-        tiles = inject(self.tile_injection, torch.relu(self.tile_projection(rows.tiles)), topo.tile_valid)
+        if self.tile_dice_projection is None:
+            tile_inputs = self.tile_projection(rows.tiles)
+        else:
+            tile_inputs = (self.tile_projection(rows.tiles[..., : self.plain_tiles])
+                           + self.tile_dice_projection(rows.tiles[..., self.plain_tiles:]))
+        tiles = inject(self.tile_injection, torch.relu(tile_inputs), topo.tile_valid)
         edges = inject(self.edge_injection, torch.relu(self.edge_projection(rows.edges)), topo.edge_valid)
         for layer in self.layers:
             nodes, tiles, edges = layer(nodes, tiles, edges, topo)

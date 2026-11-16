@@ -45,7 +45,7 @@ from catanrl.envs.encoding import (
     CRITIC_PLAYERS,
     check_dims,
     critic_level_of,
-    dice_odds_of,
+    dice_state_of,
     hidden_feature_indices,
     level_name,
     make_encoder,
@@ -108,8 +108,8 @@ def resolve_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def normalize_levels(levels: Mapping[str, Any] | str) -> dict[str, Any]:
-    """``{"level": ..., "critic_level": ...}`` with names checked, plus ``"dice_odds": True``
-    when the rows carry the dice input (:data:`~catanrl.envs.encoding.DICE_ODDS`; absent when
+    """``{"level": ..., "critic_level": ...}`` with names checked, plus ``"dice_state": True``
+    when the rows carry the dice input (:data:`~catanrl.envs.encoding.DICE_STATE`; absent when
     off, so a network without it has the levels it always had).
 
     ``critic_level`` None (or equal to ``level``) means the critic reads the
@@ -117,17 +117,17 @@ def normalize_levels(levels: Mapping[str, Any] | str) -> dict[str, Any]:
     """
     if isinstance(levels, str):
         levels = {"level": levels}
-    unknown = set(levels) - {"level", "critic_level", "dice_odds"}
+    unknown = set(levels) - {"level", "critic_level", "dice_state"}
     if unknown or "level" not in levels:
-        raise ValueError(f"levels need 'level' (and optionally 'critic_level', 'dice_odds'), got {sorted(levels)}")
-    dice = levels.get("dice_odds", False)
+        raise ValueError(f"levels need 'level' (and optionally 'critic_level', 'dice_state'), got {sorted(levels)}")
+    dice = levels.get("dice_state", False)
     if not isinstance(dice, bool):
-        raise ValueError(f"levels' dice_odds is true or false, not {dice!r}")
+        raise ValueError(f"levels' dice_state is true or false, not {dice!r}")
     level = level_name(levels["level"])
     critic = levels.get("critic_level")
     out: dict[str, Any] = {"level": level, "critic_level": level_name(critic) if critic is not None else level}
     if dice:
-        out["dice_odds"] = True
+        out["dice_state"] = True
     return out
 
 
@@ -153,8 +153,8 @@ class GraphModel(CatanModel):
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__(spec, dims, levels, layout)
         args = spec["args"]
-        dice = dice_odds_of(levels)
-        canonical = canonical_feature_names(dice_odds=dice)
+        dice = dice_state_of(levels)
+        canonical = canonical_feature_names(dice_state=dice)
         names = feature_names(dims, levels["level"], dice)
         action_layout = make_encoder(dims, levels["level"]).action_space.layout()
         actor_reader = RowReader(layout, names, canonical=canonical)
@@ -242,7 +242,7 @@ class MlpModel(CatanModel):
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__(spec, dims, levels, layout)
         args = spec["args"]
-        names = feature_names(dims, levels["level"], dice_odds_of(levels))
+        names = feature_names(dims, levels["level"], dice_state_of(levels))
         self.present_index = names["players"].index("present")
         self.players_offset, (_, self.player_width) = layout["players"][0], layout["players"][1]
         if args["shared"]:
@@ -298,8 +298,8 @@ class LstmModel(CatanModel):
         self.aux = bool(args["aux"])
         if self.has_critic_block and not self.aux:
             raise ValueError("an lstm network has one trunk for both heads and cannot read a separate critic level")
-        dice = dice_odds_of(levels)
-        canonical = canonical_feature_names(dice_odds=dice)
+        dice = dice_state_of(levels)
+        canonical = canonical_feature_names(dice_state=dice)
         names = feature_names(dims, levels["level"], dice)
         action_layout = make_encoder(dims, levels["level"]).action_space.layout()
         reader = RowReader(layout, names, canonical=canonical)
@@ -409,7 +409,7 @@ def build_model(
     dims = check_dims(dims)
     levels = normalize_levels(levels)
     expected = row_layout(dims, levels["level"], critic_level_of(levels["level"], levels["critic_level"]),
-                          dice_odds_of(levels))
+                          dice_state_of(levels))
     if layout is not None:
         given = {name: (int(off), tuple(int(s) for s in shape)) for name, (off, shape) in dict(layout).items()}
         if given != expected:

@@ -185,11 +185,11 @@ class _Maps:
 def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_game) -> None:
     networks = [a for a in agents if isinstance(a, NativeAgent)]
     level = networks[0].level if networks else "private"
-    dice = bool(getattr(networks[0], "dice_odds", False)) if networks else False
+    dice = bool(getattr(networks[0], "dice_state", False)) if networks else False
 
     def own_rows(agent) -> bool:
         """Whether ``agent`` reads rows other than the VecEnv's (another level or dice input)."""
-        return agent.level != level or bool(getattr(agent, "dice_odds", False)) != dice
+        return agent.level != level or bool(getattr(agent, "dice_state", False)) != dice
     enemies = {a.value_enemies for a in agents if isinstance(a, BotAgent) and a.key == "F"}
     if len(enemies) > 1:
         raise ValueError("every F of a lineup must count the same enemies")
@@ -211,7 +211,7 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
     exact = any(agent.needs_trackers and agent.tracker_mode == cpp.TrackerMode.EXACT for agent in agents)
     vec = cpp.VecEnv(cpp_scenarios, num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
                      seed=0, num_threads=int(threads), auto_reset=False, trackers=trackers,
-                     tracker_mode=cpp.TrackerMode.EXACT if exact else cpp.TrackerMode.POOL, dice_odds=dice)
+                     tracker_mode=cpp.TrackerMode.EXACT if exact else cpp.TrackerMode.POOL, dice_state=dice)
     buffers = vec.allocate()
     vec.reset()
     size = int(vec.action_size)

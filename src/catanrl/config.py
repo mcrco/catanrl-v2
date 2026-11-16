@@ -33,9 +33,9 @@ is optional the same way (:data:`TRAIN_OPTIONAL`): absent from
 ``configs/train/ppo.yaml``, so a config without it keeps its hash. So is an
 AlphaZero variant's ``train.reuse`` (absent from ``configs/train/alphazero.yaml``).
 ``runtime.search_groups`` is optional too (``runtime`` is not hashed; unset,
-the AlphaZero trainer takes its default). So is ``obs.dice_odds``
-(:data:`OPTIONAL`), the opt-in dice input: each seat's next-roll odds in every
-row (:data:`catanrl.envs.encoding.DICE_ODDS`), with
+the AlphaZero trainer takes its default). So is ``obs.dice_state``
+(:data:`OPTIONAL`), the opt-in dice input: the balanced dice state in every
+row (:data:`catanrl.envs.encoding.DICE_STATE`), with
 ``init_from.zero_new_inputs`` to start such a network from a checkpoint
 without it.
 
@@ -111,7 +111,7 @@ ENTRY_KEYS = {
 ENTRY_LISTS = ("eval.final", "eval.monitor")
 #: Keys a config may set that defaults.yaml leaves out, with the value that means "unset": a
 #: config without them (or with them at that value, dropped at resolution) hashes as before.
-OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None, "obs.dice_odds": False}
+OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None, "obs.dice_state": False}
 #: ``runtime.search_groups`` (unhashed like all of ``runtime``; unset: the trainer's default): the
 #: groups AlphaZero self-play splits its searches into (catanrl.search.pipeline; 1: the serial loop).
 OPTIONAL["runtime.search_groups"] = None
@@ -573,9 +573,9 @@ def _check_semantics(cfg: dict) -> None:
             if init.get("restore", "weights") != "weights":
                 raise ConfigError("init_from.zero_new_inputs copies the source's weights and zeroes the dice input's; "
                                   "it restores weights only (the source's optimizer state has no dice weights)")
-            if not (cfg.get("obs") or {}).get("dice_odds"):
+            if not (cfg.get("obs") or {}).get("dice_state"):
                 raise ConfigError("init_from.zero_new_inputs zero-initializes the dice input's weights: set "
-                                  "obs.dice_odds: true")
+                                  "obs.dice_state: true")
     _check_obs(cfg)
     select = cfg["eval"]["select"]
     if select is not None and ("suite" not in select or "lineup" not in select):
@@ -589,15 +589,16 @@ def _check_semantics(cfg: dict) -> None:
 
 
 def _check_obs(cfg: Mapping[str, Any]) -> None:
-    """``obs.dice_odds`` (optional, :data:`OPTIONAL`): a bool, read by the PPO trainer (its
-    VecEnv, network and checkpoints); every agent and harness reads it from the checkpoint."""
-    dice = (cfg.get("obs") or {}).get("dice_odds", False)
+    """``obs.dice_state`` (optional, :data:`OPTIONAL`): a bool, read by the PPO and AlphaZero
+    trainers (their VecEnv and search pools, network, replay and checkpoints); every agent and
+    harness reads it from the checkpoint."""
+    dice = (cfg.get("obs") or {}).get("dice_state", False)
     if not isinstance(dice, bool):
-        raise ConfigError(f"obs.dice_odds is true or false, not {dice!r}")
+        raise ConfigError(f"obs.dice_state is true or false, not {dice!r}")
     algo = (cfg.get("train") or {}).get("algo")
-    if dice and cfg.get("kind") == "train" and algo != "ppo":
-        raise ConfigError(f"obs.dice_odds (the dice input) trains with train.algo ppo, not {algo}: the {algo} "
-                          "trainer builds its rows without it")
+    if dice and cfg.get("kind") == "train" and algo not in ("ppo", "alphazero"):
+        raise ConfigError(f"obs.dice_state (the dice input) trains with train.algo ppo or alphazero, not {algo}: "
+                          f"the {algo} trainer builds its rows without it")
 
 
 def _check_monitors(cfg: Mapping[str, Any]) -> None:

@@ -1,0 +1,121 @@
+# The dice state as a network input, in the AlphaZero line (Marco, 2026-11-14: "adding dice shuffle
+# into the architecture (keep track of the shuffled cards, then pass that into the model as input)").
+#
+# What: two arms from az-2p-kata/main+1500@e1800 (search-v3.1's network), 600 more iterations each on
+# that run's recipe. `dice` differs only in obs.dice_state and its warm start.
+# Why: base-2p-fr rolls OpenHex's balanced dice: a 36-card deck drawn without replacement and
+# refilled when 13 cards are left, with a penalty on totals in the last five rolls and a per-seat correction
+# to the 7. The next roll's odds move far from two fair dice (tools/dice_odds_sim.py), and the
+# network's row shows none of it; the search's chance nodes use the true odds, the priors and
+# values at its leaves cannot.
+# The input (catanrl.envs.encoding.DICE_STATE), 127 more floats on a 2p base row (2,564 -> 2,691):
+#   global, 51: each seat's next-roll odds per total (x6: a fair 7 reads 1), the cards left in the
+#     deck per total (of that total's 1-6), each total's count in the five-roll window (/3), the
+#     draws left before the reshuffle (/23), each seat's sevens (/10) and share of all sevens, and
+#     the seven streak (length /5 in its owner's slot);
+#   each tile, 4: its own number's odds if I roll and if the opponent rolls (x36/5: its `pips`
+#     feature under fair dice), that number's cards left and its count in the window; 0 on the
+#     desert.
+# `dice` starts from the same checkpoint with every weight on the new inputs at zero
+# (init_from.zero_new_inputs: two bias-free projections, 7,616 weights), so at e0 it is that
+# network bit for bit. `control` is the same continuation without the input: the yardstick for
+# what 600 more iterations add by themselves.
+#
+# Both arms: main+1500's train keys exactly (its stored config) with iterations 600, a fresh AdamW
+# and an EMPTY replay (weights only: main+1500's replay holds rows without the input, and the arms
+# must not differ in that). Self-play alone until the replay holds min_replay 50,000 positions (~6
+# iterations), then 64 updates x 512 rows per ~8,192 new positions as before; the replay fills its
+# 500,000 after ~61 iterations.
+# Doses: 512 games x 64 steps = 32,768 moves per iteration, ~8,192 recorded (600-visit searches);
+# 600 iterations = ~4.9M recorded positions, ~108,000 games.
+# Logged every iteration by `dice`: dice/weight_norm (and _global, _tiles; 0 at e0), and from the
+# first learning step dice/probe_kl, dice/probe_flips, dice/probe_value_gap: the policy and value
+# on 512 fixed replay positions against the same rows showing a fresh dice state
+# (catanrl.train.dice_probe).
+#
+# Evals: no select (eval-share-of-run-time: the method works; the arms are compared at the end).
+# One final row per arm, the deployed search against the family's raw start, BELIEF(fr3, 16 worlds),
+# on all of heldout-2p-fr: 2,500 boards x 2 seats = 5,000 games (main+1500@e1800 scored 62.95% on
+# its first 1,000 boards). One row is +-1.3 pp (95%). The two rows play the same schedule (game ids,
+# maps, game and bot seeds) against the same opponent, so they pair game for game
+# (tools/search_probe.py --pair <control's eval id> <dice's>): this family's rows disagree on
+# 29-35% of shared games, so the paired difference has SE ~0.8 pp and 80% power at two-sided 0.05
+# for ~2.1-2.3 pp. main+1500's own row extends to the same 5,000 games as the third point (what
+# either arm's 600 iterations added), if wanted.
+#
+# Time (measured for main+1500 on the RTX 2070 SUPER): ~84 s an iteration (~69k leaves/s), so 600
+# iterations = 14 h per arm; the final ~2.3 h per 2,000 games = ~5.8 h. ~20 h per arm, ~40 h in
+# all, control first. `dice` is not measured on the GPU yet: its rows are 5% wider and its first
+# layer has two more small products; tools/dice_input_smoke.py measures both arms before launch.
+# The time limit is main+1500's guard.
+# Memory: a replay position is 5,773 bytes in `control` and 6,027 in `dice` (254 more: 127 float16),
+# 2.89 and 3.01 GB at capacity, in RAM and in the trainer state.
+# `--smoke` cannot run this config: it forces the CPU (the fused kernels are CUDA only) and turns
+# @e1800 into @latest under the pinned sha.
+#
+# Launch (main, GPU free, after tools/dice_input_smoke.py passes on the card):
+#   catanrl run configs/experiments/az-2p-dice.yaml
+name: az-2p-dice
+seed: 42                        # main+1500's: its training pool (map_pool from the seed)
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 512                 # games in flight
+obs: {level: full}
+model: {preset: graph-s, args: {shared: true}}
+# search-v3.1's network; weights only (restore: weights), so a fresh optimizer and an empty replay
+init_from: {ckpt: "az-2p-kata/main+1500@e1800#7c44ec80540a", parts: [actor, critic]}
+train:                          # main+1500's stored train keys, but iterations
+  algo: alphazero
+  iterations: 600               # 14 h of self-play (header)
+  steps_per_iteration: 64       # x 512 games = 32,768 searched moves, ~8,192 of them recorded
+  root: puct
+  sims: 600                     # a full search (recorded)
+  fast_sims: 100                # the other moves (played only)
+  pending: 24                   # leaves per round of a full search
+  fast_pending: 4               # and of a fast one
+  full_search_prob: 0.25
+  record_fast: false            # only full searches enter replay
+  dets: 0                       # the true game (the network reads it whole)
+  reuse: true                   # a move's search starts from the last one's subtree
+  c_puct: 0.75
+  gumbel_m: 16                  # not read (root: puct)
+  dirichlet_noise: true         # full searches only
+  temperature_start: 1.0
+  temperature_end: 0.0
+  temperature_moves: 30
+  truncation_value: share
+  policy_target: pruned         # the visit distribution without the visits the noise forced
+  target_c_visit: 50.0          # not read (policy_target: gumbel's)
+  target_c_scale: 0.1
+  target_prior_temperature: 1.0
+  target_rescale: true
+  replay_capacity: 500_000      # ~61 iterations of recorded positions; 2.9-3.0 GB of RAM
+  min_replay: 50_000            # ~6 iterations of recorded positions (filed when their games end)
+  updates_per_iteration: 64     # x 512 = 32,768 samples per ~8,192 new positions
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  value_coef: 1.0
+  max_grad_norm: 1.0
+  search_rows: 512              # rows per forward
+  kernels: fused16              # self-play forwards in float16 on the fused kernels
+  checkpoint_interval: 25       # ~35 min of self-play
+eval:
+  select: null                  # no in-run evals (header)
+  final:
+    - suite: heldout-2p-fr      # all 2,500 boards x 2 seats
+      lineup:
+        - "MCTS:ckpt=${run}@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+sweep:
+  axes:
+    arm:
+      control: {}
+      dice:
+        obs.dice_state: true
+        init_from.zero_new_inputs: true   # the new inputs' weights start at zero: e0 plays as the start
+  name: "{arm}"
+# num_envs, infer_rows: the evals' games in flight (main+1500's)
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512, time_limit_hours: 60}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

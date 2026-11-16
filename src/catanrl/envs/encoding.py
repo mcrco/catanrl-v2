@@ -5,8 +5,8 @@ Every feature, action index and mask comes from cppanatron's ``GraphEncoder``
 must be:
 
 * :func:`make_encoder` builds the ``cpp.GraphEncoder`` for a dims dict and an
-  information level (and, opt-in, ``dice_odds``: each seat's next-roll odds in the
-  global block, :data:`DICE_ODDS`);
+  information level (and, opt-in, ``dice_state``: the balanced dice state in the
+  global block and on each tile, :data:`DICE_STATE`);
 * :func:`dims_for` gives the dims covering a list of scenarios, by default
   from the map generators' seed-independent bounds (``dims: auto``);
 * :func:`row_layout` is the ``{block: (offset, shape)}`` dict of a full
@@ -34,15 +34,35 @@ LEVELS = {
 }
 #: The most seats any game has; graph networks pad seat slots to it.
 MAX_PLAYERS = 6
-#: The opt-in dice input (``obs.dice_odds`` in a config; ``dice_odds: true`` in a checkpoint's
-#: ``obs`` header and a network's ``levels``, present only when on): the global block ends with
-#: ``dice_odds_<k>_<t>``, ``Game.roll_probabilities`` of relative seat k for totals t = 2..12
-#: (``GraphEncoder``'s ``dice_odds``; fair 2d6 odds under random dice, absent seats 0). Without
-#: it a row is exactly what it was before the option existed.
-DICE_ODDS = "dice_odds"
-#: The global features of the dice input, by name prefix.
-DICE_PREFIX = "dice_odds_"
-#: The fair 2d6 odds of totals 2..12: what every seat reads under random dice.
+#: The opt-in dice input (``obs.dice_state`` in a config; ``dice_state: true`` in a checkpoint's
+#: ``obs`` header and a network's ``levels``, present only when on): the balanced dice between
+#: two rolls (``cpp.BalancedDice``, all of it public), as ``GraphEncoder``'s ``dice_state``
+#: writes it. The global block ends with, P the row's seat slots, relative to the observer
+#: (absent seats 0):
+#:
+#: * ``dice_odds_<k>_<t>`` [P x 11]: :data:`DICE_ODDS_SCALE` x P(next total = t), t = 2..12,
+#:   when seat k rolls (``Game.roll_probabilities``); the fair 7 reads 1;
+#: * ``dice_deck_<t>`` [11]: cards of total t the next draw can take / the full deck's;
+#: * ``dice_recent_<t>`` [11]: min(times t is among the last five totals / 3, 1);
+#: * ``dice_draws_left``: draws before the next refill / 23 (1 on a full deck);
+#: * ``dice_sevens_<k>`` [P]: min(seat k's sevens so far / 10, 1);
+#: * ``dice_seven_share_<k>`` [P]: seat k's share of all sevens so far (0 before the first);
+#: * ``dice_streak_<k>`` [P]: min(the current run of sevens / 5, 1) in its owner's slot;
+#:
+#: 14 P + 23 numbers (51 in a two-seat row), and each tile ends with P + 2 about its own
+#: number (0 on the desert): ``dice_odds_<k>`` [P], :data:`TILE_ODDS_SCALE` x the odds of
+#: that number when seat k rolls (the tile's ``pips`` feature under fair dice),
+#: ``dice_deck`` and ``dice_recent`` of that number (76 numbers on a two-seat base board).
+#: Under random dice these are the features of a fresh balanced state at every roll (the
+#: fair odds, a full deck, no history: :func:`fresh_dice_features`). Without the option a
+#: row is exactly what it was before it existed.
+DICE_STATE = "dice_state"
+#: The features of the dice input, global and per tile, by name prefix.
+DICE_PREFIX = "dice_"
+#: The scale of the global odds (the fair 7 reads 1) and of a tile's (its pips / 5 when fair).
+DICE_ODDS_SCALE = 6.0
+TILE_ODDS_SCALE = 36.0 / 5.0
+#: The fair 2d6 odds of totals 2..12: what every seat's next roll is under random dice.
 FAIR_ODDS = tuple(w / 36.0 for w in (1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1))
 #: Blocks of a row that hold per-slot features.
 FEATURE_BLOCKS = ("global", "players", "tiles", "nodes", "edges")
@@ -63,10 +83,28 @@ HIDDEN_FEATURES = (
 )
 
 
-def dice_odds_of(levels: Mapping[str, Any] | None) -> bool:
+def dice_state_of(levels: Mapping[str, Any] | None) -> bool:
     """Whether rows of ``levels`` (a network's, a checkpoint's ``obs`` or a config's ``obs``)
-    carry the dice input (:data:`DICE_ODDS`)."""
-    return bool((levels or {}).get(DICE_ODDS, False))
+    carry the dice input (:data:`DICE_STATE`)."""
+    return bool((levels or {}).get(DICE_STATE, False))
+
+
+def fresh_dice_features(names: Sequence[str], present: int) -> list[float | None]:
+    """What the global dice features ``names`` read on a fresh balanced state with ``present``
+    seats (and so at every roll of a random-dice game): the fair odds for the present seats,
+    a full deck, no history. None for a name that is not a dice feature."""
+    out: list[float | None] = []
+    for name in names:
+        parts = name.split("_")
+        if not name.startswith(DICE_PREFIX):
+            out.append(None)
+        elif parts[1] == "odds":
+            out.append(FAIR_ODDS[int(parts[3]) - 2] * DICE_ODDS_SCALE if int(parts[2]) < present else 0.0)
+        elif parts[1] == "deck" or name == "dice_draws_left":
+            out.append(1.0)
+        else:  # the window, the sevens, their shares and the streak
+            out.append(0.0)
+    return out
 
 
 def info_level(level: str | cpp.InfoLevel) -> cpp.InfoLevel:
@@ -123,10 +161,10 @@ def encoder_dims(dims: Mapping[str, Any] | cpp.EncoderDims) -> cpp.EncoderDims:
 
 
 def make_encoder(dims: Mapping[str, Any] | cpp.EncoderDims, level: str | cpp.InfoLevel,
-                 dice_odds: bool = False) -> cpp.GraphEncoder:
+                 dice_state: bool = False) -> cpp.GraphEncoder:
     """The graph encoder (and through it the action space) for ``dims`` at ``level``, with the
-    dice input when ``dice_odds`` (:data:`DICE_ODDS`)."""
-    return cpp.GraphEncoder(encoder_dims(dims), info_level(level), dice_odds=bool(dice_odds))
+    dice input when ``dice_state`` (:data:`DICE_STATE`)."""
+    return cpp.GraphEncoder(encoder_dims(dims), info_level(level), dice_state=bool(dice_state))
 
 
 def action_size(dims: Mapping[str, Any]) -> int:
@@ -145,7 +183,7 @@ def critic_level_of(level: str, critic_level: str | None) -> str | None:
 
 
 def row_layout(dims: Mapping[str, Any], level: str, critic_level: str | None = None,
-               dice_odds: bool = False) -> dict[str, Any]:
+               dice_state: bool = False) -> dict[str, Any]:
     """``{block: (offset, shape)}`` of one environment row.
 
     The blocks are the encoder's (``global``, ``players``, ``tiles``,
@@ -153,10 +191,10 @@ def row_layout(dims: Mapping[str, Any], level: str, critic_level: str | None = N
     When the critic reads another information level, VecEnv appends the
     critic block (engine E5): ``critic_players``, the players block at the
     critic's level (the only block that differs between levels), right after
-    the actor's row; its feature names are the players block's. ``dice_odds``
-    widens the global block by the dice input (:data:`DICE_ODDS`).
+    the actor's row; its feature names are the players block's. ``dice_state``
+    widens the global block by the dice input (:data:`DICE_STATE`).
     """
-    encoder = make_encoder(dims, level, dice_odds)
+    encoder = make_encoder(dims, level, dice_state)
     layout: dict[str, Any] = {
         name: (int(offset), tuple(int(s) for s in shape))
         for name, (offset, shape) in encoder.layout().items()

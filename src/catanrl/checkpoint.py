@@ -20,11 +20,11 @@ A recurrent network's positions are single decisions, so its self-test pins
 the zero-state function (``model(obs)``: the network at a seat's first
 decision); the recurrent state itself is rollout-only and never saved.
 
-A network with the dice input (``obs.dice_odds``) stores ``dice_odds: true`` in
+A network with the dice input (``obs.dice_state``) stores ``dice_state: true`` in
 its ``obs`` header (absent otherwise), so every consumer builds its rows from the
 checkpoint alone; its self-test positions each declare balanced dice with a
-state of their own (:func:`with_dice_states`), so the odds it pins are not all
-the fair ones. ``init_from.zero_new_inputs`` warm-starts such a network from a
+state of their own (:func:`with_dice_states`), so the features it pins are not all
+a fresh state's. ``init_from.zero_new_inputs`` warm-starts such a network from a
 checkpoint without the input (:func:`dice_input_keys`).
 """
 
@@ -100,12 +100,12 @@ class CheckpointRef:
 # ---------------------------------------------------------------- layouts and positions
 
 
-def layout_hash(dims: Mapping[str, int], level: str, dice_odds: bool = False) -> str:
+def layout_hash(dims: Mapping[str, int], level: str, dice_state: bool = False) -> str:
     """The encoder's row layout, feature names and action layout at ``dims`` (with the dice
-    input when ``dice_odds``: off, the hash it always was)."""
+    input when ``dice_state``: off, the hash it always was)."""
     from catanrl.envs.encoding import FEATURE_BLOCKS, make_encoder
 
-    encoder = make_encoder(dims, level, dice_odds)
+    encoder = make_encoder(dims, level, dice_state)
     return digest({
         "size": int(encoder.size),
         "layout": encoder.layout(),
@@ -234,12 +234,12 @@ def select_positions(dims: Mapping[str, int], n: int = SELF_TEST_POSITIONS, game
 
 
 def encode_positions(positions: Sequence[Mapping[str, Any]], dims: Mapping[str, int], level: str,
-                     critic_level: str | None = None, dice_odds: bool = False) -> np.ndarray:
+                     critic_level: str | None = None, dice_state: bool = False) -> np.ndarray:
     """Rows as the VecEnv writes them: the actor's row (with the dice input when
-    ``dice_odds``), plus the critic's players block."""
+    ``dice_state``), plus the critic's players block."""
     from catanrl.envs.encoding import critic_level_of, make_encoder
 
-    actor = make_encoder(dims, level, dice_odds)
+    actor = make_encoder(dims, level, dice_state)
     critic = critic_level_of(level, critic_level)
     critic_encoder = make_encoder(dims, critic) if critic else None
     rows = []
@@ -275,7 +275,7 @@ def _outputs(model: nn.Module, obs: torch.Tensor, *, aux: bool = True) -> tuple[
 DICE_ROLLS = (0, 3, 9, 17, 23, 30, 6, 41)
 
 
-def dice_state(seats: int, rolls: int, seed: str) -> dict:
+def balanced_state(seats: int, rolls: int, seed: str) -> dict:
     """A balanced dice state (``cpp.BalancedDice``'s keyword arguments, JSON-able): ``rolls``
     rolls drawn by the state's own odds from a fresh deck, the seats in turn, by a
     ``random.Random(seed)``."""
@@ -298,7 +298,7 @@ def with_dice_states(positions: Sequence[Mapping[str, Any]]) -> list[dict]:
     for i, pos in enumerate(positions):
         seats = int(pos["game"]["num_players"])
         out.append({**pos, "game": {**pos["game"], "dice_mode": "balanced"},
-                    "dice": dice_state(seats, DICE_ROLLS[i % len(DICE_ROLLS)], f"selftest-dice|{i}")})
+                    "dice": balanced_state(seats, DICE_ROLLS[i % len(DICE_ROLLS)], f"selftest-dice|{i}")})
     return out
 
 
@@ -306,9 +306,9 @@ def make_self_test(model: nn.Module, dims: Mapping[str, int], level: str, n: int
                    *, critic_level: str | None = None, games: Sequence[Any] = ()) -> dict:
     """Positions, rows and outputs of a CPU copy of ``model`` (strict). A dice-input network's
     positions declare balanced dice states (:func:`with_dice_states`)."""
-    from catanrl.envs.encoding import dice_odds_of
+    from catanrl.envs.encoding import dice_state_of
 
-    dice = dice_odds_of(getattr(model, "levels", None))
+    dice = dice_state_of(getattr(model, "levels", None))
     positions = select_positions(dims, n, games)
     if dice:
         positions = with_dice_states(positions)
@@ -324,21 +324,21 @@ def make_self_test(model: nn.Module, dims: Mapping[str, int], level: str, n: int
 
 def _rebuild(spec: Mapping[str, Any], dims: Mapping[str, int], levels: Mapping[str, str],
              state: Mapping[str, torch.Tensor] | None) -> nn.Module:
-    from catanrl.envs.encoding import action_size, critic_level_of, dice_odds_of, row_layout
+    from catanrl.envs.encoding import action_size, critic_level_of, dice_state_of, row_layout
     from catanrl.models import build_model
 
     critic = critic_level_of(levels["level"], levels.get("critic_level"))
     model = build_model(spec, dims=dims, levels=dict(levels), num_actions=action_size(dims),
-                        layout=row_layout(dims, levels["level"], critic, dice_odds_of(levels)))
+                        layout=row_layout(dims, levels["level"], critic, dice_state_of(levels)))
     if state is not None:
         model.load_state_dict(state)
     return model.eval()
 
 
 def _layout_hashes(dims: Mapping[str, int], levels: Mapping[str, Any]) -> dict[str, str]:
-    from catanrl.envs.encoding import dice_odds_of
+    from catanrl.envs.encoding import dice_state_of
 
-    dice = dice_odds_of(levels)
+    dice = dice_state_of(levels)
     return {"actor": layout_hash(dims, levels["level"], dice),
             "critic": layout_hash(dims, levels.get("critic_level") or levels["level"], dice)}
 
@@ -366,8 +366,8 @@ def save(path: Path, model: nn.Module, *, run: str | None, epoch: int, agent_ste
     games = _games_of(config)
     obs = {"level": levels["level"], "critic_level": levels.get("critic_level"), "dims": dict(model.dims),
            "layout_hash": _layout_hashes(model.dims, levels)}
-    if levels.get("dice_odds"):  # absent when off: a header without the input is as it always was
-        obs["dice_odds"] = True
+    if levels.get("dice_state"):  # absent when off: a header without the input is as it always was
+        obs["dice_state"] = True
     payload = {
         "format": FORMAT, "schema": CKPT_SCHEMA, "run": run, "epoch": int(epoch), "agent_steps": int(agent_steps),
         "weights_sha256": sha, "config": dict(config or {}), "config_hash": config_hash(config) if config else None,
@@ -439,18 +439,18 @@ class Checkpoint:
 
     @property
     def levels(self) -> dict[str, Any]:
-        """The network's ``levels``: its level and critic level, and ``dice_odds: True`` when its
+        """The network's ``levels``: its level and critic level, and ``dice_state: True`` when its
         rows carry the dice input (absent otherwise)."""
         obs = self.header["obs"]
         out: dict[str, Any] = {"level": obs["level"], "critic_level": obs.get("critic_level") or obs["level"]}
-        if obs.get("dice_odds"):
-            out["dice_odds"] = True
+        if obs.get("dice_state"):
+            out["dice_state"] = True
         return out
 
     @property
-    def dice_odds(self) -> bool:
-        """Whether the network reads the dice input (``obs.dice_odds``)."""
-        return bool(self.header["obs"].get("dice_odds", False))
+    def dice_state(self) -> bool:
+        """Whether the network reads the dice input (``obs.dice_state``)."""
+        return bool(self.header["obs"].get("dice_state", False))
 
     @property
     def dims_agnostic(self) -> bool:
@@ -483,7 +483,7 @@ class Checkpoint:
         if not allow_drift:
             test = self.header["self_test"]
             positions = json.loads(test["positions"])
-            obs = encode_positions(positions, dims, levels["level"], levels["critic_level"], self.dice_odds)
+            obs = encode_positions(positions, dims, levels["level"], levels["critic_level"], self.dice_state)
             if obs.shape != tuple(test["obs"].shape) or not np.array_equal(obs, test["obs"].numpy()):
                 raise EncoderDrift(f"{self.ref}: re-encoding its self-test positions gives other rows")
             model = _rebuild(self.header["model"], dims, levels, self.state_dict)
@@ -589,8 +589,8 @@ def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[Checkpoin
     must be used; an aux head is not loaded.
 
     ``zero_new_inputs: true`` loads a checkpoint without the dice input into a network
-    with it (``obs.dice_odds``): every weight of the source is copied, and the dice input's
-    own weights, every graph trunk's ``dice_projection`` (:func:`dice_input_keys`, which the
+    with it (``obs.dice_state``): every weight of the source is copied, and the dice input's
+    own weights, every graph trunk's dice projections (:func:`dice_input_keys`, which the
     source does not have), are zero, so the network computes exactly the source's logits and
     values whatever the dice read.
     """
@@ -631,7 +631,7 @@ def init_tensors(model: nn.Module, init_from: Mapping[str, Any]) -> tuple[dict[s
         mine = {k for k in target if k.startswith(prefixes)}
         # init_from.zero_new_inputs: the dice input's weights, which a source without the input lacks
         new = mine & dice_input_keys(model) if zero_new and _gains_dice_input(model, source) else set()
-        hint = ("; a network with the dice input (obs.dice_odds) starts from one without it with "
+        hint = ("; a network with the dice input (obs.dice_state) starts from one without it with "
                 "init_from.zero_new_inputs" if not zero_new and _gains_dice_input(model, source) else "")
         if split:
             names = _split_source_keys(model, part, source, mine)
@@ -659,22 +659,23 @@ def init_tensors(model: nn.Module, init_from: Mapping[str, Any]) -> tuple[dict[s
             loaded[key] = value
     if zero_new and not zeroed:
         raise CheckpointError("init_from.zero_new_inputs: the model reads no input its source lacks (it is for a "
-                              "network with obs.dice_odds from a checkpoint without the dice input)")
+                              "network with obs.dice_state from a checkpoint without the dice input)")
     return loaded, refs
 
 
 def _gains_dice_input(model: nn.Module, source: Checkpoint) -> bool:
     """Whether ``model`` reads the dice input and ``source`` does not."""
-    from catanrl.envs.encoding import dice_odds_of
+    from catanrl.envs.encoding import dice_state_of
 
-    return dice_odds_of(getattr(model, "levels", None)) and not source.dice_odds
+    return dice_state_of(getattr(model, "levels", None)) and not source.dice_state
 
 
-#: The parameter of a graph trunk that reads the dice input (``GraphTrunk.dice_projection``).
-DICE_WEIGHTS = "dice_projection.weight"
+#: The parameters of a graph trunk that read the dice input (``GraphTrunk.dice_projection`` on
+#: the global features, ``tile_dice_projection`` on each tile's).
+DICE_WEIGHTS = ("dice_projection.weight", "tile_dice_projection.weight")
 
 
 def dice_input_keys(model: nn.Module) -> set[str]:
     """The state-dict keys of ``model``'s dice-input weights (every graph trunk's
-    ``dice_projection``): what ``init_from.zero_new_inputs`` zeroes."""
-    return {key for key in model.state_dict() if key == DICE_WEIGHTS or key.endswith("." + DICE_WEIGHTS)}
+    ``dice_projection`` and ``tile_dice_projection``): what ``init_from.zero_new_inputs`` zeroes."""
+    return {key for key in model.state_dict() if any(key == w or key.endswith("." + w) for w in DICE_WEIGHTS)}

@@ -63,21 +63,21 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
 
 
 def make_pool(dims: Mapping[str, int], level: str, config: cpp.SearchConfig,
-              critic_level: str | None = None, dice_odds: bool = False) -> cpp.SearchPool:
+              critic_level: str | None = None, dice_state: bool = False) -> cpp.SearchPool:
     """A pool whose leaf rows are the network's training rows.
 
     With a critic at another level the leaves carry the critic block too
     (``ActorCriticEncoder``, engine E8); with determinizations a leaf is a
     sampled world, whose sampled hidden cards a full-information critic sees.
-    ``dice_odds`` (a network with the dice input) gives every leaf row its
-    position's next-roll odds: a leaf is a game (or a world, a copy of it) with
+    ``dice_state`` (a network with the dice input) gives every leaf row its
+    position's dice state: a leaf is a game (or a world, a copy of it) with
     its own dice state, as the search's chance nodes leave it.
     """
     if critic_level_of(level, critic_level) is not None:
         encoder = cpp.ActorCriticEncoder(encoder_dims(dims), info_level(level), info_level(critic_level),
-                                         dice_odds=bool(dice_odds))
+                                         dice_state=bool(dice_state))
     else:
-        encoder = make_encoder(dims, level, dice_odds)
+        encoder = make_encoder(dims, level, dice_state)
     return cpp.SearchPool(encoder.action_space, encoder, config)
 
 

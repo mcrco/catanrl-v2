@@ -74,6 +74,13 @@ Checkpoints, select evals and ``best`` follow ``train_ppo`` (one epoch = one
 iteration). A resume restores the weights, optimizer, replay buffer, counters
 and RNG; games in flight restart.
 
+With ``obs.dice_state`` the self-play VecEnv, every search leaf and the replay
+carry the dice input (:data:`catanrl.envs.encoding.DICE_STATE`: 127 more floats
+on a 2p base row, 254 bytes of a replay position), and every iteration logs
+``dice/weight_norm*`` and, from the first learning step on, the sensitivity
+probe ``dice/probe_*`` on a fixed batch of replay positions that rides in the
+trainer state (:mod:`catanrl.train.dice_probe`).
+
 Every iteration also logs :class:`Monitors` (``oos/*``, ``search/overrule``
 and friends, ``target/*`` with ``policy_target: gumbel`` or ``pruned``,
 ``drift/*``):
@@ -94,13 +101,15 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from catanrl.envs.encoding import critic_level_of, encoder_dims, info_level, make_encoder
+from catanrl.envs.encoding import critic_level_of, dice_state_of, encoder_dims, info_level, make_encoder
 from catanrl.envs.puffer import plan_env
 from catanrl.models import CatanModel, feature_names
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
 from catanrl.search.pipeline import Group, Pipeline, run_groups
 from catanrl.search.pool import DIRICHLET_ALPHA
 from catanrl.seeding import derive_seed, determinism, rng_state, seed_everything, set_rng_state
+from catanrl.train.dice_probe import PROBE_ROWS as DICE_PROBE_ROWS
+from catanrl.train.dice_probe import DiceProbe
 from catanrl.train.puffer import build_policy_model, check_bindable, resolve_device, starts_fresh
 from catanrl.train.select import Selector
 
@@ -436,11 +445,13 @@ class ReplayBuffer:
 
 def make_vec(plan: Any, levels: Mapping[str, Any], *, num_envs: int, seed: int, threads: int,
              trackers: bool = False) -> cpp.VecEnv:
-    """A VecEnv of ``plan``'s scenarios writing the rows of a network at ``levels``."""
+    """A VecEnv of ``plan``'s scenarios writing the rows of a network at ``levels`` (with the
+    dice input when the network reads it, ``obs.dice_state``)."""
     critic = critic_level_of(levels["level"], levels["critic_level"])
     return cpp.VecEnv(plan.scenarios, num_envs=num_envs, dims=encoder_dims(plan.dims),
                       level=info_level(levels["level"]), seed=seed, num_threads=threads,
-                      critic_level=None if critic is None else info_level(critic), trackers=trackers)
+                      critic_level=None if critic is None else info_level(critic), trackers=trackers,
+                      dice_state=dice_state_of(levels))
 
 
 class RootOutputs:
@@ -551,7 +562,8 @@ class SelfPlay:
             params = {"sims": sims, "dets": self.dets, "oracle": self.dets == 0, "root": train["root"],
                       "c_puct": train["c_puct"], "gumbel_m": train["gumbel_m"], "pending": pending, "noise": noise}
             config = search_config(params, max_players=self.players, threads=threads)
-            return make_pool(self.dims, levels["level"], config, critic_level=levels["critic_level"])
+            return make_pool(self.dims, levels["level"], config, critic_level=levels["critic_level"],
+                             dice_state=dice_state_of(levels))
 
         #: Leaves a search sends per round, by pool (full, fast).
         self.leaves = int(train["pending"]), int(train["fast_pending"])
@@ -864,7 +876,7 @@ PHASES = ("setup", "discard", "robber", "dev", "build")
 def phases_of(model: CatanModel, rows: np.ndarray) -> dict[str, np.ndarray]:
     """Which of :data:`PHASES` each row [n, obs] is in, from its global flags and action mask
     (a phase whose flag or actions the rows lack is all False)."""
-    names = feature_names(model.dims, model.levels["level"])["global"]
+    names = feature_names(model.dims, model.levels["level"], dice_state_of(model.levels))["global"]
     offset = int(model.layout["global"][0])
     none = np.zeros(len(rows), dtype=bool)
 
@@ -1119,6 +1131,8 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
                           selfplay.players)
     monitors = Monitors(model, device=device, rows=int(train["search_rows"])) if monitoring else None
     selfplay.monitor = monitors
+    # obs.dice_state: the dice input's usage checks (dice/*, catanrl.train.dice_probe), every iteration
+    dice_probe = DiceProbe(model) if dice_state_of(model.levels) else None
     eval_runtime = {key: runtime[key] for key in ("device", "num_envs", "threads", "infer_rows") if key in runtime}
     selector = Selector((cfg.get("eval") or {}).get("select"), writer, eval_runtime,
                         monitors=(cfg.get("eval") or {}).get("monitor"))
@@ -1131,6 +1145,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             "model": {k: v.detach().cpu().clone() for k, v in model.state_dict().items()},
             "optimizer": copy.deepcopy(optimizer.state_dict()), "replay": replay.state(), "rng": rng_state(),
             "map_pool": plan.pool["hash"], **({"monitors": monitors.state()} if monitors is not None else {}),
+            **(dice_probe.state() if dice_probe is not None else {}),
         })
         if selector.due(iteration):
             selector.run(ref, model)
@@ -1148,6 +1163,8 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         selfplay.refresh()
         if monitors is not None:
             monitors.restore(state.get("monitors") or {})
+        if dice_probe is not None:
+            dice_probe.restore(state)
         selector.restore()
         state = None  # restored: free the loaded copy (its replay is as large as the buffer) for the launch
     else:
@@ -1179,9 +1196,14 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         health = monitors.before_learn(replay, replay.added - added) if monitors is not None else {}
         learned = {}
         if replay.size >= int(train["min_replay"]):
+            if dice_probe is not None and dice_probe.rows is None:
+                # the probe's fixed batch: every k-th replay position, the first time the learner trains
+                dice_probe.take(replay.obs[: replay.size : max(replay.size // DICE_PROBE_ROWS, 1)][:DICE_PROBE_ROWS])
             learned = learn(model, optimizer, replay, train, device,
                             np.random.default_rng(derive_seed(seed, "replay", iteration)))
             selfplay.refresh()
+        if dice_probe is not None:
+            health.update(dice_probe.metrics(model))
         if monitors is not None:
             health.update(monitors.drift())
             health["throughput/monitor_s"] = monitors.seconds

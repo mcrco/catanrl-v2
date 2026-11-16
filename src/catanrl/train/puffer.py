@@ -51,8 +51,9 @@ docs/experiments-implementation.md are handled here:
   ``amp/probe_logprob_gap_max``). The scaler's state rides in the trainer
   state. float16 needs fp16 tensor cores on CUDA (compute capability 7.0+)
   or the CPU (smoke runs and tests); float32 and bfloat16 are untouched.
-* ``obs.dice_odds`` (optional, :data:`catanrl.config.OPTIONAL`) gives the VecEnv's
-  rows and the network the dice input (each seat's next-roll odds); every epoch then
+* ``obs.dice_state`` (optional, :data:`catanrl.config.OPTIONAL`) gives the VecEnv's
+  rows and the network the dice input (the balanced dice state, globally and on each
+  tile: :data:`catanrl.envs.encoding.DICE_STATE`); every epoch then
   logs ``dice/weight_norm`` and the sensitivity probe ``dice/probe_*``
   (:mod:`catanrl.train.dice_probe`), whose fixed batch rides in the trainer state.
 * ``train.stop_epoch`` (optional, :data:`catanrl.config.TRAIN_OPTIONAL`) ends
@@ -74,7 +75,7 @@ from typing import Any
 import torch
 
 from catanrl._puffer import import_pufferl
-from catanrl.envs.encoding import action_size, critic_level_of, dice_odds_of, dims_for, row_layout
+from catanrl.envs.encoding import action_size, critic_level_of, dice_state_of, dims_for, row_layout
 from catanrl.envs.puffer import make_vecenv, plan_env
 from catanrl.models import CatanModel, build_model, normalize_levels
 from catanrl.seeding import derive_seed as _derive_seed
@@ -241,11 +242,11 @@ class CatanPuffeRL(pufferl.PuffeRL):
                 raise ValueError("float16 is catanrl's autocast: PuffeRL's config must be float32 with amp off "
                                  "(puffer_config)")
             self.scaler = torch.amp.GradScaler(self.amp_device)
-        #: obs.dice_odds: the dice input's usage checks (dice/*), None without the input.
+        #: obs.dice_state: the dice input's usage checks (dice/*), None without the input.
         self.dice_probe: DiceProbe | None = None
         super().__init__(config, vecenv, policy, logger=self.capture)
         try:  # a refusal here must stop PuffeRL's non-daemon utilization thread, or the process never exits
-            if dice_odds_of(self.model.levels):
+            if dice_state_of(self.model.levels):
                 self.dice_probe = DiceProbe(self.model)
             if frozen:
                 drop_frozen(self.optimizer)
@@ -489,10 +490,10 @@ def check_bindable(model: CatanModel, plan: Any) -> None:
 def build_policy_model(cfg: Mapping[str, Any], dims: Mapping[str, int]) -> CatanModel:
     obs = cfg.get("obs") or {}
     levels = normalize_levels({"level": obs.get("level", "private"), "critic_level": obs.get("critic_level"),
-                               "dice_odds": bool(obs.get("dice_odds", False))})
+                               "dice_state": bool(obs.get("dice_state", False))})
     critic = critic_level_of(levels["level"], levels["critic_level"])
     return build_model(cfg["model"], dims=dims, levels=levels, num_actions=action_size(dims),
-                       layout=row_layout(dims, levels["level"], critic, dice_odds_of(levels)))
+                       layout=row_layout(dims, levels["level"], critic, dice_state_of(levels)))
 
 
 def _lr_schedule(train: Mapping[str, Any]) -> dict[str, Any]:
@@ -556,7 +557,7 @@ def check_policy_frozen(model: CatanModel, games: Sequence[Any] = ()) -> None:
 
     levels = model.levels
     obs = encode_positions(select_positions(model.dims, 2, games), model.dims, levels["level"],
-                           levels.get("critic_level"), dice_odds_of(levels))
+                           levels.get("critic_level"), dice_state_of(levels))
     device = next(model.parameters()).device
     with torch.enable_grad():
         logits = model.policy_logits(torch.from_numpy(obs).to(device))
@@ -679,7 +680,7 @@ def _train_ppo(variant, writer, cfg, seed, launch, env_cfg, train, runtime, stri
     vecenv = make_vecenv(
         plan, num_envs=int(env_cfg["num_envs"]), level=level, critic_level=obs.get("critic_level"),
         threads=int(runtime.get("threads", 1)), seed=rollout_seed,
-        log_interval=int(train.get("log_interval", 32)), dice_odds=dice_odds_of(model.levels),
+        log_interval=int(train.get("log_interval", 32)), dice_state=dice_state_of(model.levels),
     )
     critic_gamma = train["critic_gamma"] if train["critic_gamma"] is not None else float(train["gamma"])
     policy = PufferPolicy(model, num_rows=vecenv.num_agents, compile=bool(runtime.get("compile", False)),

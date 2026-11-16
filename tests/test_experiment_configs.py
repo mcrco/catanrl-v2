@@ -415,3 +415,59 @@ def test_fp16_2p_pins_graph_m_2p_lrs_own_e300():
     ref = run.resolve("e300#21153dbc209c")
     assert ref.epoch == 300 and ref.agent_steps == 300 * 132_096
     assert run.config_hash == load_plan("graph-m-2p-lr").variants[0].config_hash
+
+
+def test_az_2p_dice_arms_differ_only_in_the_dice_input():
+    """The dice-state experiment: two arms from search-v3.1's network (weights only: a fresh
+    optimizer and an empty replay in both) that differ in the input and its warm start alone,
+    no in-run evals, and one final each on the same 5,000 games (heldout-2p-fr's 2,500 boards x
+    2 seats against BELIEF(fr3, 16 worlds)), so the two rows pair game for game."""
+    from catanrl.config import config_diff, hashed_part
+    from catanrl.envs.encoding import dims_for
+    from catanrl.eval.suites import load_suite
+    from catanrl.games import load_game
+    from catanrl.train.puffer import build_policy_model
+
+    plan = load_plan("az-2p-dice")
+    assert [v.name for v in plan.variants] == ["control", "dice"]
+    control, dice = plan.variants
+    assert control.depends_on == dice.depends_on == ()
+    assert control.config_hash != dice.config_hash
+    assert config_diff(hashed_part(control.config), hashed_part(dice.config)) == [
+        "init_from.zero_new_inputs: '<unset>' -> True", "obs.dice_state: '<unset>' -> True"]
+    start = "az-2p-kata/main+1500@e1800#7c44ec80540a"
+    for v in plan.variants:
+        cfg = v.config
+        assert cfg["init_from"]["ckpt"] == start and cfg["init_from"]["parts"] == ["actor", "critic"]
+        assert cfg["init_from"].get("restore", "weights") == "weights"
+        assert cfg["train"]["iterations"] == 600 and cfg["train"]["kernels"] == "fused16"
+        assert cfg["eval"]["select"] is None and not cfg["eval"].get("monitor")
+        assert [(e["suite"], e["lineup"]) for e in cfg["eval"]["final"]] == [("heldout-2p-fr", [
+            f"MCTS:ckpt={v.ref}@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused",
+            "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"])]
+    assert load_suite("heldout-2p-fr").boards == 2500
+
+    dims = dims_for([load_game("base-2p-fr")])
+    plain, wide = (build_policy_model(v.config, dims) for v in plan.variants)
+    assert (plain.obs_size, wide.obs_size) == (2564, 2691)  # 51 global and 4 x 19 tile features
+    new = sorted(set(wide.state_dict()) - set(plain.state_dict()))
+    assert new == ["backbone.dice_projection.weight", "backbone.tile_dice_projection.weight"]
+    assert all(not wide.state_dict()[key].any() for key in new)
+    count = lambda model: sum(p.numel() for p in model.parameters())  # noqa: E731
+    assert (count(plain), count(wide)) == (541_540, 549_156)
+
+
+@pytest.mark.runs
+def test_az_2p_dice_trains_as_its_parent_did():
+    """Every train key (but the length), the seed, rows, network, scenario and runtime of
+    az-2p-kata/main+1500 as that run stored them."""
+    from catanrl.runs import RunError, load_experiment
+
+    try:
+        parent = load_experiment("az-2p-kata/main+1500").config
+    except RunError:
+        pytest.skip("az-2p-kata/main+1500 is not in the runs directory")
+    cfg = load_plan("az-2p-dice").variant("control").config
+    assert {**cfg["train"], "iterations": 1800} == parent["train"]
+    assert {k: cfg[k] for k in ("seed", "obs", "model", "env", "runtime")} == {
+        k: parent[k] for k in ("seed", "obs", "model", "env", "runtime")}
