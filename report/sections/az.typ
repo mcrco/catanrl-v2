@@ -720,3 +720,42 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 python tools/bundle_smoke.py --runs <scratch dir>   # the GPU check, ~15 min
 catanrl run configs/experiments/az-2p-bundle.yaml
 ```)
+
+=== Does the better search net play better without the search? #chip("queued") <exp:az-raw>
+#meta(
+  dates: "for the GPU after az-2p-bundle",
+  dates-label: "queued",
+  owner: "marco",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-16): after the bundled run, compare the raw policies of the checkpoints, to see whether a net that is better inside the search is also a better raw policy. Every AlphaZero row so far judged the net inside the 1,024-sim search.]
+
+*Question.* From fr3 to e300, e900 and e1800 the search gained 3.85, 6.45 and 9.10 pp against the fair raw fr3 bot. Did the raw policy gain too?
+
+#lead[Setup.]
+- *Bots.* The fair raw bot (`BELIEF:worlds=16`) of e300, e900, e1800 and the bundled run's last checkpoint, each against the same of fr3. No search on either side.
+- *Games.* All 2,500 boards of `heldout-2p-fr` in both seat orders, 5,000 games a row: ±1.4 pp at 50%, and about 2 pp between two checkpoints is detectable at 80% power (paired by game). The first 1,000 boards are the search rows' boards.
+- *Reading.* Each checkpoint gets two numbers against the same opponent, with the search and without. Raw scores that rise with the search scores say self-play improves the policy itself; flat raw scores say the gain lives in what the search does with the net (its value, or its second and third choices).
+- *Cost.* About 13 min a row (2.7 min per 1,000 games in @exp:recipe-transitivity), under 1 h for the four rows.
+- *Not planned.* A round robin among the checkpoints (6 more pairs).
+
+=== How the checkpoints differ: value and policy similarity over training #chip("queued") <exp:az-similarity>
+#meta(
+  dates: "for the GPU after az-2p-bundle",
+  dates-label: "queued",
+  owner: "marco",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-16): a difference measure between the critics of the checkpoints, and a similarity matrix between checkpoints over time. Every saved checkpoint from fr3 to the end of the bundled run reads one fixed set of positions; no games are played to compare them.]
+
+*Question.* How far does each checkpoint's value and policy sit from every other's, and does the net drift steadily, settle, or jump where the recipe changed (e410's faster self-play, the bundle's new input and head)?
+
+#lead[Setup.]
+- *Checkpoints.* Every 25 iterations: 74 from fr3 to e1800 and 37 of the bundled run.
+- *Positions.* About 20,000, a few from each of 2,000 games on boards outside the training pool, played by the raw policies of fr3, e900, e1800 and the bundle's last checkpoint in equal shares, so that no one checkpoint's style sets the sample. Each position is encoded with and without the dice state, for the nets that read it and those that do not.
+- *Value matrix.* For each pair of checkpoints, the mean absolute difference between their win probabilities for the seat to move.
+- *Policy matrix.* For each pair, the share of positions where both prefer the same move, and the mean divergence between the two policies.
+- *Against the outcome.* Each checkpoint's value scored against who won the game (Brier score and log loss), to tell a critic that moved from one that got better.
+- *Cost.* Network forwards only: minutes on the GPU.
