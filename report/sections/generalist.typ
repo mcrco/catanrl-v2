@@ -225,9 +225,9 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
   owner: "marco",
   config: "configs/experiments/gen-base.yaml (wt/player-set, 4f01d31)",
   wandb: (("gen-base-main-96725ccd", "gen-base/main"),),
-  records: ("47f566cf", "2bd4e3a9", "a8b0f0ee"),
+  records: ("47f566cf", "2bd4e3a9", "a8b0f0ee", "dd5e7fb8", "5c8dcfcb", "be7738c2", "31f7ab56", "f7fb1923", "b17a6d3e"),
 )
-#tldr[`graph-seat-s` from scratch for 996M agent steps (249M decisions) on a Modal L40S: 5.97 h, \$15.43. At 4p it is level with best-4p, which had 2.5 times its 4p decisions. At 3p it beats `ppo-mixed` at equal training (36.2% against two copies, parity 33.3%, p = 0.001). At 2p it takes 36.2% from best-2p made fair, where fr3 took 45.0% with 12 times its 2p decisions. Registered as `mix-graph-seat-s-1`.]
+#tldr[`graph-seat-s` from scratch for 996M agent steps (249M decisions) on a Modal L40S: 5.97 h, \$15.43. At 4p it is level with best-4p, which had 2.5 times its 4p decisions. At 3p it beats `ppo-mixed` at equal training (36.2% against two copies, parity 33.3%, p = 0.001). At 2p it takes 36.2% from best-2p made fair, where fr3 took 45.0% with 12 times its 2p decisions. It was still gaining: the halfway checkpoint is 6 to 13 pp lower on the same games, and the last 236M steps, near the floor learning rate, added 4 pp at 2p, 3 pp at 3p and 1.3 pp at 4p (the last not significant). Registered as `mix-graph-seat-s-1`.]
 
 *Question.* How strong is the player-agnostic network after `ppo-mixed`'s budget, at each table size?
 
@@ -251,15 +251,38 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 - *3p.* Above `ppo-mixed` at equal training: 1,085 wins of 3,000 against 1,025 and 890 for the two copies (p = 0.001 against a third).
 - *2p.* Well below best-2p (`graph-m`, 1.5B decisions of 2p). fr3 (1.0B decisions of 2p) took 45.0% #ci[43.6][46.4] from the same opponent over the suite's 5,000 games (`71af32b1`, @exp:deploy-graph-m-check; not paired with this row). `gen-base` had 80M decisions of 2p, and plays from `private` rows where the other two are `full`-level networks averaged over 16 sampled worlds.
 - *Not separated.* The network, the dice input, the undiscounted critic and the 2p rules changed together from `ppo-mixed` (bundle first, Marco), so the 3p and 4p gains belong to the bundle.
-- *Not measured.* Whether it was still gaining at the end: the run has no row before e3800. Checkpoints are kept every 100 epochs.
 - *Critic.* On its own self-play games in the last 100 epochs, the critic's squared error against the outcome is 0.136 at 2p, 0.176 at 3p and 0.159 at 4p (slot 0); `ppo-mixed`'s on its own games was 0.097, 0.142 and 0.122. The games and players differ, so this does not rank the critics; scoring both on the same games would (not run).
 - *The run.* One container, no preemption. 47,600 agent steps a second (median; 49,300 in the six-minute check), 5.97 h billed with the compile and the finals (4 min), \$15.43. The app stopped itself after the finals; the run and its 39 checkpoints are on the volume and in `runs/gen-base/main` here.
+
+#lead[Slope check (Claude's suggestion; Marco, 2026-11-16: "lets do slope check").]
+Was it still gaining at the end? Two earlier checkpoints played the same three tables: the same boards, seats and opponents, so the rows pair game by game with e3800's. e1900 is the halfway point (`gen-base-slope`). e2900 (`gen-base-slope-e2900`) is 236M agent steps before the end, when the learning rate was 0.0011, about twice the floor; a continuation would train near that rate. 4.5 min on an L40S each, \$0.42 with the builds.
+#figure(
+  btable(
+    columns: (1.2fr, auto, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, right, right),
+    header: ([Table], [Games], [e1900 (%)], [e2900 (%)], [e3800 (%)], [e3800 − e1900 (pp)], [e3800 − e2900 (pp)]),
+    [2p against best-2p made fair], [2,000], [23.6], [32.15], [36.2], [+12.6 #ci[+10.2][+15.0]], [+4.05 #ci[+1.6][+6.5]],
+    [3p against 2 × `ppo-mixed`], [3,000], [29.2], [33.1], [36.2], [+7.0 #ci[+4.9][+9.1]], [+3.1 #ci[+0.9][+5.2]],
+    [4p against 3 × best-4p], [4,000], [19.2], [24.15], [25.45], [+6.3 #ci[+4.6][+8.0]], [+1.3 #ci[−0.4][+3.0]],
+    mid,
+    [Agent steps], [], [498M], [760M], [996M], [], [],
+    [Learning rate], [], [0.00275], [0.0011], [0.0005], [], [],
+  ),
+  caption: [`gen-base`'s checkpoints on the same games; differences are paired. Games won only by e3800 against only by the earlier checkpoint, e1900: 453 to 201 at 2p (p = 3e-23), 652 to 442 at 3p (p = 2e-10), 728 to 477 at 4p (p = 5e-13); e2900: 360 to 279 (p = 0.002), 578 to 486 (p = 0.005), 632 to 580 (p = 0.14). Records, e1900: `dd5e7fb8`, `5c8dcfcb`, `be7738c2`; e2900: `31f7ab56`, `f7fb1923`, `b17a6d3e`.],
+) <tab:gen-base-slope>
+- *Reading.* It gained through the whole second half, most at 2p. At the halfway point it was below `ppo-mixed` at 3p and below best-4p at 4p; it passed `ppo-mixed` and drew level with best-4p in the second half. The gain is slowing: over the 262M steps to e2900 and then the 236M to the end, 8.6 then 4.1 pp at 2p, 3.9 then 3.1 pp at 3p, 5.0 then 1.3 pp at 4p.
+- *Caveat.* Slowing and the falling learning rate are not separated: the rate went from 0.00275 at e1900 to the floor, 0.0005, at the end. The two continuations of a 2p net are both poor precedents: at the floor rate, constant, `ppo-2p-fr` gained about 1 pp in 1B steps (@exp:recipe-2p-openhex-3), and a fresh cosine from the peak went backwards (@exp:recipe-2p-openhex-2). Both started from a net 1.4B steps old; this one still gained near the floor rate.
 
 #repro(```sh
 # from the wt/modal worktree; the finals need the three opponents' checkpoints on the volume
 python tools/modal_train.py launch configs/experiments/gen-base.yaml --rev wt/player-set --gpu L40S --cpu 8 --memory 32 --max-hours 7 \
   --set runtime.threads=8 --ship graph-m-2p-lr/main@e22711 --ship ppo-mixed/main@e3550 --ship ppo-4p/main@e3650
 python tools/modal_train.py watch gen-base/main --every 10   # pulls into runs/ and mirrors to W&B until the run ends
+# the slope check: the records land in runs/gen-base/main/evals
+# (gen-base-slope-e2900.yaml with --ship gen-base/main@e2900 for the other checkpoint)
+python tools/modal_train.py launch configs/experiments/gen-base-slope.yaml --rev wt/player-set --gpu L40S --cpu 8 --memory 32 --max-hours 0.25 \
+  --set runtime.threads=8 --ship gen-base/main@e1900 --ship graph-m-2p-lr/main@e22711 --ship ppo-mixed/main@e3550 --ship ppo-4p/main@e3650
+python tools/modal_train.py pull gen-base/main
 ```)
 
 === 5–6 players on the extension map #chip("todo") <exp:gen-5-6p>
