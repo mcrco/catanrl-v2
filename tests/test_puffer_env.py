@@ -7,7 +7,14 @@ import pytest
 import torch
 
 from catanrl.envs.encoding import action_size, row_layout
-from catanrl.envs.puffer import CatanPufferEnv, make_vecenv, plan_env, scenario_specs
+from catanrl.envs.puffer import (
+    POINTS_KEYS,
+    STYLE_KEYS,
+    CatanPufferEnv,
+    make_vecenv,
+    plan_env,
+    scenario_specs,
+)
 from catanrl.models import CatanModel, build_model
 from catanrl.train.puffer_policy import PufferPolicy, ValueBatch, seat_rows
 
@@ -264,3 +271,40 @@ def test_episode_stats_weigh_every_episode_equally():
     for key, value in every_step.items():
         assert batched[key] == pytest.approx(value, rel=1e-9), key
     assert every_step["vsR/episodes"] + every_step["base-2p/episodes"] == ended
+
+
+def test_take_stats_gives_the_style_of_play_and_the_points_of_the_games_somebody_won():
+    """The development cards and the awards changing hands are means over every episode like
+    length; the final victory points are means over the won ones, recounted here from each
+    env's last outcome, and 0.0 where every game was cut."""
+    plan = small_plan({"game": "base-2p", "turn_limit": 300}, {"game": "base-3p", "turn_limit": 300},
+                      {"game": "base-2p", "turn_limit": 8, "name": "cut", "weight": 0.2})
+    names = [s.name for s in plan.specs]
+    env = CatanPufferEnv(plan.scenarios, names=names, num_envs=12, dims=plan.dims, threads=2,
+                         log_interval=37, seed=4)
+    env.reset(4)
+    rng = np.random.default_rng(6)
+    size = env.single_action_space.n
+    won = {name: [] for name in names}  # (winner's points, the mean of the others', all)
+    for _ in range(4_000):
+        mask = env.observations[:, -size:]
+        playing = [names[env.vec.scenario_index(e)] for e in range(env.vec.num_envs)]
+        env.step((rng.random(mask.shape) * mask).argmax(1).astype(np.int32))
+        for e in np.flatnonzero(env.terminals.reshape(env.vec.num_envs, -1)[:, 0]):
+            last = env.vec.last_outcome(int(e))
+            if not last["truncated"]:
+                points = sorted(last["victory_points"])
+                won[playing[e]].append(
+                    (points[-1], sum(points[:-1]) / (len(points) - 1), sum(points)))
+    stats = env.take_stats()
+    assert "won" not in stats and not won["cut"] and stats["cut/truncated"] == 1.0
+    assert 0 < stats["truncated"] < 1 and all(len(won[name]) > 3 for name in names[:2])
+    everything = [game for games in won.values() for game in games]
+    for prefix, games in [("", everything), *((f"{name}/", won[name]) for name in names)]:
+        expected = np.mean(games, axis=0) if games else np.zeros(3)
+        for key, value in zip(POINTS_KEYS, expected):
+            assert stats[f"{prefix}{key}"] == pytest.approx(value, rel=1e-9), (prefix, key)
+        assert stats[f"{prefix}episodes"] * (1 - stats[f"{prefix}truncated"]) == pytest.approx(len(games))
+        assert all(f"{prefix}{key}" in stats for key in STYLE_KEYS)
+    assert stats["base-3p/loser_vp"] < stats["base-3p/winner_vp"] and stats["dev_bought"] > 0
+    assert 0 < stats["road_awarded"] < 1 and 0 < stats["army_awarded"] < 1

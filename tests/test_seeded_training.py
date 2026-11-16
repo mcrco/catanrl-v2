@@ -6,6 +6,7 @@ import pytest
 from run_helpers import train
 from train_configs import tiny_ppo
 
+from catanrl.envs.puffer import POINTS_KEYS, STYLE_KEYS
 from catanrl.train.puffer import train_ppo
 
 pytestmark = pytest.mark.train
@@ -35,3 +36,19 @@ def test_other_seed_other_weights(tmp_path):
     other = run(tmp_path, "c", seed=4)
     assert first[0][0] != other[0][0]  # the init seed changes e000000
     assert first[0][-1] != other[0][-1]
+
+
+def test_the_rows_carry_the_style_of_the_games():
+    """PPO logs the env's take_stats whole, so the final victory points, the development
+    cards and the awards changing hands sit in every row that has environment/length."""
+    config = tiny_ppo(seed=3)
+    for scenario in config["env"]["scenarios"]:
+        scenario["turn_limit"] = 6  # games that end within the run
+    rows = train(train_ppo, config, "style").rows
+    both = [row for row in rows if "environment/self/length" in row and "environment/vsR/length" in row]
+    assert len(both) > 1
+    for row in both:
+        for prefix in ("environment/", "environment/self/", "environment/vsR/"):
+            assert all(f"{prefix}{key}" in row for key in (*POINTS_KEYS, *STYLE_KEYS)), prefix
+        assert row["environment/truncated"] == 1.0 and row["environment/winner_vp"] == 0.0
+        assert row["environment/dev_bought"] >= 0.0 == row["environment/road_changes"]

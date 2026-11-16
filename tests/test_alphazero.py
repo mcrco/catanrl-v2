@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from catanrl import canon
 from catanrl.config import ConfigError, Variant, config_hash, load_plan, resolve
 from catanrl.envs.encoding import encoder_dims
-from catanrl.envs.puffer import plan_env
+from catanrl.envs.puffer import POINTS_KEYS, STYLE_KEYS, plan_env
 from catanrl.runs import RunWriter, load_experiment
 from catanrl.search import BatchEvaluator, run_pools
 from catanrl.train.alphazero import (
@@ -157,6 +157,27 @@ def test_a_tiny_run_trains_checkpoints_and_selects(monkeypatch):
     assert "best" in run_.aliases()
     net = run_.build_policy("latest")
     assert net.dims_agnostic
+
+
+def test_a_run_logs_the_style_of_its_games(monkeypatch):
+    """Beside environment/length: the final victory points, the development cards and the
+    awards changing hands, as the env's pop_stats gave them for the iteration."""
+    popped = []
+    original = cpp.VecEnv.pop_stats
+
+    def spy(self):
+        popped.append(original(self))
+        return popped[-1]
+
+    monkeypatch.setattr(cpp.VecEnv, "pop_stats", spy)
+    run(variant())
+    rows = load_experiment("az/t").metrics()
+    assert len(rows) == len(popped) == 2 and sum(row["environment/episodes"] for row in rows) > 0
+    for row, stats in zip(rows, popped):
+        assert row["environment/length"] == stats["length"]
+        for key in (*POINTS_KEYS, *STYLE_KEYS):
+            assert row[f"environment/{key}"] == stats[key], key
+    assert rows[-1]["environment/winner_vp"] == 0.0  # every game was cut at 8 turns
 
 
 def test_resume_restores_the_replay_buffer_and_counters(monkeypatch):
