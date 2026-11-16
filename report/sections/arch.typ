@@ -228,7 +228,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 == Inputs
 
-=== The balanced-dice state as a network input #chip("queued") <exp:dice-input>
+=== The balanced-dice state as a network input #chip("running") <exp:dice-input>
 #meta(
   dates: "2026-11-10 (next-roll odds), 2026-11-15 (the whole state)",
   dates-label: "built",
@@ -250,4 +250,13 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *Warm start.* Every new weight starts at zero, so a network given the input plays exactly as its parent at first. Off by default: rows, networks and config hashes stay as they are.
 - *Any size.* The input attaches to the graph trunk's board and tile projections, the same in `graph-s` and `graph-m` (@exp:az-graph-m).
 
-*Status.* Being built on `wt/dice2` from the unrun 2026-11-10 branch (`wt/dice-input`), for the AlphaZero trainer, the fused kernels and the OpenHex seat. The PPO pair planned on 2026-11-10 (`dice-input-2p`) is dropped for the bundled run.
+#lead[As built.]
+- *Switch.* `obs.dice_state: true`, off by default; merged 2026-11-15.
+- *Row.* A 2p `full` row grows from 2,564 to 2,691 floats: 51 on the board and 4 on each of the 19 tiles.
+- *Board, 51.* Each seat's odds per total, as 6 × P(total) (22); the deck's cards per total (11); each total's count in the five-roll window, over 3 (11); the draws left before the refill; and per seat its sevens, its share of the sevens (added in the build) and the streak.
+- *Tile, 4.* For the tile's number: its odds on my roll and on the opponent's (× 36/5), its cards left and its count in the window; zeros on the desert.
+- *Network.* Two bias-free projections that start at zero, added to the board and tile projections: 7,616 parameters on `graph-s` (541,540 to 549,156). The fused kernels read them with two more small matrix products.
+- *Check on the GPU.* A network warm-started with `init_from.zero_new_inputs` gives e1800's logits and values bit for bit on the fused kernels in full and half precision (plain PyTorch on the GPU: within 3e-6, the same best move). After 6 learning steps the input's weights have norm 0.10 and move the policy by 0.0002 nats on probe positions.
+- *Logged.* `dice/weight_norm`, and on fixed probe positions `dice/probe_kl`, `dice/probe_flips` and `dice/probe_value_gap`: the network with the true dice state against the same network told the dice are fair.
+
+*Status.* Training in @exp:az-bundle. The PPO pair planned on 2026-11-10 (`dice-input-2p`) is dropped for the bundled run.

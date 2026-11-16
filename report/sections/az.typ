@@ -590,7 +590,79 @@ catanrl run az-2p-kata --set runtime.search_groups=1                        # th
 pytest tests/test_search_pipeline.py tests/test_alphazero.py tests/test_graph_kernels.py -q
 ```)
 
-=== Auxiliary targets: each seat's final VP and the turns left #chip("queued") <exp:az-aux>
+=== Where the time goes: a faster card, more cores and the main thread #chip("done") <exp:az-hardware>
+#meta(
+  dates: "2026-11-15",
+  owner: "marco",
+  config: "tools/gpu_bench.py, tools/modal_bench.py (wt/modal, unmerged)",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco: would a new GPU help, and would a GPU simulator pay on a big card? Measured on rented cards (Modal, \$1.53). AlphaZero self-play on `graph-s` is not limited by the GPU: on an L40S, which runs the network 4.3× faster than the RTX 2070 Super, an iteration takes 82.7 s against 83.3 s here, and 32 cores instead of 8 give 1.29×. A profile finds why: only a third of the time is work spread over threads, and the main thread alone spends 19% of the wall-clock freeing finished search trees. `graph-m` PPO is the opposite: 96–98% of an epoch is the network, and an L40S-speed card would give 2.7×.]
+
+*Question.* What would a faster GPU or more cores buy for the two workloads, self-play on `graph-s` and PPO on `graph-m`?
+
+#lead[Setup.]
+- *Machines.* This box (RTX 2070 Super, Ryzen 3700X, 16 threads); Modal's A10G and L40S with 8 cores, and the L40S with 32. The same torch and CUDA; W&B off; nothing left deployed.
+- *Self-play.* e1800's stored config for 5 iterations, learning from 4,096 positions so the learning step is timed; medians of the last two.
+- *PPO.* `graph-m-2p-lr`'s config from scratch for 8 epochs in full and half precision; medians of the last five.
+- *Prediction for a new card in this box.* Self-play: the recorded trace of GPU calls replayed with a faster device. PPO: the forwards and the update scaled by the card's measured speed, the rest unchanged.
+- *Profile.* `perf` on the main thread of the live self-play process (the GPU check of @exp:az-bundle), 2,567 stack samples, and the CPU time of every thread.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([], [This box], [A10G], [L40S]),
+    tgroup(4)[Network alone, rows a second],
+    [`graph-s` forward, fused half precision], [120,756], [175,628 (1.45×)], [520,328 (4.31×)],
+    [`graph-m` update, full precision], [13,038], [16,429 (1.26×)], [37,037 (2.84×)],
+    [`graph-m` update, half precision], [19,703], [27,718 (1.41×)], [54,006 (2.74×)],
+    tgroup(4)[AlphaZero self-play, `graph-s`: seconds an iteration],
+    [8 cores (this box: 8 cores, 16 threads)], [83.3], [], [82.7],
+    [32 cores], [], [], [64.2],
+    [A card of that speed in this box (predicted)], [83.3], [69.6], [67.7],
+    tgroup(4)[`graph-m` PPO: steps a second],
+    [Full precision], [6,092], [], [18,470],
+    [Half precision], [11,717], [], [28,356],
+    [Full precision, that card in this box (predicted)], [6,092], [7,620], [16,700],
+    [Half precision, that card in this box (predicted)], [11,717], [16,300], [30,600],
+  ),
+  caption: [The two workloads on this box and on rented cards. Ratios are against this box.],
+) <tab:az-hardware>
+
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, left),
+    header: ([Main thread of self-play on this box], [Share of wall-clock], [Runs on]),
+    [Growing the trees and applying the network's results], [34%], [all 12 threads of a group],
+    [Freeing finished search trees (`SearchPool::remove`)], [19%], [the main thread],
+    [Waiting for the GPU], [17%], [the main thread],
+    [Python and the rest], [12%], [the main thread],
+    [Off the CPU], [15%], [not broken down],
+  ),
+  caption: [Where a second of self-play goes. The main thread is on the CPU 85% of the time; each of about 22 worker threads 17%; the process uses 4.7 of 16 logical cores.],
+) <tab:az-profile>
+
+*Reading.*
+- *Self-play is limited by one thread.* On the L40S the card is idle 80% of the time and the main thread never waits for it. Only about a third of the time is spread over threads, which is why four times the cores give 1.29×.
+- *Freeing trees.* Each tree node holds a copy of the game, and the board keeps its road networks and buildable spots in `std::set<int>`: many small allocations a node. Allocating and freeing is a third of the main thread's time.
+- *A new card.* For self-play on `graph-s`, about 1.2×. For `graph-m` PPO, 1.25× (A10G speed) to 2.7× (L40S speed); half precision on the present card already gives 1.9× (@exp:fp16).
+- *A GPU simulator* is not supported by these numbers: the time goes to tree bookkeeping on one thread, not to stepping games.
+- *Limits.* 5 iterations and 8 epochs a cell; this box was measured with other processes on the CPU (load average 3.0 before the self-play benchmark); Modal's cores are 0.83× this box's on one thread; `graph-m` in self-play (@exp:az-graph-m) was not measured.
+
+*Next* (Claude's suggestions, not queued). Free trees on an idle worker thread, a small engine change that leaves results as they are (up to 1.2× on self-play, the profile's bound). Keep the board's sets as bit masks, a larger change that removes most allocations.
+
+#repro(```sh
+# from the wt/modal worktree
+python tools/gpu_bench.py a --out OUT --runs RUNS     # then: b1 --iterations 5 | b2 --epochs 8 --precision float16
+modal run tools/modal_bench.py --job l40s-b1 --out OUT   # cpu | a10g-a | l40s-a | l40s-b1-t8 | l40s-b1-t32 | l40s-b2
+perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
+```)
+
+=== Auxiliary targets: each seat's final VP and the turns left #chip("running") <exp:az-aux>
 #meta(
   dates: "2026-11-15",
   dates-label: "proposed",
@@ -604,15 +676,23 @@ pytest tests/test_search_pipeline.py tests/test_alphazero.py tests/test_graph_ke
 - *Heads.* Two small heads on the pooled state, trained with small weights beside the policy and value losses and never read at play time: the search, the kernels and the deployed bots use the same logits and values as without them.
 - *Readouts.* Both losses on W&B, with the mean error in VP and in turns.
 
-*Status.* Being built on `wt/dice2`.
+#lead[As built.]
+- *Switch.* `model.args.outcome: true`, off by default; merged 2026-11-15.
+- *Head.* One extra head beside the policy and value heads, 135,938 parameters on `graph-s`, run only by the trainer's learning step. Targets: each seat's final VP over the points to win and the turns left over 100, Huber loss.
+- *Weights.* `outcome_vp_coef` and `outcome_turns_coef`, both 0.5 in the bundle: an estimate, not tuned.
+- *Labels.* Stored with each replay position once its game ends (6 more bytes; 6,033 a position with the dice input); positions of games cut at the turn limit are masked.
+- *Check on the GPU.* With the head in the network, self-play and the evals give the same logits and values as without it. In 6 learning steps the mean error fell from 6.9 to 2.0 VP and from 19 to 7.6 turns (2.1 and 8.0 on positions not trained on).
+- *Logged.* `train/outcome_vp_loss`, `train/outcome_turns_loss`, `train/outcome_vp_mae` (in VP), `train/outcome_turns_mae` (in turns) and the same under `oos/`.
 
-=== 900 more iterations with the dice input and auxiliary targets: `az-2p-bundle` #chip("queued") <exp:az-bundle>
+*Status.* Training in @exp:az-bundle.
+
+=== 900 more iterations with the dice input and auxiliary targets: `az-2p-bundle` #chip("running") <exp:az-bundle>
 #meta(
-  dates: "for the GPU after the search measurement",
-  dates-label: "queued",
+  dates: "2026-11-15 19:20",
+  dates-label: "started",
   owner: "marco",
   config: "configs/experiments/az-2p-bundle.yaml",
-  wandb: (),
+  wandb: (("az-2p-bundle-main-da6d1382", "az-2p-bundle/main"),),
   records: (),
 )
 #tldr[Marco (2026-11-15): bundle everything into the continued training first and ablate later; the goal is the best 1v1 bot. e1800 continues for 900 iterations with the dice input (@exp:dice-input) and the auxiliary targets (@exp:az-aux) on. One held-out row at the end, on e1800's games.]
@@ -623,7 +703,20 @@ pytest tests/test_search_pipeline.py tests/test_alphazero.py tests/test_graph_ke
 - *Run.* From `az-2p-kata/main+1500@e1800` (`2p-graph-s-6`) under its own recipe (@exp:az-kata-1800), with the new input weights at zero and the new heads beside the old ones, so iteration 0 plays exactly as e1800. The replay starts empty: e1800's stored positions have neither the dice state nor the new labels.
 - *Eval.* No selects. One row at the end: the last checkpoint in the 1,024-sim search against `BELIEF(fr3, 16 worlds)` on e1800's 2,000 held-out games (62.95% there), paired by game. The paired difference has a standard error of about 1.2 pp, so about 3.4 pp is detectable at 80% power.
 - *What the row can say.* The gain over e1800 mixes the input, the targets and 900 more iterations; the last 900 iterations alone gained 2.65 pp. The row says how good the new bot is, not what each part gave: that is for the ablations.
-- *Cost.* About 21 h of self-play at e1800's 82 s an iteration (the wider rows and the extra heads will add to that; measured in the GPU smoke) and 2.3 h for the row, about 10% of the wall-clock.
-- *Not in the bundle.* `graph-m` (@exp:az-graph-m: the fused kernels do not fit it yet) and the search changes of @exp:search-stratified and @exp:search-paired-root, which change play, not training, and wait for @exp:search-noise.
+- *Start.* The optimizer and the replay start fresh; the first learning step comes when 50,000 positions are stored, after about 6 iterations.
+- *Cost.* About 21 h of self-play at 84 s an iteration (measured in the GPU check: 68,300 leaves a second, 98.5% of e1800's pace) and 2.3 h for the row, about 10% of the wall-clock. Due about 18:40 on 2026-11-16.
+- *Not in the bundle.* `graph-m` (@exp:az-graph-m: the fused kernels do not fit it yet) and the search changes of @exp:search-stratified and @exp:search-paired-root, parked after @exp:search-noise.
 
-*Status.* Waits for the build, a GPU smoke (iteration 0 against e1800 bit for bit on the fused kernels; throughput) and the GPU.
+#lead[GPU check before the launch.]
+- *Tool.* `tools/bundle_smoke.py`: 8 iterations of the real config, learning from 2,000 positions.
+- *Iteration 0 is e1800.* The e0 checkpoint holds e1800's weights, zeros on the dice input and the new head; on the fused kernels (full precision, the eval's; half precision, self-play's) its logits and values equal e1800's bit for bit on 1,032 positions.
+- *Kernels against plain PyTorch.* With trained dice weights the fused kernels are within 4e-6 on the values, the same as e1800 without the input (4.4e-6).
+- *Learning.* All losses finite; the two new losses fall (@exp:az-aux); the dice weights leave zero (@exp:dice-input).
+- *Two thresholds corrected.* The tool first printed FAIL: it asked plain PyTorch on the GPU for bit equality (off by 3e-6, the same best move) and the fused values for 1e-6 of plain PyTorch. e1800 itself misses both, so they now stand at rounding and at the kernel tests' 1e-5.
+
+*Status.* Running since 2026-11-15 19:20 (config `da6d1382`). Main's code is frozen until it ends.
+
+#repro(```sh
+python tools/bundle_smoke.py --runs <scratch dir>   # the GPU check, ~15 min
+catanrl run configs/experiments/az-2p-bundle.yaml
+```)
