@@ -474,7 +474,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 === Style statistics of the training games #chip("todo") <exp:recipe-style>
 #meta(
   dates: "2026-11-16",
-  dates-label: "building",
+  dates-label: "built",
   owner: "marco",
   wandb: (),
   records: (),
@@ -484,7 +484,11 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *Why not strength.* From fr3 to e1800 the net in the search gained 9.1 pp while the mean length of its self-play games stayed at 76–78 turns (@exp:az-kata-1800). Length fell only while a net learned the game (PPO `graph-m` from scratch: 200 to about 84 turns).
 - *Counters, per finished game.* Final victory points of the winner and of the losers; development cards bought, and whether the deck ran out; how often the largest army and the longest road changed hands.
 - *Rule.* Logging only: the same games, rows and checkpoints, and a cost under 1% of the environment's step time, measured before the merge.
-- *Status.* Being built in `wt/style-counters`. The counters live in hashed code, so they merge after @exp:az-bundle ends and show in the runs after it.
+- *Built* (`wt/style-counters`, both trainers; not merged). Counted in the vectorised environment on real moves only, so the search's node copies are untouched. Keys under `environment/`: `winner_vp`, `loser_vp`, `total_vp` (games with a winner), `dev_bought`, `dev_deck_empty`, `army_changes`, `road_changes`, `army_awarded`, `road_awarded` (all finished games). PPO logs them per scenario too.
+- *Same games.* Three seeded rollouts (2p, 3p and 4p) hash the same before and after, and the pinned-weight training tests pass. The counters match a move-by-move recount in 2p, 3p and 4p games.
+- *Overhead.* About 150 to 200 more instructions per environment step, 0.15–0.2% of the step. Wall time could not resolve it beside the live run (noise ±2%).
+- *Not checked.* Self-play speed on the GPU, and a live W&B write. Both wait for the GPU.
+- *Status.* The counters live in hashed code, so they merge after @exp:az-bundle ends and show in the runs after it.
 
 == Rollout segments and λ
 
