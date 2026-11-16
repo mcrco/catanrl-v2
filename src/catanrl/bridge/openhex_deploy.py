@@ -1,8 +1,8 @@
 """Versions of our OpenHex bots: which model plays under which registration, from which code.
 
-An OpenHex registration is permanent: its name and description are fixed when it
-is made, no endpoint renames, edits or deletes one, and its Elo, record and
-head-to-head belong to it. So a new model (or agent) gets a new registration, a
+An OpenHex registration is permanent: no endpoint deletes one, and its id, key,
+Elo, record and head-to-head belong to it (``PATCH /api/bots/me`` edits its name,
+once in 24 hours, and its description; the deploy file's name must follow). So a new model (or agent) gets a new registration, a
 *version* (``catanrl-1v1-v2``), and the deploy file (``deploy/openhex.yaml``)
 keeps every version ever registered, the retired ones too::
 
@@ -514,7 +514,7 @@ def build_stamps(entries: Sequence[DeployEntry], resolved: Mapping[str, Any],
 
 def registration(entry: DeployEntry, commit: str | None) -> dict:
     """The body of ``POST /api/bots`` for ``entry``: its name, mode and a description (at most
-    280 characters, fixed for good once registered) naming the version, the pinned spec,
+    280 characters; ``PATCH /api/bots/me`` can edit it later) naming the version, the pinned spec,
     the code (``commit``, the tag's when the entry has one) and the repository."""
     code = f"code {commit[:12] if commit else 'unknown'}" + (f" ({entry.tag})" if entry.tag else "")
     head, tail = f"catanrl {entry.version}: ", f"; {code}; {REPO_URL}"

@@ -1,15 +1,19 @@
-# Our bots on OpenHex (https://open-hex.web.app). A registration is permanent (its
-# name, description, Elo and record are fixed to it; OpenHex cannot rename, edit or
-# delete one), so each model we deploy is a new registration, a *version*, and this
-# file keeps every version ever registered: retired ones stay (retired: true) for the
-# record and `catanrl openhex stats`; the runner skips them. Every ckpt is pinned by
-# its weights' #sha. API keys: one per registration, in /etc/catanrl/openhex.env.
+# Our bots on OpenHex (https://open-hex.web.app). A registration keeps its id, key, rating
+# and record for good and cannot be deleted, so each model we deploy is a new
+# registration, a *version*, and this file keeps every version ever registered: retired
+# ones stay (retired: true) for the record and `catanrl openhex stats`; the runner skips
+# them. Its name and description can be edited (PATCH /api/bots/me; a rename once in 24 h):
+# the name here must follow a rename, since the runner checks each key's name against it.
+# Names are catanrl-<mode>-<greedy|search>-v<N> since 2026-11-16 (greedy: the network's top
+# move, no search); games created before a rename keep the name they were played under.
+# Every ckpt is pinned by its weights' #sha. API keys: one per registration, in
+# ~/.config/catanrl/openhex.env on yang.
 # Procedure (pin, tag, --check, --describe, register, overlap, retire): see
 # deploy/openhex-handoff.md, "Versioning".
 bots:
   # v1: the first three registrations (2026-10-17), deployed before versioning; their
   # specs pinned to what @best resolved to when they played.
-  - name: catanrl-1v1
+  - name: catanrl-1v1-greedy-v1  # catanrl-1v1 until 2026-11-16
     mode: 1v1
     version: 1v1-v1
     spec: BELIEF:ckpt=puffer-graph2/full@e3350#3355b5059503:worlds=16
@@ -18,7 +22,7 @@ bots:
     deployed: 2026-10-17
     tag: openhex-1v1-v3.1
     retired: false
-  - name: catanrl-4p
+  - name: catanrl-4p-greedy-v1  # catanrl-4p until 2026-11-16
     mode: 4p
     version: 4p-v1
     spec: POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f
@@ -27,7 +31,7 @@ bots:
     deployed: 2026-10-17
     tag: openhex-1v1-v3.1
     retired: false
-  - name: catanrl-1v1-search
+  - name: catanrl-1v1-search-v1  # catanrl-1v1-search until 2026-11-16
     mode: 1v1
     version: 1v1-search-v1
     # sims=1024 on the OCI VM's CPU (2026-10-20); on yang's GTX 1080 since 2026-10-24 at 2^16
@@ -43,7 +47,7 @@ bots:
   # ~1.57b steps on OpenHex's 1v1 rules (friendly robber, balanced dice). heldout-2p-fr, 5,000
   # games each: POLICY 98.92 vs F, 64.66 vs v1's net, 51.0 vs ppo-2p-fr/full@e7600; BELIEF
   # 98.94 vs F, 51.18 vs e7600.
-  - name: catanrl-1v1-v2
+  - name: catanrl-1v1-greedy-v2  # catanrl-1v1-v2 until 2026-11-16
     mode: 1v1
     version: 1v1-v2
     spec: BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16

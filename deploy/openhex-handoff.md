@@ -36,9 +36,12 @@ The keys live only in `/etc/catanrl/openhex.env` on the OCI VM (root-readable,
 
 ## Versioning
 
-A registration cannot change (name and description are fixed at `POST
-/api/bots`; there is no endpoint to rename, edit or delete one) and its Elo,
-record and head-to-head belong to it. So **each model we deploy is a new
+A registration cannot be deleted, and its id, key, Elo, record and head-to-head
+belong to it. Its name and description can be edited (`PATCH /api/bots/me` with
+the bot's key; a rename once in 24 hours, unique per mode): after a rename,
+change `name` in `deploy/openhex.yaml` too (the key check compares names) and
+move the bot's state directory. Since 2026-11-16 the names are
+`catanrl-<mode>-<greedy|search>-v<N>`. So **each model we deploy is a new
 registration, a version**, and `deploy/openhex.yaml` keeps every version ever
 registered. Retired versions stay in the file, marked `retired: true`, for the
 record and for `stats`; the runner skips them. The code lives in
