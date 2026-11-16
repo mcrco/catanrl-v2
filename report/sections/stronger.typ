@@ -41,7 +41,7 @@ Marco (2026-11-15), before more AlphaZero training: think about ways to make the
 
 - *The network is our weaker half.* The leader and the 12th bot are raw networks by their names ("Greedy"); a sibling's description says "3x1024 ResBlock ... greedy argmax policy, 0 MCTS sims". Our raw fr3 bot sits at 1557. On the ladder our search added about 16 Elo to fr3 (1557 to 1571, different dates and opponents).
 - *What the others search with.* HexN compares its top six moves on the same 64 sampled futures (common random numbers, @exp:search-paired-root); none describes a tree as deep as ours.
-- `search-v3.1` (e1800, @exp:deploy-openhex-search-v3-1) is released but not yet on the ladder.
+- `search-v3.1` (e1800, @exp:deploy-openhex-search-v3-1) went live the same afternoon (bot `e296048b5a1c4a83`; 3 of its first 6 games won, too few to rate).
 
 #lead[The post.] "Exploiting the law of small numbers in Catan" reverse-engineers Colonist's balanced dice: a 36-card deck reshuffled when 13 cards are left, a penalty on totals rolled in the last five rolls, and in 1v1 a multiplier on sevens that evens out each player's share and breaks streaks. A player who tracks all of it puts about 20% more probability on the roll that comes (0.26 bits a roll).
 - *Same dice.* `engine/cppanatron/include/cppanatron/dice.hpp` has the post's constants: refill at 13, a window of 5, 0.34 per recent copy, a seven multiplier clamped to 0–2 with ±0.4 per streak step.

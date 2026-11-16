@@ -21,7 +21,7 @@ The bots that play people are in @tab:deploy-bots. To serve a 1v1 net raw, use t
     [`catanrl-1v1-v2`], [`BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16`],
     [`catanrl-1v1-search-v2` \ #sub[2026-11-04 to 2026-11-13; retired for search-v3]], [`MCTS:ckpt=ppo-2p-fr3/full@e4350:sims=131072:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`],
     [`catanrl-1v1-search-v3` \ #sub[bot `1154c5f058024665`, live since 2026-11-13 (@exp:deploy-openhex-search-v3); retired in the file for search-v3.1 on 2026-11-15]], [`MCTS:ckpt=az-2p-kata/main@e300:` the same search],
-    [`catanrl-1v1-search-v3.1` \ #sub[released 2026-11-15, not registered yet (@exp:deploy-openhex-search-v3-1)]], [`MCTS:ckpt=az-2p-kata/main+1500@e1800:` the same search],
+    [`catanrl-1v1-search-v3.1` \ #sub[bot `e296048b5a1c4a83`, live since 2026-11-15 (@exp:deploy-openhex-search-v3-1)]], [`MCTS:ckpt=az-2p-kata/main+1500@e1800:` the same search],
   ),
   caption: [The deploy files in this checkout, sha pins omitted. `@best` is e3350 for `puffer-graph2/full`, e3650 for `ppo-4p/main` and e3550 for `ppo-mixed/main`.],
 ) <tab:deploy-bots>
@@ -279,15 +279,16 @@ catanrl openhex deploy/openhex.yaml --describe catanrl-1v1-search-v3 > /tmp/body
 catanrl openhex stats deploy/openhex.yaml --since 2026-11-11
 ```)
 
-=== OpenHex search-v3.1: the same run at 1,800 iterations #chip("queued") <exp:deploy-openhex-search-v3-1>
+=== OpenHex search-v3.1: the same run at 1,800 iterations #chip("running") <exp:deploy-openhex-search-v3-1>
 #meta(
-  dates: "2026-11-15 (released; not registered yet)",
+  dates: "2026-11-15 (released; registered by Marco at 15:05 PST)",
+  dates-label: "live since",
   owner: "marco",
   config: "deploy/openhex.yaml at tag openhex-1v1-v3.1",
   wandb: (("az-2p-kata-main-1500-22e5f5af", "az-2p-kata/main+1500"),),
   records: ("ea257443", "4411825a", "e917f9bb", "809619df"),
 )
-#tldr[`az-2p-kata/main+1500@e1800` (`2p-graph-s-6`) is released on GitHub as #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v3.1")[`openhex-1v1-v3.1`] for a new bot, `catanrl-1v1-search-v3.1` (Marco: "release e1800 as v3.1"): search-v3's search with the net 1,500 iterations later. It waits for Marco's registration on yang; search-v3 is retired in the same file.]
+#tldr[`az-2p-kata/main+1500@e1800` (`2p-graph-s-6`) is released on GitHub as #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v3.1")[`openhex-1v1-v3.1`] for a new bot, `catanrl-1v1-search-v3.1` (Marco: "release e1800 as v3.1"): search-v3's search with the net 1,500 iterations later. Marco registered it on 2026-11-15 (bot `e296048b5a1c4a83`) and it is playing; search-v3 is retired in the same file.]
 
 *Question.* Does the e1800 net do better on OpenHex's ladder than e300, at the deployed 2#super[17] sims?
 
