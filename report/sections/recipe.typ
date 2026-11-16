@@ -471,6 +471,21 @@ catanrl run configs/experiments/discount-2p-h2h.yaml   # g1 vs g999 within each 
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/transitivity-2p-belief.yaml
 ```)
 
+=== Style statistics of the training games #chip("todo") <exp:recipe-style>
+#meta(
+  dates: "2026-11-16",
+  dates-label: "building",
+  owner: "marco",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-16): cheap numbers about the games a run plays while it trains, logged next to the game length, "if the overhead isn't much". They describe how the bot plays, not how strong it is.]
+
+- *Why not strength.* From fr3 to e1800 the net in the search gained 9.1 pp while the mean length of its self-play games stayed at 76–78 turns (@exp:az-kata-1800). Length fell only while a net learned the game (PPO `graph-m` from scratch: 200 to about 84 turns).
+- *Counters, per finished game.* Final victory points of the winner and of the losers; development cards bought, and whether the deck ran out; how often the largest army and the longest road changed hands.
+- *Rule.* Logging only: the same games, rows and checkpoints, and a cost under 1% of the environment's step time, measured before the merge.
+- *Status.* Being built in `wt/style-counters`. The counters live in hashed code, so they merge after @exp:az-bundle ends and show in the runs after it.
+
 == Rollout segments and λ
 
 === 256-step segments and λ = 1, from scratch #chip("queued") <exp:recipe-horizon>

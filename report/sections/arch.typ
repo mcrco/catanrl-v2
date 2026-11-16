@@ -209,6 +209,30 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p-lr.yaml
 ```)
 
+=== `graph-m` in the search against the raw fr3 bot #chip("queued") <exp:arch-graph-m-search>
+#meta(
+  dates: "for the GPU after az-2p-bundle and its follow-ups",
+  dates-label: "queued",
+  owner: "marco",
+  config: "configs/experiments/graph-m-search-vs-raw.yaml",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-16): queue `graph-m` in the search against raw fr3. One row on the games the AlphaZero checkpoints are judged on, so `2p-graph-m-1` gets a place on that curve by measurement and not by chaining two rows.]
+
+*Question.* Where does `2p-graph-m-1`, a PPO net with no self-play with search, sit among fr3's net (53.85%), e300 (57.70%), e900 (60.30%) and e1800 (62.95%) when each plays in the search against the fair raw fr3 bot?
+
+#lead[Setup.]
+- *Row.* `graph-m` in the search against `BELIEF` of fr3 with 16 worlds, on the first 1,000 boards of `heldout-2p-fr` in both seat orders: the same 2,000 games as the AlphaZero rows, so it pairs with each of them by game.
+- *Search.* 300 simulations, the equal-time budget of @exp:deploy-graph-m-check (1,024 / 3.38; no fused kernels for `graph-m` yet). The other options are the rows' own.
+- *Sample.* 2,000 games: ±2.2 pp. Against e1800's row, paired, about 3.4 pp is detectable at 80% power.
+- *Prediction* (Claude, by chaining rows): about 58% ± 3 pp. `graph-m`'s search beat fr3's search 54.3% at equal time, and fr3's search scores 53.85% here.
+- *Cost.* Not measured: 3–4 h is an estimate from e1800's row (2.3 h) and the deploy check's search row (9.1 h with two searching seats).
+
+#repro(```sh
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-search-vs-raw.yaml
+```)
+
 === `graph-m` in the AlphaZero line #chip("todo") <exp:az-graph-m>
 #meta(
   dates: "2026-11-15",

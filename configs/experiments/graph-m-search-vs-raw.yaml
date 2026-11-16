@@ -1,0 +1,27 @@
+# graph-m in the search against the raw fr3 bot, on the AlphaZero rows' games (marco, 2026-11-16:
+# "im down to queue graph-m in search against raw fr3").
+#
+# the AlphaZero line is judged by its net in the 1,024-sim search against BELIEF(fr3, 16 worlds) on
+# heldout-2p-fr's first 1,000 boards in both seat orders: fr3's net 53.85%, e300 57.70%, e900 60.30%,
+# e1800 62.95%. graph-m (2p-graph-m-1, PPO only) has one search row, head to head with fr3's search
+# (54.3%, deploy-check-2p-graph-m); placing it on that curve took a chain of two rows. this row puts
+# it there directly: the same opponent, the same 2,000 games, paired by game with e1800's row.
+#
+# sims: 300, the equal-time budget of deploy-check-2p-graph-m (1,024 / 3.38; the fused kernels are
+# compiled for hidden 96 and refuse graph-m, so it searches with the torch forward). the other
+# options are the rows' own (dets=1, pending=64, reuse, transpositions).
+# 2,000 games: +-2.2 pp at 50%; against e1800's row, paired, a standard error of about 1.2 pp, so
+# about 3.4 pp is detectable at 80% power.
+# cost: unmeasured; 3-4 h is an estimate from e1800's row (2.3 h at 1,024 fused sims) and the deploy
+# check's two-seat row (9.1 h).
+name: graph-m-search-vs-raw
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup:
+        - "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=300:dets=1:pending=64:reuse=true:transpositions=true"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

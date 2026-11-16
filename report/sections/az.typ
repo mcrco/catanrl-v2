@@ -735,10 +735,11 @@ catanrl run configs/experiments/az-2p-bundle.yaml
 
 #lead[Setup.]
 - *Bots.* The fair raw bot (`BELIEF:worlds=16`) of e300, e900, e1800 and the bundled run's last checkpoint, each against the same of fr3. No search on either side.
-- *Games.* All 2,500 boards of `heldout-2p-fr` in both seat orders, 5,000 games a row: ±1.4 pp at 50%, and about 2 pp between two checkpoints is detectable at 80% power (paired by game). The first 1,000 boards are the search rows' boards.
+- *Games.* All 2,500 boards of `heldout-2p-fr` in both seat orders, 5,000 games a row: ±1.4 pp at 50%, and between two checkpoints 2 to 3 pp is detectable at 80% power (2.8 pp unpaired; about 2 pp if pairing by game works as well as in the search rows, not checked for raw bots). The first 1,000 boards are the search rows' boards.
 - *Reading.* Each checkpoint gets two numbers against the same opponent, with the search and without. Raw scores that rise with the search scores say self-play improves the policy itself; flat raw scores say the gain lives in what the search does with the net (its value, or its second and third choices).
 - *Cost.* About 13 min a row (2.7 min per 1,000 games in @exp:recipe-transitivity), under 1 h for the four rows.
 - *Not planned.* A round robin among the checkpoints (6 more pairs).
+- *Status.* Config built and validated in `wt/az-similarity` (`configs/experiments/az-raw-2p.yaml`; e900 is `az-2p-kata/main+600-fast-noselect@e900#713c7a0a818a`). It launches once, with the bundle's last checkpoint filled in: a row added after the launch would change the config's hash. The `BELIEF` bot already plays networks that read the dice state.
 
 === How the checkpoints differ: value and policy similarity over training #chip("queued") <exp:az-similarity>
 #meta(
@@ -759,3 +760,4 @@ catanrl run configs/experiments/az-2p-bundle.yaml
 - *Policy matrix.* For each pair, the share of positions where both prefer the same move, and the mean divergence between the two policies.
 - *Against the outcome.* Each checkpoint's value scored against who won the game (Brier score and log loss), to tell a critic that moved from one that got better.
 - *Cost.* Network forwards only: minutes on the GPU.
+- *Status.* Tool built in `wt/az-similarity` (`tools/checkpoint_similarity.py`: `play`, `score`, `report`), tested on the CPU only: 12 tests, and on 20 real positions the bundle's e0 and e1800 agree to 1e-6 in value with the same preferred moves. 111 checkpoints (e410, where the faster self-play began, is kept). Not yet run on the GPU or at full size.
