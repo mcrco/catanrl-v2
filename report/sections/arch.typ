@@ -217,11 +217,13 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-15): can the dice state go into `graph-m`? Yes: `graph-m` is the same network class as `graph-s` at other sizes, so the inputs of @exp:dice-input and the targets of @exp:az-aux attach unchanged, and `2p-graph-m-1` can take them with zero weights and play as before. What it lacks is speed: the fused kernels are written for `graph-s`'s width. Not queued.]
+#tldr[Marco (2026-11-15): can the dice state go into `graph-m`? Yes: `graph-m` is the same network class as `graph-s` at other sizes, so the inputs of @exp:dice-input and the targets of @exp:az-aux attach unchanged, and `2p-graph-m-1` can take them with zero weights and play as before. What it lacks is speed: the fused kernels are written for `graph-s`'s width. Marco (2026-11-15): build the kernels; the run itself is not queued.]
 
-- *Sizes.* `graph-s`: hidden 96, 3 layers. `graph-m`: hidden 192, 4 layers, 4.3× the parameters.
+- *Sizes.* `graph-s`: hidden 96, 3 layers, 0.54M parameters. `graph-m`: hidden 192, 4 layers, 2.32M parameters (4.3×).
+- *Is Catan that complicated?* (Marco's doubt.) For small: HexN's 332k-parameter net with rollouts is rated above our search bot. For bigger: under one recipe `graph-m` ended 12.3 pp above `graph-s` against fr3 (@exp:arch-graph-m-2p-lr), the largest single gain measured here for a raw policy. Whether size still pays after self-play with search is not measured.
 - *Why.* `graph-m` beats `graph-s` as a raw policy (@exp:arch-graph-m-2p-lr), and on OpenHex's ladder raw networks sit above our search bot (@exp:deploy-ladder).
 - *Cost.* 3.4× `graph-s` per leaf on the PyTorch path (@exp:deploy-graph-m-check). Self-play runs on the fused half-precision kernels (@exp:az-speed), which are built for hidden 96; without them `graph-m` self-play is not affordable on this box. With them, an iteration should take roughly 3× `graph-s`'s 82 s (not measured).
+- *Kernels.* Built after the dice input lands (`wt/dice2`), since the wide kernels must read the same new inputs.
 - *Start.* `2p-graph-m-1`, a PPO net: it has none of e1800's 329,221 games of self-play, so it starts behind in the search and has to make that up.
 
 == Inputs
