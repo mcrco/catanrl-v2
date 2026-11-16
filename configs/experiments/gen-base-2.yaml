@@ -1,0 +1,83 @@
+# The generalist base, second stage (Marco, 2026-11-16: "you can go over the budget. im approving
+# another 25 bucks total."): gen-base's last checkpoint (mix-graph-seat-s-1, 996M agent steps)
+# trained for as many steps again on the same games.
+#
+# gen-base was still gaining when it ended: on the same games its e2900 checkpoint, 236M steps
+# before the end, is 4.05 pp lower at 2p (p = 0.002), 3.1 pp at 3p (p = 0.005) and 1.3 pp at 4p
+# (not significant), and over those steps the learning rate fell from 0.0011 to the floor, 0.0005.
+#
+# Everything is gen-base's but the start and the learning rate:
+#   - init_from: the weights of e3800 (actor and critic), a fresh optimizer;
+#   - learning rate: gen-base's floor, 0.0005, held constant. The rate that last produced a
+#     measured gain; a fresh cosine from the peak took ppo-2p-fr backwards (ppo-2p-fr2).
+# The seed is gen-base's: the same training maps.
+#
+# Evals: none in the run. The three finals are gen-base's, on the same boards, seats and
+# opponents, so each row pairs game by game with gen-base's e3800 row (2,000, 3,000 and 4,000
+# games; a paired difference of about 2.5, 2 and 1.7 pp is detectable). The checkpoints every
+# 100 epochs allow a slope check afterwards.
+#
+# Speed: gen-base ran at 47,600 agent steps/s on an L40S (8 cores): 5.8 h of training, about
+# $15.5 with the compile and the finals.
+name: gen-base-2
+seed: 42
+env:
+  scenarios:
+    - {game: base-2p-fr, turn_limit: 1000, maps: 2048}
+    - {game: base-3p, turn_limit: 1000, maps: 2048}
+    - {game: base-4p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-2p-fr, num_players: 2, map: {type: hexagon, radius: 2}, victory_points_to_win: 15, discard_limit: 9,
+              friendly_robber: true, dice_mode: balanced},
+       turn_limit: 1000, maps: 2048}
+    - {game: hexagon-3p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-4p, num_players: 4, map: {type: hexagon, radius: 2}}, turn_limit: 1000, maps: 2048}
+  num_envs: 1024
+obs: {level: private, dice_state: true}   # private: the only fair level past two players
+model: {preset: graph-seat-s, args: {shared: true}}
+init_from: {ckpt: "gen-base/main@e3800#ebde6ebd6eea", parts: [actor, critic]}   # mix-graph-seat-s-1
+train:
+  algo: ppo
+  total_timesteps: 996_147_200    # 3,800 epochs x 262,144 agent steps: as many again
+  optimizer: muon
+  learning_rate: 0.0005           # gen-base's floor (0.005 x 0.1), held constant (header)
+  lr_schedule: constant
+  anneal_lr: false                # no cosine: the learning rate stays 0.0005
+  min_lr_ratio: 0.1               # not read with anneal_lr: false
+  adam_beta1: 0.95
+  adam_beta2: 0.999
+  adam_eps: 1.0e-12
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2
+  ent_coef: 0.005
+  max_grad_norm: 4.0
+  bptt_horizon: 64
+  minibatch_size: 32768
+  max_minibatch_size: 4096
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 100
+eval:
+  select: null                    # no in-run evals (header)
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup: ["POLICY:ckpt=${run}@latest", "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"]
+    - suite: {name: heldout-3p, purpose: heldout, seed: 71, boards: 1000, scenarios: [{game: base-3p}], turn_limit: 500}
+      lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf"]
+    - suite: heldout-4p
+      lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f",
+               "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f"]
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  recipe: gen-base
+  notes: |
+    Report idea: one model for up to n players and arbitrary maps (exp:gen-base-2). The
+    second stage of the base of the AlphaZero specialists.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
