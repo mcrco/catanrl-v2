@@ -285,6 +285,33 @@ python tools/modal_train.py launch configs/experiments/gen-base-slope.yaml --rev
 python tools/modal_train.py pull gen-base/main
 ```)
 
+=== `gen-base-2`: the second stage #chip("running") <exp:gen-base-2>
+#meta(
+  dates: "2026-11-16 11:34 –",
+  owner: "marco",
+  config: "configs/experiments/gen-base-2.yaml (wt/player-set, 477f2cf)",
+  wandb: (("gen-base-2-main-3956bb68", "gen-base-2/main"),),
+)
+#tldr[`gen-base`'s last checkpoint trained for 996M more agent steps on the same games, at its floor learning rate held constant. Running on a Modal L40S since 11:34; about 6 h and \$15.5. Marco raised the Modal budget by \$25 for it.]
+
+*Question.* How much stronger does the base get with as many steps again?
+
+*Setup.* Marco (2026-11-16, after the slope checks of @exp:gen-base-1): "you can go over the budget. im approving another 25 bucks total."
+- *Start.* The weights of `gen-base/main@e3800` (`mix-graph-seat-s-1`), actor and critic, with a fresh optimizer.
+- *Learning rate.* 0.0005, `gen-base`'s floor, constant. It is the rate that last gave a measured gain (@tab:gen-base-slope); a fresh cosine from the peak took `ppo-2p-fr` backwards (@exp:recipe-2p-openhex-2).
+- *Everything else.* `gen-base`'s: games, maps (the same seed), network, optimizer settings, 3,800 epochs of 262,144 agent steps.
+- *Evals.* None in the run. The three finals are `gen-base`'s, on the same boards, seats and opponents, so each row pairs game by game with e3800's (2,000, 3,000 and 4,000 games; paired differences of about 2.5, 2 and 1.7 pp are detectable). Checkpoints every 100 epochs.
+- *Check before launch.* Four small epochs on the CPU from e3800: entropy 0.135 and explained variance 0.87 at the start (`gen-base` ended at 0.129 and 0.89), learning rate 0.0005.
+- *Cost.* Capped at 6.4 h, \$16.54.
+- *First epochs.* 48,800 agent steps a second, `gen-base`'s speed: the end is due about 17:35. Epoch 1 on the real games: entropy 0.140, explained variance 0.90, learning rate 0.0005. W&B is mirrored from this box every 10 minutes.
+
+#repro(```sh
+# from the wt/modal worktree
+python tools/modal_train.py launch configs/experiments/gen-base-2.yaml --rev wt/player-set --gpu L40S --cpu 8 --memory 32 --max-hours 6.4 \
+  --set runtime.threads=8 --ship gen-base/main@e3800 --ship graph-m-2p-lr/main@e22711 --ship ppo-mixed/main@e3550 --ship ppo-4p/main@e3650
+python tools/modal_train.py watch gen-base-2/main --every 10
+```)
+
 === 5–6 players on the extension map #chip("todo") <exp:gen-5-6p>
 #meta(owner: "marco")
 #tldr[Blocked on the engine: 5–6 player games need the special building phase; then they are one more entry in `ppo-mixed`'s `env.scenarios`.]

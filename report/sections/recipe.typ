@@ -590,7 +590,7 @@ uv run python tools/search_probe.py --pair <fp16's final record> <fp32's final r
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-16): launch experiments in parallel on Modal. A training harness is built and tested there for \$0.49. `ppo-mixed`'s training runs at 60,800 agent steps a second on an L40S, 2.5× this box: 1B steps in 4.6 h for about \$12. Marco's budget is the month's \$30 of free credit; the first run on it, `gen-base`, cost \$15.43 (@exp:gen-base-1); \$18.27 is spent.]
+#tldr[Marco (2026-11-16): launch experiments in parallel on Modal. A training harness is built and tested there for \$0.49. `ppo-mixed`'s training runs at 60,800 agent steps a second on an L40S, 2.5× this box: 1B steps in 4.6 h for about \$12. Marco's budget is the month's \$30 of free credit and \$25 more; the first run on it, `gen-base`, cost \$15.43 (@exp:gen-base-1); \$18.27 was spent before its second stage (@exp:gen-base-2).]
 
 #lead[The harness.]
 - *Launch.* Any committed revision of any local branch, a config, a card, cores and a cap in hours; the job runs detached and prints its price per hour and worst-case cost.
@@ -619,7 +619,7 @@ uv run python tools/search_probe.py --pair <fp16's final record> <fp32's final r
 - *A full run.* `gen-base` (@exp:gen-base-1): 5.97 h in one container, the finals in the same container against shipped checkpoints, mirrored every 10 minutes; the app stopped itself.
 - *Eval-only configs.* They file their records under the first agent's run, so the harness now returns the new eval records of shipped runs to the volume (`gen-base-slope`).
 - *Not tested.* A real 24 h continuation, a real preemption, and an AlphaZero run. A build from another branch worked (@exp:gen-base's speed check from `wt/player-set`).
-- *Spent.* \$1.53 on the benchmark (@exp:az-hardware) \$0.49 here and \$0.40 on the base's speed check and finals check: \$2.42 in all before `gen-base`, which cost \$15.43, and \$0.42 on its two slope checks (@exp:gen-base-1): \$18.27 of the month's \$30 of free credit (Marco's budget, 2026-11-16), by the harness's count of billed seconds; Modal's billing page is the authority.
+- *Spent.* \$1.53 on the benchmark (@exp:az-hardware) \$0.49 here and \$0.40 on the base's speed check and finals check: \$2.42 in all before `gen-base`, which cost \$15.43, and \$0.42 on its two slope checks (@exp:gen-base-1): \$18.27 of the month's \$30 of free credit (Marco's budget, 2026-11-16), by the harness's count of billed seconds; Modal's billing page is the authority. Marco then approved \$25 more ("you can go over the budget. im approving another 25 bucks total."): \$55 in all, of which `gen-base-2` may take \$16.54 (@exp:gen-base-2).
 
 #repro(```sh
 # from the wt/modal worktree
