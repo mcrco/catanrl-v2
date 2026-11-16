@@ -162,11 +162,11 @@ def test_an_unset_head_keeps_specs_and_config_hashes():
 
 
 @pytest.mark.parametrize("kwargs, match", [
-    (dict(outcome_vp_coef=0.5), "set model.args.outcome"),
-    (dict(outcome=True), "outcome_vp_coef"),
-    (dict(outcome=True, outcome_turns_coef=-1.0), "non-negative"),
-    (dict(outcome=True, outcome_vp_coef="much"), "non-negative"),
-    (dict(outcome=True, outcome_vp_coef=True), "non-negative"),
+    ({"outcome_vp_coef": 0.5}, "set model.args.outcome"),
+    ({"outcome": True}, "outcome_vp_coef"),
+    ({"outcome": True, "outcome_turns_coef": -1.0}, "non-negative"),
+    ({"outcome": True, "outcome_vp_coef": "much"}, "non-negative"),
+    ({"outcome": True, "outcome_vp_coef": True}, "non-negative"),
 ])
 def test_the_head_and_its_coefficients_come_together(kwargs, match):
     with pytest.raises(ConfigError, match=match):

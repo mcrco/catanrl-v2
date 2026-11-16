@@ -126,7 +126,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from catanrl.envs.encoding import critic_level_of, dice_state_of, encoder_dims, info_level, make_encoder
+from catanrl.envs.encoding import (
+    critic_level_of,
+    dice_state_of,
+    encoder_dims,
+    info_level,
+    make_encoder,
+)
 from catanrl.envs.puffer import plan_env
 from catanrl.models import CatanModel, feature_names
 from catanrl.models.graph import OUTCOME_TURNS

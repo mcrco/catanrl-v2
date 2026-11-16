@@ -34,7 +34,13 @@ from typing import Any
 
 import torch
 
-from catanrl.envs.encoding import DICE_ODDS_SCALE, DICE_PREFIX, FAIR_ODDS, dice_state_of, fresh_dice_features
+from catanrl.envs.encoding import (
+    DICE_ODDS_SCALE,
+    DICE_PREFIX,
+    FAIR_ODDS,
+    dice_state_of,
+    fresh_dice_features,
+)
 from catanrl.models.rows import feature_names
 
 #: Positions in the probe batch.
