@@ -1,0 +1,19 @@
+# gen-base-slope with e2900 (760M of 996M agent steps) in the learner's seat: the gain of the run's last
+# 236M steps, taken at a learning rate within about twice the floor, which is where a continuation at
+# the floor rate would train. Pairs game by game with e3800's and e1900's rows. About 4 minutes on an L40S.
+name: gen-base-slope-e2900
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup: ["POLICY:ckpt=gen-base/main@e2900#39858878240b", "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"]
+    - suite: {name: heldout-3p, purpose: heldout, seed: 71, boards: 1000, scenarios: [{game: base-3p}], turn_limit: 500}
+      lineup: ["POLICY:ckpt=gen-base/main@e2900#39858878240b", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf"]
+    - suite: heldout-4p
+      lineup: ["POLICY:ckpt=gen-base/main@e2900#39858878240b", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f",
+               "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f"]
+runtime: {device: cuda, threads: 12, num_envs: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  notes: |
+    Report idea: one model for up to n players and arbitrary maps (exp:gen-base-1).
