@@ -292,6 +292,10 @@ def remote_state(wandb: ModuleType, settings: Settings, id_: str) -> RemoteRun |
         remote = api.run(path)
     except ValueError:  # wandb's RunNotFoundError is one (older versions raised a bare ValueError): a new run
         return None
+    except wandb.errors.CommError as error:  # wandb 0.30 reports a missing run as this ("Could not find run")
+        if "not find run" not in str(error) and "not found" not in str(error):
+            raise
+        return None
     return RemoteRun(group=getattr(remote, "group", None) or None, tags=tuple(getattr(remote, "tags", None) or ()))
 
 
