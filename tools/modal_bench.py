@@ -86,9 +86,9 @@ def _main_runs() -> Path:
 image = (
     modal.Image.from_registry("nvidia/cuda:13.0.3-devel-ubuntu24.04", add_python="3.11")
     .entrypoint([])
-    .apt_install("git", "build-essential", "ninja-build", "cmake")
+    .apt_install("git", "build-essential", "gcc-14", "g++-14", "ninja-build", "cmake")
     .pip_install("uv")
-    .env({"CC": "gcc", "CXX": "g++"})  # the added Python's sysconfig names clang, which the image lacks
+    .env({"CC": "gcc-14", "CXX": "g++-14"})  # the added Python's sysconfig names clang, which the image lacks
 )
 if modal.is_local():
     _stage = _staging()
@@ -98,7 +98,9 @@ if modal.is_local():
             "git config --global --add safe.directory '*'",
             f"cd {REMOTE} && git submodule update --init --depth 1",
             f"cd {REMOTE} && git submodule status",
-            f"cd {REMOTE} && UV_LINK_MODE=copy uv sync --extra cu130 --frozen --no-dev --python 3.11",
+            # this box builds the engine with gcc 16; Ubuntu 24.04's gcc 13 and 14 report a stringop-overflow
+            # in it that newer ones do not, and the engine builds with -Werror
+            f"cd {REMOTE} && CXXFLAGS=-Wno-stringop-overflow UV_LINK_MODE=copy uv sync --extra cu130 --frozen --no-dev --python 3.11",
         )
         .add_local_dir(_stage / "runs", REMOTE_RUNS, copy=True)
     )
