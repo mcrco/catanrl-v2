@@ -96,12 +96,17 @@ def machine() -> dict:
     """The hardware and software next to every number."""
     import torch
 
-    cpu_model = None
+    cpu_model, cpuinfo = None, {}  # a sandbox may hide the model's name: family/model/stepping still tell
     with contextlib.suppress(OSError):
-        for line in Path("/proc/cpuinfo").read_text().splitlines():
-            if line.startswith("model name"):
-                cpu_model = line.split(":", 1)[1].strip()
-                break
+        for line in Path("/proc/cpuinfo").read_text().split("\n\n")[0].splitlines():
+            key, _, value = (part.strip() for part in line.partition(":"))
+            if key == "model name":
+                cpu_model = value
+            elif key in ("vendor_id", "cpu family", "model", "stepping", "cpu MHz", "cache size", "siblings",
+                         "cpu cores"):
+                cpuinfo[key] = value
+            elif key == "flags":
+                cpuinfo["avx2"], cpuinfo["avx512f"] = " avx2" in f" {value}", " avx512f" in f" {value}"
     cgroup = None
     with contextlib.suppress(OSError):
         cgroup = Path("/sys/fs/cgroup/cpu.max").read_text().strip()
@@ -109,9 +114,10 @@ def machine() -> dict:
         "time": time.strftime("%Y-%m-%d %H:%M:%S %z"), "platform": platform.platform(),
         "python": platform.python_version(), "torch": torch.__version__, "torch_cuda": torch.version.cuda,
         "cudnn": torch.backends.cudnn.version() if torch.backends.cudnn.is_available() else None,
-        "cpu_model": cpu_model, "cpu_count": os.cpu_count(), "cpu_affinity": len(os.sched_getaffinity(0)),
+        "cpu_model": cpu_model, "cpuinfo": cpuinfo, "cpu_count": os.cpu_count(), "cpu_affinity": len(os.sched_getaffinity(0)),
         "cgroup_cpu_max": cgroup, "load_average": load_average(),
         "nvcc": (_run("nvcc", "--version") or "").splitlines()[-1:] or None,
+        "cxx": (_run(os.environ.get("CXX", "c++"), "--version") or "").splitlines()[:1] or None,
     }
     with contextlib.suppress(OSError):
         kb = int(next(l for l in Path("/proc/meminfo").read_text().splitlines() if l.startswith("MemTotal")).split()[1])
@@ -202,6 +208,16 @@ def bench_a(args: argparse.Namespace) -> dict:
     scale = (lambda n: max(2, n // 16)) if tiny else (lambda n: n)
     dims, acting_np, waiting_np = real_rows(16 if tiny else 256)
     torch.manual_seed(0)
+    results: dict[str, dict] = {}
+    # A0: one core of this machine on the engine (the same random games again: play and encode)
+    seconds = []
+    for _ in range(3):
+        started = time.perf_counter()
+        real_rows(len(acting_np))
+        seconds.append(time.perf_counter() - started)
+    results["A0 engine, one thread (random games played and encoded)"] = {
+        "rows": len(acting_np), "seconds": min(seconds), "rows_per_s": len(acting_np) / min(seconds), "launch": 1.0,
+        "what": "positions/s of real_rows: Python-driven engine moves and two encodes a position; the best of 3"}
 
     def model_of(preset: str):
         return build_policy_model({"model": {"preset": preset, "args": {"shared": True}}, "obs": {"level": "full"}},
@@ -212,7 +228,6 @@ def bench_a(args: argparse.Namespace) -> dict:
 
     presets = ("graph-tiny",) if tiny else ("graph-s", "graph-m")
     small, big = presets[0], presets[-1]
-    results: dict[str, dict] = {}
     items: list[tuple[str, str, int, object]] = []  # (key, description, rows, a function that returns _timed)
 
     def add(key: str, what: str, rows: int, make) -> None:

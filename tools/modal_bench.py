@@ -108,7 +108,34 @@ if modal.is_local():
     )
 
 
-def _bench(runs: list[list[str]]) -> dict:
+# How many cores' worth of work the container really gets (a sandbox shows only a CPU count): the
+# throughput of k busy processes against one's. Also run on this box: python -c "$CAPACITY".
+CAPACITY = r"""
+import json, multiprocessing as mp, os, time
+def spin(seconds, queue):
+    end, n = time.perf_counter() + seconds, 0
+    while time.perf_counter() < end:
+        for _ in range(10000):
+            n += 1
+    queue.put(n)
+def rate(k, seconds=1.5):
+    queue = mp.Queue()
+    workers = [mp.Process(target=spin, args=(seconds, queue)) for _ in range(k)]
+    [w.start() for w in workers]
+    total = sum(queue.get() for _ in workers)
+    [w.join() for w in workers]
+    return total / seconds
+if __name__ == "__main__":
+    visible = len(os.sched_getaffinity(0))
+    one = rate(1)
+    out = {"visible_cpus": visible, "one_process_loops_per_s": round(one)}
+    for k in sorted({max(1, visible // 2), visible, 2 * visible}):
+        out[f"x{k}"] = round(rate(k) / one, 2)
+    print("capacity", json.dumps(out))
+"""
+
+
+def _bench(runs: list[list[str]], capacity: bool = False) -> dict:
     """Run gpu_bench.py once per argument list in the image's checkout; return the files it wrote."""
     out, started, codes = Path("/root/out"), time.time(), []
     env = {**os.environ, "WANDB_MODE": "disabled", "PYTHONUNBUFFERED": "1",
@@ -116,33 +143,39 @@ def _bench(runs: list[list[str]]) -> dict:
     env.pop("WANDB_API_KEY", None)
     subprocess.run("nvidia-smi; nproc; cat /sys/fs/cgroup/cpu.max; grep -m1 'model name' /proc/cpuinfo",
                    shell=True, check=False)
+    measured = None
+    if capacity:
+        printed = subprocess.run([f"{REMOTE}/.venv/bin/python", "-c", CAPACITY], capture_output=True, text=True,
+                                 check=False).stdout
+        print(printed, flush=True)
+        measured = json.loads(printed.split("capacity", 1)[1]) if "capacity" in printed else None
     for arguments in runs:
         command = [f"{REMOTE}/.venv/bin/python", "tools/gpu_bench.py", *arguments, "--out", str(out),
                    "--runs", "/root/scratch-runs", "--real-runs", REMOTE_RUNS]
         print("$", " ".join(command), flush=True)
         codes.append(subprocess.run(command, cwd=REMOTE, env=env, check=False).returncode)
     files = {p.name: p.read_bytes() for p in sorted(out.glob("*")) if p.is_file()} if out.exists() else {}
-    return {"returncodes": codes, "seconds": time.time() - started, "files": files}
+    return {"returncodes": codes, "seconds": time.time() - started, "files": files, "capacity": measured}
 
 
 @app.function(image=image, cpu=(4.0, 4.0), memory=16384, timeout=900)
-def on_cpu(runs: list[list[str]]) -> dict:
-    return _bench(runs)
+def on_cpu(runs: list[list[str]], capacity: bool = False) -> dict:
+    return _bench(runs, capacity)
 
 
 @app.function(image=image, gpu="A10G", cpu=(8.0, 8.0), memory=32768, timeout=600)
-def on_a10g(runs: list[list[str]]) -> dict:
-    return _bench(runs)
+def on_a10g(runs: list[list[str]], capacity: bool = False) -> dict:
+    return _bench(runs, capacity)
 
 
 @app.function(image=image, gpu="L40S", cpu=(8.0, 8.0), memory=32768, timeout=1200)
-def on_l40s(runs: list[list[str]]) -> dict:
-    return _bench(runs)
+def on_l40s(runs: list[list[str]], capacity: bool = False) -> dict:
+    return _bench(runs, capacity)
 
 
 @app.function(image=image, gpu="L40S", cpu=(32.0, 32.0), memory=32768, timeout=1200)
-def on_l40s_32(runs: list[list[str]]) -> dict:
-    return _bench(runs)
+def on_l40s_32(runs: list[list[str]], capacity: bool = False) -> dict:
+    return _bench(runs, capacity)
 
 
 B1 = ["b1", "--iterations", str(ITERATIONS)]
@@ -162,7 +195,7 @@ JOBS = {
 def main(job: str, out: str = "/tmp/modal-bench"):
     function, gpu, cores, gib, machine, runs = JOBS[job]
     started = time.time()
-    result = function.remote(runs)
+    result = function.remote(runs, capacity=job in ("cpu", "a10g-a", "l40s-a", "l40s-b1-t32"))
     call_s = time.time() - started
     target = Path(out) / machine
     target.mkdir(parents=True, exist_ok=True)
@@ -173,7 +206,7 @@ def main(job: str, out: str = "/tmp/modal-bench"):
     row = {"job": job, "gpu": gpu, "cores": cores, "GiB": gib, "returncodes": result["returncodes"],
            "function_s": round(result["seconds"], 1), "call_s": round(call_s, 1),
            "usd_per_h": round(rate * 3600, 3), "usd_function": round(rate * result["seconds"], 3),
-           "usd_call": round(rate * call_s, 3), "files": sorted(result["files"]),
+           "usd_call": round(rate * call_s, 3), "files": sorted(result["files"]), "capacity": result["capacity"],
            "time": time.strftime("%Y-%m-%d %H:%M:%S")}
     with open(Path(out) / "tally.jsonl", "a") as handle:
         handle.write(json.dumps(row) + "\n")
