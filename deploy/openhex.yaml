@@ -96,6 +96,7 @@ bots:
     version: 1v1-search-v3.1
     spec: MCTS:ckpt=az-2p-kata/main+1500@e1800#7c44ec80540a:sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45
     key_env: OPENHEX_KEY_1V1_SEARCH_V3_1
+    bot_id: e296048b5a1c4a83
     deployed: 2026-11-15
     tag: openhex-1v1-v3.1
     evidence: [ea2574432c1ce3fc, 4411825addefb873, e917f9bb47b8ad4c, 809619df11e87cc8]
