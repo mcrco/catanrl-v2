@@ -100,7 +100,9 @@ if modal.is_local():
             f"cd {REMOTE} && git submodule status",
             # this box builds the engine with gcc 16; Ubuntu 24.04's gcc 13 and 14 report a stringop-overflow
             # in it that newer ones do not, and the engine builds with -Werror
-            f"cd {REMOTE} && CXXFLAGS=-Wno-stringop-overflow UV_LINK_MODE=copy uv sync --extra cu130 --frozen --no-dev --python 3.11",
+            # and the builder has no GPU for torch to read PufferLib's CUDA architectures from
+            # (8.6: A10G, 8.9: L40S)
+            f"cd {REMOTE} && CXXFLAGS=-Wno-stringop-overflow TORCH_CUDA_ARCH_LIST='8.6;8.9' UV_LINK_MODE=copy uv sync --extra cu130 --frozen --no-dev --python 3.11",
         )
         .add_local_dir(_stage / "runs", REMOTE_RUNS, copy=True)
     )
