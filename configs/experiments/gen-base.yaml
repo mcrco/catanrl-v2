@@ -13,7 +13,8 @@
 #      dice (the 3p and 4p games) it reads as a fresh deck at every roll;
 #   4. the critic: the undiscounted default (critic_targets lambda, critic_gamma 1.0), where
 #      ppo-mixed pinned the discounted V-trace targets. The policy's gamma stays ppo-mixed's.
-# The games of change 2 and the dice input are Claude's proposal, for Marco to confirm.
+# Marco confirmed the games and the dice input on 2026-11-16 ("everything openhex rules, with
+# dice input") and kept graph-s's size for speed.
 #
 # Evals: none in the run (best = latest). Three finals, one per table size, the last
 # checkpoint's raw policy against the yardstick of that size:
