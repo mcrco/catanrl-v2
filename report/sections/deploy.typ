@@ -313,6 +313,42 @@ catanrl openhex deploy/openhex.yaml --check --keys --device cuda
 catanrl openhex stats deploy/openhex.yaml --since 2026-11-13
 ```)
 
+=== OpenHex's 1v1 ladder on 2026-11-15 #chip("done") <exp:deploy-ladder>
+#meta(
+  dates: "2026-11-15",
+  owner: "marco",
+  wandb: (),
+  records: (),
+)
+#tldr[Our best bot is 11th of 42 rated 1v1 bots, about 80 Elo from the top, and the leader's name says it plays its network's top move without search.]
+
+#figure(
+  btable(
+    columns: (auto, 1fr, auto, auto),
+    align: (right, left, right, right),
+    header: ([Rank], [Bot], [Elo], [Won / played]),
+    [1], [2s-NN-Medium-Greedy], [1703], [724 / 1,107],
+    [2], [Gaz], [1696], [89 / 155],
+    [3], [Ham], [1684], [11 / 16],
+    [4], [Pattern], [1681], [70 / 128],
+    [5], [2s-NN-Mini-1024], [1675], [611 / 1,090],
+    [6], [oversized-pig: "Neural evaluation with sampled lookahead."], [1675], [236 / 377],
+    [7], [puma-ppo-864m], [1672], [31 / 55],
+    [8], [2s-NN-Medium-256], [1658], [694 / 1,068],
+    [9], [HexN: "Graph network, 64 wide, 332k parameters. Search by paired rollouts over the top 6 moves, 64 worlds, 8 turns deep."], [1655], [629 / 973],
+    [10], [2s-NN-Mini-256], [1649], [699 / 1,236],
+    [11], [`catanrl-1v1-search-v3` (e300 in the search; @exp:deploy-openhex-search-v3)], [1623], [122 / 220],
+    [12], [2s-NN-Mini-Greedy], [1610], [754 / 1,266],
+    [14], [`catanrl-1v1-search-v2` (fr3 in the search)], [1571], [241 / 464],
+    [16], [`catanrl-1v1-search` (an older net, 1,024 sims)], [1559], [726 / 1,444],
+  ),
+  caption: [OpenHex's 1v1 ladder on 2026-11-15 (public records; 42 bots with rated 1v1 games). Quotes are the bots' own descriptions.],
+) <tab:deploy-ladder>
+
+- *The network is our weaker half.* The leader and the 12th bot are raw networks by their names ("Greedy"); a sibling's description says "3x1024 ResBlock ... greedy argmax policy, 0 MCTS sims". Our raw fr3 bot sits at 1557. On the ladder our search added about 16 Elo to fr3 (1557 to 1571, different dates and opponents).
+- *What the others search with.* HexN compares its top six moves on the same 64 sampled futures (common random numbers, @exp:search-paired-root); none describes a tree as deep as ours.
+- `search-v3.1` (e1800, @exp:deploy-openhex-search-v3-1) went live the same afternoon (bot `e296048b5a1c4a83`; 3 of its first 6 games won, too few to rate).
+
 == Search in the deployed bots
 
 === Search reuse on the server bridge and the OpenHex seat #chip("done") <exp:deploy-reuse-bridge>

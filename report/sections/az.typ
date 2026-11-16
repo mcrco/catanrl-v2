@@ -589,3 +589,41 @@ catanrl run az-2p-kata --set train.reuse=true --set train.kernels=fused16   # tw
 catanrl run az-2p-kata --set runtime.search_groups=1                        # the old round loop
 pytest tests/test_search_pipeline.py tests/test_alphazero.py tests/test_graph_kernels.py -q
 ```)
+
+=== Auxiliary targets: each seat's final VP and the turns left #chip("queued") <exp:az-aux>
+#meta(
+  dates: "2026-11-15",
+  dates-label: "proposed",
+  owner: "assistant",
+  wandb: (),
+  records: (),
+)
+#tldr[Claude's suggestion, approved by Marco on 2026-11-15. KataGo trains its trunk on more than win or loss: ownership and score heads give many labels per position and are dropped at play time (about 1.65× training speed in its ablation). Catan's analogs: each seat's final VP and the number of turns left. It trains first in the bundled run (@exp:az-bundle).]
+
+- *Why.* A game gives the value head one bit. Final VP and game length are known for every stored position once its game ends, at no extra self-play.
+- *Heads.* Two small heads on the pooled state, trained with small weights beside the policy and value losses and never read at play time: the search, the kernels and the deployed bots use the same logits and values as without them.
+- *Readouts.* Both losses on W&B, with the mean error in VP and in turns.
+
+*Status.* Being built on `wt/dice2`.
+
+=== 900 more iterations with the dice input and auxiliary targets: `az-2p-bundle` #chip("queued") <exp:az-bundle>
+#meta(
+  dates: "for the GPU after the search measurement",
+  dates-label: "queued",
+  owner: "marco",
+  config: "configs/experiments/az-2p-bundle.yaml",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-15): bundle everything into the continued training first and ablate later; the goal is the best 1v1 bot. e1800 continues for 900 iterations with the dice input (@exp:dice-input) and the auxiliary targets (@exp:az-aux) on. One held-out row at the end, on e1800's games.]
+
+*Question.* How strong is the search after 900 more iterations with both additions?
+
+#lead[Setup.]
+- *Run.* From `az-2p-kata/main+1500@e1800` (`2p-graph-s-6`) under its own recipe (@exp:az-kata-1800), with the new input weights at zero and the new heads beside the old ones, so iteration 0 plays exactly as e1800. The replay starts empty: e1800's stored positions have neither the dice state nor the new labels.
+- *Eval.* No selects. One row at the end: the last checkpoint in the 1,024-sim search against `BELIEF(fr3, 16 worlds)` on e1800's 2,000 held-out games (62.95% there), paired by game. The paired difference has a standard error of about 1.2 pp, so about 3.4 pp is detectable at 80% power.
+- *What the row can say.* The gain over e1800 mixes the input, the targets and 900 more iterations; the last 900 iterations alone gained 2.65 pp. The row says how good the new bot is, not what each part gave: that is for the ablations.
+- *Cost.* About 21 h of self-play at e1800's 82 s an iteration (the wider rows and the extra heads will add to that; measured in the GPU smoke) and 2.3 h for the row, about 10% of the wall-clock.
+- *Not in the bundle.* `graph-m` (@exp:az-graph-m: the fused kernels do not fit it yet) and the search changes of @exp:search-stratified and @exp:search-paired-root, which change play, not training, and wait for @exp:search-noise.
+
+*Status.* Waits for the build, a GPU smoke (iteration 0 against e1800 bit for bit on the fused kernels; throughput) and the GPU.

@@ -208,3 +208,44 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p-lr.yaml
 ```)
+
+=== `graph-m` in the AlphaZero line #chip("todo") <exp:az-graph-m>
+#meta(
+  dates: "2026-11-15",
+  dates-label: "proposed",
+  owner: "marco",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-15): can the dice state go into `graph-m`? Yes: `graph-m` is the same network class as `graph-s` at other sizes, so the inputs of @exp:dice-input and the targets of @exp:az-aux attach unchanged, and `2p-graph-m-1` can take them with zero weights and play as before. What it lacks is speed: the fused kernels are written for `graph-s`'s width. Not queued.]
+
+- *Sizes.* `graph-s`: hidden 96, 3 layers. `graph-m`: hidden 192, 4 layers, 4.3× the parameters.
+- *Why.* `graph-m` beats `graph-s` as a raw policy (@exp:arch-graph-m-2p-lr), and on OpenHex's ladder raw networks sit above our search bot (@exp:deploy-ladder).
+- *Cost.* 3.4× `graph-s` per leaf on the PyTorch path (@exp:deploy-graph-m-check). Self-play runs on the fused half-precision kernels (@exp:az-speed), which are built for hidden 96; without them `graph-m` self-play is not affordable on this box. With them, an iteration should take roughly 3× `graph-s`'s 82 s (not measured).
+- *Start.* `2p-graph-m-1`, a PPO net: it has none of e1800's 329,221 games of self-play, so it starts behind in the search and has to make that up.
+
+== Inputs
+
+=== The balanced-dice state as a network input #chip("queued") <exp:dice-input>
+#meta(
+  dates: "2026-11-10 (next-roll odds), 2026-11-15 (the whole state)",
+  dates-label: "built",
+  owner: "marco",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco's idea: keep track of the shuffled cards and pass that to the model. The search already rolls from the exact odds, but the network's value and prior are the same whatever the deck holds. An opt-in input gives it the deck, the recent rolls and the seven balance, on the board and on each tile. It trains first in the bundled AlphaZero run (@exp:az-bundle).]
+
+#lead[Why.] Marco's reading, #link("https://benburk.ca/catan-law-of-small-numbers/")["Exploiting the law of small numbers in Catan"], reverse-engineers Colonist's balanced dice: a 36-card deck reshuffled when 13 cards are left, a penalty on totals rolled in the last five rolls, and in 1v1 a multiplier on sevens that evens out each player's share and breaks streaks. A player who tracks all of it puts about 20% more probability on the roll that comes (0.26 bits a roll).
+- *Same dice.* `engine/cppanatron/include/cppanatron/dice.hpp` has the post's constants: refill at 13, a window of 5, 0.34 per recent copy, a seven multiplier clamped to 0–2 with ±0.4 per streak step.
+- *Who uses them here.* The search's chance nodes and its sampled worlds. The network sees none of it.
+- *How much the odds move* (our dice-only simulation, `tools/dice_odds_sim.py`): the roller's P(7) runs 4–28% (fair 16.7%), and on 58% of rolls some total cannot come.
+- *The post's advice* (track the deck, the window and the seven share; place the robber and hold cards by them) is what a network with this input could learn.
+
+#lead[Setup.]
+- *Board inputs.* Each seat's odds for the next roll (11 totals per seat; all that the 2026-11-10 version had), the cards left in the deck per total, the count of each total in the last five rolls, the draws left before the refill, each seat's sevens and the current streak.
+- *Tile inputs.* For the tile's own number: its odds on my roll and on the opponent's, its cards left and its count in the window. The network need not route eleven board numbers to the tiles that carry them.
+- *Warm start.* Every new weight starts at zero, so a network given the input plays exactly as its parent at first. Off by default: rows, networks and config hashes stay as they are.
+- *Any size.* The input attaches to the graph trunk's board and tile projections, the same in `graph-s` and `graph-m` (@exp:az-graph-m).
+
+*Status.* Being built on `wt/dice2` from the unrun 2026-11-10 branch (`wt/dice-input`), for the AlphaZero trainer, the fused kernels and the OpenHex seat. The PPO pair planned on 2026-11-10 (`dice-input-2p`) is dropped for the bundled run.

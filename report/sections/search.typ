@@ -299,3 +299,47 @@ catanrl run configs/experiments/mcts-reuse-4p.yaml
 # Pair a new row with its stored row on the shared games, e.g.
 uv run python tools/search_probe.py --pair aca296e23ff93a67 72819d1a1a072278
 ```)
+
+== Sampling noise at chance nodes
+
+=== What limits the search: seed agreement and depth in dice rolls #chip("running") <exp:search-noise>
+#meta(
+  dates: "2026-11-15",
+  dates-label: "started",
+  owner: "assistant",
+  wandb: (),
+  records: (),
+)
+#tldr[Claude's suggestion, approved by Marco on 2026-11-15. Two measurements on e1800 in the deployed search, to say whether the search is short of samples or short of a better network: do two searches of one position with different seeds pick the same move, above all when they overrule the network, and how many dice rolls deep do the simulations reach?]
+
+*Question.* Is the deployed search limited by sampling noise or by the network's values?
+
+#lead[Why.] A dice node draws its outcome at random from the exact odds (`sample_outcome`), and the search plays one sampled world. A search of 1,024 simulations spread over 11 totals and two or three rolls of depth has few samples per branch. If noise decides the move, the search ideas pay (@exp:search-stratified, @exp:search-paired-root); if two seeds agree and the tree is shallow, the network is the limit (@exp:dice-input, @exp:az-aux, @exp:az-graph-m).
+
+#lead[Setup.]
+- *Positions.* Decisions with at least two legal moves from new games of e1800 against fr3 on `base-2p-fr` (seed 20261115, not a suite's), spread from the opening placements to the endgame, at most two per game.
+- *Seed agreement.* Each position is searched twice with different search seeds, in the deployed options (one world, 64 pending, transpositions, fused kernels) on a fresh tree: 4,000 positions at 1,024 sims (the evals' depth) and up to 1,000 of them at 131,072 (the bot's). Reported with Wilson intervals, split by opening placement and main game: how often the two agree, how often the search overrules the network's top move, and when it does, whether the second search makes the same move, the network's, or a third.
+- *Depth.* Over all simulations, the number of dice rolls and of decisions between the root and the leaf.
+- No games are played and no win rate comes out: this is a diagnostic, about 2.5 h of GPU.
+
+*Status.* Being built and run on the GPU (`wt/search-diag`, `tools/search_noise.py`).
+
+=== Stratified dice nodes #chip("todo") <exp:search-stratified>
+#meta(
+  dates: "2026-11-15",
+  dates-label: "proposed",
+  owner: "assistant",
+  wandb: (),
+  records: (),
+)
+#tldr[Claude's suggestion, approved in outline by Marco on 2026-11-15; not queued. At a dice node, visit the total furthest below its share of the visits instead of drawing one at random. The value of the node is the same weighted mean with less noise at equal simulations. A change to one function (`sample_outcome`); built if @exp:search-noise says the search is noise-limited.]
+
+=== Paired candidates at the root #chip("todo") <exp:search-paired-root>
+#meta(
+  dates: "2026-11-15",
+  dates-label: "proposed",
+  owner: "assistant",
+  wandb: (),
+  records: (),
+)
+#tldr[Claude's suggestion (HexN's approach, @tab:deploy-ladder), approved in outline by Marco on 2026-11-15; not queued. Judge the root's top moves on the same worlds and the same dice, so that the luck of the draw cancels in their difference. Built if @exp:search-noise says the search is noise-limited and stratified dice nodes do not close the gap.]
