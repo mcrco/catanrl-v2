@@ -549,6 +549,16 @@ def evaluate(model, rows, kernels: str, mode: str, device: str = "cuda"):
     return BatchEvaluator(copy.deepcopy(model), device=device, infer_rows=16, mode=mode, kernels=kernels)(rows.numpy())
 
 
+def same_on_device(a, b, kernels: str) -> bool:
+    """Two (logits, values) results of one network read at two row widths: equal bit for bit on
+    the fused kernels; on ``kernels=torch`` within rounding, with every row's best action the same."""
+    (la, va), (lb, vb) = (tuple(np.asarray(x, dtype=np.float32) for x in r) for r in (a, b))
+    if kernels != "torch":
+        return bool(np.array_equal(la, lb) and np.array_equal(va, vb))
+    return bool(np.allclose(la, lb, rtol=1e-5, atol=1e-4) and np.allclose(va, vb, atol=1e-5)
+                and (la.argmax(1) == lb.argmax(1)).all())
+
+
 def warm_started(tmp_path, preset: str = "graph-s"):
     """(a network without the input, the one with it warm-started from it)."""
     source = trained_scale(model_of(False, seed=3, preset=preset))
@@ -564,10 +574,12 @@ def warm_started(tmp_path, preset: str = "graph-s"):
                                            ("fused", "fast"), ("fused16", "strict"), ("fused16", "fast")])
 def test_a_warm_started_network_is_its_source_on_the_device_evaluators(tmp_path, kernels, mode):
     """The run's e0 (init_from.zero_new_inputs) on the GPU: the module, the fused kernels and
-    their half-precision variant give the source's logits and values, bit for bit."""
+    their half-precision variant give the source's logits and values: the kernels bit for bit,
+    the module to rounding (cuBLAS rounds a product of the wider rows' slices differently: 1e-5
+    on these logits, measured on the RTX 2070 SUPER)."""
     source, target = warm_started(tmp_path)
     was, now = evaluate(source, real_rows(False), kernels, mode), evaluate(target, real_rows(True), kernels, mode)
-    assert np.array_equal(was[0], now[0]) and np.array_equal(was[1], now[1])
+    assert same_on_device(was, now, kernels)
 
 
 @pytest.mark.gpu

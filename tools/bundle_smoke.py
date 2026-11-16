@@ -14,11 +14,13 @@ input):
 * per device evaluator (``BatchEvaluator`` with ``kernels`` torch, fused and fused16, in the
   ``strict`` and ``fast`` modes the evals and the trainer use): ``logits_equal`` and
   ``values_equal``, bit for bit, the largest differences and ``argmax_equal``. The run needs
-  all of them true: it must start as e1800 in the trainer's self-play (fused16, fast) and in the
-  final's search (fused, strict), with the input and the head in the network;
+  the kernels' true: it must start as e1800 in the trainer's self-play (fused16, fast) and in the
+  final's search (fused, strict), with the input and the head in the network. ``kernels=torch``
+  on the device is held to rounding (``within``: 1e-4 on the logits, 1e-5 on the values, the same
+  best action): cuBLAS rounds a product of the wider rows' slices differently (3e-6 measured);
 * ``trained``: the same network with random weights on the dice input (std 0.05, a stand-in for
   trained ones), each kernel against ``kernels=torch`` on the dice rows: fused within 1e-3 on
-  the logits and 1e-6 on the values, fused16 within 0.25 and 1e-2 (the kernels' own
+  the logits and 1e-5 on the values, fused16 within 0.25 and 1e-2 (the kernels' own
   tolerances), and ``reads_dice``: the outputs moved from the zero-weight ones, so the kernels do
   read the input.
 
@@ -91,7 +93,12 @@ PARENT_LEAVES_PER_S = 69_328.0
 #: self-plays with fused16 in fast.
 EVALUATORS = (("torch", "strict"), ("torch", "fast"), ("fused", "strict"), ("fused", "fast"), ("fused16", "fast"))
 #: kernels against kernels=torch with trained weights: (logits, values) tolerances.
-TOLERANCE = {"fused": (1e-3, 1e-6), "fused16": (0.25, 1e-2)}
+#: fused's values: tests/test_graph_kernels.py's 1e-5 (e1800 itself, without the input, is 4.4e-6 from
+#: kernels=torch on the identity rows).
+TOLERANCE = {"fused": (1e-3, 1e-5), "fused16": (0.25, 1e-2)}
+#: the start against e0 on kernels=torch on the device: rounding (the wider rows' slices), not bit
+#: for bit; the run plays through the kernels, which are.
+MODULE_TOLERANCE = (1e-4, 1e-5)
 
 
 def _variant(args: argparse.Namespace):
@@ -236,7 +243,13 @@ def _identity(args: argparse.Namespace) -> dict:
             continue
         was, now, moved = (tuple(np.array(x, dtype=np.float32) for x in result) for result in (was, now, moved))
         out["device"][name] = _compare(was, now, legal)
-        ok = ok and out["device"][name]["logits_equal"] and out["device"][name]["values_equal"]
+        same = out["device"][name]
+        if kernels == "torch":
+            same["within"] = bool(same["logit_max_diff"] <= MODULE_TOLERANCE[0] and same["argmax_equal"]
+                                  and same["value_max_diff"] <= MODULE_TOLERANCE[1])
+            ok = ok and same["within"]
+        else:
+            ok = ok and same["logits_equal"] and same["values_equal"]
         if (kernels, mode) == ("torch", "strict"):
             reference = moved
         entry = {"reads_dice": bool(np.abs(moved[1] - now[1]).max() > 0 and np.abs(moved[0] - now[0])[legal].max() > 0)}

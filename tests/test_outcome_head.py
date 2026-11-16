@@ -37,6 +37,7 @@ from test_dice_input import (
     native,
     needs_kernels,
     real_rows,
+    same_on_device,
     saved,
     trained_scale,
 )
@@ -323,7 +324,7 @@ def test_the_device_evaluators_answer_as_without_the_head(tmp_path, kernels, mod
     ck.load_parts(target, {"ckpt": str(saved(tmp_path, source).path), "parts": ["actor", "critic"],
                            "zero_new_inputs": True})
     was, now = evaluate(source, real_rows(False), kernels, mode), evaluate(target, rows, kernels, mode)
-    assert np.array_equal(was[0], now[0]) and np.array_equal(was[1], now[1])
+    assert same_on_device(was, now, kernels)  # the module on the wider rows: to rounding (test_dice_input.py)
 
 
 # ---------------------------------------------------------------- self-play and the replay
