@@ -216,6 +216,29 @@ def test_sync_run_copies_changes_cuts_torn_rows_and_follows_removals(tmp_path):
     assert (dst / "trainer_state.pt").read_bytes() == b"state 3"
     assert json.loads((dst / "run.json").read_text())["trainer_state"]["epoch"] == 3
     assert not list(dst.rglob("*.part"))
+    # the way back (a new container): the same files, and a record that copies nothing up again
+    back = tmp_path / "container"
+    (dst / "checkpoints" / "e000009.pt.part").write_bytes(b"a copy that was cut")
+    assert mt.restore_run(dst, back) == 6                             # e2, e3, config, metrics, run.json, state
+    assert {p.relative_to(back).as_posix(): p.read_bytes() for p in back.rglob("*") if p.is_file()} == {
+        p.relative_to(dst).as_posix(): p.read_bytes() for p in dst.rglob("*") if p.is_file() and p.suffix != ".part"}
+    assert mt.sync_run(back, dst, mt._signatures(back)) == 0
+
+
+def test_pull_cut_short_leaves_a_manifest(tmp_path):
+    listing = [("a.txt", 1, 1), ("b.txt", 1, 1)]
+
+    def fetch(rel, f):
+        if rel == "b.txt":
+            raise KeyboardInterrupt
+        f.write(b"a")
+
+    manifest = tmp_path / "_modal" / "e" / "v.pull.json"
+    with pytest.raises(KeyboardInterrupt):
+        mt.pull_files(listing, fetch, tmp_path / "e" / "v", manifest, workers=1)
+    assert "a.txt" in json.loads(manifest.read_text())                # the next pull goes on from here
+    report = mt.pull_files(listing, lambda rel, f: f.write(b"a"), tmp_path / "e" / "v", manifest)
+    assert (report["same"], report["new"]) == (["a.txt"], ["b.txt"])
 
 
 def test_progress_and_status(tmp_path):

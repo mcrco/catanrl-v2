@@ -13,6 +13,7 @@
     $P tools/modal_train.py pull ppo-mixed/main           # Volume -> local runs dir, then W&B backfill
     $P tools/modal_train.py watch ppo-mixed/main --every 10        # pull + mirror in a loop
     $P tools/modal_train.py ship ppo-mixed/main@e3550     # only upload a ref's files
+    $P tools/modal_train.py rm ppo-mixed/main             # delete a stopped run from the Volume
     modal app logs <app id>                               # the trainer's own progress lines
     modal app list                                        # nothing of ours may be left running
 
@@ -35,7 +36,10 @@ checkpoint with its trainer state) and every ``--sync-minutes``; trainer_state.p
 last, from one consistent read, so the Volume always holds a state the trainer itself could have
 crashed in. A container that starts and finds the run on the Volume copies it back and
 ``catanrl run`` resumes it: that is the path after a preemption, a stopped container, ``resume``
-and the 24-hour cap.
+and the 24-hour cap (so does a second ``launch`` of a run the Volume holds: ``rm`` it first for a
+fresh start). A stop the trainer hears once ends at an epoch boundary and loses nothing. A hard
+death between a checkpoint's commit and that epoch's metrics row (the trainer writes weights,
+trainer state, the select eval, then the row) resumes after that epoch, and its row is missing.
 
 ``--max-hours`` is a budget of supervisor seconds for one launch, kept in the Volume
 (``_modal/<exp>/<variant>.state.json``). The trainer gets the budget less a grace as its own time
@@ -55,7 +59,9 @@ runs directory would collide, so ``pull`` refuses a local run directory it did n
 applies the per-file rule anyway). ``pull`` never replaces a local file whose content it did not
 write: new files are fetched, an append-only file the Volume has extended is extended, a file this
 tool pulled earlier and nobody touched is updated, and anything else is a conflict that keeps the
-local file and is listed (``--force`` overwrites and says so). While the run is live its pulled
+local file and is listed (``--force`` overwrites and says so). After a pull the run is mirrored
+by tools/wandb_backfill.py from this machine, into the project the config names (``meta.wandb``):
+``--no-mirror`` or WANDB_MODE=disabled leaves W&B alone. While the run is live its pulled
 run.json says ``running`` with no lock, which ``catanrl ls`` shows as ``dead``. The container's
 engine and PufferLib binaries are its own builds (gcc 14), so its code id differs from this box's
 in those two components: a local resume of a pulled run needs ``--allow-code-change``.
@@ -894,6 +900,9 @@ def cmd_launch(args) -> int:
     pins = unpushed_pins(sha)
     if pins:
         print(f"warning: not seen on a remote-tracking branch here (the image clones them from the forks): {', '.join(pins)}")
+    for ref in args.ship:
+        if ref.split("@")[0].split("#")[0] == run:
+            raise ToolError(f"--ship {ref} is the run being launched: its directory on the Volume is the run itself")
     ships = ship(args.ship, Path(args.runs) if args.runs else default_runs()) if args.ship else []
     stage = stage_revision(sha)
     spec = {
@@ -1073,6 +1082,34 @@ def cmd_stop(args) -> int:
     return 0
 
 
+def cmd_rm(args) -> int:
+    run = check_run(args.run)
+    launch_path, state_path, stop_path, log_path = sidecar(run)
+    spec = vol_json(launch_path) or {}
+    if app_alive(spec.get("app_id"), app_states()):
+        raise ToolError(f"{run} is running in {spec['app_id']}: stop it first")
+    files = vol_list(f"runs/{run}")
+    gone = 0
+    for path, recursive in ((f"runs/{run}", True), (launch_path, False), (state_path, False), (stop_path, False),
+                            (log_path, False)):
+        try:
+            volume.remove_file(path, recursive=recursive)
+            gone += 1
+        except Exception as e:  # a path that is not there
+            if "NotFound" not in type(e).__name__ and "No such file" not in str(e) and "not found" not in str(e).lower():
+                raise
+    exp = run.split("/")[0]
+    for parent in (f"runs/{exp}", f"_modal/{exp}"):  # an experiment's directory with nothing left in it
+        if gone and not vol_list(parent):
+            try:
+                volume.remove_file(parent, recursive=True)
+            except Exception:  # noqa: BLE001, S110  it was not there
+                pass
+    print(f"{run}: removed from the Volume {VOLUME} ({len(files)} files, {sum(f[1] for f in files) / 1e6:.1f} MB)"
+          if gone else f"{run}: the Volume {VOLUME} does not have it")
+    return 0
+
+
 def cmd_pull(args) -> int:
     run, runs = check_run(args.run), Path(args.runs) if args.runs else default_runs()
     pull(run, runs, force=args.force, merge=args.merge)
@@ -1085,6 +1122,10 @@ def cmd_watch(args) -> int:
     while True:
         spec = vol_json(launch_path) or {}
         alive = app_alive(spec.get("app_id"), app_states())
+        if alive and not vol_list(f"runs/{run}"):
+            print(f"{time.strftime('%H:%M:%S')} {run}: nothing on the Volume yet (image build or cold start)", flush=True)
+            time.sleep(args.every * 60)
+            continue
         report = pull(run, runs, merge=args.merge)
         if not args.no_mirror:
             mirror(run, runs)
@@ -1146,6 +1187,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             pu.add_argument("--every", type=float, default=10, metavar="MINUTES")
         pu.set_defaults(fn=fn)
+    rm = sub.add_parser("rm", help="delete a stopped run (its directory and this tool's notes) from the Volume")
+    rm.add_argument("run")
+    rm.set_defaults(fn=cmd_rm)
     sh = sub.add_parser("ship", help="upload the files of local run refs to the Volume")
     sh.add_argument("refs", nargs="+")
     sh.add_argument("--runs")
