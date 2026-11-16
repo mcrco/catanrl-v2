@@ -88,6 +88,7 @@ image = (
     .entrypoint([])
     .apt_install("git", "build-essential", "ninja-build", "cmake")
     .pip_install("uv")
+    .env({"CC": "gcc", "CXX": "g++"})  # the added Python's sysconfig names clang, which the image lacks
 )
 if modal.is_local():
     _stage = _staging()
