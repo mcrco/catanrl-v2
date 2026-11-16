@@ -196,16 +196,16 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 - *Search.* Works on the plain PyTorch path. The fused kernels refuse it by name, so kernels come before any long self-play run.
 - *Not measured.* Playing strength (no training run yet), speed on this box's card (the estimate from the L40S ratio is about 19,500 agent steps a second), float16 on a GPU, and the 5p and 6p games beyond the unit tests.
 
-=== A generalist base, then AlphaZero specialists #chip("running") <exp:gen-base>
+=== A generalist base, then AlphaZero specialists #chip("todo") <exp:gen-base>
 #meta(
   dates: "2026-11-16",
-  dates-label: "launched",
+  dates-label: "planned",
   owner: "marco",
   config: "configs/experiments/gen-base.yaml (wt/player-set)",
-  wandb: (("gen-base-main-96725ccd", "gen-base/main"),),
+  wandb: (),
   records: (),
 )
-#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). Marco confirmed the games and the dice input, kept the small network for speed, and set the Modal budget at the month's \$30 of free credit. The first stage, `gen-base`, started on an L40S at 03:48 on 2026-11-16: 5.6 h and about \$15, due about 09:45 with its three finals.]
+#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). Marco confirmed the games and the dice input, kept the small network for speed, and set the Modal budget at the month's \$30 of free credit. The first stage is done (@exp:gen-base-1): level with best-4p at 4p, above `ppo-mixed` at 3p, well below best-2p at 2p. Later stages and the specialists wait on Marco.]
 
 #lead[Plan.]
 - *Base.* PPO self-play from scratch with `graph-seat-s` on 2p, 3p and 4p games at the `private` level, the only fair one past two players (as `ppo-mixed`).
@@ -219,11 +219,47 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 - *Later stages.* Continue while it gains. fr3 had about 1B decisions of 2p alone; that much for each seat count, with no transfer between them, would be 12 times the first stage. How much the shared weights save is the question.
 - *Specialists.* AlphaZero self-play from the base for each setting, as @exp:az-kata. Two things differ from fr3's line: the base reads `private` rows where fr3 reads `full`, and the fused kernels do not cover the new network (unfused, `graph-m` cost 3.4× per simulation, @exp:deploy-graph-m-check), so kernels come before self-play.
 
+=== `gen-base`: the first stage #chip("done") <exp:gen-base-1>
+#meta(
+  dates: "2026-11-16 03:48 – 09:47",
+  owner: "marco",
+  config: "configs/experiments/gen-base.yaml (wt/player-set, 4f01d31)",
+  wandb: (("gen-base-main-96725ccd", "gen-base/main"),),
+  records: ("47f566cf", "2bd4e3a9", "a8b0f0ee"),
+)
+#tldr[`graph-seat-s` from scratch for 996M agent steps (249M decisions) on a Modal L40S: 5.97 h, \$15.43. At 4p it is level with best-4p, which had 2.5 times its 4p decisions. At 3p it beats `ppo-mixed` at equal training (36.2% against two copies, parity 33.3%, p = 0.001). At 2p it takes 36.2% from best-2p made fair, where fr3 took 45.0% with 12 times its 2p decisions. Registered as `mix-graph-seat-s-1`.]
+
+*Question.* How strong is the player-agnostic network after `ppo-mixed`'s budget, at each table size?
+
+*Setup.* @exp:gen-base's first stage as planned. Its raw policy at the last checkpoint (e3800) plays one seat; the other seats are copies of one opponent; every board is played once from each seat.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, 1.3fr, auto, auto, auto, auto),
+    align: (left, left, right, right, right, left),
+    header: ([Table], [Other seats], [Games], [`gen-base` wins (%)], [Parity], [Record]),
+    [2p, OpenHex 1v1 rules \ #sub[`heldout-2p-fr`, 1,000 boards]], [best-2p made fair \ #sub[`BELIEF` of `graph-m`, 16 worlds]], [2,000], [36.2 #ci[34.1][38.3]], [50], [`47f566cf`],
+    [3p \ #sub[`heldout-3p`, 1,000 boards]], [2 × `ppo-mixed`], [3,000], [36.2 #ci[34.5][37.9]], [33.3], [`2bd4e3a9`],
+    [4p \ #sub[`heldout-4p`, 1,000 boards]], [3 × best-4p (`ppo-4p`)], [4,000], [25.45 #ci[24.1][26.8]], [25], [`a8b0f0ee`],
+  ),
+  caption: [`gen-base/main@e3800`'s share of wins by table size. Its decisions in training: 80M at 2p, 70M at 3p, 99M at 4p.],
+) <tab:gen-base-1>
+
+#lead[Reading.]
+- *4p.* Level with the 4p specialist (1,018 wins of 4,000; the three copies 1,014, 1,009 and 959; p = 0.51), on 99M 4p decisions against its 249M. `ppo-mixed`, with the same share of 4p games, was 2.7 pp below the specialist in @exp:gen-slot-order; that table had two learners and two F, so the two rows do not pair.
+- *3p.* Above `ppo-mixed` at equal training: 1,085 wins of 3,000 against 1,025 and 890 for the two copies (p = 0.001 against a third).
+- *2p.* Well below best-2p (`graph-m`, 1.5B decisions of 2p). fr3 (1.0B decisions of 2p) took 45.0% #ci[43.6][46.4] from the same opponent over the suite's 5,000 games (`71af32b1`, @exp:deploy-graph-m-check; not paired with this row). `gen-base` had 80M decisions of 2p, and plays from `private` rows where the other two are `full`-level networks averaged over 16 sampled worlds.
+- *Not separated.* The network, the dice input, the undiscounted critic and the 2p rules changed together from `ppo-mixed` (bundle first, Marco), so the 3p and 4p gains belong to the bundle.
+- *Not measured.* Whether it was still gaining at the end: the run has no row before e3800. Checkpoints are kept every 100 epochs.
+- *Critic.* On its own self-play games in the last 100 epochs, the critic's squared error against the outcome is 0.136 at 2p, 0.176 at 3p and 0.159 at 4p (slot 0); `ppo-mixed`'s on its own games was 0.097, 0.142 and 0.122. The games and players differ, so this does not rank the critics; scoring both on the same games would (not run).
+- *The run.* One container, no preemption. 47,600 agent steps a second (median; 49,300 in the six-minute check), 5.97 h billed with the compile and the finals (4 min), \$15.43. The app stopped itself after the finals; the run and its 39 checkpoints are on the volume and in `runs/gen-base/main` here.
+
 #repro(```sh
 # from the wt/modal worktree; the finals need the three opponents' checkpoints on the volume
 python tools/modal_train.py launch configs/experiments/gen-base.yaml --rev wt/player-set --gpu L40S --cpu 8 --memory 32 --max-hours 7 \
   --set runtime.threads=8 --ship graph-m-2p-lr/main@e22711 --ship ppo-mixed/main@e3550 --ship ppo-4p/main@e3650
-python tools/modal_train.py watch gen-base/main --every 10
+python tools/modal_train.py watch gen-base/main --every 10   # pulls into runs/ and mirrors to W&B until the run ends
 ```)
 
 === 5–6 players on the extension map #chip("todo") <exp:gen-5-6p>

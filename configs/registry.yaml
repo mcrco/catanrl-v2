@@ -71,3 +71,9 @@ models:
     from: scratch
     steps: 930_611_200
     use: one net for 2-4 players and any map; deployed (the site's island room)
+  mix-graph-seat-s-1:
+    ref: "gen-base/main@e3800#ebde6ebd6eea"
+    rules: base-2p-fr, base-3p and base-4p, BASE and hexagon boards, dice input
+    from: scratch
+    steps: 996_147_200
+    use: the player-agnostic network (graph-seat-s, 579,844 parameters; preset and config on wt/player-set until merged); level with 4p-graph-s-1 at 4p, 36.2% vs two mix-graph-s-1 at 3p, 36.2% vs fair 2p-graph-m-1 at 2p; the base for the AlphaZero specialists
