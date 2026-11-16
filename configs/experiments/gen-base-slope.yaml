@@ -1,0 +1,25 @@
+# Was gen-base still gaining at the end? (Claude's suggestion; Marco, 2026-11-16: "lets do slope check".)
+#
+# gen-base's three finals again with its halfway checkpoint (e1900, 498M of 996M agent steps) in the
+# learner's seat: the same boards, seats and opponents, so each row pairs game by game with e3800's
+# (47f566cf, 2bd4e3a9, a8b0f0ee). 2,000 + 3,000 + 4,000 games; a paired difference of about 3 pp is
+# detectable at 2p and about 2 pp at 4p (80% power). About 4 minutes on an L40S.
+# An eval config files its records under its first agent's run: runs/gen-base/main/evals.
+# The learning rate annealed over the run, so e1900 to e3800 is the gain of the second half of this
+# schedule, not of 498M more steps at a fixed rate.
+name: gen-base-slope
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup: ["POLICY:ckpt=gen-base/main@e1900#a3310442f2f0", "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"]
+    - suite: {name: heldout-3p, purpose: heldout, seed: 71, boards: 1000, scenarios: [{game: base-3p}], turn_limit: 500}
+      lineup: ["POLICY:ckpt=gen-base/main@e1900#a3310442f2f0", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf"]
+    - suite: heldout-4p
+      lineup: ["POLICY:ckpt=gen-base/main@e1900#a3310442f2f0", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f",
+               "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f"]
+runtime: {device: cuda, threads: 12, num_envs: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  notes: |
+    Report idea: one model for up to n players and arbitrary maps (exp:gen-base-1).
