@@ -31,9 +31,15 @@ eval (resolution copies its suite, lineup, every, metric and fill into
 ``eval.select``), so ``best`` follows it. A PPO variant's ``train.stop_epoch``
 is optional the same way (:data:`TRAIN_OPTIONAL`): absent from
 ``configs/train/ppo.yaml``, so a config without it keeps its hash. So is an
-AlphaZero variant's ``train.reuse`` (absent from ``configs/train/alphazero.yaml``).
+AlphaZero variant's ``train.reuse`` (absent from ``configs/train/alphazero.yaml``),
+and its ``train.outcome_vp_coef`` / ``outcome_turns_coef`` with the optional
+``model.args.outcome`` (the outcome head: :data:`catanrl.models.OPTIONAL_ARGS`).
 ``runtime.search_groups`` is optional too (``runtime`` is not hashed; unset,
-the AlphaZero trainer takes its default).
+the AlphaZero trainer takes its default). So is ``obs.dice_state``
+(:data:`OPTIONAL`), the opt-in dice input: the balanced dice state in every
+row (:data:`catanrl.envs.encoding.DICE_STATE`), with
+``init_from.zero_new_inputs`` to start such a network from a checkpoint
+without it.
 
 An AlphaZero variant that starts from a network (``init_from`` with the
 actor) gets :func:`alphazero_evals` as a layer between the defaults and the
@@ -101,13 +107,13 @@ ENTRY_KEYS = {
     "eval.select": {"suite", "lineup", "every", "metric", "fill", "from"},
     "eval.monitor": {"name", "suite", "lineup", "every", "metric", "fill"},
     "eval.final": {"suite", "lineup", "fill", "harness"},
-    "init_from": {"ckpt", "parts", "restore", "split_shared"},
+    "init_from": {"ckpt", "parts", "restore", "split_shared", "zero_new_inputs"},
 }
 #: Entry sections that are lists (the others are a mapping or null).
 ENTRY_LISTS = ("eval.final", "eval.monitor")
 #: Keys a config may set that defaults.yaml leaves out, with the value that means "unset": a
 #: config without them (or with them at that value, dropped at resolution) hashes as before.
-OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None}
+OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None, "obs.dice_state": False}
 #: ``runtime.search_groups`` (unhashed like all of ``runtime``; unset: the trainer's default): the
 #: groups AlphaZero self-play splits its searches into (catanrl.search.pipeline; 1: the serial loop).
 OPTIONAL["runtime.search_groups"] = None
@@ -116,8 +122,12 @@ OPTIONAL["runtime.search_groups"] = None
 #: resolution) hashes as it did before they existed. ``stop_epoch``: end the run after that
 #: epoch (its checkpoint, then the finals) with the schedule still the whole budget's.
 #: ``reuse`` (AlphaZero): self-play keeps a game's search tree from one decision to the next
-#: (catanrl.train.alphazero).
-TRAIN_OPTIONAL: dict[str, dict[str, Any]] = {"ppo": {"stop_epoch": None}, "alphazero": {"reuse": False}}
+#: (catanrl.train.alphazero). ``outcome_vp_coef`` / ``outcome_turns_coef`` (AlphaZero): the
+#: weights of the outcome head's two losses (``model.args.outcome``; 0: no such loss).
+TRAIN_OPTIONAL: dict[str, dict[str, Any]] = {
+    "ppo": {"stop_epoch": None},
+    "alphazero": {"reuse": False, "outcome_vp_coef": 0.0, "outcome_turns_coef": 0.0},
+}
 #: train.precision of a PPO run: float32; bfloat16 (PuffeRL's own autocast, with train.amp);
 #: float16 (needs train.amp: catanrl.train.puffer's autocast and GradScaler).
 PRECISIONS = ("float32", "bfloat16", "float16")
@@ -409,6 +419,7 @@ def _check_train(train: Any) -> dict:
     if algo == "alphazero":
         _check_alphazero_targets(out, base)
         _check_alphazero_reuse(out)
+        _check_alphazero_outcome(out)
     if algo == "distill":
         check_distill(out, base)
     return out
@@ -455,6 +466,39 @@ def _check_alphazero_reuse(train: Mapping[str, Any]) -> None:
     if reuse and train["dets"] > 0:
         raise ConfigError("train.reuse keeps one tree per game on the true game (dets: 0); sampled worlds "
                           "hold one seat's knowledge and do not carry over to the next seat's decision")
+
+
+def _check_alphazero_outcome(train: dict) -> None:
+    """train.outcome_vp_coef / outcome_turns_coef (optional, hashed when positive): non-negative
+    numbers, kept as floats."""
+    for key in ("outcome_vp_coef", "outcome_turns_coef"):
+        if key not in train:
+            continue
+        value = train[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0.0:
+            raise ConfigError(f"train.{key} is a non-negative number (the weight of the outcome head's loss; "
+                              f"0: none), not {value!r}")
+        train[key] = float(value)
+
+
+def _check_outcome(cfg: Mapping[str, Any]) -> None:
+    """``model.args.outcome`` (the outcome head) and its losses' weights come together: the
+    AlphaZero trainer trains the head by train.outcome_vp_coef / outcome_turns_coef, and no
+    other trainer does."""
+    if cfg.get("kind") != "train":
+        return
+    head = bool(((cfg.get("model") or {}).get("args") or {}).get("outcome", False))
+    train = cfg.get("train") or {}
+    algo = train.get("algo")
+    coefs = [key for key in ("outcome_vp_coef", "outcome_turns_coef") if train.get(key, 0.0) > 0.0]
+    if head and algo != "alphazero":
+        raise ConfigError(f"model.args.outcome (the outcome head) trains with train.algo alphazero, not {algo}")
+    if coefs and not head:
+        raise ConfigError(f"train.{coefs[0]} weighs the outcome head's loss: set model.args.outcome: true (on a "
+                          "shared graph trunk)")
+    if head and not coefs:
+        raise ConfigError("model.args.outcome adds the outcome head, which only its losses train: set "
+                          "train.outcome_vp_coef and/or train.outcome_turns_coef above 0")
 
 
 def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) -> None:
@@ -563,6 +607,17 @@ def _check_semantics(cfg: dict) -> None:
         if init.get("split_shared") and init.get("restore", "weights") != "weights":
             raise ConfigError("init_from.split_shared copies a shared trunk's weights into separate actor and critic "
                               "networks; it restores weights only")
+        if not isinstance(init.get("zero_new_inputs", False), bool):
+            raise ConfigError("init_from.zero_new_inputs is true or false")
+        if init.get("zero_new_inputs"):
+            if init.get("restore", "weights") != "weights":
+                raise ConfigError("init_from.zero_new_inputs copies the source's weights and zeroes the dice input's; "
+                                  "it restores weights only (the source's optimizer state has no dice weights)")
+            if not (cfg.get("obs") or {}).get("dice_state"):
+                raise ConfigError("init_from.zero_new_inputs zero-initializes the dice input's weights: set "
+                                  "obs.dice_state: true")
+    _check_obs(cfg)
+    _check_outcome(cfg)
     select = cfg["eval"]["select"]
     if select is not None and ("suite" not in select or "lineup" not in select):
         raise ConfigError("eval.select needs suite and lineup")
@@ -572,6 +627,19 @@ def _check_semantics(cfg: dict) -> None:
             raise ConfigError("every eval.final entry needs suite and lineup")
         if entry.get("harness", "native") not in ("native", "catanatron"):
             raise ConfigError(f"eval.final harness must be native or catanatron, not {entry['harness']!r}")
+
+
+def _check_obs(cfg: Mapping[str, Any]) -> None:
+    """``obs.dice_state`` (optional, :data:`OPTIONAL`): a bool, read by the PPO and AlphaZero
+    trainers (their VecEnv and search pools, network, replay and checkpoints); every agent and
+    harness reads it from the checkpoint."""
+    dice = (cfg.get("obs") or {}).get("dice_state", False)
+    if not isinstance(dice, bool):
+        raise ConfigError(f"obs.dice_state is true or false, not {dice!r}")
+    algo = (cfg.get("train") or {}).get("algo")
+    if dice and cfg.get("kind") == "train" and algo not in ("ppo", "alphazero"):
+        raise ConfigError(f"obs.dice_state (the dice input) trains with train.algo ppo or alphazero, not {algo}: "
+                          f"the {algo} trainer builds its rows without it")
 
 
 def _check_monitors(cfg: Mapping[str, Any]) -> None:

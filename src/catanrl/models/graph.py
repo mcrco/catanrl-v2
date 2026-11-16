@@ -20,7 +20,19 @@ Differences from v1's port, all because v2 rows carry the graph explicitly:
 * an optional auxiliary head (``aux``, on a shared trunk) predicts, from the
   same inputs, the hidden features of every other seat (slots 1..P-1): the
   players-block features a ``private`` row zeroes for them (DESIGN 2), in the
-  encoder's scale. Training only; it never feeds the policy or the value.
+  encoder's scale. Training only; it never feeds the policy or the value;
+* an optional outcome head (``outcome``, on a shared trunk; :class:`GraphOutcomeHead`)
+  predicts how the game ends: each seat's final victory points and the turns left.
+  Training only (the AlphaZero trainer's ``outcome_vp_coef`` / ``outcome_turns_coef``):
+  no play-time path runs it, and it is built last, so the other parts' weights and
+  outputs do not depend on it;
+* rows with the dice input (``obs.dice_state``: the balanced dice state, the last
+  global features and the last features of each tile) feed it through projections
+  of their own, ``dice_projection`` and ``tile_dice_projection`` (no bias, zero at
+  initialization), added to the global and the tile projections'
+  pre-activations: a network without the input has exactly its
+  parameters and function, and one with it starts as that network
+  (``init_from.zero_new_inputs`` copies the rest).
 
 Aggregations are dense per-sample incidence matrices (built by comparisons
 and ``bmm``, row-normalized by degree): deterministic on CUDA, free of host
@@ -39,7 +51,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from catanrl.envs.encoding import MAX_PLAYERS
+from catanrl.envs.encoding import DICE_PREFIX, MAX_PLAYERS
 from catanrl.models.rows import RowReader, Rows, mask_logits, orthogonal_, value_prior
 
 GRAPH_DEFAULTS: dict[str, Any] = {
@@ -53,9 +65,17 @@ GRAPH_DEFAULTS: dict[str, Any] = {
     # (catanrl.envs.encoding.HIDDEN_FEATURES) from the row; trained by train.aux_coef.
     "aux": False,
 }
+#: Optional args and the values that mean "unset": left out of the resolved spec when unset
+#: (catanrl.models.resolve_spec), so a network without them has the spec, and a config the hash,
+#: it had before they existed. ``outcome``: the outcome head (:class:`GraphOutcomeHead`) on the
+#: shared trunk, trained by the AlphaZero trainer's train.outcome_vp_coef / outcome_turns_coef.
+GRAPH_OPTIONAL: dict[str, Any] = {"outcome": False}
 POLICY_OUTPUT_GAIN = 0.01
 VALUE_OUTPUT_GAIN = 0.01
 AUX_OUTPUT_GAIN = 0.01
+OUTCOME_OUTPUT_GAIN = 0.01
+#: The outcome head's turns output is the turns left until the game ends over this many.
+OUTCOME_TURNS = 100.0
 HIDDEN_GAIN = math.sqrt(2.0)
 
 
@@ -168,10 +188,21 @@ class GraphTrunk(nn.Module):
         self.hidden = hidden
         self.global_hidden = global_hidden
         self.pooled_dim = 3 * hidden + global_hidden
-        self.global_projection = nn.Linear(w["global"] + MAX_PLAYERS * w["players"], global_hidden)
+        # The dice input (obs.dice_state), when the rows have it: the last global features and
+        # the last features of each tile.
+        dice = [j for j, name in enumerate(reader.canonical["global"]) if name.startswith(DICE_PREFIX)]
+        tile_dice = [j for j, name in enumerate(reader.canonical["tiles"]) if name.startswith(DICE_PREFIX)]
+        if (dice != list(range(w["global"] - len(dice), w["global"]))
+                or tile_dice != list(range(w["tiles"] - len(tile_dice), w["tiles"])) or bool(dice) != bool(tile_dice)):
+            raise ValueError("the dice inputs must end the global block and each tile's features")
+        self.dice_inputs = len(dice)
+        self.plain_globals = w["global"] - len(dice)
+        self.tile_dice_inputs = len(tile_dice)
+        self.plain_tiles = w["tiles"] - len(tile_dice)
+        self.global_projection = nn.Linear(self.plain_globals + MAX_PLAYERS * w["players"], global_hidden)
         self.player_projection = nn.Linear(w["players"] + MAX_PLAYERS, hidden)
         self.node_projection = nn.Linear(w["nodes"], hidden)
-        self.tile_projection = nn.Linear(w["tiles"], hidden)
+        self.tile_projection = nn.Linear(self.plain_tiles, hidden)
         self.edge_projection = nn.Linear(w["edges"], hidden)
 
         def injection() -> nn.Sequential:
@@ -184,12 +215,27 @@ class GraphTrunk(nn.Module):
         self.register_buffer("slot_ids", torch.eye(MAX_PLAYERS), persistent=False)
         for module in self.modules():
             orthogonal_(module, HIDDEN_GAIN)
+        #: The dice input's weights (rows with obs.dice_state only), on the global features and on
+        #: each tile's: zero at the start and built without drawing from the RNG (skip_init), so
+        #: every other weight is drawn as without it.
+        self.dice_projection = (torch.nn.utils.skip_init(nn.Linear, self.dice_inputs, global_hidden, bias=False)
+                                if dice else None)
+        self.tile_dice_projection = (torch.nn.utils.skip_init(nn.Linear, self.tile_dice_inputs, hidden, bias=False)
+                                     if dice else None)
+        if dice:
+            nn.init.zeros_(self.dice_projection.weight)
+            nn.init.zeros_(self.tile_dice_projection.weight)
 
     def forward(self, obs: torch.Tensor, rows: Rows | None = None) -> Embeddings:
         rows = self.reader(obs) if rows is None else rows
         topo = topology(rows, self.valid)
         batch = obs.shape[0]
-        glob = torch.relu(self.global_projection(torch.cat((rows.glob, rows.players.flatten(1)), dim=1)))
+        if self.dice_projection is None:
+            glob = torch.relu(self.global_projection(torch.cat((rows.glob, rows.players.flatten(1)), dim=1)))
+        else:
+            plain = rows.glob[:, : self.plain_globals]
+            glob = torch.relu(self.global_projection(torch.cat((plain, rows.players.flatten(1)), dim=1))
+                              + self.dice_projection(rows.glob[:, self.plain_globals:]))
         slot_ids = self.slot_ids.unsqueeze(0).expand(batch, -1, -1)
         present = rows.players[..., self.present].unsqueeze(-1)
         players = torch.relu(self.player_projection(torch.cat((rows.players, slot_ids), dim=-1))) * present
@@ -199,7 +245,12 @@ class GraphTrunk(nn.Module):
             return module(torch.cat((x, g), dim=-1)) * valid
 
         nodes = inject(self.node_injection, torch.relu(self.node_projection(rows.nodes)), topo.node_valid)
-        tiles = inject(self.tile_injection, torch.relu(self.tile_projection(rows.tiles)), topo.tile_valid)
+        if self.tile_dice_projection is None:
+            tile_inputs = self.tile_projection(rows.tiles)
+        else:
+            tile_inputs = (self.tile_projection(rows.tiles[..., : self.plain_tiles])
+                           + self.tile_dice_projection(rows.tiles[..., self.plain_tiles:]))
+        tiles = inject(self.tile_injection, torch.relu(tile_inputs), topo.tile_valid)
         edges = inject(self.edge_injection, torch.relu(self.edge_projection(rows.edges)), topo.edge_valid)
         for layer in self.layers:
             nodes, tiles, edges = layer(nodes, tiles, edges, topo)
@@ -322,12 +373,35 @@ class GraphAuxHead(nn.Module):
         return self.mlp(torch.cat((pooled, others), dim=-1)).float()
 
 
+class GraphOutcomeHead(nn.Module):
+    """How the game ends, from the trunk's embeddings: each seat's final victory points as a
+    fraction of the points to win (seat-relative like the value head: slot 0 = the row's own
+    seat; from the pooled state and that seat's embedding, hidden victory point cards counted)
+    and the turns left until the game ends over :data:`OUTCOME_TURNS` (from the pooled state).
+    Both are plain regressions that start near 0. Training targets only: nothing reads them at
+    play time."""
+
+    def __init__(self, trunk: GraphTrunk, *, head_hidden: int, num_players: int) -> None:
+        super().__init__()
+        self.num_players = num_players
+        self.vp = _mlp(trunk.pooled_dim + trunk.hidden, head_hidden, 1, 2, OUTCOME_OUTPUT_GAIN)
+        self.turns = _mlp(trunk.pooled_dim, head_hidden, 1, 2, OUTCOME_OUTPUT_GAIN)
+
+    def forward(self, emb: Embeddings) -> tuple[torch.Tensor, torch.Tensor]:
+        """(final victory points / points to win [B, P], turns left / OUTCOME_TURNS [B])."""
+        players = emb.players[:, : self.num_players]
+        pooled = emb.pooled.unsqueeze(1).expand(-1, self.num_players, -1)
+        vp = self.vp(torch.cat((pooled, players), dim=-1)).squeeze(-1).float()
+        return vp, self.turns(emb.pooled).squeeze(-1).float()
+
+
 class GraphNetwork(nn.Module):
-    """A trunk with a policy head, a value head or both, and ``aux_features`` > 0 adds the
-    auxiliary head (built last, so the other parts' initial weights do not depend on it)."""
+    """A trunk with a policy head, a value head or both; ``aux_features`` > 0 adds the
+    auxiliary head and ``outcome`` the outcome head, each after everything before it, so the
+    other parts' initial weights do not depend on them."""
 
     def __init__(self, reader, action_layout, *, args, num_players, policy: bool, value: bool,
-                 aux_features: int = 0) -> None:
+                 aux_features: int = 0, outcome: bool = False) -> None:
         super().__init__()
         self.trunk = GraphTrunk(
             reader, hidden=args["hidden"], global_hidden=args["global_hidden"], layers=args["layers"]
@@ -341,4 +415,8 @@ class GraphNetwork(nn.Module):
         self.aux = (
             GraphAuxHead(self.trunk, head_hidden=args["head_hidden"], num_players=num_players,
                          num_features=int(aux_features)) if aux_features else None
+        )
+        self.outcome = (
+            GraphOutcomeHead(self.trunk, head_hidden=args["head_hidden"], num_players=num_players)
+            if outcome else None
         )

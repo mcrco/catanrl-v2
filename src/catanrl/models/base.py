@@ -29,6 +29,8 @@ class CatanModel(nn.Module):
     hidden_size: int = 0
     #: An auxiliary head predicting the other seats' hidden features (graph and lstm, ``args.aux``).
     aux: bool = False
+    #: An outcome head (graph, ``args.outcome``): final victory points and turns left, training only.
+    outcome: bool = False
 
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__()

@@ -415,3 +415,59 @@ def test_fp16_2p_pins_graph_m_2p_lrs_own_e300():
     ref = run.resolve("e300#21153dbc209c")
     assert ref.epoch == 300 and ref.agent_steps == 300 * 132_096
     assert run.config_hash == load_plan("graph-m-2p-lr").variants[0].config_hash
+
+
+def test_az_2p_bundle_is_one_run_from_e1800_with_the_dice_input_and_the_outcome_head():
+    """The bundled continued run (Marco, 2026-11-15: bundle first, ablate later): one variant from
+    search-v3.1's network (weights only: a fresh optimizer and an empty replay) with the dice input
+    and the outcome head, no in-run evals, and one final on the 2,000 games of e1800's stored row
+    (heldout-2p-fr's first 1,000 boards x 2 seats against BELIEF(fr3, 16 worlds)), so the two rows
+    pair game for game."""
+    from catanrl.envs.encoding import dims_for
+    from catanrl.games import load_game
+    from catanrl.train.puffer import build_policy_model
+
+    plan = load_plan("az-2p-bundle")
+    assert [v.name for v in plan.variants] == ["main"]
+    (v,) = plan.variants
+    assert v.depends_on == () and v.config_hash == "da6d138201dd000b"
+    cfg = v.config
+    assert cfg["init_from"] == {"ckpt": "az-2p-kata/main+1500@e1800#7c44ec80540a", "parts": ["actor", "critic"],
+                                "zero_new_inputs": True}  # no restore: weights only
+    assert cfg["obs"]["dice_state"] is True and cfg["model"]["args"]["outcome"] is True
+    train = cfg["train"]
+    assert train["iterations"] == 900 and train["kernels"] == "fused16"
+    assert (train["outcome_vp_coef"], train["outcome_turns_coef"]) == (0.5, 0.5)
+    assert cfg["eval"]["select"] is None and not cfg["eval"].get("monitor")
+    assert [(e["suite"], e["lineup"]) for e in cfg["eval"]["final"]] == [({"name": "heldout-2p-fr", "boards": 1000}, [
+        f"MCTS:ckpt={v.ref}@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused",
+        "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"])]
+
+    dims = dims_for([load_game("base-2p-fr")])
+    model = build_policy_model(cfg, dims)
+    assert model.obs_size == 2691 and model.outcome  # 2,564 + 51 global and 4 x 19 tile features
+    state = model.state_dict()
+    dice = ["backbone.dice_projection.weight", "backbone.tile_dice_projection.weight"]
+    assert all(key in state and not state[key].any() for key in dice)
+    head = [key for key in state if key.startswith("outcome_head.")]
+    assert head and sum(p.numel() for p in model.parameters()) == 685_094  # 541,540 + 7,616 + 135,938
+    assert sum(p.numel() for name, p in model.named_parameters() if name.startswith("outcome_head.")) == 135_938
+
+
+@pytest.mark.runs
+def test_az_2p_bundle_trains_as_its_parent_did():
+    """Every train key (but the length and the outcome coefficients), the seed, scenario and
+    runtime of az-2p-kata/main+1500 as that run stored them; its rows and network plus the dice
+    input and the outcome head."""
+    from catanrl.runs import RunError, load_experiment
+
+    try:
+        parent = load_experiment("az-2p-kata/main+1500").config
+    except RunError:
+        pytest.skip("az-2p-kata/main+1500 is not in the runs directory")
+    cfg = load_plan("az-2p-bundle").variant("main").config
+    train = {k: v for k, v in cfg["train"].items() if k not in ("outcome_vp_coef", "outcome_turns_coef")}
+    assert {**train, "iterations": 1800} == parent["train"]
+    assert {k: cfg[k] for k in ("seed", "env", "runtime")} == {k: parent[k] for k in ("seed", "env", "runtime")}
+    assert cfg["obs"] == {**parent["obs"], "dice_state": True}
+    assert cfg["model"] == {**parent["model"], "args": {**parent["model"]["args"], "outcome": True}}

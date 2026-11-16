@@ -5,7 +5,9 @@ logits and ``sigmoid(value logits) * present``) from the same weights, restructu
 GPU running small batches of whole boards:
 
 * the row reader's feature remapping is folded into the first projections' weights, so
-  the raw blocks are read once (the topology kernel copies them contiguous);
+  the raw blocks are read once (the topology kernel copies them contiguous); the dice
+  input's features (``obs.dice_state``), when the rows have them, are two small GEMMs
+  of their own beside the global and the tile projections;
 * the dense per-row incidence matrices become neighbour lists (a hex board's node has at
   most three neighbours, edges and tiles; a tile six corners) and each aggregation a
   gather; since the message weights are linear, each is applied after its mean, and a
@@ -64,14 +66,17 @@ def _fold(weight: torch.Tensor, index: torch.Tensor, raw_width: int) -> torch.Te
 
 class FusedGraph:
     """The forward of a shared-trunk :class:`~catanrl.models.GraphModel` (no aux head,
-    hidden 96) on a CUDA device: ``forward(obs)`` is (logits, values, overflow), the last
+    hidden 96; an outcome head, ``model.args.outcome``, is training only and is left out: the
+    kernels read the trunk, the policy head and the value head, so the logits and values are
+    those of the same weights without it) on a CUDA device: ``forward(obs)`` is (logits, values, overflow), the last
     a [1] int32 tensor set when a node has more than three neighbours, edges or tiles (a
     board the neighbour lists cannot hold; :class:`~catanrl.search.evaluator.BatchEvaluator`
     raises on it)."""
 
     def __init__(self, model) -> None:
         if getattr(model, "spec", {}).get("class") != "graph" or not getattr(model, "shared", False) or model.aux:
-            raise ValueError("kernels=fused runs shared-trunk graph networks without an aux head")
+            raise ValueError("kernels=fused runs shared-trunk graph networks without an aux head (model.args.aux; "
+                             "an outcome head is accepted: no kernel runs it)")
         K = kernels()
         trunk, policy, value = model.backbone, model.policy_head, model.value_head
         if trunk.hidden != K.hidden:
@@ -94,11 +99,28 @@ class FusedGraph:
         if sp["players"][0] != sp["global"][0] + raw["global"]:
             raise ValueError("the kernels expect the players block right after the global block")
         wg = d(trunk.global_projection.weight)
-        G, Fp = canon["global"], canon["players"]
-        parts = [_fold(wg[:, :G], idx["global"], raw["global"])]
+        G, Fp = trunk.plain_globals, canon["players"]
+        # The dice input (obs.dice_state) ends the global block and each tile's features, in the
+        # raw row as in the canonical order. Its weights stay GEMMs of their own, added to the
+        # plain projections' pre-activations, and the plain GEMMs read exactly the plain columns:
+        # a network warm-started with zero dice weights (init_from.zero_new_inputs) then runs
+        # its source's GEMMs on its source's inputs and adds exact zeros.
+        self.dice = trunk.dice_projection is not None
+        plain = {b: raw[b] for b in raw}
+        if self.dice:
+            for b, n in (("global", G), ("tiles", trunk.plain_tiles)):
+                plain[b] = int((idx[b][:n] < raw[b]).sum())
+                if int(idx[b][:n][idx[b][:n] < raw[b]].max()) >= plain[b]:
+                    raise ValueError(f"the kernels expect the dice inputs at the end of the raw {b} features")
+        self.plain = plain
+        parts = [_fold(wg[:, :G], idx["global"][:G], raw["global"])[:, : plain["global"]]]
         parts += [_fold(wg[:, G + k * Fp: G + (k + 1) * Fp], idx["players"], raw["players"]) for k in range(self.P)]
         self.g_span = (sp["global"][0], sp["global"][0] + raw["global"] + self.P * raw["players"])
         self.wgT, self.bg = c(torch.cat(parts, dim=1).T), d(trunk.global_projection.bias)
+        if self.dice:
+            fold = lambda lin, b, n: c(_fold(d(lin.weight), idx[b][n:], raw[b])[:, plain[b]:].T)
+            self.g_dice = fold(trunk.dice_projection, "global", G)
+            self.t_dice = fold(trunk.tile_dice_projection, "tiles", trunk.plain_tiles)
         wp = d(trunk.player_projection.weight)
         self.wp = _fold(wp[:, :Fp], idx["players"], raw["players"])
         self.bp = d(trunk.player_projection.bias) + wp[:, Fp:].T[: self.P]  # the slot one-hot, per slot
@@ -108,7 +130,8 @@ class FusedGraph:
             wi = d(inj[0].weight)
             wig.append(wi[:, self.H:])
             bi.append(d(inj[0].bias))
-            self.proj[b] = {"wT": c(_fold(d(lin.weight), idx[b], raw[b]).T), "b": d(lin.bias),
+            self.proj[b] = {"wT": c(_fold(d(lin.weight), idx[b][: lin.weight.shape[1]], raw[b])[:, : plain[b]].T),
+                            "b": d(lin.bias),
                             "wiT": c(wi[:, : self.H].T), "ln": (d(inj[1].weight), d(inj[1].bias), inj[1].eps)}
         self.wigT, self.bi = c(torch.cat(wig).T), torch.cat(bi)
         self.layers = []
@@ -151,17 +174,34 @@ class FusedGraph:
                 x = torch.relu_(x)
         return x
 
+    def _first(self, obs: torch.Tensor, xn: torch.Tensor, xt: torch.Tensor, xe: torch.Tensor):
+        """The first projections (float32 in both precisions): the global state after its relu,
+        and each entity type's projection through its injection's own weights."""
+        pre = [torch.addmm(self.proj[b]["b"], r, self.proj[b]["wT"]) for b, r in (("nodes", xn), ("edges", xe))]
+        if not self.dice:
+            glob = torch.addmm(self.bg, obs[:, self.g_span[0]: self.g_span[1]], self.wgT)
+            tiles = torch.addmm(self.proj["tiles"]["b"], xt, self.proj["tiles"]["wT"])
+        else:
+            g0, g1 = self.g_span[0], self.g_span[0] + self.plain["global"]  # the plain global features
+            p0 = self.spans["players"][0]
+            glob = torch.addmm(self.bg, torch.cat((obs[:, g0:g1], obs[:, p0: self.g_span[1]]), dim=1), self.wgT)
+            glob.add_(torch.mm(obs[:, g1:p0], self.g_dice))
+            n = self.plain["tiles"]
+            tiles = torch.addmm(self.proj["tiles"]["b"], xt[:, :n].contiguous(), self.proj["tiles"]["wT"])
+            tiles.add_(torch.mm(xt[:, n:].contiguous(), self.t_dice))
+        us = [torch.mm(torch.relu_(x), self.proj[b]["wiT"])
+              for b, x in (("nodes", pre[0]), ("tiles", tiles), ("edges", pre[1]))]
+        return torch.relu_(glob), us
+
     @torch.inference_mode()
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         K = kernels()
         obs = obs.float().contiguous()
         B, H, N, T, E = obs.shape[0], self.H, self.N, self.T, self.E
         (xn, xt, xe, vn, vt, ve, nn, nnc, ne, nec, nt, ntc, tn, tnc, en, enc, overflow) = K.topo(obs, self.layout)
-        glob = torch.relu_(torch.addmm(self.bg, obs[:, self.g_span[0]: self.g_span[1]], self.wgT))
+        glob, us = self._first(obs, xn, xt, xe)
         gb = torch.addmm(self.bi, glob, self.wigT)  # each type's injection: the glob part, bias in
         types = ("nodes", "tiles", "edges")
-        us = [torch.mm(torch.relu_(torch.addmm(self.proj[b]["b"], r, self.proj[b]["wT"])), self.proj[b]["wiT"])
-              for b, r in zip(types, (xn, xt, xe))]
         x = [obs.new_empty(B * n, H) for n in (N, T, E)]
         XN, XT, XE = obs.new_empty(B * N, 4 * H), obs.new_empty(B * T, 2 * H), obs.new_empty(B * E, 2 * H)
         Z, zs = [XN, XT, XE], [4 * H, 2 * H, 2 * H]
@@ -258,11 +298,9 @@ class FusedGraph16(FusedGraph):
         obs = obs.float().contiguous()
         B, H, N, T, E = obs.shape[0], self.H, self.N, self.T, self.E
         (xn, xt, xe, vn, vt, ve, nn, nnc, ne, nec, nt, ntc, tn, tnc, en, enc, overflow) = K.topo(obs, self.layout)
-        glob = torch.relu_(torch.addmm(self.bg, obs[:, self.g_span[0]: self.g_span[1]], self.wgT))
+        glob, us = self._first(obs, xn, xt, xe)
         gb = torch.addmm(self.bi, glob, self.wigT)
         types = ("nodes", "tiles", "edges")
-        us = [torch.mm(torch.relu_(torch.addmm(self.proj[b]["b"], r, self.proj[b]["wT"])), self.proj[b]["wiT"])
-              for b, r in zip(types, (xn, xt, xe))]
         x = [obs.new_empty(B * n, H) for n in (N, T, E)]
         half = lambda *shape: torch.empty(*shape, dtype=torch.half, device=obs.device)
         XN, XT, XE = half(B * N, 4 * H), half(B * T, 2 * H), half(B * E, 2 * H)

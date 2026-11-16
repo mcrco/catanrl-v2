@@ -410,6 +410,8 @@ class TradeAgent(NativeAgent):
                  critic: CatanModel | None = None) -> None:
         critic = model if critic is None else critic
         check_critic(critic)
+        if model.levels.get("dice_state") or critic.levels.get("dice_state"):
+            raise ValueError("TRADE has no dice input yet: its policy and critic read rows without obs.dice_state")
         self.oracle = bool(_param(params, "oracle", False))
         self.audit = bool(_param(params, "audit", False))
         if self.audit and self.oracle:

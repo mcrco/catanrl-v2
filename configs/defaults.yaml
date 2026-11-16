@@ -11,11 +11,18 @@ env:
   map_pool: {seed: null}     # null: derive_seed(seed, "map_pool")
   reward: {vp: 0.0}          # win/loss only; vp shaping leaves PufferLib's clamp and is refused
 obs: {level: private, critic_level: null}   # private | public | full; critic null = actor's level
+  # Optional, absent by default (config.OPTIONAL): dice_state: true adds the balanced dice state to
+  # every row: globally each seat's next-roll odds, the deck, the five-roll window, the draws left
+  # and the sevens; on each tile its own number's odds, cards left and window count (2p base rows:
+  # 127 more floats; envs/encoding.py DICE_STATE). PPO and AlphaZero train it, and every agent and
+  # harness reads it from the checkpoint's obs header
 model: null                  # required: {preset} or {preset, class, args}; no default architecture
 train: {algo: ppo}           # ppo | imitation | alphazero | distill
 init_from: null              # {ckpt: REF or {actor: REF, critic: REF}, parts: [actor, critic], restore: weights,
                              #  split_shared: false (true: a shared-trunk graph checkpoint into separate actor and
-                             #  critic networks, each an exact copy of the trunk with its own head)}
+                             #  critic networks, each an exact copy of the trunk with its own head),
+                             #  zero_new_inputs: false (true: a checkpoint without the dice input into a network
+                             #  with obs.dice_state, the new input's weights zero: it plays as its source)}
 eval:
   select: null               # {suite, lineup: ["POLICY:ckpt=${self}", F], every: 50, metric: score_rate, fill: null}
                              # or {from: NAME}: monitor NAME's suite, lineup, every, metric and fill (best follows it)
