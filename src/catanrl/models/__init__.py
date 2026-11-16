@@ -18,7 +18,11 @@ illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
   (a shared trunk) it carries an auxiliary head predicting the other seats'
   hidden features (``aux_predictions``); its training targets are the
   ``critic_players`` block of a row whose ``critic_level`` is above its
-  ``level`` (``aux_targets``), which no head reads;
+  ``level`` (``aux_targets``), which no head reads. With ``args.outcome`` (optional,
+  a shared trunk) it carries the outcome head (``heads_with_outcome``: each seat's final
+  victory points and the turns left), which only the AlphaZero trainer's losses run:
+  ``forward`` / ``heads`` and so every agent, evaluator and kernel are the network
+  without it;
 * ``mlp``: :mod:`catanrl.models.mlp` (padded dims only);
 * ``cnn``: :mod:`catanrl.models.cnn` (v1's cross-dimensional CNN; the BASE board only);
 * ``lstm``: :mod:`catanrl.models.lstm` (dims-agnostic, recurrent: the graph
@@ -53,7 +57,7 @@ from catanrl.envs.encoding import (
 )
 from catanrl.models.base import CatanModel
 from catanrl.models.cnn import CNN_DEFAULTS, CnnModel
-from catanrl.models.graph import GRAPH_DEFAULTS, GraphNetwork
+from catanrl.models.graph import GRAPH_DEFAULTS, GRAPH_OPTIONAL, GraphNetwork
 from catanrl.models.lstm import LSTM_DEFAULTS, LstmNetwork
 from catanrl.models.mlp import MLP_DEFAULTS, FlatNetwork
 from catanrl.models.rows import (
@@ -68,6 +72,9 @@ MODEL_CONFIG_DIR = Path(__file__).resolve().parents[3] / "configs" / "models"
 CLASSES: dict[str, dict[str, Any]] = {
     "graph": GRAPH_DEFAULTS, "mlp": MLP_DEFAULTS, "cnn": CNN_DEFAULTS, "lstm": LSTM_DEFAULTS,
 }
+#: Per class, the args a spec may leave out, with the value that means "unset": an unset one is
+#: not in the resolved spec, so the specs (and config hashes) from before it existed stand.
+OPTIONAL_ARGS: dict[str, dict[str, Any]] = {"graph": GRAPH_OPTIONAL}
 
 __all__ = ["MODEL_CLASSES", "CatanModel", "build_model", "load_preset", "normalize_levels", "resolve_spec"]
 
@@ -85,7 +92,8 @@ def load_preset(name: str) -> dict[str, Any]:
 
 
 def resolve_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
-    """The complete spec: class defaults filled in, unknown keys refused."""
+    """The complete spec: class defaults filled in, unknown keys refused, optional args
+    (:data:`OPTIONAL_ARGS`) kept only when set."""
     spec = dict(spec)
     unknown = set(spec) - {"preset", "class", "args"}
     if unknown:
@@ -100,9 +108,15 @@ def resolve_spec(spec: Mapping[str, Any]) -> dict[str, Any]:
     if cls not in CLASSES:
         raise ValueError(f"unknown model class {cls!r}; expected one of {sorted(CLASSES)}")
     args = dict(spec.get("args") or {})
-    unknown = set(args) - set(CLASSES[cls])
+    optional = OPTIONAL_ARGS.get(cls, {})
+    unknown = set(args) - set(CLASSES[cls]) - set(optional)
     if unknown:
-        raise ValueError(f"unknown {cls} args {sorted(unknown)}; expected {sorted(CLASSES[cls])}")
+        raise ValueError(f"unknown {cls} args {sorted(unknown)}; expected {sorted([*CLASSES[cls], *optional])}")
+    for key, unset in optional.items():
+        if key in args and not isinstance(args[key], type(unset)):
+            raise ValueError(f"{cls} arg {key} is {type(unset).__name__}, not {args[key]!r}")
+        if key in args and args[key] == unset:
+            del args[key]
     resolved = {**copy.deepcopy(CLASSES[cls]), **args}
     return {"preset": spec.get("preset"), "class": cls, "args": resolved}
 
@@ -162,18 +176,24 @@ class GraphModel(CatanModel):
         self.aux = bool(args["aux"])
         if self.aux and not args["shared"]:
             raise ValueError("the aux head (model.args.aux) sits on a shared trunk: set model.args.shared")
+        self.outcome = bool(args.get("outcome", False))
+        if self.outcome and not args["shared"]:
+            raise ValueError("the outcome head (model.args.outcome) sits on a shared trunk: set model.args.shared")
         if args["shared"]:
             if self.has_critic_block and not self.aux:
                 raise ValueError("a shared trunk cannot read a separate critic level")
             hidden = hidden_feature_indices(canonical["players"]) if self.aux else []
             net = GraphNetwork(actor_reader, action_layout, args=args, num_players=self.num_players,
-                               policy=True, value=True, aux_features=len(hidden))
+                               policy=True, value=True, aux_features=len(hidden), outcome=self.outcome)
             self.backbone, self.policy_head, self.value_head = net.trunk, net.policy, net.value
             self.parts = {"actor": ["backbone.", "policy_head."], "critic": ["value_head."]}
             if self.aux:
                 self.aux_head = net.aux
                 self.parts["aux"] = ["aux_head."]
                 self.register_buffer("hidden_index", torch.tensor(hidden, dtype=torch.long), persistent=False)
+            if self.outcome:  # after every other part: the keys before it are the network's without it
+                self.outcome_head = net.outcome
+                self.parts["outcome"] = ["outcome_head."]
             # The trunk reads the actor's row only; a critic block, when the row has one, is the
             # aux head's target and no head reads it (the policy stays fair at the actor's level).
             self.reads_critic_block = False
@@ -222,6 +242,18 @@ class GraphModel(CatanModel):
         emb = self.backbone(obs, rows)
         present = self._present(rows)
         return self.policy_head(emb, rows.mask), self.value_head(emb, present), present, self.aux_head(emb)
+
+    def heads_with_outcome(self, obs):
+        """(masked logits, value logits, present, final VP fractions [B, P], turns left /
+        OUTCOME_TURNS [B]) in one trunk pass: the training forward of a network with the
+        outcome head (:class:`~catanrl.models.graph.GraphOutcomeHead`)."""
+        if not self.outcome:
+            raise ValueError("this network has no outcome head (model.args.outcome)")
+        rows = self.backbone.reader(obs)
+        emb = self.backbone(obs, rows)
+        present = self._present(rows)
+        return (self.policy_head(emb, rows.mask), self.value_head(emb, present), present,
+                *self.outcome_head(emb))
 
     def aux_predictions(self, obs):
         """The aux head's predictions [B, P-1, F]: row k holds slot k+1's hidden features

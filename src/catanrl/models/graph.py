@@ -21,6 +21,11 @@ Differences from v1's port, all because v2 rows carry the graph explicitly:
   same inputs, the hidden features of every other seat (slots 1..P-1): the
   players-block features a ``private`` row zeroes for them (DESIGN 2), in the
   encoder's scale. Training only; it never feeds the policy or the value;
+* an optional outcome head (``outcome``, on a shared trunk; :class:`GraphOutcomeHead`)
+  predicts how the game ends: each seat's final victory points and the turns left.
+  Training only (the AlphaZero trainer's ``outcome_vp_coef`` / ``outcome_turns_coef``):
+  no play-time path runs it, and it is built last, so the other parts' weights and
+  outputs do not depend on it;
 * rows with the dice input (``obs.dice_state``: the balanced dice state, the last
   global features and the last features of each tile) feed it through projections
   of their own, ``dice_projection`` and ``tile_dice_projection`` (no bias, zero at
@@ -60,9 +65,17 @@ GRAPH_DEFAULTS: dict[str, Any] = {
     # (catanrl.envs.encoding.HIDDEN_FEATURES) from the row; trained by train.aux_coef.
     "aux": False,
 }
+#: Optional args and the values that mean "unset": left out of the resolved spec when unset
+#: (catanrl.models.resolve_spec), so a network without them has the spec, and a config the hash,
+#: it had before they existed. ``outcome``: the outcome head (:class:`GraphOutcomeHead`) on the
+#: shared trunk, trained by the AlphaZero trainer's train.outcome_vp_coef / outcome_turns_coef.
+GRAPH_OPTIONAL: dict[str, Any] = {"outcome": False}
 POLICY_OUTPUT_GAIN = 0.01
 VALUE_OUTPUT_GAIN = 0.01
 AUX_OUTPUT_GAIN = 0.01
+OUTCOME_OUTPUT_GAIN = 0.01
+#: The outcome head's turns output is the turns left until the game ends over this many.
+OUTCOME_TURNS = 100.0
 HIDDEN_GAIN = math.sqrt(2.0)
 
 
@@ -360,12 +373,35 @@ class GraphAuxHead(nn.Module):
         return self.mlp(torch.cat((pooled, others), dim=-1)).float()
 
 
+class GraphOutcomeHead(nn.Module):
+    """How the game ends, from the trunk's embeddings: each seat's final victory points as a
+    fraction of the points to win (seat-relative like the value head: slot 0 = the row's own
+    seat; from the pooled state and that seat's embedding, hidden victory point cards counted)
+    and the turns left until the game ends over :data:`OUTCOME_TURNS` (from the pooled state).
+    Both are plain regressions that start near 0. Training targets only: nothing reads them at
+    play time."""
+
+    def __init__(self, trunk: GraphTrunk, *, head_hidden: int, num_players: int) -> None:
+        super().__init__()
+        self.num_players = num_players
+        self.vp = _mlp(trunk.pooled_dim + trunk.hidden, head_hidden, 1, 2, OUTCOME_OUTPUT_GAIN)
+        self.turns = _mlp(trunk.pooled_dim, head_hidden, 1, 2, OUTCOME_OUTPUT_GAIN)
+
+    def forward(self, emb: Embeddings) -> tuple[torch.Tensor, torch.Tensor]:
+        """(final victory points / points to win [B, P], turns left / OUTCOME_TURNS [B])."""
+        players = emb.players[:, : self.num_players]
+        pooled = emb.pooled.unsqueeze(1).expand(-1, self.num_players, -1)
+        vp = self.vp(torch.cat((pooled, players), dim=-1)).squeeze(-1).float()
+        return vp, self.turns(emb.pooled).squeeze(-1).float()
+
+
 class GraphNetwork(nn.Module):
-    """A trunk with a policy head, a value head or both, and ``aux_features`` > 0 adds the
-    auxiliary head (built last, so the other parts' initial weights do not depend on it)."""
+    """A trunk with a policy head, a value head or both; ``aux_features`` > 0 adds the
+    auxiliary head and ``outcome`` the outcome head, each after everything before it, so the
+    other parts' initial weights do not depend on them."""
 
     def __init__(self, reader, action_layout, *, args, num_players, policy: bool, value: bool,
-                 aux_features: int = 0) -> None:
+                 aux_features: int = 0, outcome: bool = False) -> None:
         super().__init__()
         self.trunk = GraphTrunk(
             reader, hidden=args["hidden"], global_hidden=args["global_hidden"], layers=args["layers"]
@@ -379,4 +415,8 @@ class GraphNetwork(nn.Module):
         self.aux = (
             GraphAuxHead(self.trunk, head_hidden=args["head_hidden"], num_players=num_players,
                          num_features=int(aux_features)) if aux_features else None
+        )
+        self.outcome = (
+            GraphOutcomeHead(self.trunk, head_hidden=args["head_hidden"], num_players=num_players)
+            if outcome else None
         )

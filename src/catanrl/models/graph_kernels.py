@@ -66,14 +66,17 @@ def _fold(weight: torch.Tensor, index: torch.Tensor, raw_width: int) -> torch.Te
 
 class FusedGraph:
     """The forward of a shared-trunk :class:`~catanrl.models.GraphModel` (no aux head,
-    hidden 96) on a CUDA device: ``forward(obs)`` is (logits, values, overflow), the last
+    hidden 96; an outcome head, ``model.args.outcome``, is training only and is left out: the
+    kernels read the trunk, the policy head and the value head, so the logits and values are
+    those of the same weights without it) on a CUDA device: ``forward(obs)`` is (logits, values, overflow), the last
     a [1] int32 tensor set when a node has more than three neighbours, edges or tiles (a
     board the neighbour lists cannot hold; :class:`~catanrl.search.evaluator.BatchEvaluator`
     raises on it)."""
 
     def __init__(self, model) -> None:
         if getattr(model, "spec", {}).get("class") != "graph" or not getattr(model, "shared", False) or model.aux:
-            raise ValueError("kernels=fused runs shared-trunk graph networks without an aux head")
+            raise ValueError("kernels=fused runs shared-trunk graph networks without an aux head (model.args.aux; "
+                             "an outcome head is accepted: no kernel runs it)")
         K = kernels()
         trunk, policy, value = model.backbone, model.policy_head, model.value_head
         if trunk.hidden != K.hidden:

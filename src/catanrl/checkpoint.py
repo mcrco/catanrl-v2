@@ -256,7 +256,9 @@ def _outputs(model: nn.Module, obs: torch.Tensor, *, aux: bool = True) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """(logits, values, logits with every action legal, aux predictions or None): the open
     logits show every policy head's output; the aux head's predictions pin it when there is
-    one (``aux=False`` skips that third trunk pass when a self-test does not compare it)."""
+    one (``aux=False`` skips that third trunk pass when a self-test does not compare it). An
+    outcome head (``model.args.outcome``) is not pinned: nothing plays from it, and the weights'
+    sha256 covers its parameters."""
     from catanrl.seeding import determinism
 
     offset, (size,) = model.layout["action_mask"]
@@ -558,8 +560,8 @@ def _split_source_keys(model: nn.Module, part: str, source: Checkpoint, keys: se
     if theirs["class"] != cls or not theirs["args"].get("shared", False):
         raise CheckpointError(f"init_from.split_shared needs a shared-trunk {cls} checkpoint; {source.ref} is a "
                               f"{'shared' if theirs['args'].get('shared') else 'separate'} {theirs['class']} network")
-    mine_args = {k: v for k, v in model.spec["args"].items() if k not in ("shared", "aux")}
-    their_args = {k: v for k, v in theirs["args"].items() if k not in ("shared", "aux")}
+    mine_args = {k: v for k, v in model.spec["args"].items() if k not in ("shared", "aux", "outcome")}
+    their_args = {k: v for k, v in theirs["args"].items() if k not in ("shared", "aux", "outcome")}
     if mine_args != their_args:
         raise CheckpointError(f"init_from.split_shared from {source.ref}: model args {their_args} differ from "
                               f"{mine_args}")

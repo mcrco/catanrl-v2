@@ -74,6 +74,31 @@ Checkpoints, select evals and ``best`` follow ``train_ppo`` (one epoch = one
 iteration). A resume restores the weights, optimizer, replay buffer, counters
 and RNG; games in flight restart.
 
+With ``model.args.outcome`` (a shared graph trunk) the network carries the
+outcome head (:class:`catanrl.models.graph.GraphOutcomeHead`) and learn() adds
+two auxiliary losses, ``outcome_vp_coef`` and ``outcome_turns_coef`` (optional
+train keys, above 0 exactly when the head exists) times a Huber loss
+(:data:`OUTCOME_HUBER_DELTA`) on
+
+* each seated slot's final victory points over the game's points to win
+  (seat-relative like the value targets; hidden victory point cards counted), and
+* the turns left until the game ends over
+  :data:`~catanrl.models.graph.OUTCOME_TURNS`,
+
+on the positions of games that ended with a winner: a game cut at the turn
+limit has no such labels and its positions are masked from both losses (as are
+those of a game whose end the VecEnv did not report by itself: a second game
+that finished in the same step). The replay holds the labels as integers, P + 4
+bytes a position: the final victory points per slot (uint8), the points to win
+(uint8), the turns left (uint16) and whether they are known (bool). The head is
+training only: self-play, the searches, the monitors' policy and value forwards
+and every agent run ``forward`` / ``heads``, which never touch it. Logged with
+the other ``train/*``: ``outcome_vp_loss``, ``outcome_turns_loss``, their mean
+absolute errors in victory points and in turns (``outcome_vp_mae``,
+``outcome_turns_mae``) and ``outcome_known`` (the labelled share of the sampled
+rows); and by :class:`Monitors` out of sample, ``oos/outcome_vp_mae`` and
+``oos/outcome_turns_mae`` (with ``oos/outcome_rows``).
+
 With ``obs.dice_state`` the self-play VecEnv, every search leaf and the replay
 carry the dice input (:data:`catanrl.envs.encoding.DICE_STATE`: 127 more floats
 on a 2p base row, 254 bytes of a replay position), and every iteration logs
@@ -104,6 +129,7 @@ import torch.nn.functional as F
 from catanrl.envs.encoding import critic_level_of, dice_state_of, encoder_dims, info_level, make_encoder
 from catanrl.envs.puffer import plan_env
 from catanrl.models import CatanModel, feature_names
+from catanrl.models.graph import OUTCOME_TURNS
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
 from catanrl.search.pipeline import Group, Pipeline, run_groups
 from catanrl.search.pool import DIRICHLET_ALPHA
@@ -153,7 +179,12 @@ ALPHAZERO_KEYS: dict[str, Any] = {
 
 #: Optional ``train`` keys and the values that mean "unset" (catanrl.config.TRAIN_OPTIONAL: absent
 #: from configs/train/alphazero.yaml, and a config without them hashes as it did before they existed).
-ALPHAZERO_OPTIONAL: dict[str, Any] = {"reuse": False}
+ALPHAZERO_OPTIONAL: dict[str, Any] = {"reuse": False, "outcome_vp_coef": 0.0, "outcome_turns_coef": 0.0}
+#: The outcome losses' Huber delta, in the heads' units: quadratic within half the points to
+#: win and within half of OUTCOME_TURNS, linear beyond (a 300-turn game does not swamp a batch).
+OUTCOME_HUBER_DELTA = 0.5
+#: The replay's outcome labels (a network with the outcome head), all integers.
+OUTCOME_LABELS = ("final_vp", "vp_to_win", "turns_left", "outcome_known")
 
 #: ``runtime.search_groups`` when a config leaves it unset: self-play's searches in two groups
 #: that take turns on the device (SelfPlay; 1 is the serial loop, run_pools).
@@ -206,7 +237,16 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
     if reuse and int(train["dets"]) > 0:
         raise ValueError("train.reuse keeps one tree per game on the true game (dets: 0); sampled worlds "
                          "hold one seat's knowledge and do not carry over to the next seat's decision")
+    for key in ("outcome_vp_coef", "outcome_turns_coef"):
+        value = train.get(key, 0.0)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0.0:
+            raise ValueError(f"train.{key} is a non-negative number, not {value!r}")
     return train
+
+
+def outcome_coefs(train: Mapping[str, Any]) -> tuple[float, float]:
+    """(outcome_vp_coef, outcome_turns_coef); 0 when unset."""
+    return float(train.get("outcome_vp_coef", 0.0)), float(train.get("outcome_turns_coef", 0.0))
 
 
 def temperature(train: Mapping[str, Any], ply: int) -> float:
@@ -378,15 +418,23 @@ def root_log_priors(pool: cpp.SearchPool, sid: int) -> np.ndarray:
 
 
 class ReplayBuffer:
-    """A FIFO of positions: float16 rows and policy targets, float32 value targets."""
+    """A FIFO of positions: float16 rows and policy targets, float32 value targets. With
+    ``outcome`` (a network with the outcome head) also each position's outcome labels
+    (:data:`OUTCOME_LABELS`): the final victory points of each slot (uint8, seat-relative), the
+    points to win (uint8), the turns left until the game ended (uint16) and whether those are
+    known (bool; False: a game cut at the turn limit)."""
 
-    def __init__(self, capacity: int, obs_size: int, num_actions: int, max_players: int) -> None:
+    def __init__(self, capacity: int, obs_size: int, num_actions: int, max_players: int, *,
+                 outcome: bool = False) -> None:
         self.capacity = int(capacity)
         self.shapes = (int(obs_size), int(num_actions), int(max_players))
         self.size = 0
         self.next = 0
         self.added = 0
+        self.outcome = bool(outcome)
+        self.names = ("obs", "policy", "has_policy", "value", "present") + (OUTCOME_LABELS if outcome else ())
         self.obs = self.policy = self.has_policy = self.value = self.present = None
+        self.final_vp = self.vp_to_win = self.turns_left = self.outcome_known = None
 
     def _allocate(self) -> None:
         obs_size, num_actions, players = self.shapes
@@ -395,34 +443,53 @@ class ReplayBuffer:
         self.has_policy = np.zeros(self.capacity, dtype=bool)
         self.value = np.zeros((self.capacity, players), dtype=np.float32)
         self.present = np.zeros((self.capacity, players), dtype=np.float32)
+        if self.outcome:
+            self.final_vp = np.zeros((self.capacity, players), dtype=np.uint8)
+            self.vp_to_win = np.zeros(self.capacity, dtype=np.uint8)
+            self.turns_left = np.zeros(self.capacity, dtype=np.uint16)
+            self.outcome_known = np.zeros(self.capacity, dtype=bool)
 
-    def add(self, obs, policy, has_policy, value, present) -> None:
+    def add(self, obs, policy, has_policy, value, present, outcome: Mapping[str, Any] | None = None) -> None:
+        """``outcome``: the positions' :data:`OUTCOME_LABELS` (a buffer with them takes them
+        with every add; one without takes none)."""
+        if self.outcome != (outcome is not None):
+            raise ValueError("a replay buffer with outcome labels takes them with every add, and one without "
+                             "takes none")
         if self.obs is None:
             self._allocate()
         count = len(obs)
         keep = slice(max(0, count - self.capacity), count)  # more than fits: the newest
         slots = (self.next + np.arange(count)[keep] - keep.start) % self.capacity
         for name, values in (("obs", obs), ("policy", policy), ("has_policy", has_policy), ("value", value),
-                             ("present", present)):
+                             ("present", present), *((name, outcome[name]) for name in OUTCOME_LABELS
+                                                     if outcome is not None)):
             getattr(self, name)[slots] = np.asarray(values)[keep]
         self.next = (self.next + len(slots)) % self.capacity
         self.size = min(self.size + len(slots), self.capacity)
         self.added += count
 
     def batch(self, index: np.ndarray, device: str) -> dict[str, torch.Tensor]:
-        def tensor(array, dtype=torch.float32):
-            return torch.from_numpy(np.ascontiguousarray(array[index])).to(device=device, dtype=dtype)
+        def tensor(array, dtype=torch.float32, stored=None):
+            rows = array[index] if stored is None else array[index].astype(stored)
+            return torch.from_numpy(np.ascontiguousarray(rows)).to(device=device, dtype=dtype)
 
-        return {"obs": tensor(self.obs), "policy": tensor(self.policy), "has_policy": tensor(self.has_policy, torch.bool),
-                "value": tensor(self.value), "present": tensor(self.present)}
+        out = {"obs": tensor(self.obs), "policy": tensor(self.policy), "has_policy": tensor(self.has_policy, torch.bool),
+               "value": tensor(self.value), "present": tensor(self.present)}
+        if self.outcome:  # the labels as floats, in their own units (victory points, turns)
+            out.update({"final_vp": tensor(self.final_vp), "vp_to_win": tensor(self.vp_to_win),
+                        "turns_left": tensor(self.turns_left, stored=np.int32),
+                        "outcome_known": tensor(self.outcome_known, torch.bool)})
+        return out
 
     def state(self) -> dict[str, Any]:
         """The buffer for the trainer state, oldest first (``weights_only``-loadable)."""
         if self.size == 0:
             return {"size": 0, "added": self.added}
         order = np.arange(self.next - self.size, self.next) % self.capacity
-        arrays = {name: torch.from_numpy(np.ascontiguousarray(getattr(self, name)[order]))
-                  for name in ("obs", "policy", "has_policy", "value", "present")}
+        # turns_left as int32: torch has no uint16 that every version loads
+        arrays = {name: torch.from_numpy(np.ascontiguousarray(
+                      getattr(self, name)[order].astype(np.int32 if name == "turns_left" else getattr(self, name).dtype)))
+                  for name in self.names}
         return {"size": self.size, "added": self.added, **arrays}
 
     def restore(self, state: Mapping[str, Any]) -> None:
@@ -433,7 +500,9 @@ class ReplayBuffer:
             return
         self._allocate()
         keep = slice(max(0, count - self.capacity), count)
-        for name in ("obs", "policy", "has_policy", "value", "present"):
+        for name in self.names:
+            if name in OUTCOME_LABELS and name not in state:
+                continue  # a state from before the labels: its positions have none (outcome_known False)
             values = state[name][keep].numpy()
             getattr(self, name)[: len(values)] = values
         self.size = min(count, self.capacity)
@@ -530,6 +599,8 @@ class _Pending:
     policy: np.ndarray | None
     seat: int
     num_players: int
+    #: The game's turn count at the position (read with the outcome head only: its turns-left label).
+    turn: int = 0
 
 
 class SelfPlay:
@@ -598,6 +669,10 @@ class SelfPlay:
             "rescale": bool(train["target_rescale"]), "prior_temperature": float(train["target_prior_temperature"])}
         self.mask = slice(model.mask_offset, model.mask_offset + model.num_actions)
         self.pending: list[list[_Pending]] = [[] for _ in range(num_envs)]
+        #: The outcome head's labels are recorded (model.args.outcome), and the games each env
+        #: has finished as this object saw them (against VecEnv.last_outcome's count).
+        self.outcome = bool(getattr(model, "outcome", False))
+        self.finished = np.zeros(num_envs, dtype=np.int64)
         self.ply = np.zeros(num_envs, dtype=np.int64)
         self.decisions = 0
         self.games = 0
@@ -752,7 +827,8 @@ class SelfPlay:
                     self.trees[env] = (*self.trees[env][:3], int(b["actions"][row]))
                 if full[i] or self.train["record_fast"]:
                     self.pending[env].append(_Pending(b["observations"][row].astype(np.float16), policy, seat,
-                                                      int(b["num_players"][env])))
+                                                      int(b["num_players"][env]),
+                                                      int(self.vec.num_turns(env)) if self.outcome else 0))
                 self.ply[env] += 1
         except BaseException:
             self.trees.clear()  # a step that failed keeps no tree: the searches go below
@@ -775,6 +851,16 @@ class SelfPlay:
         self.vec.step()
         self._finish(replay)
 
+    def _last_outcome(self, env: int) -> dict[str, Any]:
+        """``VecEnv.last_outcome`` of the game ``env`` just finished, with ``known``: its end
+        labels that game's positions. Not when the game was cut at the turn limit (no winner,
+        no end to count turns to), nor when it is not the one game the env finished since the
+        last terminal seen here."""
+        last = dict(self.vec.last_outcome(env))
+        last["known"] = not last["truncated"] and int(last["games"]) == int(self.finished[env]) + 1
+        self.finished[env] = int(last["games"])
+        return last
+
     def _finish(self, replay: ReplayBuffer) -> None:
         b = self.buffers
         players = self.players
@@ -786,6 +872,7 @@ class SelfPlay:
             if int(env) in self.trees:  # reuse: the game is over (won or truncated) and reset
                 pool, sid, _, _ = self.trees.pop(int(env))
                 pool.remove(sid)
+            last = self._last_outcome(int(env)) if self.outcome else None
             if not rows:
                 continue
             rewards = b["rewards"][env * players : (env + 1) * players]
@@ -799,7 +886,27 @@ class SelfPlay:
                 np.array([r.policy is not None for r in rows]),
                 np.stack([t for t, _ in targets]),
                 np.stack([p for _, p in targets]),
+                outcome_labels(rows, last, players) if last is not None else None,
             )
+
+
+def outcome_labels(rows: list[_Pending], last: Mapping[str, Any], max_players: int) -> dict[str, np.ndarray]:
+    """The :data:`OUTCOME_LABELS` of a finished game's positions from ``VecEnv.last_outcome``
+    (``last``; ``known: False`` in it: no labels, all masked). Slot k of ``final_vp`` is the
+    seat k places after the row's (the value targets' order)."""
+    count = len(rows)
+    labels = {"final_vp": np.zeros((count, max_players), np.uint8), "vp_to_win": np.zeros(count, np.uint8),
+              "turns_left": np.zeros(count, np.uint16), "outcome_known": np.zeros(count, bool)}
+    if not last.get("known", True):
+        return labels
+    points = np.asarray(last["victory_points"], dtype=np.int64)
+    for i, row in enumerate(rows):
+        n = row.num_players
+        labels["final_vp"][i, :n] = np.clip(points[(row.seat + np.arange(n)) % n], 0, 255)
+        labels["turns_left"][i] = min(max(int(last["turns"]) - row.turn, 0), 65535)
+    labels["vp_to_win"][:] = min(int(last["vps_to_win"]), 255)
+    labels["outcome_known"][:] = True
+    return labels
 
 
 # ---------------------------------------------------------------- learning
@@ -817,17 +924,45 @@ def policy_stats(target: torch.Tensor, net_logp: torch.Tensor, net_probs: torch.
     return -(target * target_log).sum(1), -(net_probs * safe).sum(1), (target * (target_log - safe)).sum(1)
 
 
+def outcome_losses(vp: torch.Tensor, turns: torch.Tensor, batch: Mapping[str, torch.Tensor]
+                   ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The outcome head's two Huber losses on a replay batch and their mean absolute errors in
+    victory points and in turns, over the labelled rows (``outcome_known``; the victory points
+    over the seated slots of those): ``vp`` [B, P] is the head's final victory points over the
+    points to win, ``turns`` [B] its turns left over OUTCOME_TURNS. No labelled row: zeros."""
+    known = batch["outcome_known"].float()
+    seats = batch["present"] * known[:, None]
+    to_win = batch["vp_to_win"].clamp_min(1.0)[:, None]
+    vp_gap = vp - batch["final_vp"] / to_win
+    turns_gap = turns - batch["turns_left"] / OUTCOME_TURNS
+    zeros = torch.zeros_like
+    vp_loss = (F.huber_loss(vp_gap, zeros(vp_gap), reduction="none", delta=OUTCOME_HUBER_DELTA) * seats).sum()
+    turns_loss = (F.huber_loss(turns_gap, zeros(turns_gap), reduction="none", delta=OUTCOME_HUBER_DELTA) * known).sum()
+    n_seats, n_rows = seats.sum().clamp_min(1.0), known.sum().clamp_min(1.0)
+    with torch.no_grad():
+        vp_mae = (vp_gap.abs() * to_win * seats).sum() / n_seats
+        turns_mae = (turns_gap.abs() * known).sum() * OUTCOME_TURNS / n_rows
+    return vp_loss / n_seats, turns_loss / n_rows, vp_mae, turns_mae
+
+
 def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuffer, train: Mapping[str, Any],
           device: str, rng: np.random.Generator) -> dict[str, float]:
-    """``updates_per_iteration`` gradient steps on uniform minibatches; their mean statistics."""
+    """``updates_per_iteration`` gradient steps on uniform minibatches; their mean statistics.
+    A network with the outcome head adds its two losses (:func:`outcome_losses`) at
+    ``outcome_vp_coef`` and ``outcome_turns_coef``."""
     model.train()
+    outcome = bool(getattr(model, "outcome", False))
+    vp_coef, turns_coef = outcome_coefs(train)
     sums: dict[str, float] = {}
     players = replay.shapes[2]
     by_n = np.zeros((players + 1, 3))  # count, predicted seat-sum, target seat-sum
     updates = int(train["updates_per_iteration"])
     for _ in range(updates):
         batch = replay.batch(rng.integers(0, replay.size, int(train["minibatch_size"])), device)
-        logits, value_logits, _ = model.heads(batch["obs"])
+        if outcome:
+            logits, value_logits, _, final_vp, turns_left = model.heads_with_outcome(batch["obs"])
+        else:
+            logits, value_logits, _ = model.heads(batch["obs"])
         logp = F.log_softmax(logits.float(), dim=1)
         has = batch["has_policy"]
         target = batch["policy"][has]
@@ -837,6 +972,12 @@ def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuf
         value_loss = (F.binary_cross_entropy_with_logits(value_logits.float(), batch["value"], reduction="none")
                       * present).sum() / present.sum().clamp_min(1.0)
         loss = policy_loss + float(train["value_coef"]) * value_loss
+        extra: tuple[tuple[str, torch.Tensor], ...] = ()
+        if outcome:
+            vp_loss, turns_loss, vp_mae, turns_mae = outcome_losses(final_vp, turns_left, batch)
+            loss = loss + vp_coef * vp_loss + turns_coef * turns_loss
+            extra = (("outcome_vp_loss", vp_loss), ("outcome_turns_loss", turns_loss), ("outcome_vp_mae", vp_mae),
+                     ("outcome_turns_mae", turns_mae), ("outcome_known", batch["outcome_known"].float().mean()))
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), float(train["max_grad_norm"]))
@@ -847,7 +988,7 @@ def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuf
                 for key, value in zip(("target_entropy", "net_entropy", "kl_target_net"),
                                       policy_stats(target, logp[has], probs[has])):
                     sums[key] = sums.get(key, 0.0) + float(value.mean()) / updates
-            for key, value in (("policy_loss", policy_loss), ("value_loss", value_loss)):
+            for key, value in (("policy_loss", policy_loss), ("value_loss", value_loss), *extra):
                 sums[key] = sums.get(key, 0.0) + float(value) / updates
             predicted = (torch.sigmoid(value_logits.float()) * present).sum(1)
             n = present.sum(1).long().cpu().numpy()
@@ -907,7 +1048,10 @@ class Monitors:
       that finished during the iteration (in replay but not yet trained on): ``value_bce``
       (per seated slot, train/value_loss's normalization) and ``value_brier`` against the outcome
       targets the trainer uses; per player count n the mean seat-sums ``value_sum_{n}p`` and
-      ``target_sum_{n}p`` and their gap ``sum_gap_{n}p``; ``rows``.
+      ``target_sum_{n}p`` and their gap ``sum_gap_{n}p``; ``rows``. With the outcome head
+      (``model.args.outcome``) also ``outcome_vp_mae`` and ``outcome_turns_mae``, its mean
+      absolute errors in victory points (per seated slot) and in turns on those positions'
+      labelled rows (``outcome_rows`` of them).
     * ``search/*`` (self-play): among the iteration's full-budget searches at non-forced
       decisions, ``overrule``, the fraction whose target's argmax is not the network's masked
       argmax at that root; ``target_entropy``, ``net_entropy`` and ``kl_target_net`` on those
@@ -1022,8 +1166,29 @@ class Monitors:
                     value, target_sum = by_n[n, 1] / by_n[n, 0], by_n[n, 2] / by_n[n, 0]
                     logs.update({f"oos/value_sum_{n}p": float(value), f"oos/target_sum_{n}p": float(target_sum),
                                  f"oos/sum_gap_{n}p": float(abs(value - target_sum))})
+            if replay.outcome and getattr(self.model, "outcome", False):
+                logs.update(self._outcome(replay, index))
         self.seconds += time.time() - start
         return logs
+
+    def _outcome(self, replay: ReplayBuffer, index: np.ndarray) -> dict[str, float]:
+        """``oos/outcome_*``: the outcome head's mean absolute errors on the replay rows ``index``."""
+        vp = turns = seats = rows = 0.0
+        with torch.inference_mode():
+            for first in range(0, len(index), self.rows):
+                batch = replay.batch(index[first : first + self.rows], self.device)
+                known = batch["outcome_known"].float()
+                if not bool(known.any()):
+                    continue
+                _, _, _, final_vp, turns_left = self.model.heads_with_outcome(batch["obs"])
+                _, _, vp_mae, turns_mae = outcome_losses(final_vp, turns_left, batch)
+                n_seats, n_rows = float((batch["present"] * known[:, None]).sum()), float(known.sum())
+                vp, turns = vp + float(vp_mae) * n_seats, turns + float(turns_mae) * n_rows
+                seats, rows = seats + n_seats, rows + n_rows
+        if not rows:
+            return {"oos/outcome_rows": 0}
+        return {"oos/outcome_rows": int(rows), "oos/outcome_vp_mae": vp / max(seats, 1.0),
+                "oos/outcome_turns_mae": turns / rows}
 
     def drift(self) -> dict[str, float]:
         """``drift/*``: the network against the starting network on the probe."""
@@ -1119,6 +1284,9 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         from catanrl.checkpoint import load_parts
 
         load_parts(model, cfg["init_from"])
+    if (max(outcome_coefs(train)) > 0.0) != bool(getattr(model, "outcome", False)):
+        raise ValueError("train.outcome_vp_coef / outcome_turns_coef weigh the outcome head's losses: one of them "
+                         "is above 0 exactly when the network has the head (model.args.outcome)")
     device = resolve_device(runtime.get("device", "auto"))
     model.to(device).eval()
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(train["learning_rate"]),
@@ -1128,7 +1296,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
                         device=device, mode="strict" if strict else "fast",
                         groups=int(runtime.get("search_groups") or SEARCH_GROUPS))
     replay = ReplayBuffer(int(train["replay_capacity"]), selfplay.vec.observation_size, selfplay.vec.action_size,
-                          selfplay.players)
+                          selfplay.players, outcome=selfplay.outcome)
     monitors = Monitors(model, device=device, rows=int(train["search_rows"])) if monitoring else None
     selfplay.monitor = monitors
     # obs.dice_state: the dice input's usage checks (dice/*, catanrl.train.dice_probe), every iteration
