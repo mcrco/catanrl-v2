@@ -584,17 +584,43 @@ uv run python tools/search_probe.py --pair <fp16's final record> <fp32's final r
 === Training runs on Modal #chip("todo") <exp:recipe-modal>
 #meta(
   dates: "2026-11-16",
-  dates-label: "building",
+  dates-label: "built",
   owner: "marco",
-  config: "tools/modal_train.py (wt/modal, being built)",
+  config: "tools/modal_train.py (wt/modal, unmerged)",
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-16): launch experiments in parallel on Modal. Only the benchmark harness exists (@exp:az-hardware); a training harness is being built. No training run starts before Marco sets a budget.]
+#tldr[Marco (2026-11-16): launch experiments in parallel on Modal. A training harness is built and tested there for \$0.49. `ppo-mixed`'s training runs at 60,800 agent steps a second on an L40S, 2.5× this box: 1B steps in 4.6 h for about \$12. No training run starts before Marco sets a budget.]
 
-- *What exists.* The image and build of @exp:az-hardware: one short job per call, results returned by value, nothing stored.
-- *What training needs.* A volume for run directories and checkpoints; detached jobs that resume after a preemption; a time cap per launch; pulling the run back into `runs/`.
-- *W&B.* No key goes to Modal. The run directory is pulled to this box every few minutes and mirrored from here.
-- *What Modal buys.* Parallel runs, and speed where the card is the limit: `graph-m` PPO 3× on an L40S; AlphaZero self-play on `graph-s` 1.0× at 8 cores and 1.29× at 32 (@exp:az-hardware). PPO at `graph-s` size is not measured; the harness's smoke test measures it.
-- *Price.* An L40S \$1.95 an hour, an A10G \$1.10, plus about \$0.05 a core-hour and \$0.008 a GiB-hour: about \$2.60 an hour for an L40S with 8 cores and 32 GiB.
-- *Spent.* \$1.53 on the benchmark. The harness's own tests are capped at \$0.90.
+#lead[The harness.]
+- *Launch.* Any committed revision of any local branch, a config, a card, cores and a cap in hours; the job runs detached and prints its price per hour and worst-case cost.
+- *Storage.* The run directory is copied to a Modal volume (`catanrl-runs`) at every checkpoint and every few minutes. A restarted container resumes the run from it; past Modal's 24 h limit per call the job starts its own next segment.
+- *Cap.* The cap in hours becomes the trainer's time limit, so the run stops at a checkpoint. It counts training seconds, not the image build or the start-up.
+- *W&B.* No key goes to Modal. `pull` copies the run into `runs/` and mirrors it from this box; `watch` does so every few minutes.
+
+#lead[Tested on Modal.]
+- *Resume.* A tiny CPU run went through six launches to 136 epochs (two automatic next segments, a killed container, a hard stop, a resume, a graceful stop) with every checkpoint present. The kill lost one metrics row: the runner writes a checkpoint before its row.
+- *Checkpoints of other runs.* A shipped checkpoint resolved in the container under the same pin as here.
+- *Code identity.* The `catanrl` and `train` ids match this box's at the same commit. The engine's and PufferLib's differ, because they hash binaries built by another compiler.
+
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([`ppo-mixed`'s training, 8 cores], [\$ an hour], [Agent steps a second], [Epochs], [1B agent steps]),
+    [L40S], [2.58], [60,786 (2.5×)], [45], [4.6 h, about \$12],
+    [A10G], [1.74], [34,746 (1.4×)], [24], [8.0 h, about \$14],
+    [This box (RTX 2070 Super)], [], [about 24,000], [3,800], [11.5 h],
+  ),
+  caption: [Six-minute stretches without evals, medians after five warm-up epochs, 8 threads where the config has 12. Peak GPU memory 5.3 GiB.],
+) <tab:recipe-modal>
+
+- *Not tested.* A live W&B mirror, a real 24 h continuation, a real preemption, an AlphaZero run, and a build from another branch.
+- *Spent.* \$1.53 on the benchmark (@exp:az-hardware) and \$0.49 here. The volume is empty; nothing is running.
+
+#repro(```sh
+# from the wt/modal worktree
+python tools/modal_train.py launch <config> --rev <branch> --gpu L40S --cpu 8 --memory 32 --max-hours 12 --set runtime.threads=8
+python tools/modal_train.py watch <experiment>/<variant> --every 10    # pull and mirror to W&B from this box
+python tools/modal_train.py status <experiment>/<variant>; python tools/modal_train.py stop <experiment>/<variant> --graceful
+```)
