@@ -42,8 +42,8 @@ REMOTE = "/root/catanrl-v2"
 REMOTE_RUNS = "/root/real-runs"
 START = "az-2p-kata/main+1500"
 START_FILES = ("config.json", "run.json", "checkpoints/e001800.pt")
-ITERATIONS = 6   # B1: the same on every machine (the first three are openings)
-EPOCHS = 10      # B2: per precision
+ITERATIONS = 5   # B1: the same on every machine (the first three are openings)
+EPOCHS = 8       # B2: per precision (the first three are warm-up)
 # $ per second (modal.com/pricing, 2026-11-15): the tally's estimate
 PRICE = {"L40S": 0.000542, "A10G": 0.000306, None: 0.0, "core": 0.0000131, "GiB": 0.00000222}
 
