@@ -196,29 +196,32 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 - *Search.* Works on the plain PyTorch path. The fused kernels refuse it by name, so kernels come before any long self-play run.
 - *Not measured.* Playing strength (no training run yet), speed on this box's card (the estimate from the L40S ratio is about 19,500 agent steps a second), float16 on a GPU, and the 5p and 6p games beyond the unit tests.
 
-=== A generalist base, then AlphaZero specialists #chip("todo") <exp:gen-base>
+=== A generalist base, then AlphaZero specialists #chip("running") <exp:gen-base>
 #meta(
   dates: "2026-11-16",
-  dates-label: "config written",
+  dates-label: "launched",
   owner: "marco",
   config: "configs/experiments/gen-base.yaml (wt/player-set)",
-  wandb: (),
+  wandb: (("gen-base-main-96725ccd", "gen-base/main"),),
   records: (),
 )
-#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). The config is written and ran six minutes on an L40S: the first stage would take 5.6 h and about \$15 there. Waiting on Marco's word on the games and a Modal budget.]
+#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). Marco confirmed the games and the dice input, kept the small network for speed, and set the Modal budget at the month's \$30 of free credit. The first stage, `gen-base`, started on an L40S at 03:48 on 2026-11-16: 5.6 h and about \$15, due about 09:45 with its three finals.]
 
 #lead[Plan.]
 - *Base.* PPO self-play from scratch with `graph-seat-s` on 2p, 3p and 4p games at the `private` level, the only fair one past two players (as `ppo-mixed`).
-- *Games (Claude's proposal, for Marco to confirm).* The 2p games on OpenHex's 1v1 rules (`base-2p-fr`: 15 VP, discard at 10, friendly robber, balanced dice); 3p and 4p on base rules, which are OpenHex's 4p rules; each on the BASE board and on shuffled hexagons, as in `ppo-mixed`.
+- *Games (confirmed by Marco, 2026-11-16: "everything openhex rules, with dice input").* The 2p games on OpenHex's 1v1 rules (`base-2p-fr`: 15 VP, discard at 10, friendly robber, balanced dice); 3p and 4p on base rules, which are OpenHex's 4p rules; each on the BASE board and on shuffled hexagons, as in `ppo-mixed`.
 - *First stage.* `ppo-mixed`'s recipe and budget, 996M agent steps (249M decisions), so the two compare at equal training. Besides the network and the 2p rules, two things differ: the dice input is on (@exp:dice-input; under random dice it reads as a fresh deck), and the critic is the undiscounted default where `ppo-mixed` pinned the discounted one.
 - *Time and cost.* 49,328 agent steps a second on an L40S with 8 cores (@tab:gen-player-set): 5.6 h, about \$15 with the finals. On this box about 14 h by the same ratio (not measured).
+- *Size.* Marco asked whether to move to `graph-m`'s size for the wider mix. Kept small: `graph-m` trains at 18,470 steps a second on an L40S against `graph-s`'s 60,786 (@tab:az-hardware), so a medium seat network would take about 18 h and \$48 for the same steps, more than the budget; and the shared seat weights are this run's answer to the wider mix. A larger one follows if this one ends below `ppo-mixed` or the specialists.
+- *Not tuned for the rented card.* Full precision and gradient chunks of 4,096 rows as on this box, so the run compares with `ppo-mixed`. Half precision cost 2.3 pp at equal epochs in @exp:fp16; bfloat16 and larger chunks are not measured.
+- *Before the launch.* A two-epoch run on the L40S played the three finals at 50 boards against the shipped opponents' checkpoints.
 - *Evals.* None in the run. Three finals with the last checkpoint's raw policy, one per table size: 2p against best-2p made fair (2,000 games, ±2.2 pp at 50%), 3p against two copies of `ppo-mixed` (3,000 games, ±1.7 pp at 33.3%), 4p against three copies of best-4p (4,000 games, ±1.3 pp at 25%).
 - *Later stages.* Continue while it gains. fr3 had about 1B decisions of 2p alone; that much for each seat count, with no transfer between them, would be 12 times the first stage. How much the shared weights save is the question.
 - *Specialists.* AlphaZero self-play from the base for each setting, as @exp:az-kata. Two things differ from fr3's line: the base reads `private` rows where fr3 reads `full`, and the fused kernels do not cover the new network (unfused, `graph-m` cost 3.4× per simulation, @exp:deploy-graph-m-check), so kernels come before self-play.
 
 #repro(```sh
 # from the wt/modal worktree; the finals need the three opponents' checkpoints on the volume
-python tools/modal_train.py launch configs/experiments/gen-base.yaml --rev wt/player-set --gpu L40S --cpu 8 --memory 32 --max-hours 8 \
+python tools/modal_train.py launch configs/experiments/gen-base.yaml --rev wt/player-set --gpu L40S --cpu 8 --memory 32 --max-hours 7 \
   --set runtime.threads=8 --ship graph-m-2p-lr/main@e22711 --ship ppo-mixed/main@e3550 --ship ppo-4p/main@e3650
 python tools/modal_train.py watch gen-base/main --every 10
 ```)
