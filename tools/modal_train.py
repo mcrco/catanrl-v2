@@ -353,6 +353,18 @@ def _signatures(run_dir: Path) -> dict:
     return seen
 
 
+def restore_run(src: Path, dst: Path) -> int:
+    """Copy a run directory from the Volume to the container's disk (threads: a Volume read is slow per file)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    files = [p for p in src.rglob("*") if p.is_file() and not _skip(p.relative_to(src))]
+    for parent in {p.parent for p in files}:
+        (dst / parent.relative_to(src)).mkdir(parents=True, exist_ok=True)
+    with ThreadPoolExecutor(16) as pool:
+        list(pool.map(lambda p: shutil.copy2(p, dst / p.relative_to(src)), files))
+    return len(files)
+
+
 def progress_of(run_dir: Path) -> dict:
     """Where a run is, from run.json, config.json and the tail of metrics.jsonl."""
     out: dict = {}
@@ -434,14 +446,22 @@ def _supervise(spec: dict) -> dict:
         print(f"[modal_train] nothing to do: {state['phase']}", flush=True)
         return state
 
-    # the run and the shipped refs, from the Volume to this container's disk (a warm container keeps its own)
+    # the run and the shipped refs, from the Volume to this container's disk. A warm container (the next
+    # segment of the same launch) keeps its own copy and its record of what the Volume already holds.
     seen: dict[str, tuple] = {}
+    seen_path = log_loc.with_suffix(".seen.json")
     for name in [spec["run"], *spec.get("ships", [])]:
         src, dst = Path(VOL) / "runs" / name, Path(LOCAL_RUNS) / name
         if src.is_dir() and not (dst / "run.json").exists():
-            shutil.copytree(src, dst, dirs_exist_ok=True)
+            t0 = time.time()
+            count = restore_run(src, dst)
+            print(f"[modal_train] restored {name} from the Volume: {count} files in {time.time() - t0:.0f} s", flush=True)
             if name == spec["run"]:  # what was just copied down need not go up again
                 seen = _signatures(dst)
+        elif name == spec["run"]:
+            kept = _read_json(seen_path) or {}
+            if kept.get("launch_id") == spec["launch_id"]:
+                seen = {k: tuple(v) if isinstance(v, list) else v for k, v in kept["seen"].items()}
     start = progress_of(loc_run)
     print(f"[modal_train] {spec['run']} rev {spec['rev'][:10]} segment {state['segments']}: {seg_s:.0f} s here, "
           f"trainer limit {limit_h * 3600:.0f} s, budget {spec['budget_s']:.0f} s ({used_before:.0f} used); "
@@ -483,6 +503,7 @@ def _supervise(spec: dict) -> dict:
         if len(samples) > 240:
             samples = samples[::2]
         save_state(phase=phase, progress=now, samples=samples)
+        _put_bytes(seen_path, json.dumps({"launch_id": spec["launch_id"], "seen": seen}).encode())
         print(f"[modal_train] committed {wrote} files to the Volume: epoch {now.get('epoch')}, "
               f"commit point e{now.get('commit_epoch')}, {state['used_s']:.0f} of {spec['budget_s']:.0f} s",
               flush=True)
@@ -568,7 +589,7 @@ def _define(name: str, image: modal.Image | None, gpu: str | None, cores: float,
     train_segment = app.function(
         image=image, gpu=gpu, cpu=(float(cores), float(cores)), memory=int(gib * 1024), timeout=int(timeout_s),
         volumes={VOL: volume}, max_containers=1, scaledown_window=2,
-        retries=modal.Retries(max_retries=3, backoff_coefficient=1.0, initial_delay=5.0),
+        retries=modal.Retries(max_retries=8, backoff_coefficient=1.0, initial_delay=5.0),
         env={"WANDB_MODE": "disabled", "PYTHONUNBUFFERED": "1"},
     )(raw)
     return train_segment
@@ -739,7 +760,7 @@ KINDS = ("new", "same", "extended", "updated", "conflict", "forced")
 
 
 def pull_files(listing: list[tuple[str, int, int]], fetch, dest: Path, manifest_path: Path,
-               force: bool = False) -> dict[str, list[str]]:
+               force: bool = False, workers: int = 8, progress: bool = False) -> dict[str, list[str]]:
     """The no-overwrite rule. ``listing`` is (relative path, size, mtime); ``fetch(rel, fileobj)`` reads one.
 
     new: no local file. same: equal content. extended: a .jsonl or .log whose local copy is a strict
@@ -747,43 +768,68 @@ def pull_files(listing: list[tuple[str, int, int]], fetch, dest: Path, manifest_
     has its hash), the Volume's has changed. conflict: anything else; the local file stays. forced: a
     conflict overwritten because the caller said so.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     manifest = _read_json(manifest_path) or {}
     report: dict[str, list[str]] = {k: [] for k in KINDS}
+
+    def save_manifest() -> None:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = manifest_path.with_name(manifest_path.name + ".tmp")
+        tmp.write_text(json.dumps(manifest, indent=1, sort_keys=True))
+        os.replace(tmp, manifest_path)
+
+    need = []
     for rel, size, mtime in listing:
         if _skip(Path(rel)):
             continue
         local, known = dest / rel, manifest.get(rel)
         if local.exists() and known and known["remote"] == [size, mtime] and known["local"] == _stat(local):
             report["same"].append(rel)
-            continue
+        else:
+            need.append((rel, size, mtime))
+
+    def download(item: tuple[str, int, int]) -> Path:
+        local = dest / item[0]
         local.parent.mkdir(parents=True, exist_ok=True)
         tmp = local.with_name(f".{local.name}.modalpull")
         with open(tmp, "wb") as f:
-            fetch(rel, f)
-        theirs = _sha(tmp)
-        if not local.exists():
-            kind = "new"
-        else:
-            ours = _sha(local)
-            if ours == theirs:
-                kind = "same"
-            elif local.suffix in (".jsonl", ".log") and _is_prefix(local, tmp):
-                kind = "extended"
-            elif known and known.get("sha256") == ours:
-                kind = "updated"
-            else:
-                kind = "forced" if force else "conflict"
-        if kind in ("same", "conflict"):
-            tmp.unlink()
-        else:
-            os.replace(tmp, local)
-        if kind != "conflict":
-            manifest[rel] = {"remote": [size, mtime], "local": _stat(local), "sha256": theirs}
-        report[kind].append(rel)
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = manifest_path.with_name(manifest_path.name + ".tmp")
-    tmp.write_text(json.dumps(manifest, indent=1, sort_keys=True))
-    os.replace(tmp, manifest_path)
+            fetch(item[0], f)
+        return tmp
+
+    save_manifest()  # the directory is this tool's from the first file on, also if the pull is cut short
+    total, done, started, said = sum(size for _, size, _ in need), 0, time.time(), time.time()
+    try:
+        with ThreadPoolExecutor(workers) as pool:
+            for n, ((rel, size, mtime), tmp) in enumerate(zip(need, pool.map(download, need)), 1):
+                local, known = dest / rel, manifest.get(rel)
+                theirs = _sha(tmp)
+                if not local.exists():
+                    kind = "new"
+                else:
+                    ours = _sha(local)
+                    if ours == theirs:
+                        kind = "same"
+                    elif local.suffix in (".jsonl", ".log") and _is_prefix(local, tmp):
+                        kind = "extended"
+                    elif known and known.get("sha256") == ours:
+                        kind = "updated"
+                    else:
+                        kind = "forced" if force else "conflict"
+                if kind in ("same", "conflict"):
+                    tmp.unlink()
+                else:
+                    os.replace(tmp, local)
+                if kind != "conflict":
+                    manifest[rel] = {"remote": [size, mtime], "local": _stat(local), "sha256": theirs}
+                report[kind].append(rel)
+                done += size
+                if progress and time.time() - said >= 10:
+                    said, rate = time.time(), n / (time.time() - started)
+                    print(f"  pull: {n}/{len(need)} files, {done / 1e6:.0f} of {total / 1e6:.0f} MB, "
+                          f"ETA {(len(need) - n) / rate / 60:.1f} min", flush=True)
+    finally:
+        save_manifest()
     return report
 
 
@@ -797,7 +843,8 @@ def pull(run: str, runs: Path, force: bool = False, merge: bool = False) -> dict
     listing = [(p[len(prefix):], size, mtime) for p, size, mtime in vol_list(prefix.rstrip("/"))]
     if not listing:
         raise ToolError(f"the Volume {VOLUME} has no runs/{run}")
-    report = pull_files(listing, lambda rel, f: volume.read_file_into_fileobj(prefix + rel, f), dest, manifest, force)
+    report = pull_files(listing, lambda rel, f: volume.read_file_into_fileobj(prefix + rel, f), dest, manifest, force,
+                        progress=True)
     parts = [f"{len(report[k])} {k}" for k in KINDS if report[k]]
     print(f"{time.strftime('%H:%M:%S')} pull {run} -> {dest}: {', '.join(parts) or 'nothing on the Volume'}")
     for kind, note in (("extended", "appended rows"), ("updated", "replaced: pulled earlier, changed on the Volume"),
@@ -937,7 +984,10 @@ def status_text(run: str, spec: dict, state: dict | None, alive: bool, app_state
         where += f", {p['agent_steps'] / 1e6:.2f}M agent steps"
         if target[0] == "agent_steps":
             where += f" of {target[1] / 1e6:.1f}M ({100 * p['agent_steps'] / target[1]:.1f}%)"
-    lines.append(f"  {state.get('phase')}: {where}; run status {p.get('status')}, commit point e{p.get('commit_epoch')}, "
+    phase = state.get("phase")
+    if not alive and phase in ("training", "respawn", "interrupted"):
+        phase = f"not running (it was {phase})"
+    lines.append(f"  {phase}: {where}; run status {p.get('status')}, commit point e{p.get('commit_epoch')}, "
                  f"{p.get('checkpoints')} checkpoints; segment {state.get('segments')}")
     rate = wall_rate(state.get("samples") or [], state.get("segments"))
     trainer = p.get("trainer") or {}
