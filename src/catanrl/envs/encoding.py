@@ -5,7 +5,8 @@ Every feature, action index and mask comes from cppanatron's ``GraphEncoder``
 must be:
 
 * :func:`make_encoder` builds the ``cpp.GraphEncoder`` for a dims dict and an
-  information level;
+  information level (and, opt-in, ``dice_odds``: each seat's next-roll odds in the
+  global block, :data:`DICE_ODDS`);
 * :func:`dims_for` gives the dims covering a list of scenarios, by default
   from the map generators' seed-independent bounds (``dims: auto``);
 * :func:`row_layout` is the ``{block: (offset, shape)}`` dict of a full
@@ -33,6 +34,16 @@ LEVELS = {
 }
 #: The most seats any game has; graph networks pad seat slots to it.
 MAX_PLAYERS = 6
+#: The opt-in dice input (``obs.dice_odds`` in a config; ``dice_odds: true`` in a checkpoint's
+#: ``obs`` header and a network's ``levels``, present only when on): the global block ends with
+#: ``dice_odds_<k>_<t>``, ``Game.roll_probabilities`` of relative seat k for totals t = 2..12
+#: (``GraphEncoder``'s ``dice_odds``; fair 2d6 odds under random dice, absent seats 0). Without
+#: it a row is exactly what it was before the option existed.
+DICE_ODDS = "dice_odds"
+#: The global features of the dice input, by name prefix.
+DICE_PREFIX = "dice_odds_"
+#: The fair 2d6 odds of totals 2..12: what every seat reads under random dice.
+FAIR_ODDS = tuple(w / 36.0 for w in (1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1))
 #: Blocks of a row that hold per-slot features.
 FEATURE_BLOCKS = ("global", "players", "tiles", "nodes", "edges")
 #: The critic block VecEnv appends when the critic reads another level.
@@ -50,6 +61,12 @@ HIDDEN_FEATURES = (
     "dev_knight", "dev_year_of_plenty", "dev_monopoly", "dev_road_building", "dev_victory_point",
     "dev_playable_knight", "dev_playable_year_of_plenty", "dev_playable_monopoly", "dev_playable_road_building",
 )
+
+
+def dice_odds_of(levels: Mapping[str, Any] | None) -> bool:
+    """Whether rows of ``levels`` (a network's, a checkpoint's ``obs`` or a config's ``obs``)
+    carry the dice input (:data:`DICE_ODDS`)."""
+    return bool((levels or {}).get(DICE_ODDS, False))
 
 
 def info_level(level: str | cpp.InfoLevel) -> cpp.InfoLevel:
@@ -105,9 +122,11 @@ def encoder_dims(dims: Mapping[str, Any] | cpp.EncoderDims) -> cpp.EncoderDims:
     return cpp.EncoderDims(**check_dims(dims))
 
 
-def make_encoder(dims: Mapping[str, Any] | cpp.EncoderDims, level: str | cpp.InfoLevel) -> cpp.GraphEncoder:
-    """The graph encoder (and through it the action space) for ``dims`` at ``level``."""
-    return cpp.GraphEncoder(encoder_dims(dims), info_level(level))
+def make_encoder(dims: Mapping[str, Any] | cpp.EncoderDims, level: str | cpp.InfoLevel,
+                 dice_odds: bool = False) -> cpp.GraphEncoder:
+    """The graph encoder (and through it the action space) for ``dims`` at ``level``, with the
+    dice input when ``dice_odds`` (:data:`DICE_ODDS`)."""
+    return cpp.GraphEncoder(encoder_dims(dims), info_level(level), dice_odds=bool(dice_odds))
 
 
 def action_size(dims: Mapping[str, Any]) -> int:
@@ -125,7 +144,8 @@ def critic_level_of(level: str, critic_level: str | None) -> str | None:
     return None if critic == level_name(level) else critic
 
 
-def row_layout(dims: Mapping[str, Any], level: str, critic_level: str | None = None) -> dict[str, Any]:
+def row_layout(dims: Mapping[str, Any], level: str, critic_level: str | None = None,
+               dice_odds: bool = False) -> dict[str, Any]:
     """``{block: (offset, shape)}`` of one environment row.
 
     The blocks are the encoder's (``global``, ``players``, ``tiles``,
@@ -133,9 +153,10 @@ def row_layout(dims: Mapping[str, Any], level: str, critic_level: str | None = N
     When the critic reads another information level, VecEnv appends the
     critic block (engine E5): ``critic_players``, the players block at the
     critic's level (the only block that differs between levels), right after
-    the actor's row; its feature names are the players block's.
+    the actor's row; its feature names are the players block's. ``dice_odds``
+    widens the global block by the dice input (:data:`DICE_ODDS`).
     """
-    encoder = make_encoder(dims, level)
+    encoder = make_encoder(dims, level, dice_odds)
     layout: dict[str, Any] = {
         name: (int(offset), tuple(int(s) for s in shape))
         for name, (offset, shape) in encoder.layout().items()

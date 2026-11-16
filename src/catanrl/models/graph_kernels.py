@@ -94,8 +94,11 @@ class FusedGraph:
         if sp["players"][0] != sp["global"][0] + raw["global"]:
             raise ValueError("the kernels expect the players block right after the global block")
         wg = d(trunk.global_projection.weight)
-        G, Fp = canon["global"], canon["players"]
-        parts = [_fold(wg[:, :G], idx["global"], raw["global"])]
+        G, Fp = trunk.plain_globals, canon["players"]
+        wglob = wg[:, :G]
+        if trunk.dice_projection is not None:  # the dice inputs end the canonical global block
+            wglob = torch.cat((wglob, d(trunk.dice_projection.weight)), dim=1)
+        parts = [_fold(wglob, idx["global"], raw["global"])]
         parts += [_fold(wg[:, G + k * Fp: G + (k + 1) * Fp], idx["players"], raw["players"]) for k in range(self.P)]
         self.g_span = (sp["global"][0], sp["global"][0] + raw["global"] + self.P * raw["players"])
         self.wgT, self.bg = c(torch.cat(parts, dim=1).T), d(trunk.global_projection.bias)

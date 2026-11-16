@@ -79,19 +79,21 @@ def play_games(policy, critics: Sequence[Any], plan, *, games: int, envs: int, s
     import cppanatron as cpp
     import torch
 
-    from catanrl.envs.encoding import encoder_dims, info_level
+    from catanrl.envs.encoding import dice_odds_of, encoder_dims, info_level
 
     if games % envs:
         raise ValueError(f"--games {games} is not a multiple of --envs {envs}")
     per_env = games // envs
-    level = policy.levels["level"]
+    level, dice = policy.levels["level"], dice_odds_of(policy.levels)
     for model in (policy, *critics):
-        if model.levels["level"] != level or getattr(model, "has_critic_block", False) \
+        if model.levels["level"] != level or dice_odds_of(model.levels) != dice \
+                or getattr(model, "has_critic_block", False) \
                 or getattr(model, "recurrent", False):
-            raise ValueError("every network must read the policy's rows (one level, no critic block, not recurrent)")
+            raise ValueError("every network must read the policy's rows (one level and dice input, no critic block, "
+                             "not recurrent)")
     players = int(plan.dims["max_players"])
     vec = cpp.VecEnv(list(plan.scenarios), num_envs=envs, dims=encoder_dims(plan.dims), level=info_level(level),
-                     seed=seed, num_threads=threads, vp_reward=0.0, trackers=False)
+                     seed=seed, num_threads=threads, vp_reward=0.0, trackers=False, dice_odds=dice)
     b = vec.allocate()
     vec.reset(seed)
     offset, (size,) = policy.layout["action_mask"]

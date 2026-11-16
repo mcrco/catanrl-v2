@@ -16,8 +16,10 @@ on ``num_envs``, ``threads`` or the order games finish in:
 * the dims (and so every network's shapes) come from the scenarios'
   generator bounds, not from the games being played.
 
-Games run on cppanatron's VecEnv in schedule mode (engine E1): bots and
-forced moves play inside the engine on its threads, each game's random bots
+Games run on cppanatron's VecEnv in schedule mode (engine E1), its rows
+encoded as the first network reads them (its level, and its dice input when
+the checkpoint has one); an agent that reads other rows encodes its own from
+the game. Bots and forced moves play inside the engine on its threads, each game's random bots
 draw from its own stream (E2), and with an MCTS (``dets``), BELIEF or TRADE agent
 in the lineup the VecEnv keeps a hand tracker per learner seat, fed every
 transition (E6), which the agents read through ``tracker(env, seat)``.
@@ -183,6 +185,11 @@ class _Maps:
 def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_game) -> None:
     networks = [a for a in agents if isinstance(a, NativeAgent)]
     level = networks[0].level if networks else "private"
+    dice = bool(getattr(networks[0], "dice_odds", False)) if networks else False
+
+    def own_rows(agent) -> bool:
+        """Whether ``agent`` reads rows other than the VecEnv's (another level or dice input)."""
+        return agent.level != level or bool(getattr(agent, "dice_odds", False)) != dice
     enemies = {a.value_enemies for a in agents if isinstance(a, BotAgent) and a.key == "F"}
     if len(enemies) > 1:
         raise ValueError("every F of a lineup must count the same enemies")
@@ -204,7 +211,7 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
     exact = any(agent.needs_trackers and agent.tracker_mode == cpp.TrackerMode.EXACT for agent in agents)
     vec = cpp.VecEnv(cpp_scenarios, num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
                      seed=0, num_threads=int(threads), auto_reset=False, trackers=trackers,
-                     tracker_mode=cpp.TrackerMode.EXACT if exact else cpp.TrackerMode.POOL)
+                     tracker_mode=cpp.TrackerMode.EXACT if exact else cpp.TrackerMode.POOL, dice_odds=dice)
     buffers = vec.allocate()
     vec.reset()
     size = int(vec.action_size)
@@ -266,9 +273,9 @@ def _play_vecenv(agents, games, scenarios, maps, dims, *, num_envs, threads, on_
             agent = agents[int(slot)]
             envs = buffers["env_index"][rows_idx]
             seats = buffers["seat"][rows_idx]
-            need_games = agent.needs_games or agent.level != level
+            need_games = agent.needs_games or own_rows(agent)
             games_list = [vec.game(int(e)) for e in envs] if need_games else None
-            if agent.level != level:
+            if own_rows(agent):
                 rows = np.stack([agent.encode(g, int(s)) for g, s in zip(games_list, seats)])
             else:
                 rows = buffers["observations"][rows_idx]

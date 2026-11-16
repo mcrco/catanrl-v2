@@ -449,14 +449,25 @@ def _resolve_model(key, args, named, harness, games) -> ResolvedAgent:
     ckpt, ref = pin(params.ckpt, "all" if one_network else "actor")
     params = dataclasses.replace(params, ckpt=str(ref))
     levels, dims = ckpt.levels, ckpt.dims
+    if ckpt.dice_odds and key in ("PREDICT", "TRADE"):
+        # POLICY, BELIEF and MCTS read the dice input from the checkpoint; these two build
+        # their networks' rows themselves, without it.
+        raise SpecError(f"{key}: {ref} reads the dice input (obs.dice_odds), which {key} does not encode yet; "
+                        "play it as POLICY, BELIEF or MCTS")
     predictor, predictor_ref = None, None
     critic, critic_ref = None, None
     if key == "PREDICT":
         predictor, predictor_ref = pin(params.predictor, "aux")  # the trunk and the aux head: what the agent runs
+        if predictor.dice_odds:
+            raise SpecError(f"PREDICT: predictor {predictor_ref} reads the dice input (obs.dice_odds), which PREDICT "
+                            "does not encode yet")
         params = dataclasses.replace(params, predictor=str(predictor_ref))
         _check_predict(ref, levels, predictor, predictor_ref)
     if key == "TRADE":
         critic, critic_ref = (ckpt, ref) if one_network else pin(params.critic, "critic")  # its values: what the agent reads
+        if critic.dice_odds:
+            raise SpecError(f"TRADE: critic {critic_ref} reads the dice input (obs.dice_odds), which TRADE does not "
+                            "encode yet")
         params = dataclasses.replace(params, critic=str(critic_ref))  # the canonical spec always names the critic
         _check_trade(critic, critic_ref, harness)
     if ckpt.recurrent:

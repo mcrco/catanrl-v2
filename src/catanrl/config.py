@@ -33,7 +33,11 @@ is optional the same way (:data:`TRAIN_OPTIONAL`): absent from
 ``configs/train/ppo.yaml``, so a config without it keeps its hash. So is an
 AlphaZero variant's ``train.reuse`` (absent from ``configs/train/alphazero.yaml``).
 ``runtime.search_groups`` is optional too (``runtime`` is not hashed; unset,
-the AlphaZero trainer takes its default).
+the AlphaZero trainer takes its default). So is ``obs.dice_odds``
+(:data:`OPTIONAL`), the opt-in dice input: each seat's next-roll odds in every
+row (:data:`catanrl.envs.encoding.DICE_ODDS`), with
+``init_from.zero_new_inputs`` to start such a network from a checkpoint
+without it.
 
 An AlphaZero variant that starts from a network (``init_from`` with the
 actor) gets :func:`alphazero_evals` as a layer between the defaults and the
@@ -101,13 +105,13 @@ ENTRY_KEYS = {
     "eval.select": {"suite", "lineup", "every", "metric", "fill", "from"},
     "eval.monitor": {"name", "suite", "lineup", "every", "metric", "fill"},
     "eval.final": {"suite", "lineup", "fill", "harness"},
-    "init_from": {"ckpt", "parts", "restore", "split_shared"},
+    "init_from": {"ckpt", "parts", "restore", "split_shared", "zero_new_inputs"},
 }
 #: Entry sections that are lists (the others are a mapping or null).
 ENTRY_LISTS = ("eval.final", "eval.monitor")
 #: Keys a config may set that defaults.yaml leaves out, with the value that means "unset": a
 #: config without them (or with them at that value, dropped at resolution) hashes as before.
-OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None}
+OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None, "obs.dice_odds": False}
 #: ``runtime.search_groups`` (unhashed like all of ``runtime``; unset: the trainer's default): the
 #: groups AlphaZero self-play splits its searches into (catanrl.search.pipeline; 1: the serial loop).
 OPTIONAL["runtime.search_groups"] = None
@@ -563,6 +567,16 @@ def _check_semantics(cfg: dict) -> None:
         if init.get("split_shared") and init.get("restore", "weights") != "weights":
             raise ConfigError("init_from.split_shared copies a shared trunk's weights into separate actor and critic "
                               "networks; it restores weights only")
+        if not isinstance(init.get("zero_new_inputs", False), bool):
+            raise ConfigError("init_from.zero_new_inputs is true or false")
+        if init.get("zero_new_inputs"):
+            if init.get("restore", "weights") != "weights":
+                raise ConfigError("init_from.zero_new_inputs copies the source's weights and zeroes the dice input's; "
+                                  "it restores weights only (the source's optimizer state has no dice weights)")
+            if not (cfg.get("obs") or {}).get("dice_odds"):
+                raise ConfigError("init_from.zero_new_inputs zero-initializes the dice input's weights: set "
+                                  "obs.dice_odds: true")
+    _check_obs(cfg)
     select = cfg["eval"]["select"]
     if select is not None and ("suite" not in select or "lineup" not in select):
         raise ConfigError("eval.select needs suite and lineup")
@@ -572,6 +586,18 @@ def _check_semantics(cfg: dict) -> None:
             raise ConfigError("every eval.final entry needs suite and lineup")
         if entry.get("harness", "native") not in ("native", "catanatron"):
             raise ConfigError(f"eval.final harness must be native or catanatron, not {entry['harness']!r}")
+
+
+def _check_obs(cfg: Mapping[str, Any]) -> None:
+    """``obs.dice_odds`` (optional, :data:`OPTIONAL`): a bool, read by the PPO trainer (its
+    VecEnv, network and checkpoints); every agent and harness reads it from the checkpoint."""
+    dice = (cfg.get("obs") or {}).get("dice_odds", False)
+    if not isinstance(dice, bool):
+        raise ConfigError(f"obs.dice_odds is true or false, not {dice!r}")
+    algo = (cfg.get("train") or {}).get("algo")
+    if dice and cfg.get("kind") == "train" and algo != "ppo":
+        raise ConfigError(f"obs.dice_odds (the dice input) trains with train.algo ppo, not {algo}: the {algo} "
+                          "trainer builds its rows without it")
 
 
 def _check_monitors(cfg: Mapping[str, Any]) -> None:

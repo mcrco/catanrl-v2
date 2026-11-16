@@ -164,17 +164,20 @@ class CatanPufferEnv(pufferlib.PufferEnv):
         log_interval: int = 32,
         buf=None,
         seed: int | None = 0,
+        dice_odds: bool = False,
     ) -> None:
         dims = check_dims(dims)
         kwargs: dict[str, Any] = {}
         if critic_level_of(level, critic_level) is not None:
             kwargs["critic_level"] = info_level(critic_level)  # E5
+        if dice_odds:
+            kwargs["dice_odds"] = True  # each seat's next-roll odds in the global block
         self.vec = cpp.VecEnv(
             list(scenarios), num_envs=num_envs, dims=encoder_dims(dims), level=info_level(level),
             seed=0 if seed is None else int(seed), num_threads=threads, vp_reward=vp_reward, **kwargs,
         )
         if hasattr(self.vec, "layout"):
-            expected = row_layout(dims, level, critic_level_of(level, critic_level))
+            expected = row_layout(dims, level, critic_level_of(level, critic_level), bool(dice_odds))
             actual = {name: (int(off), tuple(int(x) for x in shape))
                       for name, (off, shape) in self.vec.layout().items()}
             if actual != expected:
@@ -295,13 +298,16 @@ def plan_env(env_cfg: Mapping[str, Any], *, pool_seed: int) -> EnvPlan:
 
 
 def make_vecenv(plan: EnvPlan, *, num_envs: int, level: str, critic_level: str | None, threads: int,
-                seed: int, vp_reward: float = 0.0, log_interval: int = 32):
-    """A ``pufferlib.vector.Serial`` over one :class:`CatanPufferEnv`."""
+                seed: int, vp_reward: float = 0.0, log_interval: int = 32, dice_odds: bool = False):
+    """A ``pufferlib.vector.Serial`` over one :class:`CatanPufferEnv` (``dice_odds``: rows with
+    the dice input, ``obs.dice_odds``)."""
     kwargs = {
         "scenarios": plan.scenarios, "names": [s.name for s in plan.specs], "num_envs": num_envs, "dims": plan.dims,
         "level": level, "critic_level": critic_level, "threads": threads, "vp_reward": vp_reward,
         "log_interval": log_interval,
     }
+    if dice_odds:
+        kwargs["dice_odds"] = True
     return pufferlib.vector.make(
         CatanPufferEnv, env_kwargs=kwargs, num_envs=1, backend=pufferlib.vector.Serial, seed=seed
     )

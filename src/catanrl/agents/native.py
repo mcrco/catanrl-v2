@@ -30,7 +30,9 @@ The harness drives every agent the same way: ``bind(dims)`` once (graph
 networks are rebuilt at the harness's dims, which leaves their outputs
 unchanged), then ``act(rows, masks, decision_seeds, games=..., trackers=...)``
 per batch of decisions, returning indices into the
-``GraphActionSpace`` of those dims. ``rows`` are encoded at ``agent.level``;
+``GraphActionSpace`` of those dims. ``rows`` are encoded at ``agent.level``,
+with the dice input when ``agent.dice_odds`` (the network's, from its
+checkpoint; BELIEF's worlds and MCTS's leaves get it from the same encoder);
 agents with ``needs_games`` also get copies of the games, and those with
 ``needs_trackers`` the deciding seats' hand trackers. A recurrent POLICY
 (``needs_memory``) also gets ``streams`` (an id per row that is stable for
@@ -63,6 +65,7 @@ from catanrl.envs.encoding import (
     action_size,
     check_dims,
     critic_level_of,
+    dice_odds_of,
     hidden_feature_indices,
     make_encoder,
     row_layout,
@@ -110,6 +113,10 @@ class NativeAgent:
         #: The level of the rows the agent reads (``act``'s ``rows``, ``encode``): the
         #: network's, unless the agent builds the network's rows itself (PREDICT).
         self.level = reads_level or model.levels["level"]
+        #: Whether those rows carry the dice input (the network's ``obs.dice_odds``).
+        self.dice_odds = dice_odds_of(model.levels)
+        if self.dice_odds and reads_level is not None:
+            raise ValueError(f"{self.key} builds the network's rows itself and has no dice input yet")
         self._weights = {k: v.detach().cpu() for k, v in model.state_dict().items()}
         self._spec = model.spec
         self._levels = dict(model.levels)
@@ -131,14 +138,14 @@ class NativeAgent:
     def _rebuild(self, dims: dict) -> CatanModel:
         critic = critic_level_of(self._levels["level"], self._levels["critic_level"])
         model = build_model(self._spec, dims=dims, levels=self._levels, num_actions=action_size(dims),
-                            layout=row_layout(dims, self._levels["level"], critic))
+                            layout=row_layout(dims, self._levels["level"], critic, self.dice_odds))
         model.load_state_dict(self._weights)
         return model
 
     def _set_model(self, model: CatanModel) -> None:
         self.model = model
         self.dims = dict(model.dims)
-        self.encoder = make_encoder(self.dims, self.level)
+        self.encoder = make_encoder(self.dims, self.level, self.dice_odds)
         self.action_space = self.encoder.action_space
         self.evaluator = BatchEvaluator(model, device=self.device, infer_rows=self.infer_rows,
                                         mode=self.mode, heads=self.heads,
@@ -466,7 +473,8 @@ class MctsAgent(NativeAgent):
 
     def _make_pool(self) -> None:
         self.config.max_players = int(self.dims["max_players"])
-        self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"])
+        self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"],
+                              dice_odds=self.dice_odds)
         #: stream -> (search id, the game handed, the index played): a new pool drops them all.
         self._live: dict[int, tuple[int, cpp.Game, int]] = {}
         #: Streams that had a first decision: a later decision of any other stream is a harness error.
