@@ -302,29 +302,75 @@ uv run python tools/search_probe.py --pair aca296e23ff93a67 72819d1a1a072278
 
 == Sampling noise at chance nodes
 
-=== What limits the search: seed agreement and depth in dice rolls #chip("running") <exp:search-noise>
+=== What limits the search: seed agreement and depth in dice rolls #chip("done") <exp:search-noise>
 #meta(
   dates: "2026-11-15",
-  dates-label: "started",
   owner: "assistant",
   wandb: (),
   records: (),
 )
-#tldr[Claude's suggestion, approved by Marco on 2026-11-15. Two measurements on e1800 in the deployed search, to say whether the search is short of samples or short of a better network: do two searches of one position with different seeds pick the same move, above all when they overrule the network, and how many dice rolls deep do the simulations reach?]
+#tldr[Claude's suggestion, approved by Marco on 2026-11-15. The network limits the search, not dice sampling. Two searches of one position with different seeds pick the same move in 93.7% of positions at 1,024 sims and 91.9% at 131,072: 128 times the simulations does not raise agreement. Where the two seeds see the same root priors they agree 97 to 99%; nearly all the variation is where the one sampled hidden world differs. Most disagreements are near-ties. The dice-sampling ideas (@exp:search-stratified, @exp:search-paired-root) are parked.]
 
 *Question.* Is the deployed search limited by sampling noise or by the network's values?
 
-#lead[Why.] A dice node draws its outcome at random from the exact odds (`sample_outcome`), and the search plays one sampled world. A search of 1,024 simulations spread over 11 totals and two or three rolls of depth has few samples per branch. If noise decides the move, the search ideas pay (@exp:search-stratified, @exp:search-paired-root); if two seeds agree and the tree is shallow, the network is the limit (@exp:dice-input, @exp:az-aux, @exp:az-graph-m).
+#lead[Why.] A dice node draws its outcome at random from the exact odds (`sample_outcome`), and the search plays one sampled world. If noise decides the move, the search ideas pay (@exp:search-stratified, @exp:search-paired-root); if two seeds agree, the network is the limit (@exp:dice-input, @exp:az-aux, @exp:az-graph-m).
 
 #lead[Setup.]
-- *Positions.* Decisions with at least two legal moves from new games of e1800 against fr3 on `base-2p-fr` (seed 20261115, not a suite's), spread from the opening placements to the endgame, at most two per game.
-- *Seed agreement.* Each position is searched twice with different search seeds, in the deployed options (one world, 64 pending, transpositions, fused kernels) on a fresh tree: 4,000 positions at 1,024 sims (the evals' depth) and up to 1,000 of them at 131,072 (the bot's). Reported with Wilson intervals, split by opening placement and main game: how often the two agree, how often the search overrules the network's top move, and when it does, whether the second search makes the same move, the network's, or a third.
-- *Depth.* Over all simulations, the number of dice rolls and of decisions between the root and the leaf.
-- No games are played and no win rate comes out: this is a diagnostic, about 2.5 h of GPU.
+- *Positions.* Decisions with at least two legal moves from 2,016 new games of e1800 (`BELIEF`, 16 worlds) against fr3 on `base-2p-fr` (seed 20261115, not a suite's), at most two per game: 4,000 positions (196 opening placements, 3,804 main game).
+- *Seed agreement.* Each position is searched twice (A and B) with different search seeds, in the deployed options (one world, 64 pending, transpositions, fused kernels) on a fresh tree: all 4,000 at 1,024 sims (the evals' depth) and 1,000 of them (60 opening, 940 main) at 131,072 (the bot's cap). Wilson 95% intervals.
+- *Depth.* Over all simulations, the number of dice rolls and of decisions between the root and the leaf (three counters added to the engine's `SearchStats`; 144 searches bit for bit the same with and without them).
+- No games are played and no win rate comes out. About 2.1 h of GPU.
 
-*Status.* Being built and run on the GPU (`wt/search-diag`, `tools/search_noise.py`).
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, right),
+    header: ([], [1,024 sims (n = 4,000)], [131,072 sims (n = 1,000)]),
+    [A and B pick the same move], [93.7 #ci[92.9][94.4]], [91.9 #ci[90.0][93.4]],
+    [... on the 1,000 shared positions], [94.6 #ci[93.0][95.8]], [91.9 #ci[90.0][93.4]],
+    [A overrules the network's top move], [2.8 #ci[2.3][3.4]], [14.8 #ci[12.7][17.1]],
+    [When A overrules: B plays A's move], [73.2 (82/112)], [77.0 (114/148)],
+    [When A overrules: B plays the network's move], [19.6 (22/112)], [15.5 (23/148)],
+    [When A overrules: B plays a third move], [7.1 (8/112)], [7.4 (11/148)],
+    [Visit share of the chosen move, median], [0.978], [0.994],
+    [Value gap of the two most visited moves, median], [0.0092], [0.0067],
+    tgroup(3)[The 1,000 shared positions, by whether A and B see the same root priors],
+    [Same priors (582): A and B agree], [99.1 #ci[98.0][99.6]], [97.4 #ci[95.8][98.4]],
+    [Different priors (418): A and B agree], [88.3 #ci[84.8][91.0]], [84.2 #ci[80.4][87.4]],
+    [Root-value noise, same / different priors], [0.0043 / 0.0508], [0.0035 / 0.0518],
+    tgroup(3)[Between the root and the leaf, mean over all simulations],
+    [Dice rolls], [2.11], [3.75],
+    [Decisions], [7.53], [13.19],
+    [Decisions with at least two moves], [5.23], [8.99],
+    [Nodes per search], [1,800], [228,984],
+  ),
+  caption: [Two searches of one position with different seeds, e1800 in the deployed search options. Percent with Wilson 95% intervals; values are win probabilities.],
+) <tab:search-noise>
 
-=== Stratified dice nodes #chip("todo") <exp:search-stratified>
+*Reading.*
+- *More simulations do not buy agreement.* With 128 times the budget the two seeds agree no more often, so the disagreement is not noise that averages out inside one tree.
+- *The sampled world is where the seeds part.* A search plays one sampled hidden world (`dets=1`). Where both seeds see the same priors at the root they agree 97 to 99% and the root value moves by about 0.004; where the priors differ (42% of positions) they agree 84 to 88% and the value moves by 0.05, at either budget. "Different priors" stands in for "a different sampled world"; the worlds themselves were not compared.
+- *Disagreements are mostly near-ties.* In its own tree each search rates its move a median 0.004 to 0.005 of win probability above the other's; about 80% of the gaps are under 0.01 and about 5% are over 0.05.
+- *The deep search does much more.* At 1,024 sims it leaves the network's move in 2.8% of positions and looks 2 dice rolls and 7.5 decisions ahead; at 131,072 it leaves it in 14.8% and looks 3.75 rolls and 13 decisions ahead. Three overrules in four are repeated by the other seed at both budgets. The same seed's move at 1,024 is its move at 131,072 in 87% of positions.
+- *What it does not say.* Agreement measures variance, not correctness: two seeds can agree on a wrong move. No win rate was measured.
+
+*Decision.* The dice-sampling changes are parked; the network-side work goes first (@exp:az-bundle).
+
+*Code.* `tools/search_noise.py` and the engine's depth counters are on `wt/search-diag` (engine branch `v2-search-diag`), unmerged while `az-2p-bundle` holds main's code.
+
+#repro(```sh
+# from the wt/search-diag worktree; results: search-noise-e1800.json
+python tools/search_noise.py \
+  --net 'az-2p-kata/main+1500@e1800#7c44ec80540a' \
+  --opponent 'BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16' \
+  --search 'dets=1:pending=64:transpositions=true:kernels=fused' --game base-2p-fr \
+  --position-seed 20261115 --per-game 2 --spare-boards 16 \
+  --budget 1024:4000 --budget 131072:1000 --seeds 1 2 --groups 2 --threads 12 \
+  --in-flight 14 --device cuda --out search-noise-e1800.json
+```)
+
+=== Stratified dice nodes #chip("parked") <exp:search-stratified>
 #meta(
   dates: "2026-11-15",
   dates-label: "proposed",
@@ -332,9 +378,9 @@ uv run python tools/search_probe.py --pair aca296e23ff93a67 72819d1a1a072278
   wandb: (),
   records: (),
 )
-#tldr[Claude's suggestion, approved in outline by Marco on 2026-11-15; not queued. At a dice node, visit the total furthest below its share of the visits instead of drawing one at random. The value of the node is the same weighted mean with less noise at equal simulations. A change to one function (`sample_outcome`); built if @exp:search-noise says the search is noise-limited.]
+#tldr[Claude's suggestion, approved in outline by Marco on 2026-11-15; not built. At a dice node, visit the total furthest below its share of the visits instead of drawing one at random. Parked: @exp:search-noise finds that the seeds part over the sampled hidden world, not over dice draws, and that more simulations do not raise agreement.]
 
-=== Paired candidates at the root #chip("todo") <exp:search-paired-root>
+=== Paired candidates at the root #chip("parked") <exp:search-paired-root>
 #meta(
   dates: "2026-11-15",
   dates-label: "proposed",
@@ -342,4 +388,4 @@ uv run python tools/search_probe.py --pair aca296e23ff93a67 72819d1a1a072278
   wandb: (),
   records: (),
 )
-#tldr[Claude's suggestion (HexN's approach, @tab:deploy-ladder), approved in outline by Marco on 2026-11-15; not queued. Judge the root's top moves on the same worlds and the same dice, so that the luck of the draw cancels in their difference. Built if @exp:search-noise says the search is noise-limited and stratified dice nodes do not close the gap.]
+#tldr[Claude's suggestion (HexN's approach, @tab:deploy-ladder), approved in outline by Marco on 2026-11-15; not built. Judge the root's top moves on the same worlds and the same dice, so that the luck of the draw cancels in their difference. Parked with @exp:search-stratified: most seed disagreements are near-ties (@exp:search-noise).]
