@@ -55,6 +55,7 @@
 #include "sections/search.typ"
 #include "sections/hidden.typ"
 #include "sections/az.typ"
+#include "sections/stronger.typ"
 #include "sections/critic.typ"
 #include "sections/canopy.typ"
 #include "sections/playouts.typ"
