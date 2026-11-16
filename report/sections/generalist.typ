@@ -137,6 +137,35 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 
 *Plan.* Either 3× the decisions (the specialists' per-setting budget, about 35 h) or a per-setting fine-tune of a few hundred epochs; if the gap closes, ship the generalist. Separately, rerun `ppo-mixed-blob` with one change at a time (@exp:gen-blob).
 
+=== A player-agnostic network: seats as a set #chip("todo") <exp:gen-player-set>
+#meta(
+  dates: "2026-11-16",
+  dates-label: "proposed",
+  owner: "marco",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-16): the graph network is board-agnostic; make it player-agnostic the same way for the hands and the game state, maybe with self-attention over the players. Today each seat slot has weights of its own. Not queued.]
+
+#lead[How seats enter the network today.]
+- *Slots.* Six fixed seat slots, ordered from the acting seat. A 2p game leaves four of them empty.
+- *Hands and state.* The 46 features of all six slots are concatenated (276 numbers) into one linear layer that makes the global vector: separate weights for each slot.
+- *Board.* Ownership is six channels per node (settlement, city, distance), per edge (road) and per tile (buildings): again separate weights for each slot.
+- *Shared part.* A per-seat embedding with shared weights exists, but only the value head and the robber's victim head read it; it never enters message passing.
+- *Cost of that.* What the net learns about the opponent in slot 1 does not carry to slots 2 and 3, which 2p games never fill. `ppo-mixed` had a third of a specialist's decisions per seat count (2p 78M, 3p 72M, 4p 99M of 249M; the specialists 250M and 249M), and the slots do not pool them.
+
+#lead[The proposal.]
+- *Seat tokens.* One embedding per present seat from shared weights. The slot number is replaced by two features that mean the same at any table: "this is me" and the number of turns until that seat plays.
+- *Seats in the graph.* Seats become a fourth entity type, joined to the nodes they built on and the edges they hold a road on, with shared message weights; the board's ownership channels shrink to "mine" and "another seat's". The incidence can be read from today's ownership channels, so the engine's rows need not change.
+- *Seat to seat.* Self-attention over the 2 to 6 seat tokens in each layer, and the global vector reads a pooled summary of the tokens in place of the concatenation.
+- *Heads.* The value head (one output per seat token) and the robber's victim head already have this shape.
+- *Kept.* The seat count stays an input: 2p is zero-sum between two seats and 4p is not, so play must still differ by table size.
+
+#lead[Cost and test.]
+- *From scratch.* The input layers change, so `ppo-mixed`'s weights do not carry over. The fused kernels do not cover it (PPO does not use them).
+- *Test.* `ppo-mixed`'s recipe and budget (249M decisions, 11.5 h; more if the net is slower, not measured), then `ppo-mixed`'s finals plus the two head to head.
+- *Extends to.* 5–6 players with no new weights (@exp:gen-5-6p).
+
 === 5–6 players on the extension map #chip("todo") <exp:gen-5-6p>
 #meta(owner: "marco")
 #tldr[Blocked on the engine: 5–6 player games need the special building phase; then they are one more entry in `ppo-mixed`'s `env.scenarios`.]
