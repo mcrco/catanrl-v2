@@ -55,14 +55,19 @@ STATE_KEY = "dice_probe_rows"
 def dice_weight_norms(model: torch.nn.Module) -> dict[str, float]:
     """The Frobenius norms of the dice inputs' weights over every graph trunk: all of them
     (``dice/weight_norm``), the global features' and the tiles'. Empty without a graph trunk
-    that reads the input (a network class that reads it another way)."""
+    that reads the input (a network class that reads it another way). A seat-set trunk's
+    global features are the seat-free ones and each seat's (``seat_dice_projection``)."""
     from catanrl.models.graph import GraphTrunk
+    from catanrl.models.seat import SeatTrunk
 
-    trunks = [m for m in model.modules() if isinstance(m, GraphTrunk) and m.dice_projection is not None]
+    trunks = [m for m in model.modules()
+              if isinstance(m, (GraphTrunk, SeatTrunk)) and m.dice_projection is not None]
     if not trunks:
         return {}
     with torch.no_grad():
         glob = float(sum(t.dice_projection.weight.detach().float().pow(2).sum() for t in trunks))
+        glob += float(sum(t.seat_dice_projection.weight.detach().float().pow(2).sum() for t in trunks
+                          if isinstance(t, SeatTrunk)))
         tiles = float(sum(t.tile_dice_projection.weight.detach().float().pow(2).sum() for t in trunks))
     return {"dice/weight_norm": (glob + tiles) ** 0.5, "dice/weight_norm_global": glob ** 0.5,
             "dice/weight_norm_tiles": tiles ** 0.5}
