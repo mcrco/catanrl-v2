@@ -492,7 +492,7 @@ def test_the_fused_kernels_keep_the_plain_gemms_and_read_the_dice_inputs_beside_
     the input the plain features go through the GEMMs of a network without it (the same
     weights, the same inputs) and the dice features through two of their own: zero dice
     weights give that network's first projections bit for bit, and trained ones the module's.
-    (CPU, stub kernels: the arithmetic of the weights; tools/dice_input_smoke.py checks the
+    (CPU, stub kernels: the arithmetic of the weights; tools/bundle_smoke.py checks the
     whole forward on the GPU.)"""
     from catanrl.models import graph_kernels
 

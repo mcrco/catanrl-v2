@@ -1,0 +1,143 @@
+# A stronger 1v1 network by continued training with everything new at once (Marco, 2026-11-15:
+# "i guess we can just bundle everything together in continued training experiment first and then
+# do ablations later on. my goal is still to get the best 1v1 bot out there.").
+#
+# What: ONE run from az-2p-kata/main+1500@e1800 (search-v3.1's network), 900 more iterations on
+# that run's recipe, with two additions bundled:
+#   1. the dice state as a network input (obs.dice_state; Marco, 2026-11-14: "adding dice shuffle
+#      into the architecture"), and
+#   2. two auxiliary training targets on an outcome head (model.args.outcome): each seat's final
+#      victory points and the turns left until the game ends.
+# The gain over e1800 will mix three things: the new input, the new targets and 900 more
+# iterations. This run cannot say which did what; the ablations come later, if the bundle pays.
+#
+# 1. The dice input. base-2p-fr rolls OpenHex's balanced dice: a 36-card deck drawn without
+# replacement and refilled when 13 cards are left, with a penalty on totals in the last five rolls
+# and a per-seat correction to the 7. The next roll's odds move far from two fair dice
+# (tools/dice_odds_sim.py), and e1800's row shows none of it; the search's chance nodes use the
+# true odds, the priors and values at its leaves cannot.
+# catanrl.envs.encoding.DICE_STATE, 127 more floats on a 2p base row (2,564 -> 2,691):
+#   global, 51: each seat's next-roll odds per total (x6: a fair 7 reads 1), the cards left in the
+#     deck per total (of that total's 1-6), each total's count in the five-roll window (/3), the
+#     draws left before the reshuffle (/23), each seat's sevens (/10) and share of all sevens, and
+#     the seven streak (length /5 in its owner's slot);
+#   each tile, 4: its own number's odds if I roll and if the opponent rolls (x36/5: its `pips`
+#     feature under fair dice), that number's cards left and its count in the window; 0 on the
+#     desert.
+#
+# 2. The outcome head (catanrl.models.graph.GraphOutcomeHead; KataGo trains its trunk on such
+# extra targets: they are denser than the win/loss bit). Two small MLPs on the shared trunk,
+# built after every other part, 135,938 parameters (549,156 -> 685,094):
+#   final victory points of each seat (slot 0 = the seat to act, like the value head), hidden
+#     cards counted, as a fraction of the 15 to win; from the pooled state and the seat's embedding;
+#   turns left until the game ends, /100; from the pooled state.
+# Loss: Huber (delta 0.5: quadratic within 7.5 points / 50 turns) on the positions of games that
+# ended with a winner; games cut at the turn limit are masked (none in main+1500's last 300
+# iterations). Training only: no search, agent, evaluator or kernel runs the head (kernels=fused
+# reads the trunk, the policy head and the value head), so play costs nothing more.
+# Coefficients: train.outcome_vp_coef 0.5 and train.outcome_turns_coef 0.5, small beside the main
+# losses in KataGo's spirit. An estimate, not a measurement: at errors of 1.5 points (0.1 of 15)
+# and 10 turns (0.1 of 100) each weighted term is 0.5 x 0.005 = 0.0025, against main+1500's value
+# loss of 0.39 and policy loss of 0.29 (medians of its last 300 iterations), and its gradient per
+# output 0.05 against the value's ~0.3-0.4. Unmeasured: how large the errors are early (the head
+# starts at 0, so ~10 points and the mean game length) and what the shared gradient clip
+# (max_grad_norm 1.0) does then. Watch train/outcome_vp_mae (in victory points) and
+# train/outcome_turns_mae (in turns) fall, and oos/outcome_*_mae for the same on positions not
+# trained on yet.
+#
+# The start: every weight of e1800, the new inputs' weights at zero (init_from.zero_new_inputs:
+# two bias-free projections, 7,616 weights), the head's fresh. At e0 the network plays as e1800
+# bit for bit. Weights only: a FRESH AdamW (e1800's optimizer state has no entries for the new
+# parameters, and the trainer restores an optimizer only whole, on an identical parameter list) and
+# an EMPTY replay (main+1500's holds rows without the input and positions without the labels).
+# Self-play alone until the replay holds min_replay 50,000 positions (~6 iterations), then 64
+# updates x 512 rows per ~8,192 new positions as before; the replay fills its 500,000 after ~61.
+# Doses: 512 games x 64 steps = 32,768 moves per iteration, ~8,192 recorded (600-visit searches);
+# 900 iterations = ~7.4M recorded positions, ~164,000 games.
+# Also logged every iteration: dice/weight_norm (and _global, _tiles; 0 at e0) and, from the first
+# learning step, dice/probe_kl, dice/probe_flips, dice/probe_value_gap: the policy and value on 512
+# fixed replay positions against the same rows showing a fresh dice state (catanrl.train.dice_probe).
+#
+# Evals: no select (eval-share-of-run-time: the method works). One final row: the deployed search
+# on the last checkpoint against the family's raw start, BELIEF(fr3, 16 worlds), on heldout-2p-fr's
+# first 1,000 boards x 2 seats = 2,000 games: the schedule of e1800's stored row (eval
+# ea2574432c1ce3fc, 62.95%), so the two rows pair game for game (tools/search_probe.py --pair
+# ea2574432c1ce3fc <this row's eval id>). One row is +-2.1 pp (95%); this family's rows disagree
+# on 29-35% of shared games, so the paired difference has SE ~1.3 pp and 80% power at two-sided
+# 0.05 for ~3.5 pp.
+#
+# Time (measured for main+1500 on the RTX 2070 SUPER): ~84 s an iteration (~69k leaves/s), so 900
+# iterations = ~21 h; the final ~2.3 h; ~23.5 h in all. NOT measured for this network on the GPU
+# yet: its rows are 5% wider and its first layer has two more small products in every forward (the
+# head adds to the 64 learning steps only, ~3 s of an iteration before); tools/bundle_smoke.py
+# measures it before launch. The time limit is main+1500's guard.
+# Memory: a replay position is 6,033 bytes (main+1500's 5,773 + 254 for the input as float16 + 6
+# for the labels), 3.02 GB at capacity, in RAM and in the trainer state.
+# `--smoke` cannot run this config: it forces the CPU (the fused kernels are CUDA only) and turns
+# @e1800 into @latest under the pinned sha.
+#
+# Keys to change: train.outcome_vp_coef / train.outcome_turns_coef (the targets' weights; 0 drops
+# one, and with both at 0 remove model.args.outcome too), train.iterations, and for a later
+# ablation obs.dice_state with init_from.zero_new_inputs (remove both: no dice input).
+#
+# Launch (main, GPU free, after tools/bundle_smoke.py passes on the card):
+#   catanrl run configs/experiments/az-2p-bundle.yaml
+name: az-2p-bundle
+seed: 42                        # main+1500's: its training pool (map_pool from the seed)
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 512                 # games in flight
+obs: {level: full, dice_state: true}
+model: {preset: graph-s, args: {shared: true, outcome: true}}
+# search-v3.1's network; weights only (restore: weights), so a fresh optimizer and an empty replay;
+# the new inputs' weights start at zero: e0 plays as the start
+init_from: {ckpt: "az-2p-kata/main+1500@e1800#7c44ec80540a", parts: [actor, critic], zero_new_inputs: true}
+train:                          # main+1500's stored train keys, but iterations and the two outcome weights
+  algo: alphazero
+  iterations: 900               # ~21 h of self-play (header)
+  steps_per_iteration: 64       # x 512 games = 32,768 searched moves, ~8,192 of them recorded
+  root: puct
+  sims: 600                     # a full search (recorded)
+  fast_sims: 100                # the other moves (played only)
+  pending: 24                   # leaves per round of a full search
+  fast_pending: 4               # and of a fast one
+  full_search_prob: 0.25
+  record_fast: false            # only full searches enter replay
+  dets: 0                       # the true game (the network reads it whole)
+  reuse: true                   # a move's search starts from the last one's subtree
+  c_puct: 0.75
+  gumbel_m: 16                  # not read (root: puct)
+  dirichlet_noise: true         # full searches only
+  temperature_start: 1.0
+  temperature_end: 0.0
+  temperature_moves: 30
+  truncation_value: share
+  policy_target: pruned         # the visit distribution without the visits the noise forced
+  target_c_visit: 50.0          # not read (policy_target: gumbel's)
+  target_c_scale: 0.1
+  target_prior_temperature: 1.0
+  target_rescale: true
+  replay_capacity: 500_000      # ~61 iterations of recorded positions; 3.0 GB of RAM
+  min_replay: 50_000            # ~6 iterations of recorded positions (filed when their games end)
+  updates_per_iteration: 64     # x 512 = 32,768 samples per ~8,192 new positions
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  value_coef: 1.0
+  outcome_vp_coef: 0.5          # x Huber on each seat's final victory points / 15 (header)
+  outcome_turns_coef: 0.5       # x Huber on the turns left / 100
+  max_grad_norm: 1.0            # over every parameter, the head's too
+  search_rows: 512              # rows per forward
+  kernels: fused16              # self-play forwards in float16 on the fused kernels
+  checkpoint_interval: 25       # ~35 min of self-play
+eval:
+  select: null                  # no in-run evals (header)
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}   # e1800's row's 2,000 games
+      lineup:
+        - "MCTS:ckpt=${run}@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+# num_envs, infer_rows: the eval's games in flight (main+1500's)
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512, time_limit_hours: 60}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

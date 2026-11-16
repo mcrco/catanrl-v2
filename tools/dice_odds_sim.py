@@ -5,7 +5,7 @@ alternating, each total drawn by ``BalancedDice.sum_probabilities`` and applied 
 ``card_for_total``. Prints the roller's P(7) and P(8) percentiles, P(7) by sevens imbalance and
 after the other seat's 7, P(8) right after an 8, the total-variation distance from fair, and how
 often some total is impossible. The numbers behind the dice input (``obs.dice_state``,
-configs/experiments/az-2p-dice.yaml)::
+configs/experiments/az-2p-bundle.yaml)::
 
     .venv/bin/python tools/dice_odds_sim.py --games 5000 --rolls 80
 """
