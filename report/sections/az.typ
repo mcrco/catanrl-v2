@@ -704,7 +704,7 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 - *Eval.* No selects. One row at the end: the last checkpoint in the 1,024-sim search against `BELIEF(fr3, 16 worlds)` on e1800's 2,000 held-out games (62.95% there), paired by game. The paired difference has a standard error of about 1.2 pp, so about 3.4 pp is detectable at 80% power.
 - *What the row can say.* The gain over e1800 mixes the input, the targets and 900 more iterations; the last 900 iterations alone gained 2.65 pp. The row says how good the new bot is, not what each part gave: that is for the ablations.
 - *Start.* The optimizer and the replay start fresh; the first learning step comes when 50,000 positions are stored, after about 6 iterations.
-- *Cost.* About 21 h of self-play at 84 s an iteration (measured in the GPU check: 68,300 leaves a second, 98.5% of e1800's pace) and 2.3 h for the row, about 10% of the wall-clock. Due about 18:40 on 2026-11-16.
+- *Cost.* About 21 h of self-play at 84 s an iteration (measured in the GPU check: 68,300 leaves a second, 98.5% of e1800's pace) and 2.3 h for the row, about 10% of the wall-clock. Due about 19:00 on 2026-11-16.
 - *Not in the bundle.* `graph-m` (@exp:az-graph-m: the fused kernels do not fit it yet) and the search changes of @exp:search-stratified and @exp:search-paired-root, parked after @exp:search-noise.
 
 #lead[GPU check before the launch.]

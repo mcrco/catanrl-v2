@@ -578,3 +578,23 @@ env -u WANDB_API_KEY WANDB_MODE=disabled uv run python tools/fp16_smoke.py --run
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/fp16-2p.yaml
 uv run python tools/search_probe.py --pair <fp16's final record> <fp32's final record>
 ```)
+
+== Rented GPUs
+
+=== Training runs on Modal #chip("todo") <exp:recipe-modal>
+#meta(
+  dates: "2026-11-16",
+  dates-label: "building",
+  owner: "marco",
+  config: "tools/modal_train.py (wt/modal, being built)",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-16): launch experiments in parallel on Modal. Only the benchmark harness exists (@exp:az-hardware); a training harness is being built. No training run starts before Marco sets a budget.]
+
+- *What exists.* The image and build of @exp:az-hardware: one short job per call, results returned by value, nothing stored.
+- *What training needs.* A volume for run directories and checkpoints; detached jobs that resume after a preemption; a time cap per launch; pulling the run back into `runs/`.
+- *W&B.* No key goes to Modal. The run directory is pulled to this box every few minutes and mirrored from here.
+- *What Modal buys.* Parallel runs, and speed where the card is the limit: `graph-m` PPO 3× on an L40S; AlphaZero self-play on `graph-s` 1.0× at 8 cores and 1.29× at 32 (@exp:az-hardware). PPO at `graph-s` size is not measured; the harness's smoke test measures it.
+- *Price.* An L40S \$1.95 an hour, an A10G \$1.10, plus about \$0.05 a core-hour and \$0.008 a GiB-hour: about \$2.60 an hour for an L40S with 8 cores and 32 GiB.
+- *Spent.* \$1.53 on the benchmark. The harness's own tests are capped at \$0.90.

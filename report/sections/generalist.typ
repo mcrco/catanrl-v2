@@ -140,12 +140,12 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 === A player-agnostic network: seats as a set #chip("todo") <exp:gen-player-set>
 #meta(
   dates: "2026-11-16",
-  dates-label: "proposed",
+  dates-label: "building",
   owner: "marco",
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-16): the graph network is board-agnostic; make it player-agnostic the same way for the hands and the game state, maybe with self-attention over the players. Today each seat slot has weights of its own. Not queued.]
+#tldr[Marco (2026-11-16): the graph network is board-agnostic; make it player-agnostic the same way for the hands and the game state. Today each seat slot has weights of its own. Marco approved the shared weights and the seats joined to the board, left attention among seats to Claude, and asked that the turn order enter the pooling. Being built in `wt/player-set`; first run in @exp:gen-base.]
 
 #lead[How seats enter the network today.]
 - *Slots.* Six fixed seat slots, ordered from the acting seat. A 2p game leaves four of them empty.
@@ -155,9 +155,10 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 - *Cost of that.* What the net learns about the opponent in slot 1 does not carry to slots 2 and 3, which 2p games never fill. `ppo-mixed` had a third of a specialist's decisions per seat count (2p 78M, 3p 72M, 4p 99M of 249M; the specialists 250M and 249M), and the slots do not pool them.
 
 #lead[The proposal.]
-- *Seat tokens.* One embedding per present seat from shared weights. The slot number is replaced by two features that mean the same at any table: "this is me" and the number of turns until that seat plays.
+- *Seat tokens.* One embedding per present seat from shared weights. The slot number is replaced by features that mean the same at any table: "this is me", how many turns after me the seat plays, and how many turns after it I play. In 2p the opponent is both the next and the previous seat; in 4p those are two seats.
 - *Seats in the graph.* Seats become a fourth entity type, joined to the nodes they built on and the edges they hold a road on, with shared message weights; the board's ownership channels shrink to "mine" and "another seat's". The incidence can be read from today's ownership channels, so the engine's rows need not change.
-- *Seat to seat.* Self-attention over the 2 to 6 seat tokens in each layer, and the global vector reads a pooled summary of the tokens in place of the concatenation.
+- *Seat to seat.* Self-attention over the 2 to 6 seat tokens in each layer (Claude's call; a switch turns it off for a control), with a learned bias by the turn order between the two seats, so that "the seat after the leader" can be read.
+- *Pooling and order.* The global vector reads the own seat's token and a pooled summary of the others in place of the concatenation. The turn order enters three ways: in each token before pooling, in the attention, and by keeping the own seat out of the pool (Marco: the pooling should include the order).
 - *Heads.* The value head (one output per seat token) and the robber's victim head already have this shape.
 - *Kept.* The seat count stays an input: 2p is zero-sum between two seats and 4p is not, so play must still differ by table size.
 
@@ -165,6 +166,25 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 - *From scratch.* The input layers change, so `ppo-mixed`'s weights do not carry over. The fused kernels do not cover it (PPO does not use them).
 - *Test.* `ppo-mixed`'s recipe and budget (249M decisions, 11.5 h; more if the net is slower, not measured), then `ppo-mixed`'s finals plus the two head to head.
 - *Extends to.* 5–6 players with no new weights (@exp:gen-5-6p).
+
+*Status.* Being built as preset `graph-seat-s`, sized as `graph-s` (0.54M parameters): the model only, the engine's rows unchanged. CPU tests now; speed and memory on a GPU are not measured.
+
+=== A generalist base, then AlphaZero specialists #chip("todo") <exp:gen-base>
+#meta(
+  dates: "2026-11-16",
+  dates-label: "planned",
+  owner: "marco",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). Waiting on the network, the games to train on and a Modal budget.]
+
+#lead[Plan.]
+- *Base.* PPO self-play from scratch with `graph-seat-s` on 2p, 3p and 4p games at the `private` level, the only fair one past two players (as `ppo-mixed`).
+- *Games (Claude's proposal, for Marco to confirm).* The 2p games on OpenHex's 1v1 rules (`base-2p-fr`: 15 VP, discard at 10, friendly robber, balanced dice); 3p and 4p on base rules, which are OpenHex's 4p rules; each on the BASE board and on shuffled hexagons, as in `ppo-mixed`.
+- *First stage.* `ppo-mixed`'s budget, 249M decisions (11.5 h on this box with `graph-s`; the new network's speed is not measured), judged against `ppo-mixed` and the specialists.
+- *Later stages.* Continue while it gains. fr3 had about 1B decisions of 2p alone; that much for each seat count, with no transfer between them, would be 12 times the first stage. How much the shared weights save is the question.
+- *Specialists.* AlphaZero self-play from the base for each setting, as @exp:az-kata. Two things differ from fr3's line: the base reads `private` rows where fr3 reads `full`, and the fused kernels do not cover the new network (unfused, `graph-m` cost 3.4× per simulation, @exp:deploy-graph-m-check), so kernels come before self-play.
 
 === 5–6 players on the extension map #chip("todo") <exp:gen-5-6p>
 #meta(owner: "marco")
