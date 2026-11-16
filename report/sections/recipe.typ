@@ -615,8 +615,8 @@ uv run python tools/search_probe.py --pair <fp16's final record> <fp32's final r
   caption: [Six-minute stretches without evals, medians after five warm-up epochs, 8 threads where the config has 12. Peak GPU memory 5.3 GiB.],
 ) <tab:recipe-modal>
 
-- *Not tested.* A live W&B mirror, a real 24 h continuation, a real preemption, an AlphaZero run, and a build from another branch.
-- *Spent.* \$1.53 on the benchmark (@exp:az-hardware) and \$0.49 here. The volume is empty; nothing is running.
+- *Not tested.* A live W&B mirror, a real 24 h continuation, a real preemption, and an AlphaZero run. A build from another branch worked (@exp:gen-base's speed check from `wt/player-set`).
+- *Spent.* \$1.53 on the benchmark (@exp:az-hardware) \$0.49 here and \$0.28 on the base's speed check: \$2.30 in all. The volume is empty; nothing is running.
 
 #repro(```sh
 # from the wt/modal worktree
