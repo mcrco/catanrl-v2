@@ -21,7 +21,8 @@ bots:
     bot_id: 05c4a25c6c0e46e1
     deployed: 2026-10-17
     tag: openhex-1v1-v3.1
-    retired: false
+    retired: true
+    retired_at: 2026-11-16  # last played 2026-10-27; not to be deployed again (Marco)
   - name: catanrl-4p-greedy-v1  # catanrl-4p until 2026-11-16
     mode: 4p
     version: 4p-v1
