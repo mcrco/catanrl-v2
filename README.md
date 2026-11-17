@@ -78,9 +78,6 @@ uv run catanrl pin puffer-graph2/full@e1500 ref --note "report"
 # runs and tests stay out (CATANRL_WANDB_SMOKE=1 opts a smoke run in). Runs made without it
 # get the identical wandb run after the fact (idempotent; a re-sync keeps the run's group and tags):
 uv run python tools/wandb_backfill.py ppo-mixed/main --project catanrl-v2
-# a run on a rented GPU (Modal): one committed revision, detached, a budget in hours; the run
-# directory lives on a Modal Volume and is pulled back and mirrored from here (tools/modal_train.py's docstring)
-.venv/bin/python tools/modal_train.py launch configs/experiments/ppo-mixed.yaml --gpu L40S --max-hours 12
 
 # evaluation (cached, seat-balanced, Wilson intervals; records keyed by everything that decides them)
 uv run catanrl eval POLICY:puffer-graph2/full@ref F --suite heldout-2p
