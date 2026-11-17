@@ -98,9 +98,10 @@ class MctsParams:
     #: after records were stored leaves their keys and canonical specs as they were.
     reuse: bool = field(default=False, metadata={"key_if_set": True})
     transpositions: bool = field(default=False, metadata={"key_if_set": True})
-    #: ``fused``: the network on custom CUDA kernels (models/graph_kernels.py; shared-trunk
-    #: graph networks on a CUDA device). Its outputs differ from the module's in the last
-    #: bits, so it is keyed when set.
+    #: ``fused``: the network on custom CUDA kernels (models/graph_kernels.py, and
+    #: models/seat_kernels.py for a seat-set network; shared-trunk networks of hidden 96 on a
+    #: CUDA device). Its outputs differ from the module's in the last bits, so it is keyed
+    #: when set.
     kernels: Literal["torch", "fused"] = field(default="torch", metadata={"key_if_set": True})
     #: Seconds a decision may search (0: no limit): the search stops at the first round past
     #: it and plays its most-visited move so far (at least one round runs). A wall clock, so

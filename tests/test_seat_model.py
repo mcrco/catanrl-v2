@@ -10,7 +10,7 @@
 * the graph network's options run on it: every information level, a shared trunk, a critic at
   another level, the aux and outcome heads, the dice input (zero at the start, warm-started
   with ``init_from.zero_new_inputs``), float16, checkpoints and ``init_from``, the search
-  agents on ``kernels=torch`` (the fused kernels refuse it by name);
+  agents on ``kernels=torch`` (the fused kernels: ``tests/test_seat_kernels.py``);
 * tiny trainings: PPO on a mixture of 2, 3 and 4 players, AlphaZero with the dice input and
   the outcome head.
 """
@@ -29,7 +29,7 @@ from test_dice_input import balanced_games, decide, native, saved
 from test_models import BASE_2P, BASE_4P, WIDE_4P, _names, model_for, played_games
 
 from catanrl import checkpoint as ck
-from catanrl.config import ConfigError, Variant, config_hash, resolve
+from catanrl.config import Variant, config_hash, resolve
 from catanrl.envs.encoding import (
     CRITIC_PLAYERS,
     MAX_PLAYERS,
@@ -573,20 +573,23 @@ def test_the_search_agents_play_a_checkpoint_on_torch_kernels(tmp_path, dice):
         assert seen.shape[1] == agent.model.obs_size and len(seen)
 
 
-def test_the_fused_kernels_refuse_the_class_by_name(tmp_path):
+def test_the_fused_kernels_are_the_class_s_own(tmp_path):
+    """On the CPU: the evaluator asks for a CUDA device as for the graph class (the kernels
+    themselves: tests/test_seat_kernels.py), the graph class's kernels name the seats', and
+    train.kernels resolves for the class."""
     from catanrl.models.graph_kernels import FusedGraph, FusedGraph16
     from catanrl.search.evaluator import BatchEvaluator
 
     model = fr_model(True, seed=7)
     for kernels in ("fused", "fused16"):
-        with pytest.raises(ValueError, match="no fused kernels are written for a seat-set network"):
+        with pytest.raises(ValueError, match=f"kernels={kernels} .* CUDA"):
             BatchEvaluator(model, device="cpu", infer_rows=8, kernels=kernels)
     for fused in (FusedGraph, FusedGraph16):
-        with pytest.raises(ValueError, match="no fused kernels are written for a seat-set network"):
+        with pytest.raises(ValueError, match="seat_kernels.FusedSeat"):
             fused(model)
     assert BatchEvaluator(model, device="cpu", infer_rows=8).kernels == "torch"
     ref = saved(tmp_path, model)
-    with pytest.raises(ValueError, match="seat-set network"):
+    with pytest.raises(ValueError, match="kernels=fused .* CUDA"):
         native(f"MCTS:ckpt={ref.path}:sims=8:dets=1:kernels=fused")
     from test_alphazero import ENV, TRAIN
 
@@ -595,11 +598,9 @@ def test_the_fused_kernels_refuse_the_class_by_name(tmp_path):
                 "train": {**TRAIN, **train}, "runtime": {"device": "cpu", "threads": 2, "determinism": "strict"},
                 "eval": {"select": None, "final": []}}
 
-    for kernels in ("fused", "fused16"):
-        with pytest.raises(ConfigError, match="train.kernels: .* seat-set network .* set train.kernels: torch"):
-            resolve(raw(TINY, kernels=kernels), experiment="seat", variant="a")
-        resolve(raw("graph-tiny", kernels=kernels), experiment="seat", variant="a")
-    assert resolve(raw(TINY), experiment="seat", variant="a")["train"]["kernels"] == "torch"
+    for kernels in ("torch", "fused", "fused16"):
+        for preset in (TINY, "graph-seat-s", "graph-tiny"):
+            assert resolve(raw(preset, kernels=kernels), experiment="seat", variant="a")["train"]["kernels"] == kernels
 
 
 # ---------------------------------------------------------------- float16

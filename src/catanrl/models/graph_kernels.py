@@ -28,6 +28,10 @@ using the kernels keys them (``MctsParams.kernels``). Built on first use with
 self-play search (``train.kernels: fused16``): its outputs are within half's rounding of
 these, not their bits, so the eval's agents and the deployed search stay on
 :class:`FusedGraph`.
+
+A seat-set network (model class ``seat``) runs on :mod:`catanrl.models.seat_kernels`
+(``FusedSeat`` / ``FusedSeat16``): these kernels for the board and the heads, with kernels of
+its own for the seats. :func:`fused_forward` picks the class.
 """
 
 from __future__ import annotations
@@ -64,11 +68,17 @@ def _fold(weight: torch.Tensor, index: torch.Tensor, raw_width: int) -> torch.Te
     return out[:, :raw_width]
 
 
-def check_class(model) -> None:
-    """Refuse, by name and on any device, a network class no fused kernels are written for."""
+def fused_forward(model, kernels: str = "fused"):
+    """The fused forward of ``model`` for ``kernels`` (``fused`` or ``fused16``), by its class:
+    :class:`FusedGraph` / :class:`FusedGraph16`, or for a seat-set network (model class
+    ``seat``) :class:`~catanrl.models.seat_kernels.FusedSeat` / ``FusedSeat16``. Each refuses
+    what it does not run."""
+    half = kernels == "fused16"
     if getattr(model, "spec", {}).get("class") == "seat":
-        raise ValueError("kernels=fused runs the graph class's networks: no fused kernels are written for a "
-                         "seat-set network (model class seat, the graph-seat presets); run it with kernels=torch")
+        from catanrl.models.seat_kernels import FusedSeat, FusedSeat16
+
+        return (FusedSeat16 if half else FusedSeat)(model)
+    return (FusedGraph16 if half else FusedGraph)(model)
 
 
 class FusedGraph:
@@ -81,12 +91,14 @@ class FusedGraph:
     raises on it)."""
 
     def __init__(self, model) -> None:
-        check_class(model)
+        if getattr(model, "spec", {}).get("class") == "seat":
+            raise ValueError("FusedGraph runs the graph class's networks: a seat-set network (model class seat) "
+                             "runs on catanrl.models.seat_kernels.FusedSeat (graph_kernels.fused_forward picks)")
         if getattr(model, "spec", {}).get("class") != "graph" or not getattr(model, "shared", False) or model.aux:
             raise ValueError("kernels=fused runs shared-trunk graph networks without an aux head (model.args.aux; "
                              "an outcome head is accepted: no kernel runs it)")
         K = kernels()
-        trunk, policy, value = model.backbone, model.policy_head, model.value_head
+        trunk = model.backbone
         if trunk.hidden != K.hidden:
             raise ValueError(f"the graph kernels are built for hidden {K.hidden}, not {trunk.hidden}")
         reader = trunk.reader
@@ -156,6 +168,14 @@ class FusedGraph:
                 "weT": c(torch.cat([w(layer.edge_self), w(layer.edge_from_node)], dim=1).T),
                 "be": d(layer.edge_self.bias),
             })
+        self._head_weights(model)
+
+    def _head_weights(self, model) -> None:
+        """The policy and value heads' weights (those of every graph-headed class)."""
+        policy, value = model.policy_head, model.value_head
+        d = lambda t: t.detach()
+        c = lambda t: t.detach().contiguous()
+        sp, raw = self.spans, self.spans["players"][1][-1]
         lin = lambda m: (c(m.weight.T), d(m.bias))
         self.other = [lin(policy.other[i]) for i in (0, 2, 4)]
         self.sc1 = (c(torch.cat([policy.settlement[0].weight, policy.city[0].weight]).T),
@@ -172,7 +192,7 @@ class FusedGraph:
         self.vP = value.num_players
         self.alayout = [model.mask_offset, model.num_actions, policy.num_globals, self.N, self.T, self.E,
                         self.robber_slots, policy.robber_tile.weight.shape[0], self.vP,
-                        sp["players"][0], raw["players"], self.present]
+                        sp["players"][0], raw, self.present]
 
     @staticmethod
     def _mlp(x: torch.Tensor, layers) -> torch.Tensor:
@@ -237,6 +257,22 @@ class FusedGraph:
                        valid, [None] * 3 if last else Z, zs, g, bt, eps, per_row)
         nodes, tiles, edges = x
         pooled = K.pool(nodes, tiles, edges, vn, vt, ve, glob, N, T, E)
+        logits, values = self._heads(obs, nodes, tiles, edges, pooled, None, en, enc)
+        return logits, values, overflow
+
+    def _players(self, obs: torch.Tensor) -> torch.Tensor:
+        """The seat embeddings the heads read, [B, P, H]: the player projection of each slot."""
+        B = obs.shape[0]
+        players_raw = obs[:, self.spans["players"][0]: self.spans["players"][0] + self.P * self.spans["players"][1][1]]
+        players_raw = players_raw.reshape(B, self.P, -1)
+        present = players_raw[..., self.present]
+        return torch.relu(F.linear(players_raw, self.wp) + self.bp) * present.unsqueeze(-1)
+
+    def _heads(self, obs, nodes, tiles, edges, pooled, players, en, enc) -> tuple[torch.Tensor, torch.Tensor]:
+        """(logits, values) from the final embeddings (float32). ``players``: the seat embeddings
+        [B, P, width], or None for :meth:`_players`' (computed where the forward always did)."""
+        K = kernels()
+        B, H, N, E = obs.shape[0], self.H, self.N, self.E
         other = self._mlp(pooled, self.other)
         sch = torch.relu_(torch.addmm(self.sc1[1], nodes, self.sc1[0]))
         XR = obs.new_empty(B * E, 2 * H)  # the road head's input: [edge | sum of its two ends]
@@ -244,17 +280,15 @@ class FusedGraph:
         K.gathers([nodes], [H], [N], [XR.narrow(1, H, H)], [2 * H], [E], [en], [enc], [0])
         roadh = torch.relu_(self._mlp(XR, self.road))
         rt = torch.addmm(self.rt[1], tiles, self.rt[0])
-        players_raw = obs[:, self.spans["players"][0]: self.spans["players"][0] + self.P * self.spans["players"][1][1]]
-        players_raw = players_raw.reshape(B, self.P, -1)
-        present = players_raw[..., self.present]
-        players = torch.relu(F.linear(players_raw, self.wp) + self.bp) * present.unsqueeze(-1)
+        if players is None:
+            players = self._players(obs)
         victims = torch.cat((self.nobody.expand(B, 1, -1), players[:, 1: self.robber_slots]), 1)
         rv = torch.matmul(victims, self.rvT).contiguous()
         vin = torch.cat((pooled.unsqueeze(1).expand(-1, self.vP, -1), players[:, : self.vP]), -1)
         vl = self._mlp(vin.reshape(B * self.vP, -1), self.value)
         logits, values = K.assemble(obs, self.alayout, other.contiguous(), sch, *self.sc_out, roadh, *self.road_out,
                                     rt, rv, *self.robber_out, vl)
-        return logits, values, overflow
+        return logits, values
 
 
 
@@ -291,6 +325,10 @@ class FusedGraph16(FusedGraph):
 
     def __init__(self, model) -> None:
         super().__init__(model)
+        self._halves()
+
+    def _halves(self) -> None:
+        """The half GEMMs' weights, rounded from the float32 ones."""
         h = lambda t: t.half()
         self.layers16 = [{k: h(L[k]) for k in ("wnT", "wtT", "weT")} for L in self.layers]
         pair = lambda layer: (h(layer[0]), h(layer[1]))
@@ -341,20 +379,26 @@ class FusedGraph16(FusedGraph):
                 K.entities16(x, u, none, bias, none, [0] * 3, none, none, [0.0] * 3, valid, [nodes, tiles, XR],
                              [H, H, 2 * H], none, none, [0.0] * 3, per_row, overflow)
         pooled = K.pool(*x, vn, vt, ve, glob, N, T, E)
+        logits, values = self._heads16(obs, nodes, tiles, XR, pooled, None, en, enc, overflow)
+        return logits, values, overflow
+
+    def _heads16(self, obs, nodes, tiles, XR, pooled, players, en, enc, overflow) -> tuple[torch.Tensor, torch.Tensor]:
+        """:meth:`_heads` on the half embeddings the last layer wrote: the nodes, the tiles and
+        the road head's input with its edge half filled (the ends' sum is gathered here)."""
+        K = kernels()
+        B, H, N, E = obs.shape[0], self.H, self.N, self.E
         other = self._mlp(pooled, self.other)
         sch = torch.addmm(self.sc1h[1], nodes, self.sc1h[0])  # the hidden layers' relus: in assemble16
         K.gathers16([nodes], [H], [N], [XR.narrow(1, H, H)], [2 * H], [E], [en], [enc], [0], overflow)
         roadh = torch.addmm(self.roadh[1][1], torch.relu_(torch.addmm(self.roadh[0][1], XR, self.roadh[0][0])),
                             self.roadh[1][0])
         rt = torch.addmm(self.rth[1], tiles, self.rth[0])
-        players_raw = obs[:, self.spans["players"][0]: self.spans["players"][0] + self.P * self.spans["players"][1][1]]
-        players_raw = players_raw.reshape(B, self.P, -1)
-        present = players_raw[..., self.present]
-        players = torch.relu(F.linear(players_raw, self.wp) + self.bp) * present.unsqueeze(-1)
+        if players is None:
+            players = self._players(obs)
         victims = torch.cat((self.nobody.expand(B, 1, -1), players[:, 1: self.robber_slots]), 1)
         rv = torch.matmul(victims, self.rvT).contiguous()
         vin = torch.cat((pooled.unsqueeze(1).expand(-1, self.vP, -1), players[:, : self.vP]), -1)
         vl = self._mlp(vin.reshape(B * self.vP, -1), self.value)
         logits, values = K.assemble16(obs, self.alayout, other.contiguous(), sch, *self.sc_out, roadh, *self.road_out,
                                       rt, rv, *self.robber_out, vl, overflow)
-        return logits, values, overflow
+        return logits, values

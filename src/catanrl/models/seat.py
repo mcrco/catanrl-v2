@@ -46,8 +46,9 @@ features on the global vector (``dice_projection``), each seat's on its token
 (``tile_dice_projection``: the odds when the row's own seat rolls, the mean odds over the
 other present seats, the deck and the window).
 
-The fused kernels (:mod:`catanrl.models.graph_kernels`) are the graph network's alone:
-``kernels: fused`` refuses this class.
+``kernels: fused`` and ``fused16`` run a shared-trunk network of this class (hidden 96, no
+aux head) on :mod:`catanrl.models.seat_kernels`: the graph network's kernels for the board
+and the heads, kernels of its own for the seats.
 """
 
 from __future__ import annotations

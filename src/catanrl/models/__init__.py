@@ -26,7 +26,8 @@ illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
 * ``seat``: :mod:`catanrl.models.seat` (dims-agnostic): the graph network with the seats
   as a set (shared weights for every seat, the seats a fourth entity type of the message
   passing, attention between them), behind the graph network's heads and with its
-  options (``shared``, ``aux``, ``outcome``, a separate critic level). No fused kernels;
+  options (``shared``, ``aux``, ``outcome``, a separate critic level). Its fused kernels:
+  :mod:`catanrl.models.seat_kernels`;
 * ``mlp``: :mod:`catanrl.models.mlp` (padded dims only);
 * ``cnn``: :mod:`catanrl.models.cnn` (v1's cross-dimensional CNN; the BASE board only);
 * ``lstm``: :mod:`catanrl.models.lstm` (dims-agnostic, recurrent: the graph

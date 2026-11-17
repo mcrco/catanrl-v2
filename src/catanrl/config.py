@@ -501,16 +501,6 @@ def _check_outcome(cfg: Mapping[str, Any]) -> None:
                           "train.outcome_vp_coef and/or train.outcome_turns_coef above 0")
 
 
-def _check_kernels(cfg: Mapping[str, Any]) -> None:
-    """``train.kernels`` other than torch (the fused CUDA kernels, :mod:`catanrl.models.graph_kernels`)
-    run the graph class's networks: a seat-set network (model class seat) is refused by name."""
-    kernels = (cfg.get("train") or {}).get("kernels", "torch")
-    if kernels != "torch" and (cfg.get("model") or {}).get("class") == "seat":
-        raise ConfigError(f"train.kernels: {kernels} runs the graph class's networks; no fused kernels are "
-                          "written for a seat-set network (model class seat, the graph-seat presets): set "
-                          "train.kernels: torch")
-
-
 def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) -> None:
     """The AlphaZero trainer's root and policy-target refusals (alphazero.check_train), at resolution:
     the trainer's come only after the run dir exists, and its failed folder then holds the variant."""
@@ -628,7 +618,6 @@ def _check_semantics(cfg: dict) -> None:
                                   "obs.dice_state: true")
     _check_obs(cfg)
     _check_outcome(cfg)
-    _check_kernels(cfg)
     select = cfg["eval"]["select"]
     if select is not None and ("suite" not in select or "lineup" not in select):
         raise ConfigError("eval.select needs suite and lineup")
