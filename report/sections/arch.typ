@@ -267,6 +267,11 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *Is Catan that complicated?* (Marco's doubt.) For small: HexN's 332k-parameter net with rollouts is rated above our search bot. For bigger: under one recipe `graph-m` ended 12.3 pp above `graph-s` against fr3 (@exp:arch-graph-m-2p-lr), the largest single gain measured here for a raw policy. Whether size still pays after self-play with search is not measured.
 - *Why.* `graph-m` beats `graph-s` as a raw policy (@exp:arch-graph-m-2p-lr), and on OpenHex's ladder raw networks sit above our search bot (@exp:deploy-ladder).
 - *Cost.* 3.4× `graph-s` per leaf on the PyTorch path (@exp:deploy-graph-m-check). Self-play runs on the fused half-precision kernels (@exp:az-speed), which are built for hidden 96; without them `graph-m` self-play is not affordable on this box. With them, an iteration should take roughly 3× `graph-s`'s 82 s (not measured).
+- *On Modal* (Marco's question, 2026-11-17; projected, no `graph-m` self-play has been run). On an L40S `graph-m`'s search forward runs at 51,600 rows a second on the PyTorch path, against 520,000 for `graph-s` on the fused kernels (@exp:az-hardware), and an iteration evaluates 5.5M rows (@exp:az-modal-scale): about 110 s of card time beside 76 s of CPU work, so one process on 8 cores fills the card.
+  - _Today's code_ (PyTorch path, one process, \$2.58 an hour): 20 to 30 iterations an hour, \$85 to \$130 per 1,000 iterations.
+  - _With fused kernels_ (assumed 3 to 5× `graph-s`'s forward): \$55 to \$75 per 1,000 with one process; \$35 to \$70 with several processes on one card, which needs the trainer of @exp:az-modal-scale too.
+  - _For scale._ `graph-s` costs \$59 per 1,000 with one process and \$19 to \$20 with several. fr3's line gained 3.85 pp in 300 iterations, 6.45 pp in 900 and 9.10 pp in 1,800; `graph-m` starts 4.85 pp behind e1800 (@exp:arch-graph-m-search).
+  - A 5-iteration benchmark (about \$0.50) would replace these ranges with a number. Not run.
 - *Kernels.* Built after the dice input lands (`wt/dice2`), since the wide kernels must read the same new inputs.
 - *Start.* `2p-graph-m-1`, a PPO net: it has none of e1800's 329,221 games of self-play, so it starts behind in the search and has to make that up.
 
