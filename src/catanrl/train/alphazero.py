@@ -133,7 +133,7 @@ from catanrl.envs.encoding import (
     info_level,
     make_encoder,
 )
-from catanrl.envs.puffer import plan_env
+from catanrl.envs.puffer import POINTS_KEYS, STYLE_KEYS, plan_env
 from catanrl.models import CatanModel, feature_names
 from catanrl.models.graph import OUTCOME_TURNS
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
@@ -1395,6 +1395,9 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             "search/mean_depth": stats["depth"] / full, "search/max_depth": stats["max_depth"] / full,
             "environment/episodes": episodes["episodes"], "environment/truncated": episodes["truncated"],
             "environment/length": episodes["length"], "environment/learner_win": episodes["learner_win"],
+            # how the games were played: final victory points (games with a winner), development
+            # cards, Largest Army and Longest Road changing hands
+            **{f"environment/{key}": episodes[key] for key in (*POINTS_KEYS, *STYLE_KEYS)},
             "throughput/selfplay_s": played, "throughput/iteration_s": time.time() - start,
             **{f"train/{k}": v for k, v in learned.items()}, **health, "map_pool": plan.pool["hash"],
         }

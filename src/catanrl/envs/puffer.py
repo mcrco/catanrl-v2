@@ -236,8 +236,12 @@ class CatanPufferEnv(pufferlib.PufferEnv):
                 continue
             total = self._totals.setdefault(prefix, {})
             total["episodes"] = total.get("episodes", 0.0) + episodes
-            for key in _MEAN_KEYS:
+            for key in (*_MEAN_KEYS, *STYLE_KEYS):
                 total[key] = total.get(key, 0.0) + float(bucket[key]) * episodes
+            won = round(episodes * (1.0 - float(bucket["truncated"])))
+            total["won"] = total.get("won", 0.0) + won
+            for key in POINTS_KEYS:  # means over the episodes with a winner
+                total[key] = total.get(key, 0.0) + float(bucket[key]) * won
             for seat, rate in enumerate(bucket["seat_win"]):
                 key = f"seat_win_{seat}"
                 total[key] = total.get(key, 0.0) + float(rate) * episodes
@@ -246,14 +250,18 @@ class CatanPufferEnv(pufferlib.PufferEnv):
         """Episodes finished since the last call: per bucket the count and the means over
         those episodes (rates for truncated, stuck, learner_win and seat wins), overall and
         per scenario (``<name>/<key>``). ``learner_win`` is per episode; divide by
-        ``learner_seats`` for a per-learner-seat rate."""
+        ``learner_seats`` for a per-learner-seat rate. The final victory points
+        (``POINTS_KEYS``) are means over the episodes somebody won, 0.0 when none was."""
         self._accumulate(self.vec.pop_stats())
         out: dict[str, float] = {}
         for prefix, total in self._totals.items():
             episodes = total["episodes"]
+            won = total.pop("won")
             out[f"{prefix}episodes"] = episodes
             for key, value in total.items():
-                if key != "episodes":
+                if key in POINTS_KEYS:
+                    out[f"{prefix}{key}"] = value / won if won else 0.0
+                elif key != "episodes":
                     out[f"{prefix}{key}"] = value / episodes
         self._totals = {}
         return out
@@ -264,6 +272,15 @@ class CatanPufferEnv(pufferlib.PufferEnv):
 
 #: The engine's per-episode means, added back up into counts by take_stats.
 _MEAN_KEYS = ("truncated", "length", "decisions", "learner_win", "learner_seats", "stuck")
+#: How the games were played (the style, not the strength), as pop_stats names it: the
+#: development cards bought and the share of episodes that ended with the deck empty, the
+#: times Largest Army and Longest Road passed from one seat to another and the share that
+#: ended with a seat holding each. Means over every episode, the truncated ones too.
+STYLE_KEYS = ("dev_bought", "dev_deck_empty", "army_changes", "road_changes", "army_awarded",
+              "road_awarded")
+#: The final victory points of the winner, of a seat that lost (the mean over them) and of
+#: every seat together: means over the episodes with a winner, which a truncated one is not.
+POINTS_KEYS = ("winner_vp", "loser_vp", "total_vp")
 
 
 @dataclass
