@@ -32,6 +32,9 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
     true`` searches the true game (``determinizations = 0``). ``c_puct`` is
     in engine units (0.75 = v1's 1.5). ``transpositions`` turns on the engine's
     transposition table (one node for a position reached by reordered actions).
+    ``root_policy_temperature`` (unset: 1.0) and ``forced_playouts`` (unset: 0.0)
+    are the engine's root exploration settings of the same names (PUCT roots;
+    self-play's full searches, catanrl.train.alphazero): no MCTS agent has them.
     """
     get = params.get if isinstance(params, Mapping) else lambda key, default=None: getattr(params, key, default)
     oracle = bool(get("oracle", False))
@@ -59,6 +62,8 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
         max_players=int(max_players),
         threads=threads,
         transpositions=bool(get("transpositions", False)),
+        root_policy_temperature=float(get("root_policy_temperature", 1.0)),
+        forced_playouts=float(get("forced_playouts", 0.0)),
     )
 
 

@@ -32,6 +32,7 @@ eval (resolution copies its suite, lineup, every, metric and fill into
 is optional the same way (:data:`TRAIN_OPTIONAL`): absent from
 ``configs/train/ppo.yaml``, so a config without it keeps its hash. So is an
 AlphaZero variant's ``train.reuse`` (absent from ``configs/train/alphazero.yaml``),
+its ``train.forced_playouts`` and ``train.root_policy_temperature``,
 and its ``train.outcome_vp_coef`` / ``outcome_turns_coef`` with the optional
 ``model.args.outcome`` (the outcome head: :data:`catanrl.models.OPTIONAL_ARGS`),
 its ``train.soft_policy_coef`` / ``soft_policy_temperature`` with the optional
@@ -64,6 +65,7 @@ import difflib
 import fnmatch
 import hashlib
 import itertools
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -133,6 +135,10 @@ TRAIN_OPTIONAL: dict[str, dict[str, Any]] = {
     "ppo": {"stop_epoch": None},
     "alphazero": {"reuse": False, "outcome_vp_coef": 0.0, "outcome_turns_coef": 0.0},
 }
+#: ``forced_playouts`` / ``root_policy_temperature`` (AlphaZero): KataGo's forced playouts and
+#: root policy temperature in self-play's full searches (catanrl.train.alphazero; 0.0 / 1.0: off).
+TRAIN_OPTIONAL["alphazero"]["forced_playouts"] = 0.0
+TRAIN_OPTIONAL["alphazero"]["root_policy_temperature"] = 1.0
 #: train.precision of a PPO run: float32; bfloat16 (PuffeRL's own autocast, with train.amp);
 #: float16 (needs train.amp: catanrl.train.puffer's autocast and GradScaler).
 PRECISIONS = ("float32", "bfloat16", "float16")
@@ -444,6 +450,7 @@ def _check_train(train: Any) -> dict:
     if algo == "alphazero":
         _check_alphazero_targets(out, base)
         _check_alphazero_reuse(out)
+        _check_alphazero_root(out)
         _check_alphazero_outcome(out)
     if algo == "distill":
         check_distill(out, base)
@@ -493,6 +500,23 @@ def _check_alphazero_reuse(train: Mapping[str, Any]) -> None:
     if reuse and train["dets"] > 0:
         raise ConfigError("train.reuse keeps one tree per game on the true game (dets: 0); sampled worlds "
                           "hold one seat's knowledge and do not carry over to the next seat's decision")
+
+
+def _check_alphazero_root(train: dict) -> None:
+    """train.forced_playouts / root_policy_temperature (optional, hashed when set): alphazero's
+    check_root_exploration, at resolution; kept as floats."""
+    for key, positive in (("forced_playouts", False), ("root_policy_temperature", True)):
+        if key not in train:
+            continue
+        value = train[key]
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                or value < 0.0 or (positive and value == 0.0)):
+            raise ConfigError(f"train.{key} is a finite {'positive' if positive else 'non-negative'} number, "
+                              f"not {value!r}")
+        if train["root"] != "puct":
+            raise ConfigError(f"train.{key} shapes a PUCT root's selection; Sequential Halving plans a Gumbel "
+                              "root's visits itself (root: puct)")
+        train[key] = float(value)
 
 
 def _check_alphazero_outcome(train: dict) -> None:

@@ -34,6 +34,15 @@
    action (a roll, a bought card, a steal), a move the VecEnv played by
    itself (forced), the end of the game and the end of the iteration (the
    network changes) drop the tree, and the next search starts empty.
+   ``root_policy_temperature`` and ``forced_playouts`` (optional; PUCT roots)
+   are KataGo's two other ways to widen a full search's root, the engine's
+   settings of the same names: the root's priors are raised to
+   ``1 / root_policy_temperature`` and renormalized before the noise is
+   mixed in, and a visited root action with fewer than
+   ``sqrt(forced_playouts * prior * visits of the root)`` visits is searched
+   before PUCT is asked. Like the noise they shape the full searches only
+   (a fast one runs as if they were unset), and ``policy_target: pruned``
+   takes out of the target what they add.
    ``runtime.search_groups`` (unset: 2) splits a step's searches into groups
    that take turns on the GPU while the engine collects and applies the
    others' leaves (:mod:`catanrl.search.pipeline`); 1 is the serial loop.
@@ -50,8 +59,9 @@
    priors either way. With ``policy_target: pruned`` (PUCT roots) it is the
    visit distribution without the visits that the root's Dirichlet noise
    forced (:func:`pruned_visits`): an action keeps the visits its value
-   earns under the network's own prior, so the noise still shapes the search
-   and the move played but is not taught back to the network. With ``reuse``
+   earns under the network's own prior, so the noise (and the root policy
+   temperature and the forced playouts) still shapes the search and the move
+   played but is not taught back to the network. With ``reuse``
    a target counts every visit of its root, carried and new, and the pruned
    one reads the prior from the tree (``SearchPool.root_priors``).
    Value: each seat's outcome, seat-relative like the value head (slot k =
@@ -234,6 +244,10 @@ ALPHAZERO_KEYS: dict[str, Any] = {
 #: Optional ``train`` keys and the values that mean "unset" (catanrl.config.TRAIN_OPTIONAL: absent
 #: from configs/train/alphazero.yaml, and a config without them hashes as it did before they existed).
 ALPHAZERO_OPTIONAL: dict[str, Any] = {"reuse": False, "outcome_vp_coef": 0.0, "outcome_turns_coef": 0.0}
+#: KataGo's forced playouts and root policy temperature in the full searches (a PUCT root; the
+#: engine's ``SearchConfig`` settings of the same names, where 0.0 and 1.0 are off).
+ALPHAZERO_OPTIONAL["forced_playouts"] = 0.0
+ALPHAZERO_OPTIONAL["root_policy_temperature"] = 1.0
 #: The outcome losses' Huber delta, in the heads' units: quadratic within half the points to
 #: win and within half of OUTCOME_TURNS, linear beyond (a 300-turn game does not swamp a batch).
 OUTCOME_HUBER_DELTA = 0.5
@@ -309,11 +323,33 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
     if reuse and int(train["dets"]) > 0:
         raise ValueError("train.reuse keeps one tree per game on the true game (dets: 0); sampled worlds "
                          "hold one seat's knowledge and do not carry over to the next seat's decision")
+    check_root_exploration(train)
     for key in ("outcome_vp_coef", "outcome_turns_coef"):
         value = train.get(key, 0.0)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0.0:
             raise ValueError(f"train.{key} is a non-negative number, not {value!r}")
     return train
+
+
+def check_root_exploration(train: Mapping[str, Any]) -> None:
+    """train.forced_playouts and train.root_policy_temperature (optional): finite numbers, the
+    first non-negative and the second positive, and set only for a PUCT root."""
+    for key, positive in (("forced_playouts", False), ("root_policy_temperature", True)):
+        value = train.get(key, ALPHAZERO_OPTIONAL[key])
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value)
+                or value < 0.0 or (positive and value == 0.0)):
+            raise ValueError(f"train.{key} is a finite {'positive' if positive else 'non-negative'} number, "
+                             f"not {value!r}")
+        if value != ALPHAZERO_OPTIONAL[key] and train["root"] != "puct":
+            raise ValueError(f"train.{key} shapes a PUCT root's selection; Sequential Halving plans a Gumbel "
+                             "root's visits itself (root: puct)")
+
+
+def root_exploration(train: Mapping[str, Any]) -> dict[str, float]:
+    """The full searches' forced_playouts and root_policy_temperature, as ``search_config`` params
+    and as a search's own options (``SearchPool.add`` / ``reroot``); off when unset."""
+    return {key: float(train.get(key, unset)) for key, unset in ALPHAZERO_OPTIONAL.items()
+            if key in ("forced_playouts", "root_policy_temperature")}
 
 
 def outcome_coefs(train: Mapping[str, Any]) -> tuple[float, float]:
@@ -811,9 +847,10 @@ class SelfPlay:
         self.model, self.device, self.mode = model, device, mode
         self.evaluator = self._evaluator()
 
-        def pool(sims: int, pending: int, noise: bool) -> cpp.SearchPool:
+        def pool(sims: int, pending: int, noise: bool, **explore: float) -> cpp.SearchPool:
             params = {"sims": sims, "dets": self.dets, "oracle": self.dets == 0, "root": train["root"],
                       "c_puct": train["c_puct"], "gumbel_m": train["gumbel_m"], "pending": pending, "noise": noise}
+            params.update(explore)
             config = search_config(params, max_players=self.players, threads=threads)
             return make_pool(self.dims, levels["level"], config, critic_level=levels["critic_level"],
                              dice_state=dice_state_of(levels))
@@ -824,11 +861,13 @@ class SelfPlay:
         #: reuse: a game's tree serves full and fast searches alike, so both run in one pool, each
         #: search with its own budget, leaves per round and noise (``options``: full, fast).
         self.reuse = bool(train.get("reuse", False))
+        #: The full searches' forced playouts and root policy temperature (off in the fast ones).
+        self.explore = root_exploration(train)
 
 
         def pools() -> list[cpp.SearchPool]:
-            full = pool(int(train["sims"]), self.leaves[0], noise)
-            # fast searches: no noise (KataGo)
+            full = pool(int(train["sims"]), self.leaves[0], noise, **self.explore)
+            # fast searches: no noise, forced playouts or root policy temperature (KataGo)
             return [full] if self.reuse else [full, pool(int(train["fast_sims"]), self.leaves[1], False)]
 
         #: Each search group's pools: [full, fast], or with reuse the one pool of both. The first
@@ -841,6 +880,8 @@ class SelfPlay:
         self.options = tuple(
             {"simulations": int(train[sims]), "max_pending": leaves, "dirichlet_alpha": DIRICHLET_ALPHA * noisy}
             for sims, leaves, noisy in (("sims", self.leaves[0], noise), ("fast_sims", self.leaves[1], False)))
+        self.options[0].update(self.explore)
+        self.options[1].update(root_exploration({}))  # the pool's are the full searches'
         #: reuse: each game's last search, kept for its next decision: (pool, search id, the game
         #: it searched, the action played).
         self.trees: dict[int, tuple[cpp.SearchPool, int, cpp.Game, int]] = {}
