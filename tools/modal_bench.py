@@ -20,6 +20,7 @@ the call's return value). Each call appends its seconds to ``<out>/tally.jsonl``
     modal run tools/modal_bench.py --job l40s-b1-t8   # B1 + C, 8 cores, 8 threads
     modal run tools/modal_bench.py --job l40s-b1-t32  # B1 + C, 32 cores, 32 threads
     modal run tools/modal_bench.py --job l40s-b2      # B2 + C, float32 and float16
+    modal run tools/modal_bench.py --job l40s-b1-x6   # six B1 processes at once on one L40S, 32 cores (x4, x8, x12)
     modal app list                                    # nothing may be left running
     .venv/bin/python tools/gpu_bench.py table local=<local out> l40s=<out>/l40s a10g=<out>/a10g
 
@@ -135,7 +136,30 @@ if __name__ == "__main__":
 """
 
 
-def _bench(runs: list[list[str]], capacity: bool = False) -> dict:
+def _bench_together(runs: list[list[str]], env: dict, out: Path) -> tuple[list[int], dict]:
+    """Every argument list at once, each process with a scratch runs directory of its own, sharing the
+    card; the card's and the cores' load sampled every 5 s (how many self-play processes one card feeds)."""
+    children = []
+    for index, arguments in enumerate(runs):
+        command = [f"{REMOTE}/.venv/bin/python", "tools/gpu_bench.py", *arguments, "--out", str(out),
+                   "--runs", f"/root/scratch-runs-{index}", "--real-runs", REMOTE_RUNS]
+        print("$", " ".join(command), flush=True)
+        children.append(subprocess.Popen(command, cwd=REMOTE, env=env))
+    samples = []
+    while any(child.poll() is None for child in children):
+        time.sleep(5)
+        smi = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu,memory.used", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, check=False).stdout.strip().split(",")
+        try:
+            samples.append({"t": time.time(), "gpu_util": float(smi[0]), "gpu_mib": float(smi[1]),
+                            "load1": float(Path("/proc/loadavg").read_text().split()[0]),
+                            "running": sum(child.poll() is None for child in children)})
+        except (ValueError, IndexError):
+            pass
+    return [child.returncode for child in children], {"samples": samples}
+
+
+def _bench(runs: list[list[str]], capacity: bool = False, together: bool = False) -> dict:
     """Run gpu_bench.py once per argument list in the image's checkout; return the files it wrote."""
     out, started, codes = Path("/root/out"), time.time(), []
     env = {**os.environ, "WANDB_MODE": "disabled", "PYTHONUNBUFFERED": "1",
@@ -149,6 +173,11 @@ def _bench(runs: list[list[str]], capacity: bool = False) -> dict:
                                  check=False).stdout
         print(printed, flush=True)
         measured = json.loads(printed.split("capacity", 1)[1]) if "capacity" in printed else None
+    if together:
+        out.mkdir(parents=True, exist_ok=True)
+        codes, load = _bench_together(runs, env, out)
+        (out / "together.json").write_text(json.dumps(load))
+        runs = []
     for arguments in runs:
         command = [f"{REMOTE}/.venv/bin/python", "tools/gpu_bench.py", *arguments, "--out", str(out),
                    "--runs", "/root/scratch-runs", "--real-runs", REMOTE_RUNS]
@@ -178,7 +207,18 @@ def on_l40s_32(runs: list[list[str]], capacity: bool = False) -> dict:
     return _bench(runs, capacity)
 
 
+@app.function(image=image, gpu="L40S", cpu=(32.0, 32.0), memory=65536, timeout=1800)
+def on_l40s_32_together(runs: list[list[str]], capacity: bool = False) -> dict:
+    return _bench(runs, capacity, together=True)
+
+
 B1 = ["b1", "--iterations", str(ITERATIONS)]
+
+
+def _together(processes: int, threads: int) -> list[list[str]]:
+    """``processes`` copies of B1 at once on one card, ``threads`` engine threads each."""
+    return [[*B1, "--threads", str(threads), "--tag", f"x{processes}p{i}"] for i in range(processes)]
+
 # job -> (function, GPU, cores, GiB, the machine's directory, gpu_bench.py argument lists)
 JOBS = {
     "cpu": (on_cpu, None, 4, 16, "cpu", [["all", "--tiny", "--iterations", "3", "--epochs", "4", "--warmup", "1"]]),
@@ -188,6 +228,11 @@ JOBS = {
     "l40s-b1-t8": (on_l40s, "L40S", 8, 32, "l40s", [[*B1, "--threads", "8", "--tag", "t8"]]),
     "l40s-b1-t32": (on_l40s_32, "L40S", 32, 32, "l40s-32c", [[*B1, "--threads", "32", "--tag", "t32"]]),
     "l40s-b2": (on_l40s, "L40S", 8, 32, "l40s", [["b2", "--epochs", str(EPOCHS)]]),
+    # several self-play processes on one L40S with 32 cores (64 vCPU): one process is limited by its main thread
+    "l40s-b1-x4": (on_l40s_32_together, "L40S", 32, 64, "l40s-32c-x4", _together(4, 12)),
+    "l40s-b1-x6": (on_l40s_32_together, "L40S", 32, 64, "l40s-32c-x6", _together(6, 8)),
+    "l40s-b1-x8": (on_l40s_32_together, "L40S", 32, 64, "l40s-32c-x8", _together(8, 6)),
+    "l40s-b1-x12": (on_l40s_32_together, "L40S", 32, 64, "l40s-32c-x12", _together(12, 4)),
 }
 
 
