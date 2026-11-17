@@ -542,6 +542,7 @@ SPLIT_SHARED = {
         "critic": {"critic.trunk.": "backbone.", "critic.value.": "value_head."},
     },
 }
+SPLIT_SHARED["seat"] = SPLIT_SHARED["graph"]  # the graph model's parts on another trunk
 
 
 def _split_source_keys(model: nn.Module, part: str, source: Checkpoint, keys: set[str]) -> dict[str, str]:
@@ -673,11 +674,13 @@ def _gains_dice_input(model: nn.Module, source: Checkpoint) -> bool:
 
 
 #: The parameters of a graph trunk that read the dice input (``GraphTrunk.dice_projection`` on
-#: the global features, ``tile_dice_projection`` on each tile's).
-DICE_WEIGHTS = ("dice_projection.weight", "tile_dice_projection.weight")
+#: the global features, ``tile_dice_projection`` on each tile's; a seat-set trunk's
+#: ``seat_dice_projection`` on each seat's).
+DICE_WEIGHTS = ("dice_projection.weight", "tile_dice_projection.weight", "seat_dice_projection.weight")
 
 
 def dice_input_keys(model: nn.Module) -> set[str]:
     """The state-dict keys of ``model``'s dice-input weights (every graph trunk's
-    ``dice_projection`` and ``tile_dice_projection``): what ``init_from.zero_new_inputs`` zeroes."""
+    ``dice_projection`` and ``tile_dice_projection``, a seat-set trunk's ``seat_dice_projection``
+    too): what ``init_from.zero_new_inputs`` zeroes."""
     return {key for key in model.state_dict() if any(key == w or key.endswith("." + w) for w in DICE_WEIGHTS)}

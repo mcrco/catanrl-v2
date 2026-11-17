@@ -85,9 +85,11 @@ class BatchEvaluator:
         #: kernels=fused16: chunks evaluated again in float32 (a half overflowed in their forward).
         self.exact_forwards = 0
         if kernels != "torch":
+            from catanrl.models.graph_kernels import FusedGraph, FusedGraph16, check_class
+
+            check_class(self.model)
             if self.device.type != "cuda" or self.recurrent or heads != "both":
                 raise ValueError(f"kernels={kernels} evaluates both heads of a stateless network on a CUDA device")
-            from catanrl.models.graph_kernels import FusedGraph, FusedGraph16
 
             self.fused = (FusedGraph16 if kernels == "fused16" else FusedGraph)(self.model)
         self._graphs: dict[int, tuple[torch.cuda.CUDAGraph, tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]] = {}

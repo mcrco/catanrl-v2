@@ -1,0 +1,13 @@
+preset: graph-seat-tiny
+class: seat
+args:
+  hidden: 16
+  global_hidden: 8
+  layers: 1
+  head_hidden: 16
+  shared: false
+  seat_hidden: 8
+  relation_hidden: 2
+  attention: true
+  attention_hidden: 8
+  attention_heads: 2

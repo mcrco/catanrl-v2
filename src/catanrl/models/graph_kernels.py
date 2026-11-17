@@ -64,6 +64,13 @@ def _fold(weight: torch.Tensor, index: torch.Tensor, raw_width: int) -> torch.Te
     return out[:, :raw_width]
 
 
+def check_class(model) -> None:
+    """Refuse, by name and on any device, a network class no fused kernels are written for."""
+    if getattr(model, "spec", {}).get("class") == "seat":
+        raise ValueError("kernels=fused runs the graph class's networks: no fused kernels are written for a "
+                         "seat-set network (model class seat, the graph-seat presets); run it with kernels=torch")
+
+
 class FusedGraph:
     """The forward of a shared-trunk :class:`~catanrl.models.GraphModel` (no aux head,
     hidden 96; an outcome head, ``model.args.outcome``, is training only and is left out: the
@@ -74,6 +81,7 @@ class FusedGraph:
     raises on it)."""
 
     def __init__(self, model) -> None:
+        check_class(model)
         if getattr(model, "spec", {}).get("class") != "graph" or not getattr(model, "shared", False) or model.aux:
             raise ValueError("kernels=fused runs shared-trunk graph networks without an aux head (model.args.aux; "
                              "an outcome head is accepted: no kernel runs it)")

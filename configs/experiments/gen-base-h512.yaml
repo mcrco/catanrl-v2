@@ -1,0 +1,89 @@
+# The generalist base with a fuller horizon and no discount (Marco, 2026-11-16: "a comparable
+# mixed base training with longer horizon on modal", "longer horizon with no discount", "let's do
+# 512 if that covers").
+#
+# gen-base cuts each env's rollout into 64-step segments, with GAE lambda 0.95 and a policy
+# discount of 0.999 a decision: a step's advantage is mostly the critic's estimate about 20
+# decisions later. Here a segment is 512 steps, lambda is 1 and nothing is discounted, so a
+# step's target is the game's actual result whenever its game ends inside the segment and the
+# critic's value at the cut otherwise. In gen-base's last epoch a game was 208 decisions at 2p
+# and 185 at 3p and 4p (all seats' decisions; 78 to 84 turns), so a 512-step segment holds about
+# 2.5 to 2.8 games and about 80% of its steps see their game's end (1 - length / 1024); at 256
+# steps 59 to 64%, at 64 steps with lambda 1 about 16%. The critic's lambda targets use the same
+# lambda. The network has no memory, so the segment length changes only the targets.
+#
+# Design: gen-base (same games, network, optimizer, cosine, seed, 996M agent steps, finals) with
+# four changes: bptt_horizon 512, gae_lambda 1.0, gamma 1.0, and num_envs 128 (from 1024) so an
+# epoch is still 262,144 agent steps (512 rows x 512 steps) with the same 16 optimizer steps and
+# the same number of finished games (about 345). Fewer games run in parallel (128 against 1,024:
+# an epoch holds 128 streams of whole games in place of 1,024 pieces of games). The three knobs
+# change together (one run, as asked), so a difference can't be pinned on one of them.
+# horizon-2p is the same question at 1v1 with 256 steps.
+#
+# Evals: none in the run. gen-base's three finals on the last checkpoint, the same boards, seats
+# and opponents, so every game pairs with gen-base@e3800's (McNemar): 2,000 games at 2p, 3,000 at
+# 3p, 4,000 at 4p.
+#
+# Speed: collection takes 8x as many env steps of an eighth the rows, so the forwards are smaller
+# and the Python per step counts 8x; measured on an L40S before the launch.
+name: gen-base-h512
+seed: 42
+env:
+  scenarios:
+    - {game: base-2p-fr, turn_limit: 1000, maps: 2048}
+    - {game: base-3p, turn_limit: 1000, maps: 2048}
+    - {game: base-4p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-2p-fr, num_players: 2, map: {type: hexagon, radius: 2}, victory_points_to_win: 15, discard_limit: 9,
+              friendly_robber: true, dice_mode: balanced},
+       turn_limit: 1000, maps: 2048}
+    - {game: hexagon-3p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-4p, num_players: 4, map: {type: hexagon, radius: 2}}, turn_limit: 1000, maps: 2048}
+  num_envs: 128                   # 512 rows x 512 steps = 262,144, gen-base's batch (header)
+obs: {level: private, dice_state: true}   # private: the only fair level past two players
+model: {preset: graph-seat-s, args: {shared: true}}
+train:
+  algo: ppo
+  total_timesteps: 996_147_200    # ppo-mixed's: 3,800 epochs x 262,144 agent steps
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95
+  adam_beta2: 0.999
+  adam_eps: 1.0e-12
+  gamma: 1.0                      # gen-base: 0.999 (header)
+  gae_lambda: 1.0                 # gen-base: 0.95 (header)
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2
+  ent_coef: 0.005
+  max_grad_norm: 4.0
+  bptt_horizon: 512               # gen-base: 64 (header)
+  minibatch_size: 32768
+  max_minibatch_size: 4096
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 100
+eval:
+  select: null                    # no in-run evals (header)
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup: ["POLICY:ckpt=${run}@latest", "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"]
+    - suite: {name: heldout-3p, purpose: heldout, seed: 71, boards: 1000, scenarios: [{game: base-3p}], turn_limit: 500}
+      lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf"]
+    - suite: heldout-4p
+      lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f",
+               "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f"]
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  recipe: gen-base
+  notes: |
+    Report idea: longer rollout segments, lambda 1 and no discount (exp:gen-base-h512), on
+    the generalist base: gen-base with 512-step segments.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

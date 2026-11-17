@@ -1,0 +1,89 @@
+# gen-base-h512 with 8 times the rows per collection and 8 times the minibatch (Marco, 2026-11-17:
+# "why do we stay at 2^18 steps for each training? why not go more for 512 x 4096 or smth?",
+# "let's run the big batch in parallel", "big batch should have bigger minibatch and the same
+# number of updates").
+#
+# gen-base-h512 kept gen-base's 262,144 agent steps per update so the two compare, which meant
+# 128 envs: 512 rows per forward and 512 forwards per collection. A forward on 512 rows takes
+# almost as long as one on 4,096 (7.6 ms against 8.8 ms on an L40S), so collection went from
+# 1.2 s to 5.0 s per 262,144 steps and the run from 47,600 to about 27,000 agent steps a second
+# (10.4 h and about $27 against gen-base's 5.97 h and $15.43).
+#
+# Here: 1,024 envs as gen-base (4,096 rows per forward) x 512 steps = 2,097,152 agent steps a
+# collection, and a minibatch of 262,144 rows (8x), so a collection still gets 8 minibatches x 2
+# passes = 16 optimizer steps. Everything else as gen-base-h512 (512-step segments, lambda 1, no
+# discount, the same 996M agent steps, the same peak and floor learning rate, seed and finals).
+# So the run makes 475 collections and 7,600 optimizer steps where gen-base and gen-base-h512
+# make 3,800 and 60,800: each step averages 8 times the rows, at an unchanged learning rate (not
+# rescaled for the batch), and the cosine advances once per collection (475 values). The work per
+# agent step is the same, so the speed should be about gen-base's (about 6 h and $16 on an L40S
+# with 8 cores); not measured before the launch.
+#
+# Compare with gen-base-h512 (isolates the batch; same finals, paired by game) and with gen-base.
+#
+# Memory: the rollout buffer lives on the GPU in float32, 3,395 floats a row: 26.6 GiB here
+# (3.3 GiB at 262,144 steps). Fits an L40S (48 GB), not this box's 8 GB card. A minibatch is
+# sampled and backpropagated in 4,096-row chunks (8 segments each; 64 chunks an optimizer step),
+# so the minibatch size does not change the peak of an update.
+name: gen-base-h512-big
+seed: 42
+env:
+  scenarios:
+    - {game: base-2p-fr, turn_limit: 1000, maps: 2048}
+    - {game: base-3p, turn_limit: 1000, maps: 2048}
+    - {game: base-4p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-2p-fr, num_players: 2, map: {type: hexagon, radius: 2}, victory_points_to_win: 15, discard_limit: 9,
+              friendly_robber: true, dice_mode: balanced},
+       turn_limit: 1000, maps: 2048}
+    - {game: hexagon-3p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-4p, num_players: 4, map: {type: hexagon, radius: 2}}, turn_limit: 1000, maps: 2048}
+  num_envs: 1024                  # 4,096 rows x 512 steps = 2,097,152 agent steps a collection (header)
+obs: {level: private, dice_state: true}   # private: the only fair level past two players
+model: {preset: graph-seat-s, args: {shared: true}}
+train:
+  algo: ppo
+  total_timesteps: 996_147_200    # the same budget: 475 collections x 2,097,152 agent steps
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95
+  adam_beta2: 0.999
+  adam_eps: 1.0e-12
+  gamma: 1.0                      # gen-base: 0.999 (header)
+  gae_lambda: 1.0                 # gen-base: 0.95 (header)
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2
+  ent_coef: 0.005
+  max_grad_norm: 4.0
+  bptt_horizon: 512               # gen-base: 64 (header)
+  minibatch_size: 262144          # 8x gen-base's 32,768: 8 minibatches x 2 passes = 16 optimizer steps a collection (header)
+  max_minibatch_size: 4096
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 12          # about every 25M agent steps, as gen-base-h512's 100 x 262,144
+eval:
+  select: null                    # no in-run evals (header)
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup: ["POLICY:ckpt=${run}@latest", "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"]
+    - suite: {name: heldout-3p, purpose: heldout, seed: 71, boards: 1000, scenarios: [{game: base-3p}], turn_limit: 500}
+      lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf"]
+    - suite: heldout-4p
+      lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f",
+               "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f"]
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  recipe: gen-base
+  notes: |
+    Report idea: longer rollout segments, lambda 1 and no discount (exp:gen-base-h512), on
+    the generalist base: gen-base-h512 with 8x the rows per collection (Marco: "do big batch
+    next time", then "let's run the big batch in parallel"), minibatch 8x too.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}

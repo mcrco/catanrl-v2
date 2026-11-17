@@ -1,0 +1,91 @@
+# The generalist base (Marco, 2026-11-16): one network trained from scratch on 2-, 3- and
+# 4-player games, to be a strong and robust policy and critic, and the start of AlphaZero
+# self-play for each specialist deployed on OpenHex.
+#
+# ppo-mixed's recipe (same mix of table sizes and maps, same optimizer, same 996M agent steps,
+# so the two runs compare at equal training) with four changes:
+#   1. the network: graph-seat-s, the seats as a set with shared weights (wt/player-set), in
+#      place of graph-s;
+#   2. the 2p games: OpenHex's 1v1 rules (15 VP, discard above 9, friendly robber, balanced
+#      dice) on both maps, in place of base-2p (10 VP, discard above 7, normal robber, random
+#      dice). The 3p and 4p games are the base rules, which are OpenHex's for 4p;
+#   3. the dice input (obs.dice_state): the balanced dice state of the 1v1 games. Under random
+#      dice (the 3p and 4p games) it reads as a fresh deck at every roll;
+#   4. the critic: the undiscounted default (critic_targets lambda, critic_gamma 1.0), where
+#      ppo-mixed pinned the discounted V-trace targets. The policy's gamma stays ppo-mixed's.
+# Marco confirmed the games and the dice input on 2026-11-16 ("everything openhex rules, with
+# dice input") and kept graph-s's size for speed.
+#
+# Evals: none in the run (best = latest). Three finals, one per table size, the last
+# checkpoint's raw policy against the yardstick of that size:
+#   2p: best-2p (2p-graph-m-1) made fair (BELIEF, 16 worlds; it is a full-level network),
+#       2,000 games, +-2.2 pp at 50%;
+#   3p: two copies of ppo-mixed (no 3p specialist exists), 3,000 games, +-1.7 pp at 33.3%;
+#   4p: three copies of best-4p (4p-graph-s-1), 4,000 games, +-1.3 pp at 25%.
+# Parity is 1 / seats. The finals need those three checkpoints in the runs directory (on
+# Modal: --ship each).
+#
+# Speed: unmeasured on a GPU. On CPU the network costs 1.2x graph-s per forward row and
+# 1.35x per update row; ppo-mixed took 11.5 h on the RTX 2070 Super and would take 4.6 h on
+# an L40S.
+name: gen-base
+seed: 42
+env:
+  scenarios:
+    - {game: base-2p-fr, turn_limit: 1000, maps: 2048}
+    - {game: base-3p, turn_limit: 1000, maps: 2048}
+    - {game: base-4p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-2p-fr, num_players: 2, map: {type: hexagon, radius: 2}, victory_points_to_win: 15, discard_limit: 9,
+              friendly_robber: true, dice_mode: balanced},
+       turn_limit: 1000, maps: 2048}
+    - {game: hexagon-3p, turn_limit: 1000, maps: 2048}
+    - {game: {name: hexagon-4p, num_players: 4, map: {type: hexagon, radius: 2}}, turn_limit: 1000, maps: 2048}
+  num_envs: 1024
+obs: {level: private, dice_state: true}   # private: the only fair level past two players
+model: {preset: graph-seat-s, args: {shared: true}}
+train:
+  algo: ppo
+  total_timesteps: 996_147_200    # ppo-mixed's: 3,800 epochs x 262,144 agent steps
+  optimizer: muon
+  learning_rate: 0.005
+  lr_schedule: constant
+  anneal_lr: true
+  min_lr_ratio: 0.1
+  adam_beta1: 0.95
+  adam_beta2: 0.999
+  adam_eps: 1.0e-12
+  gamma: 0.999
+  gae_lambda: 0.95
+  update_epochs: 2
+  clip_coef: 0.2
+  vf_coef: 2.0
+  vf_clip_coef: 0.2
+  ent_coef: 0.005
+  max_grad_norm: 4.0
+  bptt_horizon: 64
+  minibatch_size: 32768
+  max_minibatch_size: 4096
+  prio_alpha: 0.8
+  prio_beta0: 0.2
+  vtrace_rho_clip: 1.0
+  vtrace_c_clip: 1.0
+  precision: float32
+  amp: false
+  checkpoint_interval: 100
+eval:
+  select: null                    # no in-run evals (header)
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup: ["POLICY:ckpt=${run}@latest", "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"]
+    - suite: {name: heldout-3p, purpose: heldout, seed: 71, boards: 1000, scenarios: [{game: base-3p}], turn_limit: 500}
+      lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf", "POLICY:ckpt=ppo-mixed/main@e3550#1183427bf0cf"]
+    - suite: heldout-4p
+      lineup: ["POLICY:ckpt=${run}@latest", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f", "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f",
+               "POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f"]
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
+  recipe: ppo-mixed
+  notes: |
+    Report idea: one model for up to n players and arbitrary maps (exp:gen-base). The base
+    of the AlphaZero specialists.
+runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
