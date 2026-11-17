@@ -274,3 +274,101 @@ def test_ref_files(tmp_path):
     for bad in ("e/v@e9", "e/v@e1#ffff", "nope/v@e1", "e"):
         with pytest.raises(mt.ToolError):
             mt.ref_files(bad, tmp_path)
+
+
+def test_guard_trips_on_a_scenario_whose_games_are_all_cut(tmp_path):
+    guard = {"share": 0.9, "epochs": 20}
+    two, four = "environment/base-2p-fr/truncated", "environment/base-4p/truncated"
+    healthy = [{"epoch": i, two: 0.02, four: 0.0, "environment/truncated": 0.01, "losses/entropy": 0.3,
+                "losses/approx_kl": 0.03, "losses/value_loss": 0.5} for i in range(30)]
+    h = mt.health_of(healthy)
+    assert (h["cut"], h["cut_rows"]) == (0.02, 0) and mt.guard_reason(h, guard) is None
+    assert h["losses"] == {"entropy": 0.3, "KL": 0.03, "value loss": 0.5}
+    # the 2p games collapse first: the overall share stays low, the scenario's own does not
+    rows = healthy + [{"epoch": 30 + i, two: 1.0, four: 0.0, "environment/truncated": 0.3} for i in range(19)]
+    h = mt.health_of(rows)
+    assert (h["cut"], h["cut_rows"], h["cut_of"]) == (1.0, 19, "base-2p-fr") and mt.guard_reason(h, guard) is None
+    rows.append({"epoch": 49, four: 0.0})                             # an epoch that ended no 2p game: no count, no break
+    assert mt.health_of(rows)["cut_rows"] == 19
+    rows.append({"epoch": 50, two: 0.95, four: 0.0})
+    h = mt.health_of(rows)
+    assert h["cut_rows"] == 20 and "base-2p-fr games were cut at the turn limit" in mt.guard_reason(h, guard)
+    assert mt.guard_reason(h, None) is None                           # --no-guard
+    assert h["losses"]["entropy"] == 0.3                              # the newest row that has one
+    rows.append({"epoch": 51, two: 0.5, four: 0.0})                   # one epoch of finished games ends the count
+    assert mt.health_of(rows)["cut_rows"] == 0
+    # a trainer that logs no scenario (AlphaZero): all games
+    az = [{"epoch": i, "environment/truncated": 1.0, "train/policy_loss": 0.6, "train/value_loss": 0.5} for i in range(20)]
+    h = mt.health_of(az)
+    assert (h["cut_rows"], h["cut_of"]) == (20, None) and "of the games were cut" in mt.guard_reason(h, guard)
+    assert mt.health_of([]) == {} and mt.guard_reason({}, guard) is None and mt.health_text({}) is None
+    # progress_of carries it, status prints it, and a guard stop is spelled out
+    run = tmp_path / "e" / "v"
+    make_run(run, epoch=2, rows=4)
+    with open(run / "metrics.jsonl", "a") as f:
+        f.writelines(json.dumps({**row, "agent_steps": 100 * row["epoch"]}) + "\n" for row in rows[:-1])
+    p = mt.progress_of(run)
+    assert p["health"]["cut_rows"] == 20 and p["epoch"] == 50
+    launch = {"app_id": "ap-1", "rev": "a" * 40, "launch_id": "L", "budget_s": 7200.0,
+              "usd_per_s": mt.usd_per_s("L40S", 8, 32), "shape": {"gpu": "L40S", "cores": 8, "GiB": 32}}
+    state = {"launch_id": "L", "used_s": 3600.0, "heartbeat": 1100.0, "phase": "guard_stopped", "segments": 1,
+             "progress": p, "samples": [], "guard_stop": mt.guard_reason(p["health"], guard)}
+    text = mt.status_text("e/v", launch, state, False, "stopped", 1160.0)
+    assert "health: 95.0% of the games of base-2p-fr cut at the turn limit (20 epochs in a row" in text
+    assert "STOPPED BY THE GUARD: at least 90% of the base-2p-fr games" in text
+    assert "stops the run once 90%" in mt.guard_line(guard) and "off" in mt.guard_line(None)
+
+
+FAKE_TRAINER = r'''#!/usr/bin/env python3
+"""Stands in for `catanrl run`: every game is cut at the turn limit; SIGTERM ends the "epoch"."""
+import json, os, signal, sys, time
+run = os.path.join(os.environ["CATANRL_RUNS_DIR"], "e", "v")
+os.makedirs(run, exist_ok=True)
+stop = []
+signal.signal(signal.SIGTERM, lambda *a: stop.append(1))
+def state(status, epoch):
+    with open(os.path.join(run, "run.json.part"), "w") as f:
+        json.dump({"status": status, "trainer_state": {"epoch": epoch}, "checkpoints": []}, f)
+    os.replace(os.path.join(run, "run.json.part"), os.path.join(run, "run.json"))
+with open(os.path.join(run, "config.json"), "w") as f:
+    json.dump({"config": {"train": {"total_timesteps": 10**9}}}, f)
+epoch = 0
+while not stop and epoch < 600:
+    epoch += 1
+    with open(os.path.join(run, "metrics.jsonl"), "a") as f:
+        f.write(json.dumps({"epoch": epoch, "agent_steps": 100 * epoch, "environment/base-2p-fr/truncated": CUT,
+                            "environment/truncated": CUT, "losses/entropy": 0.01}) + "\n")
+    state("running", epoch)
+    time.sleep(0.1)
+state("interrupted" if stop else "finished", epoch)
+print("fake trainer out at epoch", epoch, flush=True)
+'''
+
+
+@pytest.mark.parametrize("cut, guard, phase", [(1.0, {"share": 0.9, "epochs": 5}, "guard_stopped"),
+                                               (1.0, None, "finished"),
+                                               (0.5, {"share": 0.9, "epochs": 5}, "finished")])
+def test_supervisor_stops_a_run_whose_games_are_all_cut(tmp_path, monkeypatch, cut, guard, phase):
+    class Vol:
+        def commit(self): pass
+        def reload(self): pass
+    remote = tmp_path / "remote"
+    (remote / ".venv" / "bin").mkdir(parents=True)
+    trainer = remote / ".venv" / "bin" / "catanrl"
+    trainer.write_text(FAKE_TRAINER.replace("CUT", repr(cut)).replace("epoch < 600", "epoch < 60" if phase == "finished" else "epoch < 600"))
+    trainer.chmod(0o755)
+    for name, value in (("REMOTE", str(remote)), ("VOL", str(tmp_path / "vol")), ("LOCAL_RUNS", str(tmp_path / "runs")),
+                        ("LOGS", str(tmp_path / "logs")), ("volume", Vol())):
+        monkeypatch.setattr(mt, name, value)
+    spec = {"run": "e/v", "config": "c.yaml", "variant": "v", "rev": "a" * 40, "sets": [], "ships": [],
+            "launch_id": "L", "budget_s": 600.0, "timeout_s": 750, "segment_s": None, "sync_s": 1.0, "min_sync_s": 0.0,
+            "guard": guard}
+    out = mt._supervise(spec)
+    assert out["phase"] == phase
+    state = json.loads((tmp_path / "vol" / "_modal" / "e" / "v.state.json").read_text())
+    kept = json.loads((tmp_path / "vol" / "runs" / "e" / "v" / "run.json").read_text())
+    if phase == "guard_stopped":
+        assert "base-2p-fr games were cut at the turn limit" in state["guard_stop"]
+        assert kept["status"] == "interrupted" and kept["trainer_state"]["epoch"] < 600   # stopped early, resumable
+    else:
+        assert "guard_stop" not in state and kept["status"] == "finished"

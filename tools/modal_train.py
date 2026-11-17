@@ -3,6 +3,7 @@
     P=.venv/bin/python
     $P tools/modal_train.py launch configs/experiments/ppo-mixed.yaml --gpu L40S --cpu 8 --memory 32 \\
         --max-hours 12 --set runtime.threads=8            # detached; prints $/h and the worst case
+    $P tools/modal_train.py launch configs/experiments/gen-base.yaml --max-hours 12 --guard-epochs 40   # or --no-guard
     $P tools/modal_train.py launch configs/experiments/az-2p-bundle.yaml --rev wt/player-set \\
         --gpu A10G --max-hours 30 --ship az-2p-kata/main+1500@e1800   # another branch; a start to upload
     $P tools/modal_train.py status [ppo-mixed/main]       # epoch, rate, ETA, cost so far, app alive?
@@ -49,6 +50,16 @@ call at 24 h: a run with more budget ends its segment on the trainer's time limi
 next call in the same app (``--segment-hours`` shortens the segment), as long as the last segment
 moved the run forward. ``resume`` starts a new app with a new budget.
 
+The guard. A policy that collapses stops ending its games: they run into the turn limit, a cut game
+pays nobody, every value target is 0 and nothing is left to learn (gen-base-h512, 2026-11-17: five
+hours and about $13 of that). The supervisor reads the trainer's metrics at every sync and stops the
+run (SIGTERM: the epoch ends and is checkpointed, phase ``guard_stopped``, nothing respawns) once
+``--guard-share`` (0.9) of the games of one scenario, or of all games when the trainer logs no
+scenario, were cut at the turn limit in each of the last ``--guard-epochs`` (20) epochs that ended a
+game of it. ``status`` and ``watch`` print that share with the entropy, the KL and the losses of the
+newest epoch. ``resume`` keeps the guard (and it trips again at once while the last epochs still
+look so); ``--no-guard`` on ``launch`` or ``resume`` turns it off.
+
 Money. Prices are list prices per second (modal_bench.py's table for L40S, A10G, cores and memory;
 the other GPUs from ``modal billing rates`` on 2026-11-16). ``launch`` prints the shape's $/h and
 the worst case of the budget, ``status`` the supervisor's seconds times that price. Image builds,
@@ -92,7 +103,9 @@ VOLUME = "catanrl-runs"
 REMOTE = "/root/catanrl-v2"   # the checkout in the image
 VOL = "/vol"                  # the Volume in the container
 LOCAL_RUNS = "/root/runs"     # the trainer's runs directory (container disk)
+LOGS = "/root/logs"           # the trainer's output (container disk; its tail goes to the Volume)
 EXTRA = "cu130"
+GUARD_SHARE, GUARD_EPOCHS = 0.9, 20   # the guard: this share of a scenario's games cut, this many epochs in a row
 MARGIN_S = 150                # function timeout past the budget: start-up and the last commit
 DAY_S = 24 * 3600             # Modal's cap on one call
 # $ per second. L40S, A10G, core, GiB: modal_bench.py (modal.com/pricing, 2026-11-15); the other
@@ -288,7 +301,7 @@ def _put_file(src: Path, dst: Path) -> None:
         part.unlink(missing_ok=True)
 
 
-TIME_UP, STOP = "the segment's time is up", "stop requested"
+TIME_UP, STOP, GUARD = "the segment's time is up", "stop requested", "the guard tripped"
 LAST = ("trainer_state.pt", "run.json")   # the trainer's commit point: copied last, from one read
 
 
@@ -371,8 +384,8 @@ def restore_run(src: Path, dst: Path) -> int:
     return len(files)
 
 
-def progress_of(run_dir: Path) -> dict:
-    """Where a run is, from run.json, config.json and the tail of metrics.jsonl."""
+def progress_of(run_dir: Path, share: float = GUARD_SHARE) -> dict:
+    """Where a run is and how it looks, from run.json, config.json and the tail of metrics.jsonl."""
     out: dict = {}
     run = _read_json(run_dir / "run.json") or {}
     out["status"] = run.get("status")
@@ -385,24 +398,94 @@ def progress_of(run_dir: Path) -> dict:
         out["target"] = ["epoch", int(train["iterations"])]
     elif train.get("total_timesteps"):
         out["target"] = ["agent_steps", int(train["total_timesteps"])]
-    try:
-        with open(run_dir / "metrics.jsonl", "rb") as f:
-            f.seek(0, 2)
-            f.seek(max(0, f.tell() - 262144))
-            lines = [line for line in f.read().split(b"\n") if line.strip()]
-    except OSError:
-        lines = []
-    for line in reversed(lines):
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue  # a torn last line, or the cut first one
+    rows = tail_rows(run_dir)
+    if rows:
+        row = rows[-1]
         out["epoch"] = row.get("epoch")
         out["agent_steps"] = row.get("agent_steps", row.get("step"))
         out["trainer"] = {k.split("/", 1)[1]: round(v, 3) for k, v in row.items()
                           if k.startswith("throughput/") and isinstance(v, (int, float))}
-        break
+        out["health"] = health_of(rows, share)
     return out
+
+
+def tail_rows(run_dir: Path, nbytes: int = 1 << 20) -> list[dict]:
+    """The last rows of metrics.jsonl, oldest first (about 140 of a mixed PPO run's in 1 MiB)."""
+    try:
+        with open(run_dir / "metrics.jsonl", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - nbytes))
+            lines = [line for line in f.read().split(b"\n") if line.strip()]
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue  # a torn last line, or the cut first one
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+# what a collapse shows, as the trainers log it (PPO: losses/*; AlphaZero: train/*)
+HEALTH = (("losses/entropy", "entropy"), ("losses/approx_kl", "KL"), ("losses/value_loss", "value loss"),
+          ("train/policy_loss", "policy loss"), ("train/value_loss", "value loss"))
+
+
+def health_of(rows: list[dict], share: float = GUARD_SHARE) -> dict:
+    """The share of games cut at the turn limit and the newest losses, from metrics rows (oldest first).
+
+    ``cut`` is the newest share of the scenario that looks worst (of all games when the trainer logs
+    no scenario) and ``cut_rows`` how many of its newest rows in a row are at ``share`` or above; a row
+    without the key (no game of that scenario ended in the epoch) neither counts nor breaks the count.
+    """
+    out: dict = {}
+    keys = sorted({k for r in rows for k in r if k.startswith("environment/") and k.endswith("/truncated")
+                   and k.count("/") == 2}) or ["environment/truncated"]
+    worst = None
+    for key in keys:
+        values = [r[key] for r in rows if isinstance(r.get(key), (int, float))]
+        if not values:
+            continue
+        streak = 0
+        for v in reversed(values):
+            if v < share:
+                break
+            streak += 1
+        if worst is None or (streak, values[-1]) > worst[:2]:
+            worst = (streak, values[-1], key)
+    if worst is not None:
+        name = worst[2].split("/")[1] if worst[2].count("/") == 2 else None
+        out.update(cut=round(worst[1], 4), cut_rows=worst[0], cut_of=name, rows=len(rows))
+    for key, label in HEALTH:
+        for row in reversed(rows):
+            if isinstance(row.get(key), (int, float)):
+                out.setdefault("losses", {}).setdefault(label, round(row[key], 4))
+                break
+    return out
+
+
+def guard_reason(health: dict | None, guard: dict | None) -> str | None:
+    """Why the guard stops the run, or None."""
+    if not guard or not health or health.get("cut_rows", 0) < guard["epochs"]:
+        return None
+    games = f"{health['cut_of']} games" if health.get("cut_of") else "games"
+    return (f"at least {100 * guard['share']:g}% of the {games} were cut at the turn limit in each of the last "
+            f"{health['cut_rows']} epochs that ended one (the guard's limit: {guard['epochs']})")
+
+
+def health_text(health: dict | None) -> str | None:
+    if not health:
+        return None
+    bits = []
+    if "cut" in health:
+        of = f" of {health['cut_of']}" if health.get("cut_of") else ""
+        bits.append(f"{100 * health['cut']:.1f}% of the games{of} cut at the turn limit"
+                    + (f" ({health['cut_rows']} epochs in a row at the guard's share)" if health.get("cut_rows") else ""))
+    bits += [f"{label} {value:g}" for label, value in (health.get("losses") or {}).items()]
+    return "; ".join(bits) or None
 
 
 def segment_plan(budget_s: float, used_s: float, timeout_s: float, segment_s: float | None) -> tuple[float, float]:
@@ -419,7 +502,7 @@ def _supervise(spec: dict) -> dict:
     state_path, stop_path, log_vol = (side / f"{variant}.state.json", side / f"{variant}.stop",
                                       side / f"{variant}.log")
     vol_run, loc_run = Path(VOL) / "runs" / exp / variant, Path(LOCAL_RUNS) / exp / variant
-    log_loc = Path("/root/logs") / f"{exp}--{variant}.log"
+    log_loc = Path(LOGS) / f"{exp}--{variant}.log"
     log_loc.parent.mkdir(parents=True, exist_ok=True)
 
     state = _read_json(state_path) or {}
@@ -501,8 +584,10 @@ def _supervise(spec: dict) -> dict:
 
     last_sync, last_key, term_at, why = started, None, None, None
 
+    guard = spec.get("guard")
+
     def sync(phase: str) -> dict:
-        now = progress_of(loc_run)
+        now = progress_of(loc_run, (guard or {}).get("share", GUARD_SHARE))
         wrote = sync_run(loc_run, vol_run, seen)
         samples = state["samples"] + [[round(time.time(), 1), now.get("epoch"), now.get("agent_steps"),
                                        state["segments"]]]
@@ -511,8 +596,8 @@ def _supervise(spec: dict) -> dict:
         save_state(phase=phase, progress=now, samples=samples)
         _put_bytes(seen_path, json.dumps({"launch_id": spec["launch_id"], "seen": seen}).encode())
         print(f"[modal_train] committed {wrote} files to the Volume: epoch {now.get('epoch')}, "
-              f"commit point e{now.get('commit_epoch')}, {state['used_s']:.0f} of {spec['budget_s']:.0f} s",
-              flush=True)
+              f"commit point e{now.get('commit_epoch')}, {state['used_s']:.0f} of {spec['budget_s']:.0f} s"
+              + (f"; {health_text(now.get('health'))}" if health_text(now.get("health")) else ""), flush=True)
         return now
 
     def terminate(reason: str) -> None:
@@ -534,10 +619,14 @@ def _supervise(spec: dict) -> dict:
                     volume.reload()  # the stop request is written from outside
                 except Exception as e:  # noqa: BLE001
                     print(f"[modal_train] reload failed: {type(e).__name__}: {e}", flush=True)
-                sync("training")
+                tripped = guard_reason(sync("training").get("health"), guard)
                 last_sync, last_key = time.time(), key
                 if stop_requested():
                     terminate(STOP)
+                elif tripped and term_at is None:
+                    state["guard_stop"] = tripped
+                    print(f"[modal_train] GUARD: {tripped}", flush=True)
+                    terminate(GUARD)
             if now - started >= seg_s:
                 terminate(TIME_UP)
             if term_at is not None and now - term_at > 60 and proc.poll() is None:
@@ -566,6 +655,8 @@ def _supervise(spec: dict) -> dict:
         phase = "finished"
     elif why == STOP:
         phase = "stopped"
+    elif why == GUARD:
+        phase = "guard_stopped"
     elif status == "time_limit" or (why == TIME_UP and status in ("interrupted", "finished")):
         # "finished" here: the training is done and the finals were cut; the next segment plays them
         phase = "budget_exhausted" if left < 60 else ("respawn" if idle < 2 else "stalled")
@@ -889,6 +980,13 @@ def _launch(spec: dict, image_stage: Path) -> str:
     return spec["app_id"]
 
 
+def guard_line(guard: dict | None) -> str:
+    if not guard:
+        return "guard: off (a run whose games all hit the turn limit keeps running to its budget)"
+    return (f"guard: stops the run once {100 * guard['share']:g}% of a scenario's games are cut at the turn limit "
+            f"for {guard['epochs']} epochs in a row")
+
+
 def cmd_launch(args) -> int:
     sha = resolve_rev(args.rev)
     config, exp, swept = config_at(sha, args.config)
@@ -920,10 +1018,12 @@ def cmd_launch(args) -> int:
         "budget_s": budget_s, "timeout_s": int(min(DAY_S, budget_s + MARGIN_S)),
         "segment_s": args.segment_hours * 3600 if args.segment_hours else None,
         "sync_s": args.sync_minutes * 60, "min_sync_s": args.min_sync_seconds,
+        "guard": None if args.no_guard else {"share": args.guard_share, "epochs": args.guard_epochs},
         "launch_id": f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}", "launched": time.time(),
     }
     print(f"{run} at {sha[:10]} ({args.rev}), {config}")
     print(cost_line(gpu, args.cpu, args.memory, args.max_hours, rate))
+    print(guard_line(spec["guard"]))
     if args.dry_run:
         print(json.dumps(spec, indent=1, sort_keys=True))
         return 0
@@ -953,8 +1053,11 @@ def cmd_resume(args) -> int:
                 launch_id=f"{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}", launched=time.time())
     if args.allow_code_change:
         spec["allow_code_change"] = True
+    if args.no_guard:
+        spec["guard"] = None
     print(f"{run} at {spec['rev'][:10]}, {spec['config']}: resuming from the Volume")
     print(cost_line(shape["gpu"], shape["cores"], shape["GiB"], budget_s / 3600, rate))
+    print(guard_line(spec.get("guard")))
     app_id = _launch(spec, stage_revision(spec["rev"]))
     print(f"detached: {app_id}")
     return 0
@@ -1022,6 +1125,10 @@ def status_text(run: str, spec: dict, state: dict | None, alive: bool, app_state
         bits.append(f"ETA {_hours(eta)}" + (" (past the budget)" if eta > left else ""))
     if bits:
         lines.append("  " + "; ".join(bits))
+    if health_text(p.get("health")):
+        lines.append("  health: " + health_text(p["health"]))
+    if state.get("guard_stop"):
+        lines.append(f"  STOPPED BY THE GUARD: {state['guard_stop']}")
     spent, earlier = state["used_s"] * spec["usd_per_s"], state.get("earlier_s", 0.0) * spec["usd_per_s"]
     lines.append(f"  heartbeat {_hours(max(now - state.get('heartbeat', now), 0))} ago; used {_hours(state['used_s'])} of "
                  f"{_hours(spec['budget_s'])}; cost so far ${spent:.2f} at ${spec['usd_per_s'] * 3600:.3f}/h"
@@ -1135,6 +1242,13 @@ def cmd_watch(args) -> int:
             time.sleep(args.every * 60)
             continue
         report = pull(run, runs, merge=args.merge)
+        now = progress_of(runs / run, (spec.get("guard") or {}).get("share", GUARD_SHARE))
+        print(f"{time.strftime('%H:%M:%S')} {run}: epoch {now.get('epoch')}; "
+              f"{health_text(now.get('health')) or 'no finished game in the metrics yet'}", flush=True)
+        tripped = guard_reason(now.get("health"), spec.get("guard") or {"share": GUARD_SHARE, "epochs": GUARD_EPOCHS})
+        if tripped and alive:
+            print(f"WARNING {run}: {tripped}" + ("" if spec.get("guard") else
+                  f"; this launch has no guard: tools/modal_train.py stop {run}"), flush=True)
         if not args.no_mirror:
             mirror(run, runs)
         if not alive and not any(report[k] for k in ("new", "extended", "updated")):
@@ -1167,12 +1281,17 @@ def main(argv: list[str] | None = None) -> int:
     la.add_argument("--min-sync-seconds", type=float, default=30, help="and at most this often on new checkpoints")
     la.add_argument("--segment-hours", type=float, help="end each call after this long and spawn the next (default: 24 h cap)")
     la.add_argument("--allow-code-change", action="store_true", help="passed to catanrl run")
+    la.add_argument("--guard-share", type=float, default=GUARD_SHARE,
+                    help="the guard stops the run when this share of a scenario's games is cut at the turn limit")
+    la.add_argument("--guard-epochs", type=int, default=GUARD_EPOCHS, help="for this many epochs in a row")
+    la.add_argument("--no-guard", action="store_true", help="never stop the run for cut games")
     la.add_argument("--dry-run", action="store_true", help="resolve, stage and price, but start nothing")
     la.set_defaults(fn=cmd_launch)
     re_ = sub.add_parser("resume", help="relaunch a stopped run from the Volume: same revision, config and shape")
     re_.add_argument("run")
     re_.add_argument("--max-hours", type=float, help="a new budget (default: what the last one has left)")
     re_.add_argument("--allow-code-change", action="store_true")
+    re_.add_argument("--no-guard", action="store_true", help="drop the launch's guard (it would trip again at once)")
     re_.set_defaults(fn=cmd_resume)
     st = sub.add_parser("status", help="epoch, rate, ETA, cost so far and whether the app is alive")
     st.add_argument("run", nargs="?")
