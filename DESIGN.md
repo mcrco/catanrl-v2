@@ -158,7 +158,7 @@ the value of its own player to move); chance nodes are exact (dice, dev
 draws, steals). Root options: PUCT with Dirichlet noise, or Gumbel root
 (sequential halving) for low budgets; determinized roots from the tracker.
 A PUCT root can also flatten its priors (`root_policy_temperature`) and
-visit every action at least `sqrt(k * prior * visits)` times
+bring every action it has visited up to `sqrt(k * prior * visits)` visits
 (`forced_playouts`), both KataGo's and both for self-play's full searches
 only (`train.root_policy_temperature`, `train.forced_playouts`; no agent
 has them).

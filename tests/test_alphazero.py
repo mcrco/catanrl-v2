@@ -1241,12 +1241,13 @@ def test_root_exploration_is_optional_hashed_and_refused_where_it_cannot_work():
 
 
 class Peaked(BatchEvaluator):
-    """The network with its policy logits scaled up, less than Sharp's: a prior that leaves most of
-    a root's actions next to nothing, yet above zero, so PUCT alone never visits them."""
+    """The network with its policy logits scaled up, far less than Sharp's: a prior under which PUCT
+    alone leaves the root actions it visits well short of the visits forced playouts ask for, and
+    some root actions unvisited."""
 
     def __call__(self, observations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         logits, values = super().__call__(observations)
-        return logits * np.float32(1000.0), values
+        return logits * np.float32(100.0), values
 
 
 class Watched:
@@ -1282,17 +1283,12 @@ def tempered(prior: np.ndarray, temperature: float) -> np.ndarray:
     return powered / powered.sum()
 
 
-def forced_debt(priors: np.ndarray, visits: np.ndarray, k: float) -> tuple[float, float]:
-    """The visits missing from ``ceil(sqrt(k * prior * N))`` over a root's actions after its N
-    simulations, and the most that forced playouts can leave missing at a new root: the engine's
-    bound (cppanatron tests/test_search_pool.cpp, test_forced_playouts_reach_their_counts), the
-    debt ``D(t + 1) = max(D(t) - 1, 0) + R(t + 1) - R(t)`` with R the sum of the counts at t visits."""
-    wanted, bound = np.zeros(len(priors)), 0.0
-    for total in range(1, int(visits.sum()) + 1):
-        now = np.ceil(np.sqrt(k * priors.astype(np.float64) * total))
-        bound = max(bound - 1.0, 0.0) + float((now - wanted).sum())
-        wanted = now
-    return float(np.maximum(wanted - visits, 0.0).sum()), bound
+def forced_short(priors: np.ndarray, visits: np.ndarray, k: float) -> float:
+    """The visits that a root's visited actions are short of ``ceil(sqrt(k * prior * N))`` after its
+    N simulations. Forced playouts (k) are owed to a visited action only: an unvisited one counts
+    for nothing here."""
+    wanted = np.ceil(np.sqrt(k * priors.astype(np.float64) * visits.sum()))
+    return float(np.maximum(wanted - visits, 0.0)[visits > 0].sum())
 
 
 @pytest.mark.parametrize("reuse", [False, True])
@@ -1300,10 +1296,12 @@ def test_root_exploration_shapes_the_full_searches_only(reuse, monkeypatch):
     """Self-play on a peaked prior without Dirichlet noise, full and fast searches at one budget,
     with the two pools and with reuse's one (the trees kept). With both keys set a full search's
     root selects by the network's priors at the temperature, a re-rooted root as a new one (from
-    the network's priors again, so nothing compounds), and a new one has the visits that forced
-    playouts guarantee (:func:`forced_debt`): next to none of the forced counts is missing. A
-    fast search's root selects by the network's priors as they are and misses most of those
-    counts. With the keys unset no pool and no search has them."""
+    the network's priors again, so nothing compounds), and the actions it visited are, on average
+    (over the new roots, and over all), less than a visit short of the counts forced playouts ask
+    for (:func:`forced_short`), while some full roots keep actions with a prior and no visit:
+    forced playouts open none. A fast search's root selects by the network's priors as they are,
+    and its visited actions are on average more than five visits short. With the keys unset no
+    pool and no search has them."""
     import catanrl.train.alphazero as az
 
     monkeypatch.setattr(az, "BatchEvaluator", Peaked)
@@ -1328,7 +1326,7 @@ def test_root_exploration_shapes_the_full_searches_only(reuse, monkeypatch):
 
     play._search = tracked
     rng, stats = np.random.default_rng(1), {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
-    rows = []  # (full, carried visits, the priors in use are not the network's, forced counts missing)
+    rows = []  # (full, carried visits, the priors in use are not the network's, visits short, unvisited actions)
     for step in range(20):
         started.clear()
         for pool in watched:
@@ -1337,17 +1335,17 @@ def test_root_exploration_shapes_the_full_searches_only(reuse, monkeypatch):
         for k, pool in enumerate(watched):
             for sid, (used, network, visits) in pool.roots.items():
                 full, carried = started[sid] if reuse else (k == 0, 0)
-                missing, bound = forced_debt(used, visits, 2.0)
                 if full:
                     assert np.allclose(used, tempered(network, 1.25), atol=1e-6)
-                    assert carried or missing <= bound
                 else:
                     assert np.array_equal(used, network)
-                rows.append((full, carried, not np.array_equal(used, network), missing))
-    full, carried, moved, missing = np.array(rows, dtype=np.float64).T
+                rows.append((full, carried, not np.array_equal(used, network), forced_short(used, visits, 2.0),
+                             ((used > 0) & (visits == 0)).sum()))
+    full, carried, moved, short, unvisited = np.array(rows, dtype=np.float64).T
     new = (full == 1) & (carried == 0)
     assert play.games > 5 and (full == 0).sum() > 30 and (full == 1).sum() > 25 and moved[full == 1].sum() > 25
-    assert new.sum() > 5 and missing[new].mean() < 1.0 and missing[full == 0].mean() > 10.0
+    assert new.sum() > 5 and short[new].mean() < 1.0 and short[full == 1].mean() < 1.0
+    assert short[full == 0].mean() > 5.0 and (unvisited[full == 1] > 0).sum() > 2
     assert ((full == 1) & (carried > 0)).sum() > (10 if reuse else -1)  # re-rooted full searches
 
 
@@ -1413,9 +1411,11 @@ def test_pruned_visits_take_forced_playouts_back():
 def test_a_pruned_target_drops_forced_playouts_and_keeps_the_most_visited(monkeypatch):
     """Real PUCT searches with forced playouts and nothing else (no Dirichlet noise, no root
     temperature) on a peaked prior, policy_target: pruned, through SelfPlay.step. The forced
-    playouts put visits on the actions the prior all but rules out, which the same self-play
-    without them does not visit; the pruned targets keep the most visited action's visits, are
-    distributions inside the visit distributions and are zero on most of those actions."""
+    playouts put visits on the visited actions that the same self-play without them leaves several
+    short of ``ceil(sqrt(2 * prior * visits))`` (:func:`forced_short`), and open no action: some
+    with a prior stay unvisited. The pruned targets keep the most visited action's visits and are
+    distributions inside the visit distributions; with forced playouts they cut the visits of far
+    more of the other visited actions and take a larger share of the visits out."""
     import catanrl.train.alphazero as az
 
     monkeypatch.setattr(az, "BatchEvaluator", Peaked)
@@ -1443,12 +1443,15 @@ def test_a_pruned_target_drops_forced_playouts_and_keeps_the_most_visited(monkey
         top = np.where(raw == raw.max(1, keepdims=True), prior, -1.0).argmax(1)  # most visited, then the larger prior
         assert np.all(pruned[rows, top] >= raw[rows, top])  # keeps its visits
         assert np.all((share >= 0) & (share < 1))
-        found[name] = (raw, pruned, share, legal & (prior > 0) & (prior < 1e-4))
-    raw, pruned, share, unlikely = found["forced"]
-    assert unlikely.sum() > 200 and (raw[unlikely] > 0).mean() > 0.95  # forced: (nearly) all of them visited
-    assert (pruned[unlikely & (raw > 0)] == 0).mean() > 0.9  # and taken back out of the target
-    plain_raw, _, plain_share, plain_unlikely = found["plain"]
-    assert plain_unlikely.sum() > 200 and (plain_raw[plain_unlikely] > 0).mean() < 0.2
+        visits = np.rint(raw * 96)
+        short = np.array([forced_short(p[ok], n[ok], 2.0) for p, n, ok in zip(prior, visits, legal, strict=True)])
+        side = (raw > 0) & (np.arange(raw.shape[1]) != top[:, None])  # visited, not the one that sets the bar
+        found[name] = (share, short, (pruned[side] < raw[side] - 1e-6).mean(), legal & (prior > 1e-30) & (raw == 0))
+    share, short, cut, unvisited = found["forced"]
+    plain_share, plain_short, plain_cut, _ = found["plain"]
+    assert short.mean() < 1.0 and plain_short.mean() > 5.0  # forced: the visited actions have their counts
+    assert unvisited.any(1).sum() > 5  # and no action was opened for them
+    assert cut > 0.3 and plain_cut < 0.1  # the forced visits are taken back out of the target
     assert share.mean() > plain_share.mean() + 0.05
 
 

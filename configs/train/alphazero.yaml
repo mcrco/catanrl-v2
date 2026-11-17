@@ -45,8 +45,8 @@ checkpoint_interval: 10        # iterations
 # reuse: true                  # optional (root: puct, dets: 0): a game keeps its search tree between decisions; a
                                # search re-rooted at the action played counts the visits it carries towards its
                                # budget (sims or fast_sims as a cap on the root's visits), full ones with new noise
-# forced_playouts: 2.0         # optional (root: puct; KataGo's k): a full search visits a root action with fewer than
-                               # sqrt(k * its prior * the root's visits) visits before PUCT is asked; policy_target:
-                               # pruned takes those visits out of the target again. Unset (0): PUCT alone
+# forced_playouts: 2.0         # optional (root: puct; KataGo's k): a full search visits a root action that has a
+                               # visit but fewer than sqrt(k * its prior * the root's visits) before PUCT is asked;
+                               # policy_target: pruned takes those visits out of the target again. Unset (0): PUCT alone
 # root_policy_temperature: 1.25  # optional (root: puct): a full search's root priors raised to 1 / this and
                                # renormalized, before the Dirichlet noise is mixed in. Unset (1): the network's priors

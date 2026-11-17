@@ -38,7 +38,7 @@
    are KataGo's two other ways to widen a full search's root, the engine's
    settings of the same names: the root's priors are raised to
    ``1 / root_policy_temperature`` and renormalized before the noise is
-   mixed in, and a root action with fewer than
+   mixed in, and a visited root action with fewer than
    ``sqrt(forced_playouts * prior * visits of the root)`` visits is searched
    before PUCT is asked. Like the noise they shape the full searches only
    (a fast one runs as if they were unset), and ``policy_target: pruned``
