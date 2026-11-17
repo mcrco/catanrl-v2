@@ -157,6 +157,11 @@ backs up. N-player: nodes back up a value per seat (max^n: each node picks by
 the value of its own player to move); chance nodes are exact (dice, dev
 draws, steals). Root options: PUCT with Dirichlet noise, or Gumbel root
 (sequential halving) for low budgets; determinized roots from the tracker.
+A PUCT root can also flatten its priors (`root_policy_temperature`) and
+visit every action at least `sqrt(k * prior * visits)` times
+(`forced_playouts`), both KataGo's and both for self-play's full searches
+only (`train.root_policy_temperature`, `train.forced_playouts`; no agent
+has them).
 `advance()` re-roots a search at a deterministic root action's child, keeping
 the subtree: the MCTS agent's `reuse` option (6.5) carries a seat's search
 from one decision to the next when the real game evolved by exactly the
@@ -766,8 +771,8 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
 
 Its `key_dict()` drops execution params (device, threads). It adds the model
 args and, for MCTS, the full engine `SearchConfig` read back from the
-binding, less `transpositions` at its default; `reuse` and `transpositions`
-appear in `params` only when set.
+binding, less `transpositions` (and the other `SEARCH_KEY_IF_SET` options)
+at its default; `reuse` and `transpositions` appear in `params` only when set.
 
 | Backend | Entry point |
 |---|---|

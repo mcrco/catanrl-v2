@@ -201,7 +201,7 @@ def key_params(params: Any) -> dict:
 
 #: ``SearchConfig`` attributes in ``key_dict()["search"]`` only at a non-default value: engine
 #: options added after records were stored (an older engine build has no such attribute).
-SEARCH_KEY_IF_SET = ("transpositions", "canonical_discards")
+SEARCH_KEY_IF_SET = ("transpositions", "canonical_discards", "root_policy_temperature", "forced_playouts")
 
 
 def search_details(config: Any) -> dict:

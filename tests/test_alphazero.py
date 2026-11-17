@@ -12,13 +12,14 @@ import torch
 import torch.nn.functional as F
 
 from catanrl import canon
-from catanrl.config import ConfigError, Variant, config_hash, load_plan, resolve
+from catanrl.config import TRAIN_OPTIONAL, ConfigError, Variant, config_hash, load_plan, resolve
 from catanrl.envs.encoding import encoder_dims
 from catanrl.envs.puffer import plan_env
 from catanrl.runs import RunWriter, load_experiment
 from catanrl.search import BatchEvaluator, run_pools
 from catanrl.train.alphazero import (
     ALPHAZERO_KEYS,
+    ALPHAZERO_OPTIONAL,
     PROBE_ROWS,
     Monitors,
     ReplayBuffer,
@@ -1189,3 +1190,294 @@ def test_a_reuse_run_drops_its_trees_before_learning_and_logs_them(monkeypatch):
     off = load_experiment("az/off")
     assert not any(k in m for m in off.metrics() for k in ("selfplay/reused", "selfplay/carried_full"))
     assert off.checkpoints()[-1].weights_sha256 != shas[0][-1] and off.config_hash != load_experiment("az/a").config_hash
+
+
+# ---------------------------------------------------------------- root exploration (train.forced_playouts,
+# train.root_policy_temperature)
+
+EXPLORE = {"forced_playouts": 2.0, "root_policy_temperature": 1.25}
+UNSET = {"forced_playouts": 0.0, "root_policy_temperature": 1.0}
+
+
+def test_root_exploration_is_optional_hashed_and_refused_where_it_cannot_work():
+    """Absent from ALPHAZERO_KEYS and alphazero.yaml, so configs without the two keys hash as before
+    they existed (az-2p-kata's pinned hash); finite numbers, set only on PUCT roots."""
+    assert TRAIN_OPTIONAL["alphazero"] == ALPHAZERO_OPTIONAL and UNSET.items() <= ALPHAZERO_OPTIONAL.items()
+    assert not set(UNSET) & set(ALPHAZERO_KEYS) and not set(UNSET) & set(check_train(ALPHAZERO_KEYS))
+    puct = {**ALPHAZERO_KEYS, "root": "puct"}
+    assert EXPLORE.items() <= check_train({**puct, **EXPLORE}).items()
+    assert check_train({**puct, "forced_playouts": 2})["forced_playouts"] == 2
+    assert check_train({**ALPHAZERO_KEYS, **UNSET})["root"] == "gumbel"  # unset, spelled out
+    for bad, match in (({"forced_playouts": -0.5}, "non-negative"), ({"forced_playouts": float("inf")}, "finite"),
+                       ({"forced_playouts": float("nan")}, "finite"), ({"forced_playouts": True}, "number"),
+                       ({"forced_playouts": "2"}, "number"), ({"root_policy_temperature": 0.0}, "positive"),
+                       ({"root_policy_temperature": -1.0}, "positive"), ({"root_policy_temperature": None}, "number"),
+                       ({"root_policy_temperature": float("inf")}, "finite"),
+                       ({"root": "gumbel", "forced_playouts": 2.0}, "root: puct"),
+                       ({"root": "gumbel", "root_policy_temperature": 1.25}, "root: puct")):
+        with pytest.raises(ValueError, match=match):
+            check_train({**puct, **bad})
+    plain = variant("plain", root="puct")
+    assert not set(UNSET) & set(plain.config["train"])
+    unset = variant("plain", root="puct", forced_playouts=0, root_policy_temperature=1.0)
+    assert unset.config_hash == plain.config_hash and unset.config["train"] == plain.config["train"]
+    forced = variant("plain", root="puct", forced_playouts=2)
+    assert forced.config["train"]["forced_playouts"] == 2.0 and "root_policy_temperature" not in forced.config["train"]
+    assert isinstance(forced.config["train"]["forced_playouts"], float)
+    assert forced.config_hash == variant("plain", root="puct", forced_playouts=2.0).config_hash
+    both = variant("plain", root="puct", **EXPLORE)
+    assert EXPLORE.items() <= both.config["train"].items()
+    assert len({plain.config_hash, forced.config_hash, both.config_hash}) == 3
+    for bad, match in (({"forced_playouts": 2.0}, "root: puct"), ({"root_policy_temperature": 1.25}, "root: puct"),
+                       ({"root": "puct", "forced_playouts": -1}, "non-negative"),
+                       ({"root": "puct", "forced_playouts": float("nan")}, "finite"),
+                       ({"root": "puct", "root_policy_temperature": 0}, "positive"),
+                       ({"root": "puct", "root_policy_temperature": "hot"}, "number"),
+                       ({"root": "puct", "forced_playout": 2.0}, "forced_playouts")):
+        with pytest.raises(ConfigError, match=match):
+            variant(**bad)
+    kata = load_plan("az-2p-kata").variants[0]
+    assert kata.config_hash == "2e3b1866f7a37e4a" and not set(UNSET) & set(kata.config["train"])
+
+
+class Peaked(BatchEvaluator):
+    """The network with its policy logits scaled up, less than Sharp's: a prior that leaves most of
+    a root's actions next to nothing, yet above zero, so PUCT alone never visits them."""
+
+    def __call__(self, observations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        logits, values = super().__call__(observations)
+        return logits * np.float32(1000.0), values
+
+
+class Watched:
+    """One of SelfPlay's pools that notes every search's root as its move is selected, by search
+    id: the priors the root selected by, the network's, and its visits."""
+
+    def __init__(self, pool: cpp.SearchPool) -> None:
+        self.pool = pool
+        self.roots: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    def __getattr__(self, name: str):
+        return getattr(self.pool, name)
+
+    def __len__(self) -> int:
+        return len(self.pool)
+
+    def select(self, sid: int, temperature: float) -> int:
+        self.roots[sid] = (self.pool.root_search_priors(sid)[0], self.pool.root_priors(sid)[0],
+                           np.asarray(self.pool.visits(sid), np.float64))
+        return self.pool.select(sid, temperature)
+
+
+def watch(play: SelfPlay) -> list[Watched]:
+    """``play`` (one search group) searching through :class:`Watched` pools."""
+    watched = [Watched(pool) for pool in play.pools]
+    play.groups, play.pools = [watched], watched
+    return watched
+
+
+def tempered(prior: np.ndarray, temperature: float) -> np.ndarray:
+    """``prior ** (1 / temperature)``, renormalized: the engine's root policy temperature."""
+    powered = prior.astype(np.float64) ** (1.0 / temperature)
+    return powered / powered.sum()
+
+
+def forced_debt(priors: np.ndarray, visits: np.ndarray, k: float) -> tuple[float, float]:
+    """The visits missing from ``ceil(sqrt(k * prior * N))`` over a root's actions after its N
+    simulations, and the most that forced playouts can leave missing at a new root: the engine's
+    bound (cppanatron tests/test_search_pool.cpp, test_forced_playouts_reach_their_counts), the
+    debt ``D(t + 1) = max(D(t) - 1, 0) + R(t + 1) - R(t)`` with R the sum of the counts at t visits."""
+    wanted, bound = np.zeros(len(priors)), 0.0
+    for total in range(1, int(visits.sum()) + 1):
+        now = np.ceil(np.sqrt(k * priors.astype(np.float64) * total))
+        bound = max(bound - 1.0, 0.0) + float((now - wanted).sum())
+        wanted = now
+    return float(np.maximum(wanted - visits, 0.0).sum()), bound
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_root_exploration_shapes_the_full_searches_only(reuse, monkeypatch):
+    """Self-play on a peaked prior without Dirichlet noise, full and fast searches at one budget,
+    with the two pools and with reuse's one (the trees kept). With both keys set a full search's
+    root selects by the network's priors at the temperature, a re-rooted root as a new one (from
+    the network's priors again, so nothing compounds), and a new one has the visits that forced
+    playouts guarantee (:func:`forced_debt`): next to none of the forced counts is missing. A
+    fast search's root selects by the network's priors as they are and misses most of those
+    counts. With the keys unset no pool and no search has them."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Peaked)
+    common = {"root": "puct", "sims": 96, "fast_sims": 96, "pending": 8, "fast_pending": 8, "full_search_prob": 0.5,
+              "dirichlet_noise": False, "temperature_moves": 6, **({"reuse": True} if reuse else {})}
+    plain = selfplay(**common)[0]
+    assert all({key: getattr(pool.config, key) for key in UNSET} == UNSET for pool in plain.pools)
+    assert [{key: options[key] for key in UNSET} for options in plain.options] == [UNSET, UNSET]
+    torch.manual_seed(0)
+    play, replay, _ = selfplay(**common, **EXPLORE)
+    assert {key: getattr(play.full_pool.config, key) for key in UNSET} == EXPLORE
+    if reuse:  # one pool: the full searches' settings in its config, each search with its own
+        assert [{key: options[key] for key in UNSET} for options in play.options] == [EXPLORE, UNSET]
+    else:
+        assert repr(play.fast_pool.config) == repr(plain.fast_pool.config)
+    watched, started, search = watch(play), {}, play._search
+
+    def tracked(pool, env, full, seed, stats):  # reuse: what each search began with
+        sid = search(pool, env, full, seed, stats)
+        started[sid] = (full, int(pool.visits(sid).sum()))
+        return sid
+
+    play._search = tracked
+    rng, stats = np.random.default_rng(1), {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+    rows = []  # (full, carried visits, the priors in use are not the network's, forced counts missing)
+    for step in range(20):
+        started.clear()
+        for pool in watched:
+            pool.roots.clear()
+        play.step(0, step, rng, replay, stats)
+        for k, pool in enumerate(watched):
+            for sid, (used, network, visits) in pool.roots.items():
+                full, carried = started[sid] if reuse else (k == 0, 0)
+                missing, bound = forced_debt(used, visits, 2.0)
+                if full:
+                    assert np.allclose(used, tempered(network, 1.25), atol=1e-6)
+                    assert carried or missing <= bound
+                else:
+                    assert np.array_equal(used, network)
+                rows.append((full, carried, not np.array_equal(used, network), missing))
+    full, carried, moved, missing = np.array(rows, dtype=np.float64).T
+    new = (full == 1) & (carried == 0)
+    assert play.games > 5 and (full == 0).sum() > 30 and (full == 1).sum() > 25 and moved[full == 1].sum() > 25
+    assert new.sum() > 5 and missing[new].mean() < 1.0 and missing[full == 0].mean() > 10.0
+    assert ((full == 1) & (carried > 0)).sum() > (10 if reuse else -1)  # re-rooted full searches
+
+
+def test_root_exploration_under_reuse_is_the_two_pools(monkeypatch):
+    """With both keys set (and Dirichlet noise) a new search under reuse, the keys its own options,
+    is the search of the two pools, the keys the full pool's config: with the trees dropped before
+    every step the same seeds play the same moves and file the same rows and targets. They are not
+    the targets of the keys unset."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Peaked)
+    common = {"root": "puct", "sims": 32, "fast_sims": 8, "pending": 4, "fast_pending": 2, "full_search_prob": 0.5,
+              "temperature_moves": 6}
+    boards, replays = {}, {}
+    for name, extra in (("pools", EXPLORE), ("reuse", {**EXPLORE, "reuse": True}), ("unset", {})):
+        torch.manual_seed(0)  # the same weights
+        play, replay, _ = selfplay(**common, **extra)
+        rng, stats = np.random.default_rng(1), {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+        boards[name] = []
+        for step in range(16):
+            play.drop_trees()
+            play.step(0, step, rng, replay, stats)
+            boards[name].append(play.buffers["observations"].copy())
+        assert stats.get("reused", 0.0) == 0.0
+        replays[name] = replay
+    for a, b in zip(boards["pools"], boards["reuse"], strict=True):
+        assert np.array_equal(a, b)
+    off, on, unset = replays["pools"], replays["reuse"], replays["unset"]
+    assert on.size == off.size > 0 and int(off.has_policy[: off.size].sum()) > 10
+    for key in ("obs", "has_policy", "value", "present", "policy"):
+        assert np.array_equal(getattr(on, key)[: on.size], getattr(off, key)[: off.size])
+    assert unset.size != off.size or not np.array_equal(unset.policy[: unset.size], off.policy[: off.size])
+
+
+def test_pruned_visits_take_forced_playouts_back():
+    """A hand-made root of 600 visits at c_puct 0.75 that forced playouts (k = 2) shaped: every
+    action but the first sits at the ``ceil(sqrt(2 * P * 600))`` visits they force. Action 0, the
+    most visited, keeps its visits and sets the bar. 1 (a worse Q) is cut to the visits its value
+    earns; 2 (a Q just under the bar) has earned more than it was forced to and keeps them; 3 (Q
+    above the bar) keeps all; 4 and 5 (small priors, worse Qs: forced visits and nothing else)
+    lose all."""
+    c, k = 0.75, 2.0
+    weights = {0: 0.894, 1: 0.05, 2: 0.03, 3: 0.02, 4: 0.004, 5: 0.002}
+    q = {0: 0.60, 1: 0.30, 2: 0.59, 3: 0.90, 4: 0.20, 5: 0.55}
+    forced = {a: int(np.ceil(np.sqrt(k * weights[a] * 600))) for a in range(1, 6)}
+    assert forced == {1: 8, 2: 6, 3: 5, 4: 3, 5: 2}
+    visits = {0: 600 - sum(forced.values()), **forced}
+    logits, legal, n, values, prior = hand_root(weights, visits, q)
+
+    def score(action: int, count: float) -> float:
+        return q[action] + c * prior[action] * np.sqrt(601.0) / (1.0 + count)
+
+    bar = score(0, visits[0])
+    kept = pruned_visits(logits, legal, n, values, c_puct=c)
+    assert kept[0] == visits[0] == 576
+    assert kept[1] == 2 and score(1, 2) <= bar < score(1, 1)
+    assert kept[2] == 6 and score(2, 6) > bar  # PUCT was about to visit it anyway
+    assert q[3] >= bar and kept[3] == 5
+    assert kept[4] == 0 and score(4, 0) < bar and kept[5] == 0 and score(5, 0) < bar  # not worth a visit
+    assert kept.sum() == 576 + 2 + 6 + 5
+
+
+def test_a_pruned_target_drops_forced_playouts_and_keeps_the_most_visited(monkeypatch):
+    """Real PUCT searches with forced playouts and nothing else (no Dirichlet noise, no root
+    temperature) on a peaked prior, policy_target: pruned, through SelfPlay.step. The forced
+    playouts put visits on the actions the prior all but rules out, which the same self-play
+    without them does not visit; the pruned targets keep the most visited action's visits, are
+    distributions inside the visit distributions and are zero on most of those actions."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Peaked)
+    common = {"root": "puct", "sims": 96, "fast_sims": 8, "pending": 8, "fast_pending": 8, "full_search_prob": 0.5,
+              "dirichlet_noise": False, "policy_target": "pruned", "temperature_moves": 6}
+    found = {}
+    for name, extra in (("plain", {}), ("forced", {"forced_playouts": 2.0})):
+        torch.manual_seed(0)  # the same weights
+        play, replay, _ = selfplay(**common, **extra)
+        play.monitor = seen = Seen()
+        rng, stats = np.random.default_rng(1), {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+        for step in range(20):
+            play.step(0, step, rng, replay, stats)
+        obs, raw, pruned, share = (np.concatenate(part) for part in zip(*seen.steps, strict=True))
+        assert len(obs) > 25
+        legal = obs[:, play.mask] > 0
+        logits, _ = play.evaluator(obs)
+        z = np.where(legal, logits.astype(np.float64), -np.inf)
+        prior = np.exp(z - z.max(1, keepdims=True))
+        prior /= prior.sum(1, keepdims=True)
+        raw, pruned = raw.astype(np.float64), pruned.astype(np.float64)
+        assert np.all(pruned[~legal] == 0) and np.allclose(pruned.sum(1), 1.0, atol=2e-3)
+        assert np.all(pruned[raw == 0] == 0)  # nothing is added
+        rows = np.arange(len(raw))
+        top = np.where(raw == raw.max(1, keepdims=True), prior, -1.0).argmax(1)  # most visited, then the larger prior
+        assert np.all(pruned[rows, top] >= raw[rows, top])  # keeps its visits
+        assert np.all((share >= 0) & (share < 1))
+        found[name] = (raw, pruned, share, legal & (prior > 0) & (prior < 1e-4))
+    raw, pruned, share, unlikely = found["forced"]
+    assert unlikely.sum() > 200 and (raw[unlikely] > 0).mean() > 0.95  # forced: (nearly) all of them visited
+    assert (pruned[unlikely & (raw > 0)] == 0).mean() > 0.9  # and taken back out of the target
+    plain_raw, _, plain_share, plain_unlikely = found["plain"]
+    assert plain_unlikely.sum() > 200 and (plain_raw[plain_unlikely] > 0).mean() < 0.2
+    assert share.mean() > plain_share.mean() + 0.05
+
+
+def test_a_run_with_root_exploration_trains_and_logs(monkeypatch):
+    """Through RunWriter, both keys set (a peaked prior, Dirichlet noise, pruned targets), with the
+    two pools and with reuse: the runs finish, their full searches (and only they) carry the keys,
+    and the pruned targets and the losses are logged."""
+    import catanrl.train.alphazero as az
+
+    monkeypatch.setattr(az, "BatchEvaluator", Peaked)
+    plays, init = [], SelfPlay.__init__
+
+    def built(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        plays.append(self)
+
+    monkeypatch.setattr(SelfPlay, "__init__", built)
+    common = {"root": "puct", "sims": 16, "fast_sims": 4, "pending": 2, "policy_target": "pruned", "iterations": 3}
+    for name, extra in (("pools", {}), ("reuse", {"reuse": True})):
+        writer = run(variant(name, **common, **EXPLORE, **extra))
+        run_ = load_experiment(f"az/{name}")
+        assert writer.status == "finished" and [c.epoch for c in run_.checkpoints()] == [0, 1, 2, 3]
+        assert EXPLORE.items() <= run_.config["train"].items()
+        play = plays[-1]
+        assert {key: getattr(play.full_pool.config, key) for key in UNSET} == EXPLORE
+        assert [{key: options[key] for key in UNSET} for options in play.options] == [EXPLORE, UNSET]
+        assert play.reuse or {key: getattr(play.fast_pool.config, key) for key in UNSET} == UNSET
+        metrics = run_.metrics()
+        assert [m["epoch"] for m in metrics] == [1, 2, 3] and metrics[-1]["replay"] > 0
+        assert all(0.0 < m["target/pruned"] < 1.0 and m["selfplay/leaves_per_s"] > 0 for m in metrics)
+        assert "train/policy_loss" in metrics[-1] and np.isfinite(metrics[-1]["train/policy_loss"])
+    assert load_experiment("az/pools").config_hash != load_experiment("az/reuse").config_hash

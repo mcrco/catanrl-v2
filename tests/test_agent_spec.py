@@ -194,6 +194,21 @@ def test_a_deadline_is_keyed_only_when_set_and_only_the_server_takes_it(ckpts):
         resolve_agent("MCTS:ckpt=exp/v:sims=8:deadline=-1", harness="server")
 
 
+def test_root_exploration_is_self_plays_and_keyed_only_when_set(ckpts):
+    """The engine's forced playouts and root policy temperature are ``search_config`` params that no
+    MCTS agent has: an agent's key holds neither, and a config that sets them reads back with them."""
+    base = resolve_agent("MCTS:ckpt=exp/v:sims=8")
+    assert not {"forced_playouts", "root_policy_temperature"} & set(base.key_dict()["search"])
+    for name in ("forced_playouts=2", "root_policy_temperature=1.25"):
+        with pytest.raises(SpecError):
+            resolve_agent(f"MCTS:ckpt=exp/v:sims=8:{name}")
+    params = {"sims": 8, "oracle": True, "noise": True}
+    plain = search_config(params, max_players=2, threads=0)
+    assert (plain.forced_playouts, plain.root_policy_temperature) == (0.0, 1.0)
+    shaped = search_config({**params, "forced_playouts": 2, "root_policy_temperature": 1.25}, max_players=2, threads=0)
+    assert search_details(shaped) == {**search_details(plain), "forced_playouts": 2.0, "root_policy_temperature": 1.25}
+
+
 def _rebuilds_unchanged(entry: dict) -> None:
     params = MctsParams(ckpt="x", **entry["params"])
     assert key_params(params) == entry["params"]
