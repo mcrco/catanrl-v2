@@ -691,7 +691,7 @@ class SelfPlay:
 
     def refresh(self) -> None:
         """After the weights changed (learn(), a resume). The module's forward reads them in place;
-        the fused kernels read copies made when the evaluator was built (FusedGraph), so
+        the fused kernels read copies made when the evaluator was built (FusedGraph, FusedSeat), so
         ``kernels: fused`` rebuilds it, its CUDA graphs included (``fused16`` too: its halves
         are converted from those copies)."""
         if self.train["kernels"] != "torch":
@@ -700,8 +700,9 @@ class SelfPlay:
 
     def check_kernels(self, rows: int = 64) -> None:
         """``kernels: fused``: the evaluator's values against the module's own on acting rows. The
-        kernels are within 1e-6 of the module (graph_kernels.py); an evaluator left on older weights
-        is not, and self-play would search with them unnoticed.
+        kernels are within 1e-6 of the module (graph_kernels.py; the seat-set network's too,
+        seat_kernels.py); an evaluator left on older weights is not, and self-play would search
+        with them unnoticed.
 
         ``kernels: fused16``: the same check on the float32 kernels over the copies its halves were
         converted from (the evaluator's ``exact``), as sharp as fused's, then the half-precision

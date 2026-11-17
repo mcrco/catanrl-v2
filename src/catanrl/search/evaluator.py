@@ -18,7 +18,10 @@ bits, 2.5x faster on a GTX 1080. Its rows are as batch-independent as the module
 ``kernels="fused16"`` runs their half-precision variant
 (:class:`~catanrl.models.graph_kernels.FusedGraph16`, for self-play search: the outputs
 within half's rounding in the trunk, about 1.5x faster again on an RTX 2070 Super);
-a chunk in which a half overflowed is evaluated again by the float32 kernels.
+a chunk in which a half overflowed is evaluated again by the float32 kernels. A
+shared-trunk seat-set network (model class ``seat``) runs both on
+:mod:`catanrl.models.seat_kernels` (``FusedSeat`` / ``FusedSeat16``), under the same
+contract.
 
 On CPU there are no graphs, and strict mode evaluates rows one at a time:
 CPU GEMM kernels make a row's result depend (in the last bits) on its
@@ -85,13 +88,12 @@ class BatchEvaluator:
         #: kernels=fused16: chunks evaluated again in float32 (a half overflowed in their forward).
         self.exact_forwards = 0
         if kernels != "torch":
-            from catanrl.models.graph_kernels import FusedGraph, FusedGraph16, check_class
+            from catanrl.models.graph_kernels import fused_forward
 
-            check_class(self.model)
             if self.device.type != "cuda" or self.recurrent or heads != "both":
                 raise ValueError(f"kernels={kernels} evaluates both heads of a stateless network on a CUDA device")
 
-            self.fused = (FusedGraph16 if kernels == "fused16" else FusedGraph)(self.model)
+            self.fused = fused_forward(self.model, kernels)
         self._graphs: dict[int, tuple[torch.cuda.CUDAGraph, tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]] = {}
         self.hidden_size = int(getattr(model, "hidden_size", 0)) if self.recurrent else 0
         self.rows = 0
