@@ -599,7 +599,12 @@ def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[Checkpoin
     A network with the soft policy head (``model.args.soft_policy``, a part of its own that
     ``parts`` does not name) takes the head with the actor: the source's when the source has
     one, else a copy of the policy head loaded, so its soft logits start as its policy logits
-    (:func:`soft_policy_tensors`). The outcome head is not loaded (a fresh one).
+    (:func:`soft_policy_tensors`).
+
+    The outcome head (``model.args.outcome``) loads only as the part ``outcome``
+    (``parts: [actor, critic, outcome]``), from a checkpoint that has one into a network that
+    has one; without it the head is a fresh one. A checkpoint pins no outputs of the head, so
+    the part's self-test is the whole source's (``all``: the trunk the head reads).
     """
     loaded, refs = init_tensors(model, init_from)
     model.load_state_dict({**model.state_dict(), **loaded})
@@ -632,7 +637,13 @@ def init_tensors(model: nn.Module, init_from: Mapping[str, Any]) -> tuple[dict[s
     for part in parts:
         ref = ckpt[part] if isinstance(ckpt, Mapping) else ckpt
         source = load_checkpoint(ref)
-        source.self_test(part=part)
+        if part == "outcome":  # the one part beside actor and critic: only where both networks have the head
+            if "outcome" not in model.parts:
+                raise CheckpointError("init_from's outcome part loads the outcome head, which this network does "
+                                      "not have (model.args.outcome)")
+            if not any(key.startswith(tuple(model.parts["outcome"])) for key in source.state_dict):
+                raise CheckpointError(f"init_from outcome from {source.ref}: the checkpoint has no outcome head")
+        source.self_test(part="all" if part == "outcome" else part)
         refs.append(source.ref)
         prefixes = tuple(model.parts[part])
         mine = {k for k in target if k.startswith(prefixes)}

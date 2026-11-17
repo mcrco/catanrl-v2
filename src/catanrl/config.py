@@ -137,6 +137,9 @@ TRAIN_OPTIONAL: dict[str, dict[str, Any]] = {
 #: float16 (needs train.amp: catanrl.train.puffer's autocast and GradScaler).
 PRECISIONS = ("float32", "bfloat16", "float16")
 PARTS = ("actor", "critic")
+#: The parts ``init_from`` may name: the two it loads by default, and the outcome head
+#: (``model.args.outcome``), which comes along only when ``parts`` names it.
+INIT_PARTS = (*PARTS, "outcome")
 #: The parts ``train.freeze`` may name (a network's ``parts``; ``aux`` only on an aux head).
 FREEZE_PARTS = ("actor", "critic", "aux")
 #: More optional AlphaZero train keys, after KataGo (catanrl.train.alphazero says what each
@@ -508,10 +511,14 @@ def _check_alphazero_outcome(train: dict) -> None:
 def _check_outcome(cfg: Mapping[str, Any]) -> None:
     """``model.args.outcome`` (the outcome head) and its losses' weights come together: the
     AlphaZero trainer trains the head by train.outcome_vp_coef / outcome_turns_coef, and no
-    other trainer does."""
+    other trainer does. ``init_from`` loads the head (its ``outcome`` part) into a network that
+    has one."""
     if cfg.get("kind") != "train":
         return
     head = bool(((cfg.get("model") or {}).get("args") or {}).get("outcome", False))
+    if "outcome" in init_parts(cfg.get("init_from")) and not head:
+        raise ConfigError("init_from's outcome part loads the outcome head, which the network does not have: set "
+                          "model.args.outcome: true")
     train = cfg.get("train") or {}
     algo = train.get("algo")
     coefs = [key for key in ("outcome_vp_coef", "outcome_turns_coef") if train.get(key, 0.0) > 0.0]
@@ -711,10 +718,10 @@ def _check_semantics(cfg: dict) -> None:
         if "ckpt" not in init:
             raise ConfigError("init_from needs ckpt")
         parts = init.get("parts", list(PARTS))
-        if not set(parts) <= set(PARTS) or not parts:
-            raise ConfigError(f"init_from.parts must be a non-empty subset of {PARTS}")
-        if isinstance(init["ckpt"], Mapping) and not set(init["ckpt"]) <= set(PARTS):
-            raise ConfigError(f"init_from.ckpt per part takes keys {PARTS}")
+        if not set(parts) <= set(INIT_PARTS) or not parts:
+            raise ConfigError(f"init_from.parts must be a non-empty subset of {INIT_PARTS}")
+        if isinstance(init["ckpt"], Mapping) and not set(init["ckpt"]) <= set(INIT_PARTS):
+            raise ConfigError(f"init_from.ckpt per part takes keys {INIT_PARTS}")
         if init.get("restore", "weights") not in RESTORE:
             raise ConfigError(f"init_from.restore must be one of {RESTORE}")
         if not isinstance(init.get("split_shared", False), bool):

@@ -14,7 +14,10 @@ surprise (``surprise_weight``), a soft policy head (``model.args.soft_policy``,
   differently, is self-play without (the same moves, targets and rng draws); a decided game's
   searches take their own full-search probability and fast budget;
 * learning: the blended value target, the weighted draws, the soft loss; a tiny run with all
-  four on logs them and resumes.
+  four on logs them and resumes;
+* ``init_from`` carries the outcome head as the part ``outcome`` (a continued run keeps the
+  head its source trained), beside the soft head's copy; configs that name only actor and
+  critic keep their hashes and their fresh head.
 """
 
 from __future__ import annotations
@@ -440,6 +443,120 @@ def test_a_warm_start_from_a_checkpoint_with_the_head_takes_its_head(tmp_path):
     assert all(torch.equal(v, theirs[k]) for k, v in bare.state_dict().items())
     rows = real_rows(True)
     assert_plays_alike(source, bare, rows, rows)
+
+
+# ---------------------------------------------------------------- init_from's outcome part
+
+OUTCOME_INIT = ["actor", "critic", "outcome"]
+#: Config hashes from before ``outcome`` was a part init_from could name (variant("a", ...) below).
+OLD_INIT_HASHES = {"default": "04dfc939f06e1d9c", "actor-critic": "414e3d2f46e7541b",
+                   "outcome-net": "9f01a6a7058dfd6e", "per-part": "f6d10142f2a8b392"}
+
+
+@pytest.mark.parametrize("soft", [False, True], ids=["plain", "soft-head"])
+def test_the_outcome_part_carries_the_outcome_head(tmp_path, soft):
+    """parts: [actor, critic, outcome] from a checkpoint with the head: every weight of the
+    source, its outcome head included, so the network plays and predicts outcomes as the source;
+    a soft head beside it is still the copy of the policy head."""
+    source = trained_scale(model_of(soft=False, outcome=True, seed=3))
+    path = str(saved(tmp_path, source).path)
+    target = model_of(soft=soft, outcome=True, seed=4)
+    refs = ck.load_parts(target, {"ckpt": path, "parts": OUTCOME_INIT})
+    assert [str(ref) for ref in refs] == [f"{path}#{refs[0].weights_sha256[:12]}"] * 3
+    theirs, mine = source.state_dict(), target.state_dict()
+    head = [k for k in theirs if k.startswith("outcome_head.")]
+    soft_keys = [k for k in mine if k.startswith("soft_policy_head.")]
+    assert head and all(torch.equal(mine[k], theirs[k]) for k in theirs)
+    assert sorted(set(mine) - set(theirs)) == sorted(soft_keys) and bool(soft_keys) == soft
+    rows = real_rows(True)
+    assert_plays_alike(source, target, rows, rows)
+    with torch.no_grad():
+        assert same(source.heads(rows), target.heads(rows))
+        assert same(source.heads_with_outcome(rows), target.heads_with_outcome(rows))
+        logits, _, _, extras = target.training_heads(rows)
+    assert same(source.heads_with_outcome(rows)[3:], (extras["final_vp"], extras["turns_left"]))
+    if soft:
+        assert all(torch.equal(mine[k], theirs[k.removeprefix("soft_")]) for k in soft_keys)
+        assert torch.equal(extras["soft_policy"], logits)
+    # without the part, as before it existed: the source's actor and critic, and a head of the seed's
+    fresh = model_of(soft=soft, outcome=True, seed=4)
+    seeded = {k: v.clone() for k, v in fresh.state_dict().items()}
+    ck.load_parts(fresh, {"ckpt": path, "parts": ["actor", "critic"]})
+    state = fresh.state_dict()
+    assert all(torch.equal(state[k], seeded[k]) for k in head) and not same([state[k] for k in head],
+                                                                           [theirs[k] for k in head])
+    assert all(torch.equal(state[k], theirs[k]) for k in theirs if k not in head)
+    # the head alone, from another checkpoint than the actor's and the critic's (one ref per part)
+    other = trained_scale(model_of(soft=False, outcome=True, seed=8))
+    mixed = model_of(soft=soft, outcome=True, seed=4)
+    ck.load_parts(mixed, {"ckpt": {"actor": path, "critic": path,
+                                   "outcome": str(saved(tmp_path / "other", other).path)}})
+    state = mixed.state_dict()
+    assert all(torch.equal(state[k], (other if k in head else source).state_dict()[k]) for k in theirs)
+
+
+def test_the_outcome_part_needs_the_head_on_both_sides(tmp_path):
+    with_head = str(saved(tmp_path / "with", trained_scale(model_of(soft=False, outcome=True, seed=3))).path)
+    without = str(saved(tmp_path / "without", trained_scale(model_of(soft=False, seed=3))).path)
+    with pytest.raises(ck.CheckpointError, match="the checkpoint has no outcome head"):
+        ck.load_parts(model_of(outcome=True, seed=4), {"ckpt": without, "parts": OUTCOME_INIT})
+    with pytest.raises(ck.CheckpointError, match=r"which this network does not have \(model.args.outcome\)"):
+        ck.load_parts(model_of(seed=4), {"ckpt": with_head, "parts": OUTCOME_INIT})
+    # a refused load changes no weight
+    target = model_of(outcome=True, seed=4)
+    before = {k: v.clone() for k, v in target.state_dict().items()}
+    with pytest.raises(ck.CheckpointError):
+        ck.load_parts(target, {"ckpt": without, "parts": OUTCOME_INIT})
+    assert same(before, dict(target.state_dict()))
+    # at resolution: the part with a network without the head, and parts that are none of the three
+    init = {"ckpt": "azt/src@e1#0123456789ab", "parts": OUTCOME_INIT}
+    with pytest.raises(ConfigError, match="init_from's outcome part loads the outcome head"):
+        variant("a", init_from=init)
+    with pytest.raises(ConfigError, match="init_from.parts must be a non-empty subset"):
+        variant("a", outcome=True, outcome_vp_coef=0.5, init_from={**init, "parts": ["actor", "aux"]})
+    with pytest.raises(ConfigError, match="init_from.ckpt per part takes keys"):
+        variant("a", init_from={"ckpt": {"actor": init["ckpt"], "soft_policy": init["ckpt"]}})
+    with pytest.raises(ConfigError, match="init_from's outcome part loads the outcome head"):
+        variant("a", init_from={"ckpt": dict.fromkeys(OUTCOME_INIT, init["ckpt"])})
+
+
+def test_configs_without_the_outcome_part_keep_their_hashes():
+    ref = "azt/src@e1#0123456789ab"
+    head = {"outcome": True, "outcome_vp_coef": 0.5}
+    old = {"default": variant("a", init_from={"ckpt": ref}),
+           "actor-critic": variant("a", init_from={"ckpt": ref, "parts": ["actor", "critic"]}),
+           "outcome-net": variant("a", **head, init_from={"ckpt": ref, "parts": ["actor", "critic"]}),
+           "per-part": variant("a", init_from={"ckpt": {"actor": ref, "critic": ref}})}
+    assert {name: v.config_hash for name, v in old.items()} == OLD_INIT_HASHES
+    assert old["default"].config["init_from"] == {"ckpt": ref}  # no part is written in
+    carried = variant("a", **head, init_from={"ckpt": ref, "parts": OUTCOME_INIT})
+    assert carried.config["init_from"] == {"ckpt": ref, "parts": OUTCOME_INIT}
+    assert carried.config_hash not in OLD_INIT_HASHES.values()
+    per_part = variant("a", **head, init_from={"ckpt": dict.fromkeys(OUTCOME_INIT, ref)})
+    assert per_part.config_hash not in {carried.config_hash, *OLD_INIT_HASHES.values()}
+
+
+def test_a_run_continues_its_source_outcome_head(monkeypatch):
+    """A run with the outcome head, then one from its checkpoint with parts: [actor, critic,
+    outcome] and the soft head: the run pins the three parts and starts from the source's
+    weights, outcome head included."""
+    head = {"outcome": True, "outcome_vp_coef": 0.5, "outcome_turns_coef": 0.5}
+    assert run(variant("src", **head, iterations=1)).status == "finished"
+    start = load_experiment("azt/src").resolve("latest")
+    v = variant("carry", soft=True, **head, soft_policy_coef=1.0, iterations=1,
+                init_from={"ckpt": "azt/src@latest", "parts": OUTCOME_INIT})
+    assert run(v).status == "finished"
+    carried = load_experiment("azt/carry")
+    assert carried.manifest["resolved"]["init_from"] == dict.fromkeys(OUTCOME_INIT, str(start))
+    source = ck.Checkpoint.load(start.path).model("all")
+    warm = ck.Checkpoint.load(carried.checkpoints()[0].path).model("all")
+    theirs, mine = source.state_dict(), warm.state_dict()
+    assert any(k.startswith("outcome_head.") for k in theirs) and all(torch.equal(mine[k], theirs[k]) for k in theirs)
+    rows = real_rows(True)
+    with torch.no_grad():
+        assert same(source.heads_with_outcome(rows), warm.heads_with_outcome(rows))
+        logits, _, _, extras = warm.training_heads(rows)
+    assert torch.equal(extras["soft_policy"], logits)
 
 
 def test_the_fused_kernels_take_the_soft_head_network_and_fold_the_same_weights(monkeypatch):

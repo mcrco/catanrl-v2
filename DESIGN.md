@@ -630,8 +630,10 @@ continuation, and `${init}` stays the parent's start.
 
 **Warm starts** take `init_from: {ckpt: REF, parts: [actor, critic]}`, or
 one ref per part (v1's hybrid). Each part loads strictly through the checks
-in 6.3. `e000000.pt` is always saved, and `catanrl ls` flags a `best` that is
-still the parent's weights.
+in 6.3. `parts` may also name `outcome`, the AlphaZero trainer's outcome head
+(`model.args.outcome`), which a warm start otherwise builds fresh: the network
+and the checkpoint must both have one. `e000000.pt` is always saved, and
+`catanrl ls` flags a `best` that is still the parent's weights.
 
 **Critic refits.** `init_from.split_shared: true` loads a shared-trunk graph
 checkpoint into separate actor and critic networks (`model.args.shared:
