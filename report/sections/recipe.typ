@@ -492,15 +492,15 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 == Rollout segments and λ
 
-=== 256-step segments and λ = 1, from scratch #chip("queued") <exp:recipe-horizon>
+=== 256-step segments and λ = 1, from scratch #chip("running") <exp:recipe-horizon>
 #meta(
-  dates: "queued for the GPU after `graph-m` (about 10 November)",
+  dates: "2026-11-17 01:24 –",
   owner: "marco",
   config: "configs/experiments/horizon-2p.yaml",
-  wandb: (),
+  wandb: (("horizon-2p-main-2e7799fa", "horizon-2p/main"),),
   records: (),
 )
-#tldr[Every run so far cuts each env's rollout into 64-step segments with λ = 0.95, so a step's target is mostly the critic's estimate about 20 decisions later. The same run as `discount-2p/g1-s42` with 256-step segments and λ = 1, so most targets are the game's actual result.]
+#tldr[Every run so far cuts each env's rollout into 64-step segments with λ = 0.95, so a step's target is mostly the critic's estimate about 20 decisions later. The same run as `discount-2p/g1-s42` with 256-step segments and λ = 1, so most targets are the game's actual result. Running on the local GPU since 01:24 on 2026-11-17 at 16,400 agent steps a second (the baseline: 17,800), so about 8.5 h. The same idea for the mixed base runs on Modal (@exp:recipe-horizon-mixed, @exp:recipe-horizon-big).]
 
 *Question.* Do longer segments with λ = 1 train a stronger 1v1 net than 64 steps with λ = 0.95 (Marco)?
 
@@ -511,10 +511,79 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *Changes.* Segment length 64 → 256, λ 0.95 → 1, and 1,032 → 258 envs, so each update still sees 132,096 steps (516 rows × 256) with the same 16 optimizer steps. Fewer games run in parallel. Both knobs change together, so a difference can't be pinned on either alone.
 - *Monitors.* Every 50 epochs on `select-2p-fr` against fr3, on the same games as the baseline's monitors, so every epoch pairs with it game by game. No monitor or final against F, which sits near 98% (Marco).
 - *Finals.* `heldout-2p-fr`, 5,000 games each, on the last checkpoint: against fr3, and head to head against the baseline's last checkpoint (±1.4 pp at 50%).
-- *Cost.* The baseline took 7.9 h; collecting 4× more, 4× smaller steps may be slower (to be measured). Needs the 8 GB card alone. A 2-epoch CPU smoke passed.
+- *Cost.* The baseline took 7.9 h. Over the first 17 epochs this run makes 16,400 agent steps a second against the baseline's 17,800: collecting takes 2.2 s an epoch against 1.6 s (4× as many forwards of a quarter the rows), the update 5.8 s in both. About 8.5 h for the 500M steps. Needs the 8 GB card alone.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/horizon-2p.yaml
+```)
+
+=== 512-step segments, λ = 1 and no discount for the mixed base: `gen-base-h512` #chip("running") <exp:recipe-horizon-mixed>
+#meta(
+  dates: "2026-11-16 23:57 –",
+  owner: "marco",
+  config: "configs/experiments/gen-base-h512.yaml (wt/player-set, 0a94e64)",
+  wandb: (("gen-base-h512-main-25bfdbc8", "gen-base-h512/main"),),
+  records: (),
+)
+#tldr[Marco (2026-11-16): "i've wanted to try to do a fuller horizon length training. could we run that for mixed ppo on modal and see if using the longer horizon with no discount improves ppo training?" The generalist base of @exp:gen-base-1 again with 512-step segments, λ = 1 and no discount, the rest unchanged, on a Modal L40S. It runs at 27,100 agent steps a second where `gen-base` ran at 47,500: holding the update at 262,144 steps meant 128 envs, and a forward on 512 rows costs nearly as much as one on 4,096. About 10.4 h and \$27 against 6 h and \$15; it stops at its 8 h cap and is then resumed. Epoch 463 of 3,800 at 01:23 on 2026-11-17.]
+
+*Question.* Does the mixed base end stronger at the same 996M agent steps when most targets are the game's actual result?
+
+#lead[Setup.]
+- *Baseline.* `gen-base` (@exp:gen-base-1): 64-step segments, λ = 0.95, a policy discount of 0.999 a decision, an undiscounted critic, 1,024 envs.
+- *Changes.* Segments 64 → 512, λ 0.95 → 1, the policy discount 0.999 → 1, and 1,024 → 128 envs, so an update still sees 262,144 steps (512 rows × 512) with the same 16 optimizer steps. The three knobs change together (one run, as asked), so a difference can't be pinned on one of them.
+- *Why 512.* In `gen-base`'s last epoch a game was 208 decisions at 2p and 185 at 3p and 4p. A 512-step segment holds 2.5 to 2.8 games, and about 80% of its steps see their game's end (59 to 64% at 256 steps; about 16% at 64 steps even with λ = 1).
+- *Evals.* None in the run. `gen-base`'s three finals on the last checkpoint (2,000 games at 2p, 3,000 at 3p, 4,000 at 4p; the same boards, seats and opponents), so every game pairs with `gen-base`'s.
+
+#lead[Speed.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([Per 262,144 agent steps, on an L40S], [`gen-base`], [`gen-base-h512`], [`gen-base-h512-big`]),
+    [Envs (rows a forward)], [1,024 (4,096)], [128 (512)], [1,024 (4,096)],
+    [Forwards while collecting], [64], [512], [64],
+    [Collecting, s], [1.19], [4.97], [1.28],
+    [#h(1em) of it the network], [0.56], [3.92], [not yet read],
+    [Update, s], [4.33], [4.70], [3.91],
+    [Agent steps a second], [47,500], [27,100], [50,500],
+  ),
+  caption: [Medians of the runs' own timers (`gen-base-h512` over epochs 116 to 463, `gen-base-h512-big` over its first 7 collections). A forward takes 8.8 ms on 4,096 rows and 7.6 ms on 512, so eight times the forwards cost seven times the network time.],
+) <tab:recipe-horizon-speed>
+
+- *Why it is slower.* The update costs the same. Collecting takes 4.2× as long, because the card is paid per forward, not per row, at these sizes.
+- *Cost.* \$2.58 an hour (L40S, 8 cores, 32 GiB). 10.2 h of training and the finals: about \$27. The 8 h cap (worst case \$20.67) stops it at a checkpoint about 77% through; the resume costs about \$7. Marco (2026-11-17) chose to leave it running and to run the big batch beside it (@exp:recipe-horizon-big).
+
+#repro(```sh
+# from the wt/modal worktree
+python tools/modal_train.py launch configs/experiments/gen-base-h512.yaml --rev wt/player-set --gpu L40S --cpu 8 --memory 32 --max-hours 8 --set runtime.threads=8 \
+  --ship graph-m-2p-lr/main@e22711 --ship ppo-mixed/main@e3550 --ship ppo-4p/main@e3650
+python tools/modal_train.py resume gen-base-h512/main    # after the cap
+```)
+
+=== The same with 8× the rows a collection and 8× the minibatch: `gen-base-h512-big` #chip("running") <exp:recipe-horizon-big>
+#meta(
+  dates: "2026-11-17 01:04 –",
+  owner: "marco",
+  config: "configs/experiments/gen-base-h512-big.yaml (wt/player-set, 8d75aa8)",
+  wandb: (("gen-base-h512-big-main-fecb10f4", "gen-base-h512-big/main"),),
+  records: (),
+)
+#tldr[Marco (2026-11-17): "why do we stay at 2^18 steps for each training? why not go more for 512 x 4096 or smth?", then "big batch should have bigger minibatch and the same number of updates". `gen-base-h512` with 1,024 envs, so a collection is 4,096 rows × 512 steps = 2,097,152 agent steps, and a minibatch of 262,144 (8×), so a collection still gets 16 optimizer steps. On a second L40S it runs at 50,500 agent steps a second, faster than `gen-base` (@tab:recipe-horizon-speed): about 5.7 h and \$15. Over the same 996M steps it makes 7,600 optimizer steps where the other two make 60,800, at the same learning rate.]
+
+*Question.* Does the long-horizon base train as well in 475 large updates as in 3,800 small ones, at nearly twice the speed?
+
+#lead[Setup.]
+- *Changes from `gen-base-h512`.* Envs 128 → 1,024 and the minibatch 32,768 → 262,144; a checkpoint every 12 collections (about 25M steps, as before). Segments, λ, discount, the 996M steps, the seed and the finals are unchanged.
+- *Updates.* 475 collections × 16 = 7,600 optimizer steps (`gen-base` and `gen-base-h512`: 60,800), each averaging 8× the rows. The learning rate is not rescaled: 0.005 on a cosine to 0.0005, which now moves once a collection. "The same number of updates" is read as per collection; keeping 60,800 in all would mean the small minibatch or 16 passes over each collection.
+- *Memory.* The rollout buffer lives on the GPU in float32: 26.6 GiB here (3.3 GiB at 262,144 steps). It fits the L40S's 48 GB and not this box's 8 GB card. The minibatch does not change the peak: PufferLib backpropagates 4,096-row chunks and steps the optimizer every 64 of them.
+- *Compare.* The same three finals: paired by game with `gen-base-h512` (the batch alone) and with `gen-base` (horizon and batch together).
+- *Cost.* \$2.58 an hour, cap 9 h: worst case \$23.26.
+
+#repro(```sh
+# from the wt/modal worktree
+python tools/modal_train.py launch configs/experiments/gen-base-h512-big.yaml --rev wt/player-set --gpu L40S --cpu 8 --memory 32 --max-hours 9 --set runtime.threads=8 \
+  --ship graph-m-2p-lr/main@e22711 --ship ppo-mixed/main@e3550 --ship ppo-4p/main@e3650
 ```)
 
 == Mixed precision
@@ -590,7 +659,7 @@ uv run python tools/search_probe.py --pair <fp16's final record> <fp32's final r
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-16): launch experiments in parallel on Modal. A training harness is built and tested there for \$0.49. `ppo-mixed`'s training runs at 60,800 agent steps a second on an L40S, 2.5× this box: 1B steps in 4.6 h for about \$12. Marco's budget is the month's \$30 of free credit and \$25 more; the first run on it, `gen-base`, cost \$15.43 (@exp:gen-base-1); its second stage \$15.19 (@exp:gen-base-2); \$33.48 is spent.]
+#tldr[Marco (2026-11-16): launch experiments in parallel on Modal. A training harness is built and tested there for \$0.49. `ppo-mixed`'s training runs at 60,800 agent steps a second on an L40S, 2.5× this box: 1B steps in 4.6 h for about \$12. Marco's budget is the month's \$30 of free credit and \$25 more; the first run on it, `gen-base`, cost \$15.43 (@exp:gen-base-1); its second stage \$15.19 (@exp:gen-base-2). Marco then raised the budget to \$155 for November. A multi-process self-play benchmark cost \$2.70 (@exp:az-modal-scale): \$36.18 is spent, and two long-horizon bases are running (@exp:recipe-horizon-mixed, @exp:recipe-horizon-big; about \$42 together), for about \$78 at their end.]
 
 #lead[The harness.]
 - *Launch.* Any committed revision of any local branch, a config, a card, cores and a cap in hours; the job runs detached and prints its price per hour and worst-case cost.
@@ -619,7 +688,7 @@ uv run python tools/search_probe.py --pair <fp16's final record> <fp32's final r
 - *A full run.* `gen-base` (@exp:gen-base-1): 5.97 h in one container, the finals in the same container against shipped checkpoints, mirrored every 10 minutes; the app stopped itself.
 - *Eval-only configs.* They file their records under the first agent's run, so the harness now returns the new eval records of shipped runs to the volume (`gen-base-slope`).
 - *Not tested.* A real 24 h continuation, a real preemption, and an AlphaZero run. A build from another branch worked (@exp:gen-base's speed check from `wt/player-set`).
-- *Spent.* \$1.53 on the benchmark (@exp:az-hardware) \$0.49 here and \$0.40 on the base's speed check and finals check: \$2.42 in all before `gen-base`, which cost \$15.43, and \$0.42 on its two slope checks (@exp:gen-base-1): \$18.27 of the month's \$30 of free credit (Marco's budget, 2026-11-16), by the harness's count of billed seconds; Modal's billing page is the authority. Marco then approved \$25 more ("you can go over the budget. im approving another 25 bucks total."): \$55 in all. `gen-base-2` cost \$15.19 (@exp:gen-base-2; \$15.21 with an assumed \$0.02 of image build): \$33.48 spent, about \$21.50 left.
+- *Spent.* \$1.53 on the benchmark (@exp:az-hardware) \$0.49 here and \$0.40 on the base's speed check and finals check: \$2.42 in all before `gen-base`, which cost \$15.43, and \$0.42 on its two slope checks (@exp:gen-base-1): \$18.27 of the month's \$30 of free credit (Marco's budget, 2026-11-16), by the harness's count of billed seconds; Modal's billing page is the authority. Marco then approved \$25 more ("you can go over the budget. im approving another 25 bucks total."): \$55 in all. `gen-base-2` cost \$15.19 (@exp:gen-base-2; \$15.21 with an assumed \$0.02 of image build): \$33.48 spent. Marco (2026-11-16): "i don't mind spending another 100": \$155 in all. The multi-process self-play benchmark cost \$2.70 (@exp:az-modal-scale): \$36.18 spent. Running since: `gen-base-h512` (about \$27 with its resume) and `gen-base-h512-big` (about \$15, at most \$23.26).
 
 #repro(```sh
 # from the wt/modal worktree

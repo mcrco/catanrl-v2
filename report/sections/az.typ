@@ -662,6 +662,51 @@ modal run tools/modal_bench.py --job l40s-b1 --out OUT   # cpu | a10g-a | l40s-a
 perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 ```)
 
+=== Several self-play processes on one rented card, and what \$100 buys #chip("done") <exp:az-modal-scale>
+#meta(
+  dates: "2026-11-17",
+  owner: "marco",
+  config: "tools/modal_bench.py, jobs l40s-b1-x4, -x6, -x8 (wt/modal 752d2e4, unmerged)",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-16): how fast and how expensive would AlphaZero training be on Modal with an L40S and 64 vCPUs, what would \$100 buy, and would training from random weights make sense? Measured for \$2.70. One self-play process leaves the L40S idle 75 to 82% of the time (@exp:az-hardware), so several independent trainers share one card: 4, 6 and 8 of them make 164, 198 and 207 iterations an hour together, against this box's 42.7. The card is full from about six. At \$3.97 an hour that is \$19 to \$20 per 1,000 iterations: \$100 buys about 5,000 iterations (0.9M games, 41 to 43M recorded positions) in 25 h, and the whole fr3 line so far (2,700 iterations) would take 13 h and \$52. It needs a multi-process trainer, which is not built. From random weights \$100 is about one Canopy-sized run, which likely ends below fr3. Nothing is queued.]
+
+*Question.* How many self-play processes does one L40S feed, and what does an iteration then cost?
+
+#lead[Setup.] K full trainers at once on one L40S with 32 physical cores (64 vCPUs) and 64 GiB, each running e1800's stored config for 5 iterations (512 games × 64 steps, 600-visit full searches on a quarter of the moves, fused half-precision kernels) with 32 / K threads. They share nothing but the card, so this measures the hardware, not a trainer.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (auto, 1fr, 1fr, 1fr, 1fr, 1fr, 1fr),
+    align: (left, right, right, right, right, right, right),
+    header: ([Processes × threads], [s an iteration, each], [Iterations an hour, all], [× this box], [Leaves a second, all], [Card busy], [\$ per 1,000 iterations]),
+    [1 × 8], [82.7], [43.5], [1.02], [69,700], [18%], [59],
+    [1 × 32], [64.2], [56.1], [1.31], [87,900], [25%], [71],
+    [4 × 12], [87.7], [164.2], [3.85], [259,900], [77%], [24.2],
+    [6 × 8], [108.9], [198.4], [4.65], [314,300], [98%], [20.0],
+    [8 × 6], [139.2], [206.9], [4.85], [328,200], [100%], [19.2],
+  ),
+  caption: [One L40S. The first two rows are from @exp:az-hardware (2026-11-15; the first on 8 cores at \$2.58 an hour); the others cost \$3.97 an hour (32 cores, 64 GiB). This box makes 42.7 iterations an hour. Peak GPU memory 8.0, 11.6 and 16.8 GiB; a batch's round trip takes 3.6, 7.0 and 13.6 ms, and the main threads wait for the card 2–3%, 6–7% and 19–21% of the time.],
+) <tab:az-modal-scale>
+
+*Reading.*
+- *Why it stops at about six.* The processes are not batched together: each has its own CUDA context and the card runs one batch at a time. A real evaluator call, with its uploads and downloads, runs at about 302,000 rows a second, and one process asks for 70,000 to 88,000, so four or five fill the card.
+- *Why one process does not use more threads.* Only about a third of its main thread's time is spread over threads (@exp:az-hardware): four times the cores give 1.29×.
+- *A correction.* An estimate given to Marco before this was read, that one shared inference process could give up to 1.6× more, used the bare forward's 520,000 rows a second. The call the search makes is 302,000, so that gain is not supported. What would raise the ceiling is cheaper transfers (42% of a call) or a second card.
+- *What \$100 buys.* 25.2 h at \$3.97 an hour: 5,000 to 5,200 iterations, 41 to 43M recorded positions, about 0.9M games, or five days of this box in a day. The fr3 line's 2,700 iterations: about 13 h and \$52.
+- *From random weights* (Marco's thought, for a less sharp start). Canopy's run from scratch was about 47M recorded positions (@exp:az-canopy-diff), the size \$100 buys; its raw net scores 30.5% against ours and its search 33.0% (@exp:canopy-raw-vs-raw, @exp:canopy-search-gpu). fr3's PPO made 1.0B decisions in 32 h on this box for free, and PPO makes about 44× the decisions a second of searched self-play. Visit-count targets sharpen any net as it trains, and pruned targets already handle fr3's sharp start (@exp:az-kata). So \$100 from scratch likely ends below fr3.
+- *Other savings, not measured.* Fewer cores and less memory per process; evals at home; freeing trees off the main thread matters less once the card is the limit. An H100 would need more than twice the L40S's throughput to pay.
+- *Not built.* A trainer with several self-play processes feeding one learner and one replay, and an AlphaZero resume tested on Modal. The trainer is one process today.
+
+*Next* (Claude's suggestion, not queued). If a softer start is the aim, start AlphaZero from an early PPO checkpoint instead of random weights: most of PPO's cheap games, a policy that is not yet saturated.
+
+#repro(```sh
+# from the wt/modal worktree
+modal run tools/modal_bench.py --job l40s-b1-x6 --out OUT   # l40s-b1-x4 | l40s-b1-x8
+```)
+
 === Auxiliary targets: each seat's final VP and the turns left #chip("done") <exp:az-aux>
 #meta(
   dates: "2026-11-15",

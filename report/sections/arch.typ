@@ -209,16 +209,15 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-2p-lr.yaml
 ```)
 
-=== `graph-m` in the search against the raw fr3 bot #chip("queued") <exp:arch-graph-m-search>
+=== `graph-m` in the search against the raw fr3 bot #chip("done") <exp:arch-graph-m-search>
 #meta(
-  dates: "for the GPU after az-2p-bundle and its follow-ups",
-  dates-label: "queued",
+  dates: "2026-11-16 20:23 – 2026-11-17 01:23",
   owner: "marco",
   config: "configs/experiments/graph-m-search-vs-raw.yaml",
-  wandb: (),
-  records: (),
+  wandb: (("graph-m-search-vs-raw-main-42f8b15b", "graph-m-search-vs-raw/main"),),
+  records: ("93649969",),
 )
-#tldr[Marco (2026-11-16): queue `graph-m` in the search against raw fr3. One row on the games the AlphaZero checkpoints are judged on, so `2p-graph-m-1` gets a place on that curve by measurement and not by chaining two rows.]
+#tldr[Marco (2026-11-16): `graph-m` in the search against raw fr3, on the games the AlphaZero checkpoints are judged on. `2p-graph-m-1` in a 300-sim search scores 58.10% over 2,000 games: 4.25 pp above fr3's net in its 1,024-sim search (p = 0.002), level with e300, 4.85 pp below e1800 (p = 0.0006) and 5.60 pp below the bundle (p = 6e-5). At equal time per move the best raw policy is not the best net for the search, so the fr3 AlphaZero line stays the 1v1 search bot.]
 
 *Question.* Where does `2p-graph-m-1`, a PPO net with no self-play with search, sit among fr3's net (53.85%), e300 (57.70%), e900 (60.30%) and e1800 (62.95%) when each plays in the search against the fair raw fr3 bot?
 
@@ -227,7 +226,28 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *Search.* 300 simulations, the equal-time budget of @exp:deploy-graph-m-check (1,024 / 3.38; no fused kernels for `graph-m` yet). The other options are the rows' own.
 - *Sample.* 2,000 games: ±2.2 pp. Against e1800's row, paired, about 3.4 pp is detectable at 80% power.
 - *Prediction* (Claude, by chaining rows): about 58% ± 3 pp. `graph-m`'s search beat fr3's search 54.3% at equal time, and fr3's search scores 53.85% here.
-- *Cost.* Not measured: 3–4 h is an estimate from e1800's row (2.3 h) and the deploy check's search row (9.1 h with two searching seats).
+- *Cost.* 5.0 h on the GPU (6.7 games a minute); the estimate was 3–4 h.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Net in the search], [Sims], [Score against raw fr3, %], [`graph-m` minus it, pp], [p]),
+    [fr3 (`809619df`)], [1,024], [53.85], [+4.25 #ci[+1.6][+6.9]], [0.002],
+    [e300 (`e917f9bb`)], [1,024], [57.70], [+0.40 #ci[−2.3][+3.1]], [0.80],
+    [`2p-graph-m-1` (`93649969`)], [300], [58.10 #ci[55.9][60.3]], [], [],
+    [e1800 (`ea257443`)], [1,024], [62.95], [−4.85 #ci[−7.6][−2.1]], [0.0006],
+    [The bundle (`b5483151`)], [1,024], [63.70], [−5.60 #ci[−8.3][−2.9]], [6e-5],
+  ),
+  caption: [Each net in the deployed search against `BELIEF` of fr3 on the same 2,000 held-out games. Differences are paired by game (exact McNemar). e900 (60.30%) is on the same games and was not paired here.],
+) <tab:arch-graph-m-search>
+
+*Reading.*
+- *The prediction held* (about 58% ± 3 pp by chaining rows).
+- *Where it sits.* At equal time per move, `graph-m`'s stronger raw policy is worth to the search about what the first 300 iterations of self-play added to fr3's net. The 1,500 iterations after that added 5 pp more, which `graph-m` does not have.
+- *For the bot.* The fr3 AlphaZero line stays the 1v1 search bot. `2p-graph-m-1` stays the best raw policy.
+- *Not answered.* What `graph-m` would reach after its own self-play (@exp:az-graph-m), and its score at 1,024 sims, which would cost 3.4× the time per move without fused kernels.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-search-vs-raw.yaml
