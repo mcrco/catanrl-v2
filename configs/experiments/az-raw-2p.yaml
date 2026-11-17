@@ -1,0 +1,51 @@
+# the raw policies of the alphazero checkpoints (marco, 2026-11-16, for the gpu after az-2p-bundle):
+# is a net that is better inside the search also a better raw policy? every alphazero row so far
+# judged the net inside the 1,024-sim search, where e300, e900 and e1800 gained 3.85, 6.45 and 9.10 pp
+# over fr3's net against the fair raw fr3 bot. raw scores that rise with those say self-play improves
+# the policy itself; flat ones say the gain lives in what the search does with the net (its value, or
+# its second and third choices).
+#
+# rows: the fair raw bot (BELIEF:worlds=16, no search; it samples the hidden hands instead of reading
+# them) of e300, e900, e1800 and the bundled run's last checkpoint, each against the same bot of fr3
+# (ppo-2p-fr3/full@e4350, the net the lineage started from: az-2p-kata/main@e0 holds its weights).
+# no search on either side. not planned: a round robin among the checkpoints (6 more pairs).
+# suite: all 2,500 boards of heldout-2p-fr in both seat orders, 5,000 games a row, as the deploy
+# check's fair raw row (+-1.4 pp at 50%, wilson 95%; about 2 pp between two checkpoints at 80% power,
+# paired by game: every row plays the same games against the same opponent). the first 1,000 boards
+# are the search rows' boards.
+# cost: ~13 min a row (transitivity-2p-belief: 2.7 min per 1,000 games with two belief seats of this
+# network size), under 1 h for the four rows.
+#
+# the bundle row is commented out until az-2p-bundle/main ends: fill its pin (the 12 hex that
+# str(catanrl.runs.load_checkpoint("az-2p-bundle/main@e900").ref) ends with) and uncomment it before
+# the launch. launch once: the rows are part of the config's hash, so a row added after a launch is
+# another config, which catanrl refuses under the same variant name (--variant NAME then).
+#
+# launch (main; the gpu alone):
+#   catanrl run configs/experiments/az-raw-2p.yaml
+name: az-raw-2p
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr}
+      lineup:
+        - "BELIEF:ckpt=az-2p-kata/main@e300#513d0caac817:worlds=16"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+    - suite: {name: heldout-2p-fr}
+      lineup:
+        - "BELIEF:ckpt=az-2p-kata/main+600-fast-noselect@e900#713c7a0a818a:worlds=16"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+    - suite: {name: heldout-2p-fr}
+      lineup:
+        - "BELIEF:ckpt=az-2p-kata/main+1500@e1800#7c44ec80540a:worlds=16"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+    # TODO when az-2p-bundle/main has ended: replace <pin> with e900's 12 hex and uncomment. this
+    # network reads the dice input; BELIEF takes it from the checkpoint (catanrl.agents.native), and
+    # fr3 in the other slot gets rows without it (catanrl.eval.harness).
+    # - suite: {name: heldout-2p-fr}
+    #   lineup:
+    #     - "BELIEF:ckpt=az-2p-bundle/main@e900#<pin>:worlds=16"
+    #     - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+runtime: {device: cuda, threads: 12, num_envs: 256}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
