@@ -22,7 +22,9 @@ illegal actions at -1e9, values each seat's win probability in [0, 1] (slot 0
   a shared trunk) it carries the outcome head (``heads_with_outcome``: each seat's final
   victory points and the turns left), which only the AlphaZero trainer's losses run:
   ``forward`` / ``heads`` and so every agent, evaluator and kernel are the network
-  without it;
+  without it. With ``args.soft_policy`` (optional, a shared trunk) it carries the soft
+  policy head, a second policy head that only the AlphaZero trainer's soft policy loss
+  runs (``training_heads``), under the same rule;
 * ``mlp``: :mod:`catanrl.models.mlp` (padded dims only);
 * ``cnn``: :mod:`catanrl.models.cnn` (v1's cross-dimensional CNN; the BASE board only);
 * ``lstm``: :mod:`catanrl.models.lstm` (dims-agnostic, recurrent: the graph
@@ -179,12 +181,17 @@ class GraphModel(CatanModel):
         self.outcome = bool(args.get("outcome", False))
         if self.outcome and not args["shared"]:
             raise ValueError("the outcome head (model.args.outcome) sits on a shared trunk: set model.args.shared")
+        self.soft_policy = bool(args.get("soft_policy", False))
+        if self.soft_policy and not args["shared"]:
+            raise ValueError("the soft policy head (model.args.soft_policy) sits on a shared trunk: set "
+                             "model.args.shared")
         if args["shared"]:
             if self.has_critic_block and not self.aux:
                 raise ValueError("a shared trunk cannot read a separate critic level")
             hidden = hidden_feature_indices(canonical["players"]) if self.aux else []
             net = GraphNetwork(actor_reader, action_layout, args=args, num_players=self.num_players,
-                               policy=True, value=True, aux_features=len(hidden), outcome=self.outcome)
+                               policy=True, value=True, aux_features=len(hidden), outcome=self.outcome,
+                               soft_policy=self.soft_policy)
             self.backbone, self.policy_head, self.value_head = net.trunk, net.policy, net.value
             self.parts = {"actor": ["backbone.", "policy_head."], "critic": ["value_head."]}
             if self.aux:
@@ -194,6 +201,9 @@ class GraphModel(CatanModel):
             if self.outcome:  # after every other part: the keys before it are the network's without it
                 self.outcome_head = net.outcome
                 self.parts["outcome"] = ["outcome_head."]
+            if self.soft_policy:  # last of all: a part of its own, which init_from starts at the policy head
+                self.soft_policy_head = net.soft_policy
+                self.parts["soft_policy"] = ["soft_policy_head."]
             # The trunk reads the actor's row only; a critic block, when the row has one, is the
             # aux head's target and no head reads it (the policy stays fair at the actor's level).
             self.reads_critic_block = False
@@ -254,6 +264,25 @@ class GraphModel(CatanModel):
         present = self._present(rows)
         return (self.policy_head(emb, rows.mask), self.value_head(emb, present), present,
                 *self.outcome_head(emb))
+
+    def training_heads(self, obs):
+        """(masked logits, value logits, present, extras) in one trunk pass: the training forward
+        of a network with the outcome head, the soft policy head or both. ``extras`` holds what
+        the heads it has give: ``final_vp`` [B, P] and ``turns_left`` [B] (the outcome head's
+        outputs, as in :meth:`heads_with_outcome`) and ``soft_policy`` [B, A] (the soft policy
+        head's logits, illegal actions masked as the policy head's are)."""
+        if not (self.outcome or self.soft_policy):
+            raise ValueError("this network has no outcome head (model.args.outcome) and no soft policy head "
+                             "(model.args.soft_policy)")
+        rows = self.backbone.reader(obs)
+        emb = self.backbone(obs, rows)
+        present = self._present(rows)
+        logits, value_logits, extras = self.policy_head(emb, rows.mask), self.value_head(emb, present), {}
+        if self.outcome:
+            extras["final_vp"], extras["turns_left"] = self.outcome_head(emb)
+        if self.soft_policy:
+            extras["soft_policy"] = self.soft_policy_head(emb, rows.mask)
+        return logits, value_logits, present, extras
 
     def aux_predictions(self, obs):
         """The aux head's predictions [B, P-1, F]: row k holds slot k+1's hidden features

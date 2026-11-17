@@ -257,8 +257,8 @@ def _outputs(model: nn.Module, obs: torch.Tensor, *, aux: bool = True) -> tuple[
     """(logits, values, logits with every action legal, aux predictions or None): the open
     logits show every policy head's output; the aux head's predictions pin it when there is
     one (``aux=False`` skips that third trunk pass when a self-test does not compare it). An
-    outcome head (``model.args.outcome``) is not pinned: nothing plays from it, and the weights'
-    sha256 covers its parameters."""
+    outcome head (``model.args.outcome``) and a soft policy head (``model.args.soft_policy``)
+    are not pinned: nothing plays from them, and the weights' sha256 covers their parameters."""
     from catanrl.seeding import determinism
 
     offset, (size,) = model.layout["action_mask"]
@@ -560,8 +560,8 @@ def _split_source_keys(model: nn.Module, part: str, source: Checkpoint, keys: se
     if theirs["class"] != cls or not theirs["args"].get("shared", False):
         raise CheckpointError(f"init_from.split_shared needs a shared-trunk {cls} checkpoint; {source.ref} is a "
                               f"{'shared' if theirs['args'].get('shared') else 'separate'} {theirs['class']} network")
-    mine_args = {k: v for k, v in model.spec["args"].items() if k not in ("shared", "aux", "outcome")}
-    their_args = {k: v for k, v in theirs["args"].items() if k not in ("shared", "aux", "outcome")}
+    mine_args = {k: v for k, v in model.spec["args"].items() if k not in ("shared", "aux", "outcome", "soft_policy")}
+    their_args = {k: v for k, v in theirs["args"].items() if k not in ("shared", "aux", "outcome", "soft_policy")}
     if mine_args != their_args:
         raise CheckpointError(f"init_from.split_shared from {source.ref}: model args {their_args} differ from "
                               f"{mine_args}")
@@ -595,6 +595,11 @@ def load_parts(model: nn.Module, init_from: Mapping[str, Any]) -> list[Checkpoin
     own weights, every graph trunk's dice projections (:func:`dice_input_keys`, which the
     source does not have), are zero, so the network computes exactly the source's logits and
     values whatever the dice read.
+
+    A network with the soft policy head (``model.args.soft_policy``, a part of its own that
+    ``parts`` does not name) takes the head with the actor: the source's when the source has
+    one, else a copy of the policy head loaded, so its soft logits start as its policy logits
+    (:func:`soft_policy_tensors`). The outcome head is not loaded (a fresh one).
     """
     loaded, refs = init_tensors(model, init_from)
     model.load_state_dict({**model.state_dict(), **loaded})
@@ -659,10 +664,37 @@ def init_tensors(model: nn.Module, init_from: Mapping[str, Any]) -> tuple[dict[s
                 raise CheckpointError(f"init_from {part} from {source.ref}: {key} has shape "
                                       f"{tuple(value.shape)}, the model {tuple(target[key].shape)}")
             loaded[key] = value
+        if part == "actor" and getattr(model, "soft_policy", False) and "soft_policy" not in parts:
+            loaded.update(soft_policy_tensors(model, source, loaded))
     if zero_new and not zeroed:
         raise CheckpointError("init_from.zero_new_inputs: the model reads no input its source lacks (it is for a "
                               "network with obs.dice_state from a checkpoint without the dice input)")
     return loaded, refs
+
+
+#: The soft policy head's keys (``model.parts["soft_policy"]``) and the policy head's, of a
+#: shared-trunk graph network: the same names under the two prefixes.
+SOFT_POLICY_PREFIX, POLICY_PREFIX = "soft_policy_head.", "policy_head."
+
+
+def soft_policy_tensors(model: nn.Module, source: Checkpoint, loaded: Mapping[str, torch.Tensor]
+                        ) -> dict[str, torch.Tensor]:
+    """The soft policy head of ``model`` (``model.args.soft_policy``) for an ``init_from`` whose
+    actor part is ``loaded`` from ``source``: the source's head when it has one, else, key by
+    key, a copy of the policy head's tensor in ``loaded``. The two heads have one architecture,
+    so the copy's soft logits are the policy logits on every row."""
+    out = {}
+    for key, mine in model.state_dict().items():
+        if not key.startswith(SOFT_POLICY_PREFIX):
+            continue
+        value = source.state_dict.get(key)
+        if value is None:
+            value = loaded[POLICY_PREFIX + key[len(SOFT_POLICY_PREFIX):]]
+        if value.shape != mine.shape:
+            raise CheckpointError(f"init_from soft policy head from {source.ref}: {key} has shape "
+                                  f"{tuple(value.shape)}, the model {tuple(mine.shape)}")
+        out[key] = value.clone()
+    return out
 
 
 def _gains_dice_input(model: nn.Module, source: Checkpoint) -> bool:

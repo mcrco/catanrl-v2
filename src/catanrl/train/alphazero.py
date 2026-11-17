@@ -99,6 +99,52 @@ absolute errors in victory points and in turns (``outcome_vp_mae``,
 rows); and by :class:`Monitors` out of sample, ``oos/outcome_vp_mae`` and
 ``oos/outcome_turns_mae`` (with ``oos/outcome_rows``).
 
+Four more pieces after KataGo, each optional (train keys that are off when
+absent; a config without them hashes, and the trainer runs, as before they
+existed):
+
+* **A lower-noise value target** (``value_search_blend`` w, ``value_blend_iterations``
+  n). The value target of a position that had a full search is
+  ``(1 - w') * game result + w' * search value``, with w' = w * min(1, i / n) at
+  the run's iteration i (n = 0: w at once). The search value is the root's action
+  values averaged by the visits the policy target keeps (``policy_target: pruned``:
+  the pruned visits; else all of them), for the seat to move, and 1 minus that for
+  the other seat (:func:`search_value`): 2-player games only, since the engine keeps
+  a root action's value for the mover alone. The replay holds it beside the game
+  result (``search_value`` float32 [P], ``has_search_value``), so w' also weighs
+  the positions already stored, and the monitors and ``target_sum_*`` keep reading
+  the game result. The loss stays the binary cross-entropy, on the soft target.
+  Logged: ``train/value_blend`` (w') and ``train/search_value_gap`` (the sampled
+  rows' mean |search value - game result|, the mover's).
+* **Replay sampling by policy surprise** (``surprise_weight`` s, ``surprise_cap``).
+  A full search's surprise is KL(policy target || the network's prior at its root,
+  before the noise), in nats (:func:`policy_surprise`; float32 per position, 0
+  without a policy target). learn() draws position i with probability
+  ``(1 - s) / N + s * c_i / sum(c)``, c_i its surprise capped at ``surprise_cap``
+  times the buffer's mean (0: no cap), with no importance correction
+  (:func:`surprise_probabilities`). Logged: ``train/surprise_sampled_mean`` and
+  ``train/surprise_sampled_max`` (N * p_i over the rows drawn; 1 is uniform),
+  ``train/surprise_ess`` (the distribution's effective sample size over N) and
+  ``train/surprise_mean`` (the buffer's mean surprise).
+* **A soft policy head** (``model.args.soft_policy``; ``soft_policy_coef``,
+  ``soft_policy_temperature`` T, unset 4). A second policy head on the shared
+  trunk learns the policy target raised to 1 / T over the legal actions
+  (:func:`soft_policy_target`): cross-entropy, on the rows with a policy target,
+  times ``soft_policy_coef`` (above 0 exactly when the head exists). Training only,
+  like the outcome head: nothing plays from it. Logged: ``train/soft_policy_loss``
+  and ``train/soft_target_entropy``.
+* **Smaller searches in decided games** (``decided_value`` d, ``decided_lookback``
+  k, ``decided_full_search_prob``, ``decided_fast_sims``; 2-player games). Every
+  search, full or fast, names the game's leader and the leader's value (the
+  search value above; a fast search's by all its visits). A game is decided at a
+  decision when its last k searches all gave one seat at least d; it is then
+  searched at the full budget with probability ``decided_full_search_prob``
+  instead of ``full_search_prob``, and its fast searches run ``decided_fast_sims``
+  (unset: ``fast_sims``; a budget of its own needs ``reuse``, whose searches each
+  carry theirs). Full searches keep ``sims``. Logged: ``selfplay/decided`` (the
+  share of decisions made in decided games) and ``selfplay/sims_per_decision``
+  (the simulations a search ran, on top of what a re-rooted tree carried).
+
 With ``obs.dice_state`` the self-play VecEnv, every search leaf and the replay
 carry the dice input (:data:`catanrl.envs.encoding.DICE_STATE`: 127 more floats
 on a 2p base row, 254 bytes of a replay position), and every iteration logs
@@ -117,6 +163,7 @@ from __future__ import annotations
 
 import copy
 import time
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -126,6 +173,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from catanrl.config import check_alphazero_kata
 from catanrl.envs.encoding import (
     critic_level_of,
     dice_state_of,
@@ -195,6 +243,23 @@ OUTCOME_LABELS = ("final_vp", "vp_to_win", "turns_left", "outcome_known")
 #: ``runtime.search_groups`` when a config leaves it unset: self-play's searches in two groups
 #: that take turns on the device (SelfPlay; 1 is the serial loop, run_pools).
 SEARCH_GROUPS = 2
+#: More optional keys, after KataGo (the module docstring's four pieces; checked by
+#: catanrl.config.check_alphazero_kata).
+ALPHAZERO_OPTIONAL.update({
+    "value_search_blend": 0.0,
+    "value_blend_iterations": 0,
+    "surprise_weight": 0.0,
+    "surprise_cap": 0.0,
+    "soft_policy_coef": 0.0,
+    "soft_policy_temperature": 4.0,
+    "decided_value": 0.0,
+    "decided_lookback": 0,
+    "decided_full_search_prob": 0.0,
+    "decided_fast_sims": 0,
+})
+#: The replay's search labels (value_search_blend, surprise_weight): the full search's value
+#: per slot, whether the position has one, and its policy surprise.
+SEARCH_LABELS = ("search_value", "has_search_value", "surprise")
 
 
 def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
@@ -203,6 +268,7 @@ def check_train(train: Mapping[str, Any]) -> dict[str, Any]:
     if missing or unknown:
         raise ValueError(f"alphazero train keys: missing {missing}, unknown {unknown}")
     train = dict(train)
+    check_alphazero_kata(train)
     if train["root"] not in ("puct", "gumbel"):
         raise ValueError(f"train.root must be puct or gumbel, not {train['root']!r}")
     if train["truncation_value"] not in ("share", "zero"):
@@ -420,6 +486,73 @@ def root_log_priors(pool: cpp.SearchPool, sid: int) -> np.ndarray:
         return np.log(pool.root_priors(sid).astype(np.float64))
 
 
+def search_value(weights: np.ndarray, q: np.ndarray) -> float | None:
+    """A searched root's value for the seat to move: its action values ``q`` (the pool's
+    ``q(id)``: NaN where unvisited) averaged by ``weights`` over the actions that have both, in
+    [0, 1]. The weights are the visits the policy target keeps (:func:`pruned_visits`' for
+    ``policy_target: pruned``, the pool's ``visits(id)`` otherwise), so the value is that of
+    the play the network is taught, without the visits the root's noise forced. None: no
+    action has a weight and a value."""
+    weights, q = np.asarray(weights, dtype=np.float64), np.asarray(q, dtype=np.float64)
+    seen = (weights > 0.0) & np.isfinite(q)
+    if not seen.any():
+        return None
+    return float(np.clip((weights[seen] * q[seen]).sum() / weights[seen].sum(), 0.0, 1.0))
+
+
+def policy_surprise(target: np.ndarray, log_priors: np.ndarray) -> float:
+    """KL(policy target || the network's prior at the root), in nats: how far the search moved
+    the policy (KataGo's policy surprise, which ``surprise_weight`` samples the replay by).
+    ``target`` [A] is the position's policy target (normalized here) and ``log_priors`` the
+    root's log-priors before any Dirichlet noise ([A] or one row per root world [W, A], whose
+    priors are averaged; :func:`root_log_priors`), floored at :data:`MIN_LOG_PRIOR` where the
+    target has an action the prior gives nothing. A target without mass gives 0."""
+    target = np.asarray(target, dtype=np.float64)
+    total = target.sum()
+    if not total > 0.0:
+        return 0.0
+    prior = np.exp(np.atleast_2d(np.asarray(log_priors, dtype=np.float64))).mean(0)
+    kept = target > 0.0
+    share = target[kept] / total
+    with np.errstate(divide="ignore"):
+        log_prior = np.maximum(np.log(prior[kept]), MIN_LOG_PRIOR)
+    return float(max((share * (np.log(share) - log_prior)).sum(), 0.0))
+
+
+def surprise_probabilities(surprise: np.ndarray, weight: float, cap: float = 0.0) -> np.ndarray:
+    """The replay's sampling distribution under ``surprise_weight`` s = ``weight`` (float64 [N]):
+    ``(1 - s) / N + s * c_i / sum(c)`` with c_i position i's surprise, capped at ``cap`` times
+    the mean surprise when ``cap`` > 0 (KataGo's policy surprise weighting, without its
+    importance correction: surprising positions simply train more often). NaN marks a surprise
+    that is not known (positions restored from a state that had none) and counts as the mean of
+    the known ones. No surprise at all: uniform."""
+    c = np.asarray(surprise, dtype=np.float64)
+    known = ~np.isnan(c)
+    c = np.where(known, c, c[known].mean() if known.any() else 0.0)
+    if cap > 0.0:
+        c = np.minimum(c, float(cap) * c.mean())
+    total = c.sum()
+    if not total > 0.0:
+        return np.full(len(c), 1.0 / len(c))
+    return (1.0 - float(weight)) / len(c) + float(weight) * c / total
+
+
+def soft_policy_target(target: torch.Tensor, legal: torch.Tensor, temperature: float) -> torch.Tensor:
+    """The soft policy head's target (KataGo's soft policy, as Canopy builds it): the policy
+    target raised to 1 / ``temperature`` over the legal actions, ``((target + 1e-7) * legal) **
+    (1 / T)`` normalized per row. The 1e-7 gives every legal action a share (0.018 of the best
+    one's at T = 4), so the head also learns which moves are playable at all."""
+    soft = ((target + 1e-7) * legal).pow(1.0 / float(temperature))
+    return soft / soft.sum(1, keepdim=True).clamp_min(1e-12)
+
+
+def value_blend(train: Mapping[str, Any], iteration: int) -> float:
+    """The search value's share of the value target at the run's ``iteration`` (0 at a fresh
+    start): ``value_search_blend``, ramped linearly from 0 over ``value_blend_iterations``."""
+    ramp = int(train.get("value_blend_iterations", 0))
+    return float(train.get("value_search_blend", 0.0)) * (min(1.0, iteration / ramp) if ramp else 1.0)
+
+
 # ---------------------------------------------------------------- replay
 
 
@@ -428,19 +561,25 @@ class ReplayBuffer:
     ``outcome`` (a network with the outcome head) also each position's outcome labels
     (:data:`OUTCOME_LABELS`): the final victory points of each slot (uint8, seat-relative), the
     points to win (uint8), the turns left until the game ended (uint16) and whether those are
-    known (bool; False: a game cut at the turn limit)."""
+    known (bool; False: a game cut at the turn limit). With ``search`` (value_search_blend,
+    surprise_weight) also its search labels (:data:`SEARCH_LABELS`): the full search's value of
+    each slot (float32, seat-relative like the value targets), whether it has one (bool) and
+    its policy surprise (float32 nats; NaN: not known, see :meth:`restore`)."""
 
     def __init__(self, capacity: int, obs_size: int, num_actions: int, max_players: int, *,
-                 outcome: bool = False) -> None:
+                 outcome: bool = False, search: bool = False) -> None:
         self.capacity = int(capacity)
         self.shapes = (int(obs_size), int(num_actions), int(max_players))
         self.size = 0
         self.next = 0
         self.added = 0
         self.outcome = bool(outcome)
-        self.names = ("obs", "policy", "has_policy", "value", "present") + (OUTCOME_LABELS if outcome else ())
+        self.search = bool(search)
+        self.names = (("obs", "policy", "has_policy", "value", "present") + (OUTCOME_LABELS if outcome else ())
+                      + (SEARCH_LABELS if search else ()))
         self.obs = self.policy = self.has_policy = self.value = self.present = None
         self.final_vp = self.vp_to_win = self.turns_left = self.outcome_known = None
+        self.search_value = self.has_search_value = self.surprise = None
 
     def _allocate(self) -> None:
         obs_size, num_actions, players = self.shapes
@@ -454,12 +593,21 @@ class ReplayBuffer:
             self.vp_to_win = np.zeros(self.capacity, dtype=np.uint8)
             self.turns_left = np.zeros(self.capacity, dtype=np.uint16)
             self.outcome_known = np.zeros(self.capacity, dtype=bool)
+        if self.search:
+            self.search_value = np.zeros((self.capacity, players), dtype=np.float32)
+            self.has_search_value = np.zeros(self.capacity, dtype=bool)
+            self.surprise = np.zeros(self.capacity, dtype=np.float32)
 
-    def add(self, obs, policy, has_policy, value, present, outcome: Mapping[str, Any] | None = None) -> None:
+    def add(self, obs, policy, has_policy, value, present, outcome: Mapping[str, Any] | None = None,
+            search: Mapping[str, Any] | None = None) -> None:
         """``outcome``: the positions' :data:`OUTCOME_LABELS` (a buffer with them takes them
-        with every add; one without takes none)."""
+        with every add; one without takes none). ``search``: their :data:`SEARCH_LABELS`, under
+        the same rule."""
         if self.outcome != (outcome is not None):
             raise ValueError("a replay buffer with outcome labels takes them with every add, and one without "
+                             "takes none")
+        if self.search != (search is not None):
+            raise ValueError("a replay buffer with search labels takes them with every add, and one without "
                              "takes none")
         if self.obs is None:
             self._allocate()
@@ -468,7 +616,8 @@ class ReplayBuffer:
         slots = (self.next + np.arange(count)[keep] - keep.start) % self.capacity
         for name, values in (("obs", obs), ("policy", policy), ("has_policy", has_policy), ("value", value),
                              ("present", present), *((name, outcome[name]) for name in OUTCOME_LABELS
-                                                     if outcome is not None)):
+                                                     if outcome is not None),
+                             *((name, search[name]) for name in SEARCH_LABELS if search is not None)):
             getattr(self, name)[slots] = np.asarray(values)[keep]
         self.next = (self.next + len(slots)) % self.capacity
         self.size = min(self.size + len(slots), self.capacity)
@@ -485,6 +634,9 @@ class ReplayBuffer:
             out.update({"final_vp": tensor(self.final_vp), "vp_to_win": tensor(self.vp_to_win),
                         "turns_left": tensor(self.turns_left, stored=np.int32),
                         "outcome_known": tensor(self.outcome_known, torch.bool)})
+        if self.search:
+            out.update({"search_value": tensor(self.search_value),
+                        "has_search_value": tensor(self.has_search_value, torch.bool)})
         return out
 
     def state(self) -> dict[str, Any]:
@@ -509,6 +661,13 @@ class ReplayBuffer:
         for name in self.names:
             if name in OUTCOME_LABELS and name not in state:
                 continue  # a state from before the labels: its positions have none (outcome_known False)
+            if name in SEARCH_LABELS and name not in state:
+                # a state from before the search labels: its positions have no search value, and the
+                # surprise of those with a policy target is not known (NaN: the mean of the known ones)
+                if name == "surprise":
+                    self.surprise[: len(state["has_policy"][keep])] = np.where(
+                        state["has_policy"][keep].numpy(), np.nan, 0.0)
+                continue
             values = state[name][keep].numpy()
             getattr(self, name)[: len(values)] = values
         self.size = min(count, self.capacity)
@@ -607,6 +766,10 @@ class _Pending:
     num_players: int
     #: The game's turn count at the position (read with the outcome head only: its turns-left label).
     turn: int = 0
+    #: The full search's value for the row's seat (value_search_blend; None: it has none) and
+    #: its policy surprise (surprise_weight; 0 without a policy target).
+    search_value: float | None = None
+    surprise: float = 0.0
 
 
 class SelfPlay:
@@ -632,6 +795,19 @@ class SelfPlay:
         self.buffers = self.vec.allocate()
         self.vec.reset(self.seed)
         self.players = int(self.vec.max_players)
+        #: The replay takes each full search's value (value_search_blend) and policy surprise
+        #: (surprise_weight) as its search labels (SEARCH_LABELS).
+        self.record_value = float(train.get("value_search_blend", 0.0)) > 0.0
+        self.record_surprise = float(train.get("surprise_weight", 0.0)) > 0.0
+        self.search = self.record_value or self.record_surprise
+        #: decided_value (0: off): a game is decided once its last decided_lookback searches gave
+        #: one seat at least this value. Each game's (leader, its value) of those searches.
+        self.decided = float(train.get("decided_value", 0.0))
+        self.leaders = [deque(maxlen=max(int(train.get("decided_lookback", 0)), 1)) for _ in range(num_envs)]
+        if (self.record_value or self.decided) and self.players > 2:
+            raise ValueError("train.value_search_blend and train.decided_value read the search's value for both "
+                             "seats of a 2-player game (the engine keeps a root action's value for the seat to "
+                             f"move alone); these games seat up to {self.players}")
         self.model, self.device, self.mode = model, device, mode
         self.evaluator = self._evaluator()
 
@@ -669,6 +845,9 @@ class SelfPlay:
         #: it searched, the action played).
         self.trees: dict[int, tuple[cpp.SearchPool, int, cpp.Game, int]] = {}
         self.codec = make_encoder(self.dims, levels["level"]).action_space if self.reuse else None
+        # a decided game's fast search: the fast search at decided_fast_sims (unset: fast_sims, the same)
+        self.decided_options = {**self.options[1], "simulations": int(train.get("decided_fast_sims", 0))
+                                or int(train["fast_sims"])}
         #: policy_target: gumbel's sigma constants (None: the engine's target, or the pruned one).
         self.sigma = None if train["policy_target"] != "gumbel" else {
             "c_visit": float(train["target_c_visit"]), "c_scale": float(train["target_c_scale"]),
@@ -733,8 +912,11 @@ class SelfPlay:
         action it played, when the game is that tree's game plus the action and nothing else (a
         chance outcome, a forced move the VecEnv played, a reset) and the engine re-roots there (a
         searched, deterministic action); a new search otherwise, the kept tree dropped. Either way
-        with this decision's budget and noise: a re-rooted root's visits count towards the budget."""
+        with this decision's budget and noise: a re-rooted root's visits count towards the budget
+        (a fast search of a decided game: decided_fast_sims)."""
         game, options = self.vec.game(env), self.options[0 if full else 1]
+        if not full and self._decided(env):
+            options = self.decided_options
         kept = self.trees.pop(env, None)
         sid = None
         if kept is not None:
@@ -766,7 +948,10 @@ class SelfPlay:
         """Search every acting row, play the chosen moves and file finished games."""
         b = self.buffers
         acting = np.flatnonzero(b["acting"])
-        full = rng.random(len(acting)) < float(self.train["full_search_prob"])
+        # decided_value: the rows whose game is decided, searched in full with a probability of their own
+        decided = np.array([self._decided(int(env)) for env in b["env_index"][acting]], dtype=bool)
+        full = rng.random(len(acting)) < np.where(decided, float(self.train.get("decided_full_search_prob", 0.0)),
+                                                  float(self.train["full_search_prob"]))
         searches = []
         targets = []  # the full searches' own policy targets (pool.policy_target), in acting order, for the monitor
         rebuilt = []  # policy_target: gumbel's or pruned's targets of the same searches (the ones trained on), and
@@ -803,6 +988,8 @@ class SelfPlay:
                 env, seat = int(b["env_index"][row]), int(b["seat"][row])
                 pool, sid = searches[i]
                 policy = None
+                kept = None  # policy_target: pruned's visits, which also weigh the search value
+                searched, surprise = None, 0.0  # the search's value for the seat to move, its policy surprise
                 if full[i]:
                     if not rebuild:
                         policy = pool.policy_target(sid).astype(np.float16)
@@ -828,13 +1015,26 @@ class SelfPlay:
                     search = pool.stats(sid)
                     stats["depth"] += search.mean_depth
                     stats["max_depth"] += search.max_depth
+                    if self.record_value or self.decided:  # by the visits the policy target keeps
+                        searched = search_value(pool.visits(sid) if kept is None else kept, pool.q(sid))
+                    if self.record_surprise:
+                        surprise = policy_surprise(policy, root_log_priors(pool, sid))
+                elif self.decided:
+                    searched = search_value(pool.visits(sid), pool.q(sid))
+                if self.decided:  # the game's leader by this search (no value: nobody leads)
+                    mover = 0.5 if searched is None else searched
+                    self.leaders[env].append((seat if mover >= 0.5 else 1 - seat, max(mover, 1.0 - mover)))
+                    stats["decided"] = stats.get("decided", 0.0) + float(decided[i])
+                    stats["simulations"] = stats.get("simulations", 0.0) + float(pool.stats(sid).simulations)
                 b["actions"][row] = pool.select(sid, temperature(self.train, int(self.ply[env])))
                 if self.reuse:
                     self.trees[env] = (*self.trees[env][:3], int(b["actions"][row]))
                 if full[i] or self.train["record_fast"]:
                     self.pending[env].append(_Pending(b["observations"][row].astype(np.float16), policy, seat,
                                                       int(b["num_players"][env]),
-                                                      int(self.vec.num_turns(env)) if self.outcome else 0))
+                                                      int(self.vec.num_turns(env)) if self.outcome else 0,
+                                                      searched if self.record_value and full[i] else None,
+                                                      surprise))
                 self.ply[env] += 1
         except BaseException:
             self.trees.clear()  # a step that failed keeps no tree: the searches go below
@@ -857,6 +1057,14 @@ class SelfPlay:
         self.vec.step()
         self._finish(replay)
 
+    def _decided(self, env: int) -> bool:
+        """Whether ``env``'s game is decided at its next decision (``decided_value``): its last
+        ``decided_lookback`` searches, full or fast, all gave one seat a value of at least
+        ``decided_value``. A game with fewer searches so far is not; never when off."""
+        recent = self.leaders[env]
+        return bool(self.decided and len(recent) == recent.maxlen and len({leader for leader, _ in recent}) == 1
+                    and min(value for _, value in recent) >= self.decided)
+
     def _last_outcome(self, env: int) -> dict[str, Any]:
         """``VecEnv.last_outcome`` of the game ``env`` just finished, with ``known``: its end
         labels that game's positions. Not when the game was cut at the turn limit (no winner,
@@ -874,6 +1082,7 @@ class SelfPlay:
             rows = self.pending[env]
             self.pending[env] = []
             self.ply[env] = 0
+            self.leaders[env].clear()
             self.games += 1
             if int(env) in self.trees:  # reuse: the game is over (won or truncated) and reset
                 pool, sid, _, _ = self.trees.pop(int(env))
@@ -893,6 +1102,7 @@ class SelfPlay:
                 np.stack([t for t, _ in targets]),
                 np.stack([p for _, p in targets]),
                 outcome_labels(rows, last, players) if last is not None else None,
+                search_labels(rows, players) if self.search else None,
             )
 
 
@@ -912,6 +1122,21 @@ def outcome_labels(rows: list[_Pending], last: Mapping[str, Any], max_players: i
         labels["turns_left"][i] = min(max(int(last["turns"]) - row.turn, 0), 65535)
     labels["vp_to_win"][:] = min(int(last["vps_to_win"]), 255)
     labels["outcome_known"][:] = True
+    return labels
+
+
+def search_labels(rows: list[_Pending], max_players: int) -> dict[str, np.ndarray]:
+    """The :data:`SEARCH_LABELS` of a game's positions (2 players where a row has a search
+    value): the row's seat has the search's value v and the other seat 1 - v, in the value
+    targets' slot order."""
+    count = len(rows)
+    labels = {"search_value": np.zeros((count, max_players), np.float32),
+              "has_search_value": np.zeros(count, bool), "surprise": np.zeros(count, np.float32)}
+    for i, row in enumerate(rows):
+        labels["surprise"][i] = row.surprise
+        if row.search_value is not None:
+            labels["search_value"][i, :2] = row.search_value, 1.0 - row.search_value
+            labels["has_search_value"][i] = True
     return labels
 
 
@@ -952,21 +1177,47 @@ def outcome_losses(vp: torch.Tensor, turns: torch.Tensor, batch: Mapping[str, to
 
 
 def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuffer, train: Mapping[str, Any],
-          device: str, rng: np.random.Generator) -> dict[str, float]:
+          device: str, rng: np.random.Generator, iteration: int = 0) -> dict[str, float]:
     """``updates_per_iteration`` gradient steps on uniform minibatches; their mean statistics.
     A network with the outcome head adds its two losses (:func:`outcome_losses`) at
-    ``outcome_vp_coef`` and ``outcome_turns_coef``."""
+    ``outcome_vp_coef`` and ``outcome_turns_coef``, and one with the soft policy head its
+    cross-entropy to the soft target (:func:`soft_policy_target`) at ``soft_policy_coef``.
+    ``surprise_weight`` draws the minibatches by policy surprise instead
+    (:func:`surprise_probabilities`, built once from the buffer as it is), and
+    ``value_search_blend`` mixes the search value into the value target of the rows that have
+    one, at its weight for the run's ``iteration`` (:func:`value_blend`)."""
     model.train()
     outcome = bool(getattr(model, "outcome", False))
     vp_coef, turns_coef = outcome_coefs(train)
+    soft = bool(getattr(model, "soft_policy", False))
+    soft_coef = float(train.get("soft_policy_coef", 0.0))
+    soft_temperature = float(train.get("soft_policy_temperature", ALPHAZERO_OPTIONAL["soft_policy_temperature"]))
+    mask = slice(model.mask_offset, model.mask_offset + model.num_actions)
+    blended = float(train.get("value_search_blend", 0.0)) > 0.0
+    blend = value_blend(train, iteration)
+    surprise = float(train.get("surprise_weight", 0.0))
+    if (blended or surprise > 0.0) and not replay.search:
+        raise ValueError("train.value_search_blend and train.surprise_weight read the replay's search labels "
+                         "(ReplayBuffer(search=True))")
     sums: dict[str, float] = {}
     players = replay.shapes[2]
     by_n = np.zeros((players + 1, 3))  # count, predicted seat-sum, target seat-sum
     updates = int(train["updates_per_iteration"])
+    cumulative = None
+    if surprise > 0.0:  # the sampling distribution over the buffer's rows, and N * p of the rows drawn
+        p = surprise_probabilities(replay.surprise[: replay.size], surprise, float(train.get("surprise_cap", 0.0)))
+        cumulative = np.cumsum(p)
+        drawn = []
     for _ in range(updates):
-        batch = replay.batch(rng.integers(0, replay.size, int(train["minibatch_size"])), device)
-        if outcome:
-            logits, value_logits, _, final_vp, turns_left = model.heads_with_outcome(batch["obs"])
+        if cumulative is None:
+            batch = replay.batch(rng.integers(0, replay.size, int(train["minibatch_size"])), device)
+        else:
+            index = np.searchsorted(cumulative, rng.random(int(train["minibatch_size"])) * cumulative[-1], side="right")
+            index = np.minimum(index, replay.size - 1)
+            drawn.append(p[index] * replay.size)
+            batch = replay.batch(index, device)
+        if outcome or soft:
+            logits, value_logits, _, extras = model.training_heads(batch["obs"])
         else:
             logits, value_logits, _ = model.heads(batch["obs"])
         logp = F.log_softmax(logits.float(), dim=1)
@@ -975,15 +1226,30 @@ def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuf
         target = target / target.sum(1, keepdim=True).clamp_min(1e-8)
         policy_loss = -(target * logp[has]).sum(1).mean() if bool(has.any()) else logp.new_zeros(())
         present = batch["present"]
-        value_loss = (F.binary_cross_entropy_with_logits(value_logits.float(), batch["value"], reduction="none")
+        value_target = batch["value"]
+        extra: tuple[tuple[str, torch.Tensor], ...] = ()
+        if blended:  # the rows with a search value: the game result and it; the others: the game result
+            searched = batch["has_search_value"]
+            value_target = torch.where(searched[:, None],
+                                       (1.0 - blend) * batch["value"] + blend * batch["search_value"], batch["value"])
+            gap = ((batch["search_value"][:, 0] - batch["value"][:, 0]).abs() * searched).sum()
+            extra = (("value_blend", blend), ("search_value_gap", gap / searched.sum().clamp_min(1.0)))
+        value_loss = (F.binary_cross_entropy_with_logits(value_logits.float(), value_target, reduction="none")
                       * present).sum() / present.sum().clamp_min(1.0)
         loss = policy_loss + float(train["value_coef"]) * value_loss
-        extra: tuple[tuple[str, torch.Tensor], ...] = ()
         if outcome:
-            vp_loss, turns_loss, vp_mae, turns_mae = outcome_losses(final_vp, turns_left, batch)
+            vp_loss, turns_loss, vp_mae, turns_mae = outcome_losses(extras["final_vp"], extras["turns_left"], batch)
             loss = loss + vp_coef * vp_loss + turns_coef * turns_loss
-            extra = (("outcome_vp_loss", vp_loss), ("outcome_turns_loss", turns_loss), ("outcome_vp_mae", vp_mae),
-                     ("outcome_turns_mae", turns_mae), ("outcome_known", batch["outcome_known"].float().mean()))
+            extra += (("outcome_vp_loss", vp_loss), ("outcome_turns_loss", turns_loss), ("outcome_vp_mae", vp_mae),
+                      ("outcome_turns_mae", turns_mae), ("outcome_known", batch["outcome_known"].float().mean()))
+        if soft:  # on the rows with a policy target, over the row's legal actions (its mask block)
+            soft_target = soft_policy_target(target, batch["obs"][has][:, mask] > 0, soft_temperature)
+            soft_logp = F.log_softmax(extras["soft_policy"].float(), dim=1)[has]
+            soft_loss = -(soft_target * soft_logp).sum(1).mean() if bool(has.any()) else logp.new_zeros(())
+            loss = loss + soft_coef * soft_loss
+            entropy = -(soft_target * soft_target.clamp_min(1e-12).log()).sum(1)
+            extra += (("soft_policy_loss", soft_loss),
+                      ("soft_target_entropy", entropy.mean() if bool(has.any()) else logp.new_zeros(())))
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), float(train["max_grad_norm"]))
@@ -1005,6 +1271,13 @@ def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuf
         if by_n[n, 0]:
             sums[f"value_sum_{n}p"] = by_n[n, 1] / by_n[n, 0]
             sums[f"target_sum_{n}p"] = by_n[n, 2] / by_n[n, 0]
+    if cumulative is not None:
+        drawn = np.concatenate(drawn)
+        known = replay.surprise[: replay.size]
+        known = known[~np.isnan(known)]
+        sums.update({"surprise_sampled_mean": float(drawn.mean()), "surprise_sampled_max": float(drawn.max()),
+                     "surprise_ess": float(1.0 / (replay.size * (p * p).sum())),
+                     "surprise_mean": float(known.mean()) if len(known) else 0.0})
     model.eval()
     return sums
 
@@ -1293,6 +1566,9 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
     if (max(outcome_coefs(train)) > 0.0) != bool(getattr(model, "outcome", False)):
         raise ValueError("train.outcome_vp_coef / outcome_turns_coef weigh the outcome head's losses: one of them "
                          "is above 0 exactly when the network has the head (model.args.outcome)")
+    if (float(train.get("soft_policy_coef", 0.0)) > 0.0) != bool(getattr(model, "soft_policy", False)):
+        raise ValueError("train.soft_policy_coef weighs the soft policy head's loss: it is above 0 exactly when "
+                         "the network has the head (model.args.soft_policy)")
     device = resolve_device(runtime.get("device", "auto"))
     model.to(device).eval()
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(train["learning_rate"]),
@@ -1302,7 +1578,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
                         device=device, mode="strict" if strict else "fast",
                         groups=int(runtime.get("search_groups") or SEARCH_GROUPS))
     replay = ReplayBuffer(int(train["replay_capacity"]), selfplay.vec.observation_size, selfplay.vec.action_size,
-                          selfplay.players, outcome=selfplay.outcome)
+                          selfplay.players, outcome=selfplay.outcome, search=selfplay.search)
     monitors = Monitors(model, device=device, rows=int(train["search_rows"])) if monitoring else None
     selfplay.monitor = monitors
     # obs.dice_state: the dice input's usage checks (dice/*, catanrl.train.dice_probe), every iteration
@@ -1374,7 +1650,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
                 # the probe's fixed batch: every k-th replay position, the first time the learner trains
                 dice_probe.take(replay.obs[: replay.size : max(replay.size // DICE_PROBE_ROWS, 1)][:DICE_PROBE_ROWS])
             learned = learn(model, optimizer, replay, train, device,
-                            np.random.default_rng(derive_seed(seed, "replay", iteration)))
+                            np.random.default_rng(derive_seed(seed, "replay", iteration)), iteration)
             selfplay.refresh()
         if dice_probe is not None:
             health.update(dice_probe.metrics(model))
@@ -1404,6 +1680,11 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             logs["selfplay/reused"] = stats.get("reused", 0.0) / max(new, 1)
             logs["selfplay/carried_full"] = stats.get("carried_full", 0.0) / full
             logs["selfplay/carried_fast"] = stats.get("carried_fast", 0.0) / max(new - stats["full"], 1.0)
+        if selfplay.decided:
+            # decided_value: the share of decisions made in decided games, and the simulations a
+            # search ran (a re-rooted one on top of the visits it carried)
+            logs["selfplay/decided"] = stats.get("decided", 0.0) / max(new, 1)
+            logs["selfplay/sims_per_decision"] = stats.get("simulations", 0.0) / max(new, 1)
         writer.log(logs, selfplay.decisions)
         # one line per iteration; the ETA is this launch's pace (checkpoints and selects included)
         # over the iterations left, or the time limit if that comes first

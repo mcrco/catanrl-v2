@@ -31,6 +31,8 @@ class CatanModel(nn.Module):
     aux: bool = False
     #: An outcome head (graph, ``args.outcome``): final victory points and turns left, training only.
     outcome: bool = False
+    #: A soft policy head (graph, ``args.soft_policy``): a second policy head, training only.
+    soft_policy: bool = False
 
     def __init__(self, spec, dims, levels, layout) -> None:
         super().__init__()

@@ -45,3 +45,22 @@ checkpoint_interval: 10        # iterations
 # reuse: true                  # optional (root: puct, dets: 0): a game keeps its search tree between decisions; a
                                # search re-rooted at the action played counts the visits it carries towards its
                                # budget (sims or fast_sims as a cap on the root's visits), full ones with new noise
+# value_search_blend: 0.5      # optional (2-player games): the value target of a fully searched position is
+                               # (1 - w) x the game result + w x the search's value at its root (the root's action
+                               # values averaged by the visits the policy target keeps); unset 0: the game result
+# value_blend_iterations: 200  # optional: w ramps linearly from 0 to value_search_blend over this many iterations
+                               # of the run (unset 0: full weight at once)
+# surprise_weight: 0.5         # optional, in [0, 1): this share of the replay's sampling goes by policy surprise
+                               # (KL(policy target || the network's root prior) of the position's search), the rest
+                               # uniformly; no importance correction. Unset 0: uniform
+# surprise_cap: 10.0           # optional (> 1): a position's surprise counts up to this many times the buffer's
+                               # mean (unset 0: no cap)
+# soft_policy_coef: 4.0        # optional, with model.args.soft_policy: x the cross-entropy of the soft policy head
+                               # (a second policy head, training only) to the policy target ** (1 / T) over the
+                               # legal actions
+# soft_policy_temperature: 4.0 # optional: the T above (unset 4)
+# decided_value: 0.9           # optional (2-player games), in (0.5, 1): a game is decided once its last
+                               # decided_lookback searches all gave one seat at least this value ...
+# decided_lookback: 3          # ... (at least 1 with decided_value)
+# decided_full_search_prob: 0.05  # optional: full_search_prob in decided games (unset 0: no full searches there)
+# decided_fast_sims: 8         # optional: fast_sims in decided games (unset 0: fast_sims; another budget needs reuse)
