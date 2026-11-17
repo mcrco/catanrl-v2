@@ -846,3 +846,57 @@ python tools/checkpoint_similarity.py score positions.npz --device cuda --out sc
 uv run --no-project --with numpy --with matplotlib python tools/checkpoint_similarity.py report scores.npz \
   --json similarity.json --figures figures/
 ```)
+
+=== Is self-play exploring enough? The training search against a longer, wider one #chip("queued") <exp:az-explore>
+#meta(
+  dates: "for the GPU after graph-m-search-vs-raw",
+  dates-label: "queued",
+  owner: "assistant",
+  config: "tools/explore_diag.py",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-16) asked whether the PPO policy is fuzzy enough to explore, or whether the root noise covers it. It was not fuzzy, the noise reaches the root only, and since e900 the search's target has sat almost on the net. Claude's suggestion, approved by Marco ("yeah let's try it"): on 3,000 self-play positions of the bundle's net, compare the training search with a 16× longer one and with a 16× longer one whose prior is widened at every node, and let playouts say whether the moves they find are better. Marco's addition, in its position-level form (not yet confirmed by Marco): a grid of budgets up to 16,384 visits and temperatures on the logits.]
+
+*Question.* Has the net reached what a 600-visit search can teach it, or is the search too narrow to find the moves that would still help?
+
+#lead[Why.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([In self-play], [fr3], [e300], [e1800], [Bundle's end]),
+    [Net's entropy (nats)], [0.05], [0.20], [0.28], [0.27],
+    [Search prefers another move than the net], [1.0%], [2.9%], [3.7%], [3.5%],
+    [Target's distance from the net (KL, nats)], [0.41], [0.075], [0.036], [0.033],
+  ),
+  caption: [From the runs' own logs (`search/net_entropy`, `target/overrule`, `target/kl_net`; means of the last 20 iterations, fr3: iteration 9). The target is the pruned visit distribution.],
+) <tab:az-explore-why>
+- *The start was saturated.* fr3's top move has probability above 0.999997 at three quarters of the positions with a choice (@exp:az-kata).
+- *What the noise covers.* The root of a full search (a quarter of the moves): every legal move is tried, and the raw visit counts have 0.75 nats of entropy. The pruned target keeps a noise-forced move only if its value earns it (15–18% of the root's visits are removed). Below the root there is no noise: the prior decides, at `c_puct` 0.75.
+- *It stopped moving.* Entropy has been flat since about e900 and the target is 0.03 nats from the net: the search mostly confirms the net. The logs cannot say whether that is convergence or narrowness.
+
+#lead[Setup.] `tools/explore_diag.py`, four steps; no change to the trainer or the engine (the prior is widened through the logits the engine is handed).
+- *Positions.* 3,000 decisions with at least two legal moves, a few a game, from 1,000 games of self-play as training plays it (full and fast searches, noise, temperature schedule, the true game) by `az-2p-bundle/main@e900`, on boards outside the training pool. Each is stored as board, seed and moves so far and restored exactly.
+- *Arms*, each on a fresh tree per position; an arm's move is the top of its pruned target:
+  - A1, A2: training's full search (600 visits, root noise), two seeds. Their disagreement is the floor.
+  - C, long and narrow: 9,600 visits, otherwise as A.
+  - B, long and wide: 9,600 visits and, at every node, the prior mixed 0.75 to 0.25 with a uniform one over the legal moves.
+- *Grid* (Marco: "a search sweep up to 16384 sims deep on networks with different temperature applied to the action logits"): visits 600, 2,400, 9,600 and 16,384 × temperatures 1, 1.5, 2 and 4 on the logits at every node, without root noise, on the same positions. The entropy of each tempered prior is recorded, so the curves can be read against nats added (on 24 test positions: 0.29 nats at 1, 0.44 at 1.5, 0.59 at 2, 1.12 at 4; the 0.25 mix 1.06).
+- *Referee.* Where arms chose different moves, each distinct move is played and the game finished 32 times by the net's own sampled policy for both seats, with the same chance seed across a position's moves. The measure is the mover's win rate after the arm's move minus after A1's, with a bootstrap over positions.
+- *Reading.* If B's or C's moves differ from A1's no more often than A2's do, or win no more in the playouts, exploration is not the limit. If B finds better moves that A1 gave no visits, wider self-play is worth a run; if C finds them as well, visits are the limit, not width.
+- *Power.* A 5% disagreement rate is known to ±0.8 pp. The referee's mean difference is known to about ±2.6 pp over 150 differing positions and ±1.8 pp over 300 (assumed spread, 32 playouts); 128 playouts are affordable.
+- *Cost (estimates, unmeasured for big trees).* Positions about 15 min, the four arms about 15 min (61M leaves), the grid about 90 min (348M leaves), the referee minutes. A 16,384-visit tree takes about 150 MB, so 78 positions are in flight at that budget.
+- *Why not at game level.* A 16,384-sim cell took 16–18 h per 1,000 games in @exp:search-depth-2p; four temperatures at three budgets and 2,000 games a cell are about 200 GPU hours. Game-level rows follow only for the cells the positions flag, first at 1,024 sims (2.4 h a row, paired with the existing rows).
+- *Caveats.* Fresh trees, where training re-roots the last search's tree. Playouts by the raw policy measure a move's worth under raw play, not under the search. A temperature cannot revive a move the net puts at $e^(-31)$; the uniform mix can.
+- *Status.* Built and tested on the CPU only (14 tests; the four steps chained on 24 real positions). Not verified there: the half-precision kernels under the logit wrapper, speed and memory with big trees.
+
+#repro(```sh
+python tools/explore_diag.py positions --ckpt "az-2p-bundle/main@e900#ad8c2caf507b" --out pos.npz --games 1000 --envs 500
+python tools/explore_diag.py search --positions pos.npz --out search.npz --tree-gb 12
+python tools/explore_diag.py search --positions pos.npz --out search.npz --tree-gb 12 --no-defaults \
+  --grid-visits 600,2400,9600,16384 --grid-temps 1,1.5,2,4
+python tools/explore_diag.py referee --positions pos.npz --search search.npz --out referee.npz --playouts 32
+python tools/explore_diag.py report --search search.npz --referee referee.npz --out report.json
+```)
+
