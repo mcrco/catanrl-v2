@@ -193,7 +193,7 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 ) <tab:gen-player-set>
 
 - *Tests (CPU).* 100 cases for the class, and the whole suite (1,161 passed, golden tests included). Noise in empty slots changes no output bit, at every table size from 2 to 6. With the turn order neutralised, swapping two opponents swaps their outputs and nothing else; with it back, the outputs differ. PPO on mixed 2p to 4p games and AlphaZero self-play both run with it.
-- *Search.* Works on the plain PyTorch path. The fused kernels refuse it by name, so kernels come before any long self-play run.
+- *Search.* Works on the plain PyTorch path. The fused kernels refused it by name; they are built since (@exp:gen-seat-kernels).
 - *Not measured.* Playing strength (no training run yet), speed on this box's card (the estimate from the L40S ratio is about 19,500 agent steps a second), float16 on a GPU, and the 5p and 6p games beyond the unit tests.
 
 === A generalist base, then AlphaZero specialists #chip("todo") <exp:gen-base>
@@ -205,7 +205,7 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
   wandb: (),
   records: (),
 )
-#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). Marco confirmed the games and the dice input, kept the small network for speed, and set the Modal budget at the month's \$30 of free credit, then added \$25. The first stage is done (@exp:gen-base-1): level with best-4p at 4p, above `ppo-mixed` at 3p, well below best-2p at 2p. The second stage is done too (@exp:gen-base-2): 996M more steps added 2 to 3.5 pp. The specialists wait on Marco and on fused kernels for this network.]
+#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). Marco confirmed the games and the dice input, kept the small network for speed, and set the Modal budget at the month's \$30 of free credit, then added \$25. The first stage is done (@exp:gen-base-1): level with best-4p at 4p, above `ppo-mixed` at 3p, well below best-2p at 2p. The second stage is done too (@exp:gen-base-2): 996M more steps added 2 to 3.5 pp. Fused kernels for the network are built (@exp:gen-seat-kernels). No specialist is queued: Marco (2026-11-16) is hesitant to start AlphaZero training from a base this far behind the 1v1 specialist.]
 
 #lead[Plan.]
 - *Base.* PPO self-play from scratch with `graph-seat-s` on 2p, 3p and 4p games at the `private` level, the only fair one past two players (as `ppo-mixed`).
@@ -217,7 +217,7 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
 - *Before the launch.* A two-epoch run on the L40S played the three finals at 50 boards against the shipped opponents' checkpoints.
 - *Evals.* None in the run. Three finals with the last checkpoint's raw policy, one per table size: 2p against best-2p made fair (2,000 games, ±2.2 pp at 50%), 3p against two copies of `ppo-mixed` (3,000 games, ±1.7 pp at 33.3%), 4p against three copies of best-4p (4,000 games, ±1.3 pp at 25%).
 - *Later stages.* Continue while it gains. fr3 had about 1B decisions of 2p alone; that much for each seat count, with no transfer between them, would be 12 times the first stage. How much the shared weights save is the question.
-- *Specialists.* AlphaZero self-play from the base for each setting, as @exp:az-kata. Two things differ from fr3's line: the base reads `private` rows where fr3 reads `full`, and the fused kernels do not cover the new network (unfused, `graph-m` cost 3.4× per simulation, @exp:deploy-graph-m-check), so kernels come before self-play.
+- *Specialists.* AlphaZero self-play from the base for each setting, as @exp:az-kata. Two things differ from fr3's line: the base reads `private` rows where fr3 reads `full`, and the new network needed fused kernels of its own (unfused, `graph-m` cost 3.4× per simulation, @exp:deploy-graph-m-check); they are built (@exp:gen-seat-kernels).
 
 === `gen-base`: the first stage #chip("done") <exp:gen-base-1>
 #meta(
@@ -331,6 +331,44 @@ python tools/modal_train.py launch configs/experiments/gen-base-2.yaml --rev wt/
   --set runtime.threads=8 --ship gen-base/main@e3800 --ship graph-m-2p-lr/main@e22711 --ship ppo-mixed/main@e3550 --ship ppo-4p/main@e3650
 python tools/modal_train.py watch gen-base-2/main --every 10
 ```)
+
+=== Fused kernels for the seat network #chip("done") <exp:gen-seat-kernels>
+#meta(
+  dates: "2026-11-16",
+  owner: "marco",
+  config: "wt/seat-kernels (14b06b7, 3de015e), unmerged",
+)
+#tldr[`kernels: fused` and `fused16` now run `graph-seat-s`: 2.0 to 2.2 times the PyTorch path's rows per second, and 2.9 to 3.4 times in half precision, 7 to 16% under `graph-s` on its kernels. On `mix-graph-seat-s-2` the outputs match the module within the documented tolerance at 2p, 3p and 4p. Tiny AlphaZero runs from the checkpoint work at 2p and 4p. Marco is hesitant to train specialists from this base, so none is queued.]
+
+*Question.* Can search run the base as fast as it runs `graph-s`, and what else does an AlphaZero run from the base need?
+
+*Setup.* Marco (2026-11-16): "yeah go for it." Built by a subagent on `wt/seat-kernels`, off `wt/player-set`.
+- *Design.* A second extension (`seat_kernels.cu`, five kernels: the ownership relations, the seat tokens, their residual and LayerNorm, the seats' messages into the board, the board's messages per seat with the seat-to-seat attention). The board trunk, pooling and heads run on the graph kernels, whose source is unchanged: 90 arrays of graph-class outputs are bit-identical before and after.
+- *Refused, with a message.* A separate trunk, an aux head, a hidden width other than 96 (so `graph-seat-tiny`), the CPU.
+- *Tests.* 142 passed on the GPU (81 new), 376 on the CPU, none failed.
+
+*Result.*
+#figure(
+  btable(
+    columns: (1.2fr, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, right),
+    header: ([Network and rows], [Rows per forward], [PyTorch], [`fused`], [`fused16`], [`fused16` / PyTorch]),
+    [`graph-seat-s`, 2p], [64], [12,200], [27,100], [36,800], [3.0×],
+    [`graph-seat-s`, 4p], [64], [11,900], [26,500], [33,900], [2.9×],
+    [`graph-s`, 2p], [64], [16,600], [30,100], [42,400], [2.6×],
+    mid,
+    [`graph-seat-s`, 2p], [512], [18,600], [39,100], [62,800], [3.4×],
+    [`graph-seat-s`, 4p], [512], [18,900], [37,600], [55,600], [2.9×],
+    [`graph-s`, 2p], [512], [23,600], [44,000], [68,100], [2.9×],
+  ),
+  caption: [Rows per second through the evaluator on the RTX 2070 Super, CUDA graphs, median of 9 interleaved rounds, taken beside the bundle's final eval (so the ratios are the fair part). `graph-seat-s` with `mix-graph-seat-s-2`'s weights; `graph-s` with random weights at the private level with dice.],
+) <tab:gen-seat-kernels>
+- *Accuracy on `gen-base-2/main@e3800`.* 256 self-play rows per game: `fused` within 3.1e-4 of the module's logits (scale 520 to 714) and 6.6e-7 of its values at 2p, 3p, 4p and hexagon 3p; `fused16` within 0.30 and 2.7e-4 of `fused`, with no fallback to float.
+- *AlphaZero from the checkpoint.* Three tiny GPU runs finished (3 iterations, 16 sims): 2p with the pruned targets and the outcome head, 4p with a Gumbel root, 4p with PUCT. `MCTS` and `BELIEF` lineups played 2p, 3p and 4p games in the eval harness. Plumbing only: no rates.
+- *What a real run must set.* `obs.level: private` (a wrong level loads silently); `dets: 1` or more, since `dets: 0` shows the tree the hidden hands the network does not see, and then tree reuse is off; its own `eval.select` and `eval.final` (a mixed-size run has no default suites, and no 3p suite exists).
+- *A warning.* The base's policy is very peaked: on its own games 75 to 79% of decisions with a choice have a top prior above 0.99. In the smokes a 64-sim search played the raw policy's game move for move. A sized search-against-raw check comes before any long run (not queued).
+- *Not measured.* Self-play speed at real settings; the cost of 4p search evals; resuming such a run.
+- *Merge.* After the code freeze: the branch changes hashed code (`models/`, `search/`), so eval code ids move though the graph-class outputs do not.
 
 === 5–6 players on the extension map #chip("todo") <exp:gen-5-6p>
 #meta(owner: "marco")
