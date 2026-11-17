@@ -945,16 +945,15 @@ python tools/explore_diag.py referee --positions pos.npz --search search.npz --o
 python tools/explore_diag.py report --search search.npz --referee referee.npz --out report.json
 ```)
 
-=== Six more KataGo pieces in one continued run: `az-2p-tricks` #chip("queued") <exp:az-tricks>
+=== Six more KataGo pieces in one continued run: `az-2p-tricks` #chip("running") <exp:az-tricks>
 #meta(
-  dates: "approved 2026-11-17; built, waits for the GPU",
-  dates-label: "queued",
+  dates: "2026-11-17 07:15 –",
   owner: "marco",
-  config: "configs/experiments/az-2p-tricks.yaml (code on wt/az-tricks with wt/az-root merged in, not on main yet)",
-  wandb: (),
+  config: "configs/experiments/az-2p-tricks.yaml",
+  wandb: (("az-2p-tricks-main-e2ac082a", "az-2p-tricks/main"),),
   records: (),
 )
-#tldr[Marco (2026-11-17) asked which other KataGo tricks would help. Of Claude's list Marco approved four ("let's try 1-4 since they seem like they would increase computational efficiency") and added two for exploration ("forced playouts and root temperature could also help?"). Weight averaging was declined. All six go into one run of 900 iterations continued from the bundle's end, as in @exp:az-bundle: bundle first, ablate later. All six are built and measured on the bundle's net. The measurements say 3 needed a much smaller weight, 4 will touch about 40% of the moves, and 1, 5 and 6 will change little. The launch waits for `horizon-2p` to free the GPU.]
+#tldr[Marco (2026-11-17) asked which other KataGo tricks would help. Of Claude's list Marco approved four ("let's try 1-4 since they seem like they would increase computational efficiency") and added two for exploration ("forced playouts and root temperature could also help?"). Weight averaging was declined. All six go into one run of 900 iterations continued from the bundle's end, as in @exp:az-bundle: bundle first, ablate later. All six are built and measured on the bundle's net. The measurements say 3 needed a much smaller weight, 4 will touch about 40% of the moves, and 1, 5 and 6 will change little. Running on the local GPU since 07:15 on 2026-11-17 at about 53 iterations an hour (the bundle: 42.7): about 17 h, then 2.4 h for the final row.]
 
 *Question.* Does the bundle's net gain more from 900 further iterations with these six pieces than e1800 gained from the bundle's 900 (+0.75 pp, p = 0.56)?
 
@@ -1013,7 +1012,13 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 - *KataGo's rule forces only moves that already have a visit.* The first build forced unvisited moves too (Claude's brief, not KataGo's rule). That version reached every legal move and added 0.21 nats, and its target was just as unchanged (entropy 0.193 to 0.194, top move different in 2 of 120). Switched to KataGo's rule after Marco's "let's just go with katago".
 - *Where an effect can come from.* Not the target. The move played is sampled from the raw visits over a game's first 30 moves (at a temperature falling from 1 to 0), so games vary slightly more, and the extra visits give a few side moves a better value estimate.
 
+#lead[GPU check before the launch] (2026-11-17 07:04, `tools/tricks_smoke.py`, 8 iterations in a scratch directory, W&B off). Passed.
+- *Same net as the bundle.* This run's epoch 0 gives the bundle's logits and values bit for bit on 1,032 positions, on the CPU and on the GPU through the plain, `fused` and `fused16` evaluators; the search ignores the soft head.
+- *Faster.* 67 s an iteration against the bundle's 84 s (53.5 iterations an hour against 42.7), at 65,600 leaves a second (the bundle: 68,300). Piece 4 does it: 17% of the moves get a full search where the bundle's 25% did.
+- *Fewer recorded positions.* About 6,000 an iteration against the bundle's 8,185, with the same 64 updates of 512 rows, so a recorded position is drawn about 5.4 times where the bundle drew it 4 times.
+- *Pieces as configured.* Full searches run with forced playouts 2 and root temperature 1.25, fast and decided searches without; the value blend rises to 0.5; the surprise weights stay under the cap of 10; the outcome head starts at the bundle's errors (2.0 points, 7.9 turns).
+
 #lead[Evals.] As the bundle: no in-run evals, one final row: the last checkpoint in the deployed search (1,024 sims) against raw fr3 on heldout-2p-fr's first 1,000 boards × 2 seats, paired by game (exact McNemar) with the bundle's row `b5483151` (63.70%) and e1800's `ea257443` (62.95%). 2,000 games give #sym.plus.minus 2.2 pp on the row and detect a paired difference of about 2.7 pp.
 
-#lead[Cost.] The bundle ran 42.7 iterations an hour: 900 iterations are about 21 h on the local GPU, less by whatever piece 4 saves, plus 2.4 h for the final row (about a tenth of the wall-clock). Starts after `horizon-2p` (@exp:recipe-horizon) and the merges.
+#lead[Cost.] The bundle ran 42.7 iterations an hour, which would make 900 iterations 21 h. With piece 4 the run makes about 53: about 17 h on the local GPU, plus 2.4 h for the final row (an eighth of the wall-clock). Launched at 07:15 on 2026-11-17 after `horizon-2p` was stopped (@exp:recipe-horizon) and the branches were merged.
 
