@@ -947,14 +947,14 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 
 === Six more KataGo pieces in one continued run: `az-2p-tricks` #chip("queued") <exp:az-tricks>
 #meta(
-  dates: "approved 2026-11-17; being built",
+  dates: "approved 2026-11-17; built, waits for the GPU",
   dates-label: "queued",
   owner: "marco",
-  config: "configs/experiments/az-2p-tricks.yaml (to be written; code on wt/az-tricks and wt/az-root, unmerged)",
+  config: "configs/experiments/az-2p-tricks.yaml (code on wt/az-tricks with wt/az-root merged in, not on main yet)",
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-17) asked which other KataGo tricks would help. Of Claude's list Marco approved four ("let's try 1-4 since they seem like they would increase computational efficiency") and added two for exploration ("forced playouts and root temperature could also help?"). Weight averaging was declined. All six go into one run of 900 iterations continued from the bundle's end, as in @exp:az-bundle: bundle first, ablate later. Pieces 1 to 4 are built and measured on the bundle's net; 5 and 6 are being built.]
+#tldr[Marco (2026-11-17) asked which other KataGo tricks would help. Of Claude's list Marco approved four ("let's try 1-4 since they seem like they would increase computational efficiency") and added two for exploration ("forced playouts and root temperature could also help?"). Weight averaging was declined. All six go into one run of 900 iterations continued from the bundle's end, as in @exp:az-bundle: bundle first, ablate later. All six are built and measured on the bundle's net. The measurements say 3 needed a much smaller weight, 4 will touch about 40% of the moves, and 1, 5 and 6 will change little. The launch waits for `horizon-2p` to free the GPU.]
 
 *Question.* Does the bundle's net gain more from 900 further iterations with these six pieces than e1800 gained from the bundle's 900 (+0.75 pp, p = 0.56)?
 
@@ -968,12 +968,12 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
     [2. Policy surprise weighting], [Replay rows are drawn more often where the search disagreed with the net's prior: half the draws uniform, half in proportion to the KL of the target from the prior (KataGo).], [share 0.5; a row's weight capped at 10× the mean],
     [3. Soft policy side head], [A second policy head trained on the target raised to the power 1/4. The search never reads it; it starts as a copy of the policy head.], [temperature 4; loss weight 0.125, not KataGo's and Canopy's 8 (measured below)],
     [4. Smaller searches in decided games], [Once one seat's search value has been at least 0.9 for three searches in a row, full searches drop from a quarter to a sixteenth of the moves and fast searches from 100 to 50 visits. Recorded targets stay 600-visit ones.], [0.9, 3 searches, 1/16, 50 visits],
-    [5. Forced playouts], [At the root of a full search every move gets at least $sqrt(2 P N)$ visits (P its prior with noise, N the root's visits). The pruned target already removes those its value does not earn.], [k = 2 (KataGo)],
+    [5. Forced playouts], [At the root of a full search a move that already has a visit gets at least $sqrt(2 P N)$ visits (P its prior with noise, N the root's visits). The pruned target already removes those its value does not earn.], [k = 2 (KataGo)],
     [6. Root temperature], [The root's prior is raised to the power 1/T before the noise is mixed in, in full searches only.], [T = 1.25 (KataGo's early-game value)],
   ),
   caption: [The six pieces. Every one is an optional key that leaves older configs and their hashes unchanged.],
 ) <tab:az-tricks>
-- *What 5 and 6 can and cannot do.* Both act at the root only. The root is already the best explored node: the noise tries every legal move, the raw root visits have 0.75 nats of entropy against the net's 0.27, and 15 to 18% of root visits are pruned as noise-forced (@exp:az-explore). Below the root nothing widens the prior. A temperature of 1.25 also barely moves a prior that puts 0.999 on one move. The build measures how much each changes a 600-visit root on the bundle's net before the launch.
+- *What 5 and 6 can and cannot do.* Both act at the root only. The root is already the best explored node: the noise tries every legal move, the raw root visits have 0.75 nats of entropy against the net's 0.27, and 15 to 18% of root visits are pruned as noise-forced (@exp:az-explore). Below the root nothing widens the prior. A temperature of 1.25 also barely moves a prior that puts 0.999 on one move. Measured below.
 - *Not included.* Weight averaging (declined). A temperature on the prior at every node, which is the piece that would reach below the root (Claude's suggestion; the knob of the parked sweep in @exp:az-explore): declined by Marco on 2026-11-17 ("let's just go with katago").
 
 #lead[Measured before the launch (pieces 1 to 4).] The bundle's net on the CPU, the bundle's search, 6 games in flight: 1,428 decisions, 292 recorded positions, 6 finished games. A small sample; the tails are rough.
@@ -994,7 +994,24 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 - *Piece 2: the surprise is concentrated.* Mean 0.043 nats, median 0.0025, 99th percentile 1.04; 74% of positions are below 0.01. Without a cap the weighted draws have an effective sample size of 10% of the buffer and one position is drawn 43× as often as under uniform draws; with the cap at 10× it is 31%. The cap stays (Claude's guard, not KataGo's).
 - *Piece 4: a large share of play is decided.* At 0.9 for three searches, 37 to 41% of decisions fall in decided games (25 to 29% at 0.95, 56 to 61% at 0.8). Their searches shrink, so iterations get faster, and they supply a quarter as many recorded positions as before.
 - *Piece 1: expect little.* The search's value is barely closer to the game's result than the net's own (mean absolute gap 0.211 against 0.219) and sits 0.031 from the net. Half of the target is then nearly the net's own output: the result's signal and its noise both halve, and what is added is the search's small correction.
-- *Start.* The outcome head has to be named in `init_from` to come along (`parts: [actor, critic, outcome]`); before this the bundle's head would have restarted from fresh weights. Being added.
+- *Start.* The outcome head has to be named in `init_from` to come along (`parts: [actor, critic, outcome]`, new); before this the bundle's head would have restarted from fresh weights. Checked on the CPU: all 119 of the bundle's tensors arrive unchanged, the soft head equals the policy head, and the net's outputs match the bundle's bit for bit.
+
+#lead[Measured before the launch (pieces 5 and 6).] The bundle's net, 120 positions with at least two legal moves from 4 self-play games on held-out boards, a new 600-visit search per position with noise on, four arms on the same positions and seeds.
+#figure(
+  btable(
+    columns: (auto, 1fr, 1fr, 1fr, 1fr, 1fr),
+    align: (left, right, right, right, right, right),
+    header: ([Arm], [Raw visit entropy (nats)], [Visits pruned], [Target entropy (nats)], [Target's top move differs], [Visits of the top move]),
+    [As today], [0.827], [21.1%], [0.196], [–], [436.8],
+    [Forced playouts, k = 2], [0.852], [21.4%], [0.195], [0 of 120], [435.2],
+    [Root temperature 1.25], [0.861], [22.7%], [0.194], [2 of 120], [428.4],
+    [Both], [0.885], [23.1%], [0.196], [3 of 120], [426.4],
+  ),
+  caption: [Root searches of 600 visits with and without pieces 5 and 6. "Target" is the pruned policy target. The share of legal moves that get a visit is 81 to 82% in every arm.],
+) <tab:az-tricks-root>
+- *Both are small.* Together they move about 10 of 600 visits off the top move and add 0.06 nats to the raw visits. The pruned target, which is what the net learns, has the same entropy in every arm and a different top move in 3 of 120 positions.
+- *KataGo's rule forces only moves that already have a visit.* The first build forced unvisited moves too (Claude's brief, not KataGo's rule). That version reached every legal move and added 0.21 nats, and its target was just as unchanged (entropy 0.193 to 0.194, top move different in 2 of 120). Switched to KataGo's rule after Marco's "let's just go with katago".
+- *Where an effect can come from.* Not the target. The move played is sampled from the raw visits over a game's first 30 moves (at a temperature falling from 1 to 0), so games vary slightly more, and the extra visits give a few side moves a better value estimate.
 
 #lead[Evals.] As the bundle: no in-run evals, one final row: the last checkpoint in the deployed search (1,024 sims) against raw fr3 on heldout-2p-fr's first 1,000 boards × 2 seats, paired by game (exact McNemar) with the bundle's row `b5483151` (63.70%) and e1800's `ea257443` (62.95%). 2,000 games give #sym.plus.minus 2.2 pp on the row and detect a paired difference of about 2.7 pp.
 
