@@ -847,16 +847,16 @@ uv run --no-project --with numpy --with matplotlib python tools/checkpoint_simil
   --json similarity.json --figures figures/
 ```)
 
-=== Is self-play exploring enough? The training search against a longer, wider one #chip("queued") <exp:az-explore>
+=== Is self-play exploring enough? The training search against a longer, wider one #chip("parked") <exp:az-explore>
 #meta(
-  dates: "for the GPU after graph-m-search-vs-raw",
-  dates-label: "queued",
+  dates: "built 2026-11-16; not run",
+  dates-label: "parked",
   owner: "assistant",
   config: "tools/explore_diag.py",
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-16) asked whether the PPO policy is fuzzy enough to explore, or whether the root noise covers it. It was not fuzzy, the noise reaches the root only, and since e900 the search's target has sat almost on the net. Claude's suggestion, approved by Marco ("yeah let's try it"): on 3,000 self-play positions of the bundle's net, compare the training search with a 16× longer one and with a 16× longer one whose prior is widened at every node, and let playouts say whether the moves they find are better. Marco's addition, in its position-level form (not yet confirmed by Marco): a grid of budgets up to 16,384 visits and temperatures on the logits.]
+#tldr[Marco (2026-11-16) asked whether the PPO policy is fuzzy enough to explore, or whether the root noise covers it. It was not fuzzy, the noise reaches the root only, and since e900 the search's target has sat almost on the net. Claude's suggestion, approved by Marco ("yeah let's try it"): on 3,000 self-play positions of the bundle's net, compare the training search with a 16× longer one and with a 16× longer one whose prior is widened at every node, and let playouts say whether the moves they find are better. Marco's addition: a sweep of budgets up to 16,384 sims at several temperatures on the logits, which Marco wants at game level like @exp:search-depth-2p (about 17 h for three temperatures up to 4,096 sims at 1,000 games a cell, about 17 h more per 16,384 cell). Parked by Marco the same evening, before anything ran: "good for research validation and formalities but not what i need since i just want a really good bot". The tool is merged; the search agent's temperature option was started in `wt/prior-temp` and left unfinished.]
 
 *Question.* Has the net reached what a 600-visit search can teach it, or is the search too narrow to find the moves that would still help?
 
