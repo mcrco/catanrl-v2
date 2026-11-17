@@ -1,0 +1,140 @@
+# Six more KataGo pieces on the bundle's network, in one continued run (Marco, 2026-11-17: "let's
+# try 1-4 since they seem like they would increase computational efficiency" and "i think
+# exploration is probably an issue for us, so i think the forced playouts and root temperature
+# could also help?"; "let's just go with katago"). Bundle first, ablate later: this run cannot say
+# which piece did what.
+#
+# What: ONE run from az-2p-bundle/main@e900 (2p-graph-s-7), 900 more iterations on the bundle's
+# config, with six additions. Each is an optional key that is off when unset.
+#   1. Lower-noise value target (value_search_blend 0.5, value_blend_iterations 60). A fully
+#      searched position's value target is half the game result and half the search's own value at
+#      its root (the root's action values averaged by the visits the policy target keeps), ramped
+#      in over the first 60 iterations. Canopy's form (it goes to 85%); KataGo itself keeps the
+#      game result and adds short-horizon value heads.
+#   2. Policy surprise weighting (surprise_weight 0.5, surprise_cap 10). Half the replay draws go
+#      in proportion to KL(policy target || the net's root prior), half uniformly (KataGo). The cap
+#      at 10x the buffer's mean is a guard of ours, not KataGo's.
+#   3. Soft policy head (model.args.soft_policy; soft_policy_temperature 4, soft_policy_coef
+#      0.125). A second policy head trained on the policy target ** (1/4); training only, no
+#      search or kernel reads it; it starts as a copy of the policy head.
+#   4. Smaller searches in decided games (decided_value 0.9, decided_lookback 3,
+#      decided_full_search_prob 0.0625, decided_fast_sims 50). Once one seat's search value was at
+#      least 0.9 in a game's last three searches, full searches fall from a quarter to a sixteenth
+#      of its moves and fast ones from 100 to 50 visits. A recorded target is still a 600-visit one.
+#   5. Forced playouts (forced_playouts 2). In a full search a root move that has a visit gets at
+#      least sqrt(2 x its prior x the root's visits) before PUCT is asked (KataGo's rule and k);
+#      policy_target: pruned takes the unearned ones out of the target again.
+#   6. Root temperature (root_policy_temperature 1.25). A full search's root prior ** (1 / 1.25),
+#      renormalized, before the Dirichlet noise (KataGo's early-game value).
+# Not in: weight averaging (declined) and a temperature on the prior at every node (declined).
+#
+# Measured on the bundle's net before the launch (report, exp:az-tricks):
+#   3. the soft loss's gradient norm at weight 1 is 4.68, against the policy term's 0.58, the
+#      bundle's whole loss's 0.93 and the clip at 1.0: KataGo's and Canopy's weight 8 would make
+#      the clipped update almost all soft policy. 0.125 puts it level with the policy term.
+#   2. surprise: mean 0.043 nats, median 0.0025, 99th percentile 1.04. Uncapped, the weighted draws
+#      have an effective sample size of 10% of the buffer; capped at 10x, 31%.
+#   4. 37-41% of decisions fall in decided games at 0.9 (25-29% at 0.95). Their searches shrink, so
+#      an iteration is faster and records fewer positions: watch selfplay/decided,
+#      selfplay/sims_per_decision and the recorded positions per iteration (the bundle's ~8,177).
+#   1. the search's value is 0.031 from the net's on average and barely closer to the result
+#      (gap 0.211 against 0.219): expect little.
+#   5, 6. on 120 positions a 600-visit root gains 0.06 nats of raw visit entropy with both on and
+#      the top move loses ~10 visits; the pruned target does not move (entropy 0.196 either way,
+#      another top move in 3 of 120). What changes is the move sampled in a game's first 30 moves.
+#
+# The start: every weight of the bundle's e900, its outcome head included (init_from.parts names
+# `outcome`), the soft head a copy of the policy head. At e0 the network plays as the bundle bit
+# for bit. Weights only: a FRESH AdamW and an EMPTY replay (the bundle's rows carry no search
+# value and no surprise). Self-play alone until the replay holds min_replay 50,000 positions.
+# Logged every iteration besides the bundle's: train/value_blend, train/search_value_gap,
+# train/surprise_{sampled_mean,sampled_max,ess,mean}, train/soft_policy_loss,
+# train/soft_target_entropy, selfplay/decided, selfplay/sims_per_decision.
+#
+# Evals: no select (eval-share-of-run-time). One final row, the bundle's: the deployed search on
+# the last checkpoint against BELIEF(fr3, 16 worlds) on heldout-2p-fr's first 1,000 boards x 2
+# seats = 2,000 games (+-2.2 pp), paired game for game with the bundle's row b5483151 (63.70%) and
+# e1800's ea257443 (62.95%): tools/search_probe.py --pair <that row> <this row's eval id>. The
+# paired difference is detectable from ~2.7 pp.
+#
+# Time: the bundle ran 42.7 iterations an hour on the RTX 2070 SUPER, so 900 iterations = ~21 h,
+# less by what piece 4 saves; the final ~2.4 h, about a tenth of the wall-clock.
+# `--smoke` cannot run this config (CUDA-only kernels; @e900 under a pinned sha).
+#
+# Keys to change: each piece is off with its keys removed (3: soft_policy_coef and
+# model.args.soft_policy together). decided_value 0.95 halves piece 4's reach.
+#
+# Launch (main, GPU free):
+#   catanrl run configs/experiments/az-2p-tricks.yaml
+name: az-2p-tricks
+seed: 42                        # the bundle's: its training pool (map_pool from the seed)
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 512                 # games in flight
+obs: {level: full, dice_state: true}
+model: {preset: graph-s, args: {shared: true, outcome: true, soft_policy: true}}
+# the bundle's last checkpoint (2p-graph-s-7); weights only, so a fresh optimizer and an empty replay.
+# `outcome` carries the bundle's outcome head; the soft policy head starts as a copy of the policy head.
+# No zero_new_inputs: the bundle already has the dice inputs
+init_from: {ckpt: "az-2p-bundle/main@e900#ad8c2caf507b", parts: [actor, critic, outcome]}
+train:                          # the bundle's train keys, and the twelve keys of the six pieces (marked 1-6)
+  algo: alphazero
+  iterations: 900               # ~21 h of self-play (header)
+  steps_per_iteration: 64       # x 512 games = 32,768 searched moves, ~8,192 of them recorded
+  root: puct
+  sims: 600                     # a full search (recorded)
+  fast_sims: 100                # the other moves (played only)
+  pending: 24                   # leaves per round of a full search
+  fast_pending: 4               # and of a fast one
+  full_search_prob: 0.25
+  decided_value: 0.9            # 4: a game is decided once one seat's search value was >= 0.9 ...
+  decided_lookback: 3           # 4: ... in its last 3 searches
+  decided_full_search_prob: 0.0625   # 4: full searches in decided games: a sixteenth of the moves
+  decided_fast_sims: 50         # 4: and their fast searches
+  record_fast: false            # only full searches enter replay
+  dets: 0                       # the true game (the network reads it whole)
+  reuse: true                   # a move's search starts from the last one's subtree
+  c_puct: 0.75
+  gumbel_m: 16                  # not read (root: puct)
+  dirichlet_noise: true         # full searches only
+  forced_playouts: 2.0          # 5: KataGo's k; a visited root move gets >= sqrt(k x prior x visits)
+  root_policy_temperature: 1.25 # 6: the root's prior ** (1 / 1.25) before the noise; full searches only
+  temperature_start: 1.0
+  temperature_end: 0.0
+  temperature_moves: 30
+  truncation_value: share
+  policy_target: pruned         # the visit distribution without the visits the noise forced
+  target_c_visit: 50.0          # not read (policy_target: gumbel's)
+  target_c_scale: 0.1
+  target_prior_temperature: 1.0
+  target_rescale: true
+  replay_capacity: 500_000      # ~61 iterations of recorded positions; 3.0 GB of RAM
+  min_replay: 50_000            # ~6 iterations of recorded positions (filed when their games end)
+  updates_per_iteration: 64     # x 512 = 32,768 samples per ~8,192 new positions
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  value_coef: 1.0
+  value_search_blend: 0.5       # 1: the value target is half the game result, half the search's root value
+  value_blend_iterations: 60    # 1: ramped in linearly over the first 60 iterations
+  surprise_weight: 0.5          # 2: half the replay draws go by policy surprise, half uniformly
+  surprise_cap: 10.0            # 2: a position's surprise counts up to 10x the buffer's mean
+  soft_policy_coef: 0.125       # 3: x the soft head's cross-entropy (measured: header)
+  soft_policy_temperature: 4.0  # 3: its target is the policy target ** (1 / 4)
+  outcome_vp_coef: 0.5          # x Huber on each seat's final victory points / 15 (header)
+  outcome_turns_coef: 0.5       # x Huber on the turns left / 100
+  max_grad_norm: 1.0            # over every parameter, the head's too
+  search_rows: 512              # rows per forward
+  kernels: fused16              # self-play forwards in float16 on the fused kernels
+  checkpoint_interval: 25       # ~35 min of self-play
+eval:
+  select: null                  # no in-run evals (header)
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}   # the bundle's row's 2,000 games
+      lineup:
+        - "MCTS:ckpt=${run}@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+# num_envs, infer_rows: the eval's games in flight (the bundle's)
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512, time_limit_hours: 60}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
