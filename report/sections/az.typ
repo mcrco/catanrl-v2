@@ -734,6 +734,7 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 - *Auxiliary targets.* On positions not trained on, the head's error fell from 2.2 to 1.6 VP and from 8.5 to 6.6 turns over the run. The value head did not get more accurate with it: Brier 0.129 on fresh games at the end, against 0.128 at e1800's end (each on its own games).
 - *Net.* It picks e1800's top move at 94.1% of probe positions. Policy loss 0.276 (0.288 at e1800's end), value loss 0.384 (0.385).
 - *Time.* 24.1 h: 21.2 h of self-play (84 s an iteration, 68,300 leaves a second, 7.36M recorded positions) and 2.4 h for the row, 10% of the wall-clock.
+- *Without the search* (@exp:az-raw). The bundle's raw policy is better than e1800's: 53.4% against raw fr3 where e1800 scores 49.6%, +3.82 pp on the same 5,000 games (p = 1.5e-6). The gain shows without the search and barely inside it.
 - *Caveats.* The replay and the optimizer started fresh, which the earlier 900 iterations did not have to pay for: the replay took about 60 iterations to fill. One row against one opponent at one search size; the parts are not separated.
 - *Registered* as `2p-graph-s-7` (`az-2p-bundle/main@e900#ad8c2caf507b`). OpenHex keeps e1800 (`catanrl-1v1-search-v3.1`): the row gives no reason to swap.
 
@@ -742,15 +743,15 @@ python tools/bundle_smoke.py --runs <scratch dir>   # the GPU check, ~15 min
 catanrl run configs/experiments/az-2p-bundle.yaml
 ```)
 
-=== Does the better search net play better without the search? #chip("queued") <exp:az-raw>
+=== Does the better search net play better without the search? #chip("done") <exp:az-raw>
 #meta(
-  dates: "for the GPU after az-2p-bundle",
-  dates-label: "queued",
+  dates: "2026-11-16 19:27 – 20:18",
   owner: "marco",
-  wandb: (),
-  records: (),
+  config: "configs/experiments/az-raw-2p.yaml",
+  wandb: (("az-raw-2p-main-33c6f1fc", "az-raw-2p/main"),),
+  records: ("8acb3c3d", "cc9d754a", "753ffd65", "fef53cfd"),
 )
-#tldr[Marco (2026-11-16): after the bundled run, compare the raw policies of the checkpoints, to see whether a net that is better inside the search is also a better raw policy. Every AlphaZero row so far judged the net inside the 1,024-sim search.]
+#tldr[Marco (2026-11-16): compare the raw policies of the checkpoints, to see whether a net that is better inside the search is also a better raw policy. Through e1800 it is not: without search e300, e900 and e1800 score 47.6%, 49.1% and 49.6% against raw fr3, while inside the search they gained 3.85 to 9.10 pp. The bundle's net is the exception: 53.4% raw, +3.8 pp over e1800 (p = 1.5e-6), though inside the search it gained only +0.75 pp.]
 
 *Question.* From fr3 to e300, e900 and e1800 the search gained 3.85, 6.45 and 9.10 pp against the fair raw fr3 bot. Did the raw policy gain too?
 
@@ -760,7 +761,31 @@ catanrl run configs/experiments/az-2p-bundle.yaml
 - *Reading.* Each checkpoint gets two numbers against the same opponent, with the search and without. Raw scores that rise with the search scores say self-play improves the policy itself; flat raw scores say the gain lives in what the search does with the net (its value, or its second and third choices).
 - *Cost.* About 13 min a row (2.7 min per 1,000 games in @exp:recipe-transitivity), under 1 h for the four rows.
 - *Not planned.* A round robin among the checkpoints (6 more pairs).
-- *Status.* Config built and validated in `wt/az-similarity` (`configs/experiments/az-raw-2p.yaml`; e900 is `az-2p-kata/main+600-fast-noselect@e900#713c7a0a818a`). It launches once, with the bundle's last checkpoint filled in: a row added after the launch would change the config's hash. The `BELIEF` bot already plays networks that read the dice state.
+- *Config.* `configs/experiments/az-raw-2p.yaml`, launched once with the four rows; e900 is `az-2p-kata/main+600-fast-noselect@e900#713c7a0a818a`.
+#lead[Result.]
+#figure(
+  btable(
+    columns: (auto, auto, auto, 1fr, auto),
+    align: (left, right, right, right, right),
+    header: ([Network], [Raw], [Wins of 5,000], [Paired with the row above], [In the search]),
+    [fr3, the start], [50 by symmetry], [], [], [53.85],
+    [e300], [47.58 #ci[46.2][49.0]], [2,379], [], [57.70],
+    [e900], [49.06 #ci[47.7][50.4]], [2,453], [+1.48 pp (866 vs 792), p = 0.07], [60.30],
+    [e1800], [49.60 #ci[48.2][51.0]], [2,480], [+0.54 pp (800 vs 773), p = 0.51], [62.95],
+    [Bundle], [53.42 #ci[52.0][54.8]], [2,671], [+3.82 pp (876 vs 685), p = 1.5e-6], [63.70],
+  ),
+  caption: [Score in % against fr3's fair raw bot. Raw: the network as a fair raw bot (`BELIEF`, 16 worlds, no search) on all 2,500 boards of `heldout-2p-fr` in both seat orders, the same 5,000 games in every row; McNemar's exact test. In the search: the 1,024-sim rows of @tab:az-bundle (2,000 games).],
+) <tab:az-raw>
+- *Through e1800: no.* The raw policy did not follow the search. e300 is below fr3 (47.58%, p = 0.0007 against 50%); e900 and e1800 are level with it. From e300 to e1800 the raw policy recovered 2.0 pp (p = 0.018) while the search gained 5.25 pp. By the reading set before the rows, the search's gain lives in what the search does with the net (its value, or its second and third choices), not in a better first choice.
+- *The bundle: yes.* 53.42%, above fr3 (p = 1e-6) and +3.82 pp over e1800 (interval +2.3 to +5.4). Against e900 it is +4.36 pp and against e300 +5.84 pp.
+- *Likely the dice input, not shown.* A raw bot has no chance nodes, so the dice state reaches its move only through the input; the search already rolls from the exact odds, and there the bundle gained +0.75 pp. The 900 iterations before the bundle, without the input, moved the raw policy by +0.54 pp. The outcome head and the fresh replay are in the same run, so the row does not separate them.
+- *Seats.* Moving first and second: e300 50.8% and 44.4%, e900 52.6% and 45.5%, e1800 53.9% and 45.3%, the bundle 57.6% and 49.2%.
+- *Cost.* 13 min a row, 51 min in all. No game hit the turn limit.
+- *Not measured.* The checkpoints against each other, and the raw bot of the bundle told the dice are fair (which would test the dice reading).
+
+#repro(```sh
+catanrl run configs/experiments/az-raw-2p.yaml
+```)
 
 === How the checkpoints differ: value and policy similarity over training #chip("queued") <exp:az-similarity>
 #meta(
