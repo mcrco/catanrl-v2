@@ -77,3 +77,9 @@ models:
     from: scratch
     steps: 996_147_200
     use: the player-agnostic network (graph-seat-s, 579,844 parameters; preset and config on wt/player-set until merged); level with 4p-graph-s-1 at 4p, 36.2% vs two mix-graph-s-1 at 3p, 36.2% vs fair 2p-graph-m-1 at 2p; the base for the AlphaZero specialists
+  mix-graph-seat-s-2:
+    ref: "gen-base-2/main@e3800#ac792590f9f1"
+    rules: base-2p-fr, base-3p and base-4p, BASE and hexagon boards, dice input
+    from: mix-graph-seat-s-1
+    steps: 1_992_294_400
+    use: mix-graph-seat-s-1 trained for as many steps again at its floor learning rate; 27.85% vs three 4p-graph-s-1 at 4p, 39.6% vs two mix-graph-s-1 at 3p, 38.4% vs fair 2p-graph-m-1 at 2p; the base for the AlphaZero specialists

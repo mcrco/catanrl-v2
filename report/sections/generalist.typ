@@ -205,7 +205,7 @@ catanrl run configs/experiments/ppo-mixed-blob.yaml
   wandb: (),
   records: (),
 )
-#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). Marco confirmed the games and the dice input, kept the small network for speed, and set the Modal budget at the month's \$30 of free credit. The first stage is done (@exp:gen-base-1): level with best-4p at 4p, above `ppo-mixed` at 3p, well below best-2p at 2p. Later stages and the specialists wait on Marco.]
+#tldr[Marco's plan (2026-11-16), for after @exp:az-bundle: train the player-agnostic network (@exp:gen-player-set) from scratch on 2p, 3p and 4p games into a strong, robust policy and critic, then continue it with AlphaZero self-play per setting into the specialists deployed on OpenHex. To run on Modal beside the local queue (@exp:recipe-modal). Marco confirmed the games and the dice input, kept the small network for speed, and set the Modal budget at the month's \$30 of free credit, then added \$25. The first stage is done (@exp:gen-base-1): level with best-4p at 4p, above `ppo-mixed` at 3p, well below best-2p at 2p. The second stage is done too (@exp:gen-base-2): 996M more steps added 2 to 3.5 pp. The specialists wait on Marco and on fused kernels for this network.]
 
 #lead[Plan.]
 - *Base.* PPO self-play from scratch with `graph-seat-s` on 2p, 3p and 4p games at the `private` level, the only fair one past two players (as `ppo-mixed`).
@@ -285,14 +285,15 @@ python tools/modal_train.py launch configs/experiments/gen-base-slope.yaml --rev
 python tools/modal_train.py pull gen-base/main
 ```)
 
-=== `gen-base-2`: the second stage #chip("running") <exp:gen-base-2>
+=== `gen-base-2`: the second stage #chip("done") <exp:gen-base-2>
 #meta(
-  dates: "2026-11-16 11:34 –",
+  dates: "2026-11-16 11:34 – 17:28",
   owner: "marco",
   config: "configs/experiments/gen-base-2.yaml (wt/player-set, 477f2cf)",
   wandb: (("gen-base-2-main-3956bb68", "gen-base-2/main"),),
+  records: ("470a83b7", "9e437636", "be447abf"),
 )
-#tldr[`gen-base`'s last checkpoint trained for 996M more agent steps on the same games, at its floor learning rate held constant. Running on a Modal L40S since 11:34; about 6 h and \$15.5. Marco raised the Modal budget by \$25 for it.]
+#tldr[`gen-base`'s last checkpoint trained for 996M more agent steps on the same games, at its floor learning rate held constant: 5.88 h on a Modal L40S, \$15.19. Doubling the training added 2 to 3.5 pp: +3.4 pp at 3p and +2.4 pp at 4p (both significant), +2.2 pp at 2p (not significant). It is now above best-4p at 4p (27.85%, parity 25%) and takes 38.4% from best-2p made fair, where fr3 took 45.0%. The gain per step is a quarter or less of the first stage's last stretch at 2p and 3p.]
 
 *Question.* How much stronger does the base get with as many steps again?
 
@@ -303,7 +304,26 @@ python tools/modal_train.py pull gen-base/main
 - *Evals.* None in the run. The three finals are `gen-base`'s, on the same boards, seats and opponents, so each row pairs game by game with e3800's (2,000, 3,000 and 4,000 games; paired differences of about 2.5, 2 and 1.7 pp are detectable). Checkpoints every 100 epochs.
 - *Check before launch.* Four small epochs on the CPU from e3800: entropy 0.135 and explained variance 0.87 at the start (`gen-base` ended at 0.129 and 0.89), learning rate 0.0005.
 - *Cost.* Capped at 6.4 h, \$16.54.
-- *First epochs.* 48,800 agent steps a second, `gen-base`'s speed: the end is due about 17:35. Epoch 1 on the real games: entropy 0.140, explained variance 0.90, learning rate 0.0005. W&B is mirrored from this box every 10 minutes.
+- *First epochs.* 48,800 agent steps a second, `gen-base`'s speed. Epoch 1 on the real games: entropy 0.140, explained variance 0.90, learning rate 0.0005.
+
+*Result.* The last checkpoint's raw policy (e3800 of this run, 1.99B agent steps in all) against `gen-base`'s e3800 on the same games.
+#figure(
+  btable(
+    columns: (1.3fr, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, right),
+    header: ([Table], [Games], [Parity (%)], [First stage (%)], [Second stage (%)], [Paired difference (pp)]),
+    [2p against best-2p made fair], [2,000], [50], [36.2], [38.4 #ci[36.3][40.5]], [+2.2 #ci[−0.4][+4.8]],
+    [3p against 2 × `ppo-mixed`], [3,000], [33.3], [36.2], [39.6 #ci[37.8][41.4]], [+3.4 #ci[+1.2][+5.6]],
+    [4p against 3 × best-4p], [4,000], [25], [25.45], [27.85 #ci[26.5][29.2]], [+2.4 #ci[+0.6][+4.2]],
+  ),
+  caption: [`gen-base-2/main@e3800` and `gen-base/main@e3800` in the same seat on the same boards against the same opponents. Games won only by the second stage against only by the first: 380 to 336 at 2p (p = 0.11), 616 to 513 at 3p (p = 0.002), 711 to 615 at 4p (p = 0.009). Records: `470a83b7`, `9e437636`, `be447abf`.],
+) <tab:gen-base-2>
+- *4p.* Above best-4p: 1,114 of 4,000 against three copies (p = 4e-5 against parity; the copies took 940, 968 and 978). The base has had 198M 4p decisions, best-4p 249M.
+- *3p.* 39.6% against two copies of `ppo-mixed` (the copies took 964 and 848).
+- *2p.* 38.4% against best-2p made fair; the gain over the first stage is inside the noise. fr3 took 45.0% from the same opponent (@exp:gen-base-1) with about 1.0B 2p decisions; the base has had 160M.
+- *Gain per step.* The first stage's last 236M steps added 4.05, 3.1 and 1.3 pp (@tab:gen-base-slope); these 996M added 2.2, 3.4 and 2.4 pp. Per step that is about an eighth at 2p, a quarter at 3p and under a half at 4p, with wide intervals on both sides. Two things differ and are not separated: the net is further along, and the rate here was 0.0005 throughout where the last stretch of the first stage fell from 0.0011 to 0.0005.
+- *Critic.* Its Brier score on its own self-play did not move: 0.136, 0.173 and 0.156 at 2p, 3p and 4p over the last 100 epochs (first stage: 0.136, 0.176, 0.159). Entropy fell from 0.129 to 0.108.
+- *The run.* One container, no preemption. 5.88 h billed with the compile and the finals, \$15.19; 47,500 agent steps a second over the wall clock. The run and its 39 checkpoints are on the Volume and in `runs/gen-base-2/main` here. Registered as `mix-graph-seat-s-2`.
 
 #repro(```sh
 # from the wt/modal worktree
