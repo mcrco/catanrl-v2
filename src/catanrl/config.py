@@ -32,8 +32,14 @@ eval (resolution copies its suite, lineup, every, metric and fill into
 is optional the same way (:data:`TRAIN_OPTIONAL`): absent from
 ``configs/train/ppo.yaml``, so a config without it keeps its hash. So is an
 AlphaZero variant's ``train.reuse`` (absent from ``configs/train/alphazero.yaml``),
+its ``train.forced_playouts`` and ``train.root_policy_temperature``,
 and its ``train.outcome_vp_coef`` / ``outcome_turns_coef`` with the optional
-``model.args.outcome`` (the outcome head: :data:`catanrl.models.OPTIONAL_ARGS`).
+``model.args.outcome`` (the outcome head: :data:`catanrl.models.OPTIONAL_ARGS`),
+its ``train.soft_policy_coef`` / ``soft_policy_temperature`` with the optional
+``model.args.soft_policy`` (the soft policy head), and its ``train.value_search_blend``
+/ ``value_blend_iterations``, ``train.surprise_weight`` / ``surprise_cap`` and
+``train.decided_value`` / ``decided_lookback`` / ``decided_full_search_prob`` /
+``decided_fast_sims`` (:func:`check_alphazero_kata`).
 ``runtime.search_groups`` is optional too (``runtime`` is not hashed; unset,
 the AlphaZero trainer takes its default). So is ``obs.dice_state``
 (:data:`OPTIONAL`), the opt-in dice input: the balanced dice state in every
@@ -59,6 +65,7 @@ import difflib
 import fnmatch
 import hashlib
 import itertools
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -128,12 +135,36 @@ TRAIN_OPTIONAL: dict[str, dict[str, Any]] = {
     "ppo": {"stop_epoch": None},
     "alphazero": {"reuse": False, "outcome_vp_coef": 0.0, "outcome_turns_coef": 0.0},
 }
+#: ``forced_playouts`` / ``root_policy_temperature`` (AlphaZero): KataGo's forced playouts and
+#: root policy temperature in self-play's full searches (catanrl.train.alphazero; 0.0 / 1.0: off).
+TRAIN_OPTIONAL["alphazero"]["forced_playouts"] = 0.0
+TRAIN_OPTIONAL["alphazero"]["root_policy_temperature"] = 1.0
 #: train.precision of a PPO run: float32; bfloat16 (PuffeRL's own autocast, with train.amp);
 #: float16 (needs train.amp: catanrl.train.puffer's autocast and GradScaler).
 PRECISIONS = ("float32", "bfloat16", "float16")
 PARTS = ("actor", "critic")
+#: The parts ``init_from`` may name: the two it loads by default, and the outcome head
+#: (``model.args.outcome``), which comes along only when ``parts`` names it.
+INIT_PARTS = (*PARTS, "outcome")
 #: The parts ``train.freeze`` may name (a network's ``parts``; ``aux`` only on an aux head).
 FREEZE_PARTS = ("actor", "critic", "aux")
+#: More optional AlphaZero train keys, after KataGo (catanrl.train.alphazero says what each
+#: does; :func:`check_alphazero_kata` checks them): the value target's share of the search's own
+#: value and the iterations it ramps over, replay sampling by policy surprise and its cap, the
+#: soft policy head's loss (``model.args.soft_policy``) and its target's temperature, and the
+#: smaller searches of decided games.
+TRAIN_OPTIONAL["alphazero"].update({
+    "value_search_blend": 0.0,
+    "value_blend_iterations": 0,
+    "surprise_weight": 0.0,
+    "surprise_cap": 0.0,
+    "soft_policy_coef": 0.0,
+    "soft_policy_temperature": 4.0,
+    "decided_value": 0.0,
+    "decided_lookback": 0,
+    "decided_full_search_prob": 0.0,
+    "decided_fast_sims": 0,
+})
 RESTORE = ("weights", "weights+optimizer")
 #: Execution keys: set by the runner from ``runtime``, never under ``train``.
 EXECUTION_KEYS = {"device", "seed", "data_dir", "compile", "compile_mode", "cpu_offload", "torch_deterministic",
@@ -419,9 +450,12 @@ def _check_train(train: Any) -> dict:
     if algo == "alphazero":
         _check_alphazero_targets(out, base)
         _check_alphazero_reuse(out)
+        _check_alphazero_root(out)
         _check_alphazero_outcome(out)
     if algo == "distill":
         check_distill(out, base)
+    if algo == "alphazero":
+        check_alphazero_kata(out)
     return out
 
 
@@ -468,6 +502,23 @@ def _check_alphazero_reuse(train: Mapping[str, Any]) -> None:
                           "hold one seat's knowledge and do not carry over to the next seat's decision")
 
 
+def _check_alphazero_root(train: dict) -> None:
+    """train.forced_playouts / root_policy_temperature (optional, hashed when set): alphazero's
+    check_root_exploration, at resolution; kept as floats."""
+    for key, positive in (("forced_playouts", False), ("root_policy_temperature", True)):
+        if key not in train:
+            continue
+        value = train[key]
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+                or value < 0.0 or (positive and value == 0.0)):
+            raise ConfigError(f"train.{key} is a finite {'positive' if positive else 'non-negative'} number, "
+                              f"not {value!r}")
+        if train["root"] != "puct":
+            raise ConfigError(f"train.{key} shapes a PUCT root's selection; Sequential Halving plans a Gumbel "
+                              "root's visits itself (root: puct)")
+        train[key] = float(value)
+
+
 def _check_alphazero_outcome(train: dict) -> None:
     """train.outcome_vp_coef / outcome_turns_coef (optional, hashed when positive): non-negative
     numbers, kept as floats."""
@@ -484,10 +535,14 @@ def _check_alphazero_outcome(train: dict) -> None:
 def _check_outcome(cfg: Mapping[str, Any]) -> None:
     """``model.args.outcome`` (the outcome head) and its losses' weights come together: the
     AlphaZero trainer trains the head by train.outcome_vp_coef / outcome_turns_coef, and no
-    other trainer does."""
+    other trainer does. ``init_from`` loads the head (its ``outcome`` part) into a network that
+    has one."""
     if cfg.get("kind") != "train":
         return
     head = bool(((cfg.get("model") or {}).get("args") or {}).get("outcome", False))
+    if "outcome" in init_parts(cfg.get("init_from")) and not head:
+        raise ConfigError("init_from's outcome part loads the outcome head, which the network does not have: set "
+                          "model.args.outcome: true")
     train = cfg.get("train") or {}
     algo = train.get("algo")
     coefs = [key for key in ("outcome_vp_coef", "outcome_turns_coef") if train.get(key, 0.0) > 0.0]
@@ -529,6 +584,97 @@ def _check_alphazero_targets(train: Mapping[str, Any], base: Mapping[str, Any]) 
         raise ConfigError("train.pending and train.fast_pending count a search's leaves per network round (>= 1)")
     if train["kernels"] not in ("torch", "fused", "fused16"):
         raise ConfigError(f"train.kernels must be torch, fused or fused16, not {train['kernels']!r}")
+
+
+def check_alphazero_kata(train: dict) -> None:
+    """The AlphaZero trainer's optional keys after KataGo (:data:`TRAIN_OPTIONAL`; each absent
+    or at its unset value when off), at resolution and again in the trainer
+    (alphazero.check_train): the value target's blend with the search value, replay sampling by
+    policy surprise, the soft policy loss and the smaller searches of decided games. Numbers are
+    kept as floats, in place."""
+    unset = TRAIN_OPTIONAL["alphazero"]
+
+    def number(key: str, rule: str, ok: Any) -> float:
+        value = train.get(key, unset[key])
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not ok(value):
+            raise ConfigError(f"train.{key} is {rule}, not {value!r}")
+        if key in train:
+            train[key] = float(value)
+        return float(value)
+
+    def count(key: str, rule: str) -> int:
+        value = train.get(key, unset[key])
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ConfigError(f"train.{key} is {rule}, not {value!r}")
+        return value
+
+    blend = number("value_search_blend", "the search value's share of the value target, in [0, 1] (0: the game "
+                   "result alone)", lambda v: 0.0 <= v <= 1.0)
+    if count("value_blend_iterations", "the iterations value_search_blend ramps up over (0: at once)") and not blend:
+        raise ConfigError("train.value_blend_iterations ramps train.value_search_blend: set that above 0")
+    surprise = number("surprise_weight", "the share of a minibatch sampled by policy surprise, in [0, 1) (0: "
+                      "uniform sampling)", lambda v: 0.0 <= v < 1.0)
+    cap = number("surprise_cap", "a cap on a position's surprise in multiples of the buffer's mean, above 1 (0: "
+                 "no cap)", lambda v: v == 0.0 or v > 1.0)
+    if cap and not surprise:
+        raise ConfigError("train.surprise_cap caps the surprise that train.surprise_weight samples by: set that "
+                          "above 0")
+    soft = number("soft_policy_coef", "a non-negative number (the weight of the soft policy head's loss; 0: none)",
+                  lambda v: v >= 0.0)
+    temperature = number("soft_policy_temperature", "the soft policy target's temperature, a positive number",
+                         lambda v: v > 0.0)
+    if temperature != unset["soft_policy_temperature"] and not soft:
+        raise ConfigError("train.soft_policy_temperature shapes the soft policy head's target: set "
+                          "train.soft_policy_coef above 0")
+    decided = number("decided_value", "the leader's value from which a game counts as decided, in (0.5, 1) (0: "
+                     "off)", lambda v: v == 0.0 or 0.5 < v < 1.0)
+    lookback = count("decided_lookback", "the searches in a row that must agree on a decided game's leader")
+    number("decided_full_search_prob", "a decided game's full-search probability, in [0, 1]",
+           lambda v: 0.0 <= v <= 1.0)
+    fast = count("decided_fast_sims", "a decided game's fast-search simulations (0: fast_sims)")
+    if not decided:
+        extra = [key for key in ("decided_lookback", "decided_full_search_prob", "decided_fast_sims")
+                 if train.get(key, unset[key]) != unset[key]]
+        if extra:
+            raise ConfigError(f"train.{extra[0]} is for decided games: set train.decided_value in (0.5, 1)")
+        return
+    if lookback < 1:
+        raise ConfigError("train.decided_value needs train.decided_lookback, the searches in a row (1 or more) "
+                          "that must give one leader that value")
+    if fast and fast != int(train["fast_sims"]) and not train.get("reuse", False):
+        raise ConfigError("train.decided_fast_sims gives a decided game's fast searches a budget of their own, "
+                          "which searches sharing one pool have (reuse: true); without it the fast pool runs "
+                          "fast_sims (leave decided_fast_sims out)")
+
+
+def _check_kata(cfg: Mapping[str, Any]) -> None:
+    """``model.args.soft_policy`` (the soft policy head) and ``train.soft_policy_coef`` come
+    together, with the AlphaZero trainer only (as the outcome head and its weights do); and the
+    keys that read the search's value for the seat to move (``train.value_search_blend``,
+    ``train.decided_value``) are for 2-player games: the engine keeps a root action's value for
+    that seat alone, from which only a 2-player game gives the other seat's."""
+    if cfg.get("kind") != "train":
+        return
+    head = bool(((cfg.get("model") or {}).get("args") or {}).get("soft_policy", False))
+    train = cfg.get("train") or {}
+    algo = train.get("algo")
+    coef = train.get("soft_policy_coef", 0.0) > 0.0
+    if head and algo != "alphazero":
+        raise ConfigError(f"model.args.soft_policy (the soft policy head) trains with train.algo alphazero, "
+                          f"not {algo}")
+    if coef and not head:
+        raise ConfigError("train.soft_policy_coef weighs the soft policy head's loss: set model.args.soft_policy: "
+                          "true (on a shared graph trunk)")
+    if head and not coef:
+        raise ConfigError("model.args.soft_policy adds the soft policy head, which only its loss trains: set "
+                          "train.soft_policy_coef above 0")
+    if algo != "alphazero":
+        return
+    seats = max((int(entry["game"]["num_players"]) for entry in cfg["env"]["scenarios"]), default=2)
+    for key in ("value_search_blend", "decided_value"):
+        if train.get(key, 0.0) > 0.0 and seats > 2:
+            raise ConfigError(f"train.{key} reads the search's value for both seats of a 2-player game; "
+                              f"env.scenarios has a {seats}-player game")
 
 
 def check_distill(train: Mapping[str, Any], base: Mapping[str, Any] | None = None) -> None:
@@ -596,10 +742,10 @@ def _check_semantics(cfg: dict) -> None:
         if "ckpt" not in init:
             raise ConfigError("init_from needs ckpt")
         parts = init.get("parts", list(PARTS))
-        if not set(parts) <= set(PARTS) or not parts:
-            raise ConfigError(f"init_from.parts must be a non-empty subset of {PARTS}")
-        if isinstance(init["ckpt"], Mapping) and not set(init["ckpt"]) <= set(PARTS):
-            raise ConfigError(f"init_from.ckpt per part takes keys {PARTS}")
+        if not set(parts) <= set(INIT_PARTS) or not parts:
+            raise ConfigError(f"init_from.parts must be a non-empty subset of {INIT_PARTS}")
+        if isinstance(init["ckpt"], Mapping) and not set(init["ckpt"]) <= set(INIT_PARTS):
+            raise ConfigError(f"init_from.ckpt per part takes keys {INIT_PARTS}")
         if init.get("restore", "weights") not in RESTORE:
             raise ConfigError(f"init_from.restore must be one of {RESTORE}")
         if not isinstance(init.get("split_shared", False), bool):
@@ -618,6 +764,7 @@ def _check_semantics(cfg: dict) -> None:
                                   "obs.dice_state: true")
     _check_obs(cfg)
     _check_outcome(cfg)
+    _check_kata(cfg)
     select = cfg["eval"]["select"]
     if select is not None and ("suite" not in select or "lineup" not in select):
         raise ConfigError("eval.select needs suite and lineup")

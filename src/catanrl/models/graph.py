@@ -26,6 +26,11 @@ Differences from v1's port, all because v2 rows carry the graph explicitly:
   Training only (the AlphaZero trainer's ``outcome_vp_coef`` / ``outcome_turns_coef``):
   no play-time path runs it, and it is built last, so the other parts' weights and
   outputs do not depend on it;
+* an optional soft policy head (``soft_policy``, on a shared trunk): a second
+  :class:`GraphPolicyHead` on the same embeddings, trained towards the policy target
+  raised to 1 / T (the AlphaZero trainer's ``soft_policy_coef`` /
+  ``soft_policy_temperature``; KataGo's and Canopy's soft policy). Training only, and
+  built after the outcome head, so every other part is the network's without it;
 * rows with the dice input (``obs.dice_state``: the balanced dice state, the last
   global features and the last features of each tile) feed it through projections
   of their own, ``dice_projection`` and ``tile_dice_projection`` (no bias, zero at
@@ -69,7 +74,12 @@ GRAPH_DEFAULTS: dict[str, Any] = {
 #: (catanrl.models.resolve_spec), so a network without them has the spec, and a config the hash,
 #: it had before they existed. ``outcome``: the outcome head (:class:`GraphOutcomeHead`) on the
 #: shared trunk, trained by the AlphaZero trainer's train.outcome_vp_coef / outcome_turns_coef.
-GRAPH_OPTIONAL: dict[str, Any] = {"outcome": False}
+#: ``soft_policy``: the soft policy head (a second :class:`GraphPolicyHead`) on the shared trunk,
+#: trained by the AlphaZero trainer's train.soft_policy_coef.
+GRAPH_OPTIONAL: dict[str, Any] = {
+    "outcome": False,
+    "soft_policy": False,
+}
 POLICY_OUTPUT_GAIN = 0.01
 VALUE_OUTPUT_GAIN = 0.01
 AUX_OUTPUT_GAIN = 0.01
@@ -403,11 +413,12 @@ class GraphOutcomeHead(nn.Module):
 
 class GraphNetwork(nn.Module):
     """A trunk with a policy head, a value head or both; ``aux_features`` > 0 adds the
-    auxiliary head and ``outcome`` the outcome head, each after everything before it, so the
-    other parts' initial weights do not depend on them."""
+    auxiliary head, ``outcome`` the outcome head and ``soft_policy`` the soft policy head (a
+    second policy head), each after everything before it, so the other parts' initial weights
+    do not depend on them."""
 
     def __init__(self, reader, action_layout, *, args, num_players, policy: bool, value: bool,
-                 aux_features: int = 0, outcome: bool = False) -> None:
+                 aux_features: int = 0, outcome: bool = False, soft_policy: bool = False) -> None:
         super().__init__()
         self.trunk = GraphTrunk(
             reader, hidden=args["hidden"], global_hidden=args["global_hidden"], layers=args["layers"]
@@ -425,4 +436,7 @@ class GraphNetwork(nn.Module):
         self.outcome = (
             GraphOutcomeHead(self.trunk, head_hidden=args["head_hidden"], num_players=num_players)
             if outcome else None
+        )
+        self.soft_policy = (
+            GraphPolicyHead(self.trunk, action_layout, head_hidden=args["head_hidden"]) if soft_policy else None
         )
