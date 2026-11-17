@@ -1,29 +1,30 @@
-# NOT LAUNCHED. Marco, 2026-11-17: "we can leave the current run as is and do big batch next time".
+# gen-base-h512 with 8 times the rows per collection and 8 times the minibatch (Marco, 2026-11-17:
+# "why do we stay at 2^18 steps for each training? why not go more for 512 x 4096 or smth?",
+# "let's run the big batch in parallel", "big batch should have bigger minibatch and the same
+# number of updates").
 #
-# gen-base-h512 with 8 times the rows per collection (Marco: "why do we stay at 2^18 steps for
-# each training? why not go more for 512 x 4096 or smth?"). gen-base-h512 kept gen-base's 262,144
-# agent steps per update so the two compare, which meant 128 envs: 512 rows per forward and 512
-# forwards per collection. A forward on 512 rows takes almost as long as one on 4,096 (7.6 ms
-# against 8.8 ms on an L40S), so collection went from 1.2 s to 5.0 s per 262,144 steps and the
-# run from 47,600 to about 27,000 agent steps a second (10.4 h and about $27 against gen-base's
-# 5.97 h and $15.43).
+# gen-base-h512 kept gen-base's 262,144 agent steps per update so the two compare, which meant
+# 128 envs: 512 rows per forward and 512 forwards per collection. A forward on 512 rows takes
+# almost as long as one on 4,096 (7.6 ms against 8.8 ms on an L40S), so collection went from
+# 1.2 s to 5.0 s per 262,144 steps and the run from 47,600 to about 27,000 agent steps a second
+# (10.4 h and about $27 against gen-base's 5.97 h and $15.43).
 #
 # Here: 1,024 envs as gen-base (4,096 rows per forward) x 512 steps = 2,097,152 agent steps a
-# collection; everything else as gen-base-h512 (512-step segments, lambda 1, no discount, the
-# same 996M agent steps, cosine, seed and finals). The minibatch stays 32,768 rows with two
-# passes, so a collection gets 128 optimizer steps where gen-base-h512 gets 16: the same 60,800
-# updates in all, but the policy that collects is refreshed 8 times less often, and the later
-# updates of a collection train on data from an older policy. Expected speed: about gen-base's
-# (about 6 h and $16 on an L40S with 8 cores); not measured.
+# collection, and a minibatch of 262,144 rows (8x), so a collection still gets 8 minibatches x 2
+# passes = 16 optimizer steps. Everything else as gen-base-h512 (512-step segments, lambda 1, no
+# discount, the same 996M agent steps, the same peak and floor learning rate, seed and finals).
+# So the run makes 475 collections and 7,600 optimizer steps where gen-base and gen-base-h512
+# make 3,800 and 60,800: each step averages 8 times the rows, at an unchanged learning rate (not
+# rescaled for the batch), and the cosine advances once per collection (475 values). The work per
+# agent step is the same, so the speed should be about gen-base's (about 6 h and $16 on an L40S
+# with 8 cores); not measured before the launch.
 #
 # Compare with gen-base-h512 (isolates the batch; same finals, paired by game) and with gen-base.
 #
-# Before a launch:
-#   - memory: the rollout buffer is 8 times gen-base-h512's. Not checked against the L40S's
-#     48 GB or the container's RAM (32 GiB was enough for 262,144 steps); run two collections on
-#     Modal first and read the peak. It does not fit this box's 8 GB card.
-#   - the cosine's steps: it now advances once per 2,097,152 agent steps (475 values).
-#   - Marco's go and the worst-case cost, as for every Modal launch.
+# Memory: the rollout buffer lives on the GPU in float32, 3,395 floats a row: 26.6 GiB here
+# (3.3 GiB at 262,144 steps). Fits an L40S (48 GB), not this box's 8 GB card. A minibatch is
+# sampled and backpropagated in 4,096-row chunks (8 segments each; 64 chunks an optimizer step),
+# so the minibatch size does not change the peak of an update.
 name: gen-base-h512-big
 seed: 42
 env:
@@ -59,7 +60,7 @@ train:
   ent_coef: 0.005
   max_grad_norm: 4.0
   bptt_horizon: 512               # gen-base: 64 (header)
-  minibatch_size: 32768           # unchanged: 64 minibatches x 2 passes = 128 optimizer steps a collection
+  minibatch_size: 262144          # 8x gen-base's 32,768: 8 minibatches x 2 passes = 16 optimizer steps a collection (header)
   max_minibatch_size: 4096
   prio_alpha: 0.8
   prio_beta0: 0.2
@@ -84,5 +85,5 @@ meta:
   notes: |
     Report idea: longer rollout segments, lambda 1 and no discount (exp:gen-base-h512), on
     the generalist base: gen-base-h512 with 8x the rows per collection (Marco: "do big batch
-    next time"). Not launched.
+    next time", then "let's run the big batch in parallel"), minibatch 8x too.
 runtime: {device: cuda, threads: 12, num_envs: 512, compile: true}
