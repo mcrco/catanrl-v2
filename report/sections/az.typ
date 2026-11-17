@@ -945,3 +945,38 @@ python tools/explore_diag.py referee --positions pos.npz --search search.npz --o
 python tools/explore_diag.py report --search search.npz --referee referee.npz --out report.json
 ```)
 
+=== Six more KataGo pieces in one continued run: `az-2p-tricks` #chip("queued") <exp:az-tricks>
+#meta(
+  dates: "approved 2026-11-17; being built",
+  dates-label: "queued",
+  owner: "marco",
+  config: "configs/experiments/az-2p-tricks.yaml (to be written; code on wt/az-tricks and wt/az-root, unmerged)",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco (2026-11-17) asked which other KataGo tricks would help. Of Claude's list Marco approved four ("let's try 1-4 since they seem like they would increase computational efficiency") and added two for exploration ("forced playouts and root temperature could also help?"). Weight averaging was declined. All six go into one run of 900 iterations continued from the bundle's end, as in @exp:az-bundle: bundle first, ablate later. The settings below are provisional until two CPU measurements on the bundle's net come back.]
+
+*Question.* Does the bundle's net gain more from 900 further iterations with these six pieces than e1800 gained from the bundle's 900 (+0.75 pp, p = 0.56)?
+
+#lead[Setup.] From `az-2p-bundle/main@e900` (weights only, fresh optimizer, empty replay), the bundle's config plus:
+#figure(
+  btable(
+    columns: (auto, 1fr, 1fr),
+    align: (left, left, left),
+    header: ([Piece], [What changes], [Setting (provisional)]),
+    [1. Lower-noise value target], [The value target is the game result mixed with the search's own value of the position (Canopy mixes to 85% over 60 iterations). The search's value is weighted by the pruned visits, so noise-forced visits do not drag it.], [50% search value, ramped in over the first 60 iterations],
+    [2. Policy surprise weighting], [Replay rows are drawn more often where the search disagreed with the net's prior: half the draws uniform, half in proportion to the KL of the target from the prior (KataGo).], [share 0.5; a row's weight capped at 10× the mean],
+    [3. Soft policy side head], [A second policy head trained on the target raised to the power 1/4. The search never reads it; it starts as a copy of the policy head.], [temperature 4; loss weight 8 (KataGo, Canopy) unless the gradient measurement says it swamps the clip],
+    [4. Smaller searches in decided games], [Once one seat's search value has been at least 0.9 for three searches in a row, full searches drop from a quarter to a sixteenth of the moves and fast searches from 100 to 50 visits. Recorded targets stay 600-visit ones.], [0.9, 3 searches, 1/16, 50 visits],
+    [5. Forced playouts], [At the root of a full search every move gets at least $sqrt(2 P N)$ visits (P its prior with noise, N the root's visits). The pruned target already removes those its value does not earn.], [k = 2 (KataGo)],
+    [6. Root temperature], [The root's prior is raised to the power 1/T before the noise is mixed in, in full searches only.], [T = 1.25 (KataGo's early-game value)],
+  ),
+  caption: [The six pieces. Every one is an optional key that leaves older configs and their hashes unchanged.],
+) <tab:az-tricks>
+- *What 5 and 6 can and cannot do.* Both act at the root only. The root is already the best explored node: the noise tries every legal move, the raw root visits have 0.75 nats of entropy against the net's 0.27, and 15 to 18% of root visits are pruned as noise-forced (@exp:az-explore). Below the root nothing widens the prior. A temperature of 1.25 also barely moves a prior that puts 0.999 on one move. The build measures how much each changes a 600-visit root on the bundle's net before the launch.
+- *Not included.* Weight averaging (declined). A temperature on the prior at every node, which is the piece that would reach below the root (Claude's suggestion, not queued; it is the knob of the parked sweep in @exp:az-explore).
+
+#lead[Evals.] As the bundle: no in-run evals, one final row: the last checkpoint in the deployed search (1,024 sims) against raw fr3 on heldout-2p-fr's first 1,000 boards × 2 seats, paired by game (exact McNemar) with the bundle's row `b5483151` (63.70%) and e1800's `ea257443` (62.95%). 2,000 games give #sym.plus.minus 2.2 pp on the row and detect a paired difference of about 2.7 pp.
+
+#lead[Cost.] The bundle ran 42.7 iterations an hour: 900 iterations are about 21 h on the local GPU, less by whatever piece 4 saves, plus 2.4 h for the final row (about a tenth of the wall-clock). Starts after `horizon-2p` (@exp:recipe-horizon) and the merges.
+
