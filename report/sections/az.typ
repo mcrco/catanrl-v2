@@ -684,7 +684,7 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 - *Check on the GPU.* With the head in the network, self-play and the evals give the same logits and values as without it. In 6 learning steps the mean error fell from 6.9 to 2.0 VP and from 19 to 7.6 turns (2.1 and 8.0 on positions not trained on).
 - *Logged.* `train/outcome_vp_loss`, `train/outcome_turns_loss`, `train/outcome_vp_mae` (in VP), `train/outcome_turns_mae` (in turns) and the same under `oos/`.
 
-*Result (@exp:az-bundle).* The head learned its targets: 1.6 VP and 6.6 turns of error on positions not trained on, from 2.2 and 8.5 early in the run. The value head is no more accurate than e1800's (Brier 0.129 against 0.128) and the search gained +0.75 pp (interval −1.6 to +3.1), with the dice input in the same run. Its own effect is not separated.
+*Result (@exp:az-bundle).* The head learned its targets: 1.6 VP and 6.6 turns of error on positions not trained on, from 2.2 and 8.5 early in the run. The value head is about 1% more accurate than e1800's on shared positions (Brier 0.1148 against 0.1159, @exp:az-similarity), and the search gained +0.75 pp (interval −1.6 to +3.1), with the dice input in the same run. Its own effect is not separated.
 
 === 900 more iterations with the dice input and auxiliary targets: `az-2p-bundle` #chip("done") <exp:az-bundle>
 #meta(
@@ -694,7 +694,7 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
   wandb: (("az-2p-bundle-main-da6d1382", "az-2p-bundle/main"),),
   records: ("b5483151",),
 )
-#tldr[Marco (2026-11-15): bundle everything into the continued training first and ablate later; the goal is the best 1v1 bot. e1800 continues for 900 iterations with the dice input (@exp:dice-input) and the auxiliary targets (@exp:az-aux) on. After 160,906 more games the last checkpoint scores 63.70% on e1800's 2,000 held-out games: +0.75 pp over e1800 (interval −1.6 to +3.1, p = 0.56). No measurable gain; the 900 iterations before it gained 2.65 pp. The network does read the dice state and the new head learned its targets, but the value head is no more accurate than e1800's.]
+#tldr[Marco (2026-11-15): bundle everything into the continued training first and ablate later; the goal is the best 1v1 bot. e1800 continues for 900 iterations with the dice input (@exp:dice-input) and the auxiliary targets (@exp:az-aux) on. After 160,906 more games the last checkpoint scores 63.70% on e1800's 2,000 held-out games: +0.75 pp over e1800 (interval −1.6 to +3.1, p = 0.56). No measurable gain; the 900 iterations before it gained 2.65 pp. The network does read the dice state, the new head learned its targets, the critic is about 1% more accurate (@exp:az-similarity) and the raw policy is 3.8 pp stronger (@exp:az-raw).]
 
 *Question.* How strong is the search after 900 more iterations with both additions?
 
@@ -731,7 +731,7 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 - *Strength.* 63.70% (69.2% moving first, 58.2% second). Against e1800 on the same games: +0.75 pp, interval −1.6 to +3.1, 301 games won only by the bundle and 286 only by e1800.
 - *Reading.* The two additions and 900 more iterations together did not move the search by an amount this row can see. The row cannot tell "nothing" from "the earlier rate": e900 to e1800 gained 2.65 pp, which is inside the interval. A gain above about 3 pp is ruled out.
 - *Dice input.* The network uses it, a little. Its weights grew from zero to norm 2.25. On 512 probe positions, the network with the true dice state against the same network told the dice are fair: a different top move on 3.3% of positions, policies 0.017 nats apart on average (0.57 at most), values 0.018 apart.
-- *Auxiliary targets.* On positions not trained on, the head's error fell from 2.2 to 1.6 VP and from 8.5 to 6.6 turns over the run. The value head did not get more accurate with it: Brier 0.129 on fresh games at the end, against 0.128 at e1800's end (each on its own games).
+- *Auxiliary targets.* On positions not trained on, the head's error fell from 2.2 to 1.6 VP and from 8.5 to 6.6 turns over the run. On each run's own fresh games the value head's Brier score is the same (0.129 against e1800's 0.128); on one shared set of positions it is slightly better, 0.1148 against 0.1159 (paired interval −0.0020 to −0.0003, @exp:az-similarity).
 - *Net.* It picks e1800's top move at 94.1% of probe positions. Policy loss 0.276 (0.288 at e1800's end), value loss 0.384 (0.385).
 - *Time.* 24.1 h: 21.2 h of self-play (84 s an iteration, 68,300 leaves a second, 7.36M recorded positions) and 2.4 h for the row, 10% of the wall-clock.
 - *Without the search* (@exp:az-raw). The bundle's raw policy is better than e1800's: 53.4% against raw fr3 where e1800 scores 49.6%, +3.82 pp on the same 5,000 games (p = 1.5e-6). The gain shows without the search and barely inside it.
@@ -787,15 +787,15 @@ catanrl run configs/experiments/az-2p-bundle.yaml
 catanrl run configs/experiments/az-raw-2p.yaml
 ```)
 
-=== How the checkpoints differ: value and policy similarity over training #chip("queued") <exp:az-similarity>
+=== How the checkpoints differ: value and policy similarity over training #chip("done") <exp:az-similarity>
 #meta(
-  dates: "for the GPU after az-2p-bundle",
-  dates-label: "queued",
+  dates: "2026-11-16 20:19 – 20:22",
   owner: "marco",
+  config: "tools/checkpoint_similarity.py; report/data/az-similarity.json",
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-16): a difference measure between the critics of the checkpoints, and a similarity matrix between checkpoints over time. Every saved checkpoint from fr3 to the end of the bundled run reads one fixed set of positions; no games are played to compare them.]
+#tldr[Marco (2026-11-16): a difference measure between the critics of the checkpoints, and a similarity matrix between checkpoints over time. 111 checkpoints from fr3 to the end of the bundled run read the same 20,000 positions. The critic changed once, in the first 25 iterations, and its accuracy has been flat from e150 to e1800; the bundle moved it a little and made it slightly more accurate (Brier 0.1148 against 0.1159, paired interval −0.0020 to −0.0003). The policy has drifted at a steady pace the whole way, with no jump where the recipe changed.]
 
 *Question.* How far does each checkpoint's value and policy sit from every other's, and does the net drift steadily, settle, or jump where the recipe changed (e410's faster self-play, the bundle's new input and head)?
 
@@ -806,4 +806,43 @@ catanrl run configs/experiments/az-raw-2p.yaml
 - *Policy matrix.* For each pair, the share of positions where both prefer the same move, and the mean divergence between the two policies.
 - *Against the outcome.* Each checkpoint's value scored against who won the game (Brier score and log loss), to tell a critic that moved from one that got better.
 - *Cost.* Network forwards only: minutes on the GPU.
-- *Status.* Tool built in `wt/az-similarity` (`tools/checkpoint_similarity.py`: `play`, `score`, `report`), tested on the CPU only: 12 tests, and on 20 real positions the bundle's e0 and e1800 agree to 1e-6 in value with the same preferred moves. 111 checkpoints (e410, where the faster self-play began, is kept). Not yet run on the GPU or at full size.
+- *As run.* 2,000 games (none cut at the turn limit), 20,000 positions, 111 checkpoints: 45 s to play and under 2 min to score on the GPU. Tool: `tools/checkpoint_similarity.py` (`play`, `score`, `report`; 12 tests).
+
+#lead[Result.]
+#figure(
+  grid(columns: (1fr, 1fr), gutter: 6pt,
+    image("../figures/az-similarity-value.png", width: 100%),
+    image("../figures/az-similarity-policy.png", width: 100%),
+  ),
+  caption: [Every checkpoint against every other on the same 20,000 positions, by iteration (the bundle is 1,800 to 2,700). Left: mean absolute difference of the win probabilities; darker is further apart. Right: share of positions with the same preferred move; darker is closer. Lines mark where one run hands over to the next.],
+) <fig:az-similarity>
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Checkpoint], [Brier vs who won], [Value distance to fr3], [Same top move as fr3], [Same top move as e1800]),
+    [fr3 (e0)], [0.1244 #ci[0.1201][0.1288]], [0], [100%], [84.3%],
+    [e150], [0.1165 #ci[0.1111][0.1218]], [0.064], [93.3%], [],
+    [e300], [0.1160 #ci[0.1106][0.1214]], [0.066], [90.7%], [86.6%],
+    [e900], [0.1156 #ci[0.1103][0.1210]], [0.066], [87.1%], [91.8%],
+    [e1800], [0.1159 #ci[0.1103][0.1216]], [0.077], [84.3%], [100%],
+    [Bundle, 900 more], [0.1148 #ci[0.1093][0.1203]], [0.072], [83.0%], [93.1%],
+  ),
+  caption: [Brier score of the win probability against the game's winner, with intervals from a bootstrap over games (the rows share positions, so differences are far tighter than the intervals: see the text). Value distance: mean absolute difference of the win probabilities.],
+) <tab:az-similarity>
+- *The critic changed once.* 25 iterations of self-play moved fr3's win probabilities by 0.069 on average, the largest step between neighbouring checkpoints anywhere (the median step is 0.011). Its Brier score fell by 0.0080 by e150 (interval −0.0093 to −0.0067). fr3's critic was the less decided one: its win probabilities sit 0.26 from one half on average, the later ones 0.32.
+- *Then it wandered.* From e300 to e1800 any two critics are about 0.02 apart whether 300 or 900 iterations lie between them, not far above the 0.011 between neighbours, and the Brier score did not move (e1800 against e300: −0.0001, interval −0.0008 to +0.0006). The 5.25 pp the search gained over those iterations did not come from a more accurate critic on these positions.
+- *The bundle moved it.* The bundle's critics form a block of their own: 0.027 from the earlier ones, where 900 iterations used to give 0.021. They are slightly more accurate: e900 of the bundle against e1800, −0.0011 in Brier (interval −0.0020 to −0.0003, paired over games), about 1%. Which of the dice input and the outcome head did it is not separated.
+- *The policy drifts steadily.* Neighbouring checkpoints prefer the same move on 98.6% of positions, 300 iterations apart on 95.9%, 900 apart on 91.1%, and the agreement with fr3 keeps falling: 90.7% at e300, 87.1% at e900, 84.3% at e1800, 83.0% at the bundle's end. No jump at e410 (the faster self-play) or at the bundle's start; the bundle's policy moved no faster than before (93.1% agreement with e1800 after 900 iterations).
+- *With @exp:az-raw.* The policy kept moving while the critic's accuracy and the raw policy's strength stood still through e1800. What the search gained from those nets is not visible in either readout.
+- *Caveats.* The positions come from raw policies sampled at temperature 1, not from search self-play or from the search's own nodes, where the nets are actually read. Top-move agreement ignores how close the alternatives are.
+
+#repro(```sh
+python tools/checkpoint_similarity.py play --games 2000 --device cuda --out positions.npz \
+  --players az-2p-kata/main@e0 az-2p-kata/main+600-fast-noselect@e900 az-2p-kata/main+1500@e1800 az-2p-bundle/main@e900
+python tools/checkpoint_similarity.py score positions.npz --device cuda --out scores.npz \
+  --run az-2p-kata/main --run az-2p-kata/main+600 --run az-2p-kata/main+600-fast \
+  --run az-2p-kata/main+600-fast-noselect --run az-2p-kata/main+1500 --run az-2p-bundle/main
+uv run --no-project --with numpy --with matplotlib python tools/checkpoint_similarity.py report scores.npz \
+  --json similarity.json --figures figures/
+```)
