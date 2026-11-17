@@ -974,7 +974,7 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
   caption: [The six pieces. Every one is an optional key that leaves older configs and their hashes unchanged.],
 ) <tab:az-tricks>
 - *What 5 and 6 can and cannot do.* Both act at the root only. The root is already the best explored node: the noise tries every legal move, the raw root visits have 0.75 nats of entropy against the net's 0.27, and 15 to 18% of root visits are pruned as noise-forced (@exp:az-explore). Below the root nothing widens the prior. A temperature of 1.25 also barely moves a prior that puts 0.999 on one move. The build measures how much each changes a 600-visit root on the bundle's net before the launch.
-- *Not included.* Weight averaging (declined). A temperature on the prior at every node, which is the piece that would reach below the root (Claude's suggestion, not queued; it is the knob of the parked sweep in @exp:az-explore).
+- *Not included.* Weight averaging (declined). A temperature on the prior at every node, which is the piece that would reach below the root (Claude's suggestion; the knob of the parked sweep in @exp:az-explore): declined by Marco on 2026-11-17 ("let's just go with katago").
 
 #lead[Evals.] As the bundle: no in-run evals, one final row: the last checkpoint in the deployed search (1,024 sims) against raw fr3 on heldout-2p-fr's first 1,000 boards × 2 seats, paired by game (exact McNemar) with the bundle's row `b5483151` (63.70%) and e1800's `ea257443` (62.95%). 2,000 games give #sym.plus.minus 2.2 pp on the row and detect a paired difference of about 2.7 pp.
 
