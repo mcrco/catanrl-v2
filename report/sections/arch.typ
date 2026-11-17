@@ -252,7 +252,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 == Inputs
 
-=== The balanced-dice state as a network input #chip("running") <exp:dice-input>
+=== The balanced-dice state as a network input #chip("done") <exp:dice-input>
 #meta(
   dates: "2026-11-10 (next-roll odds), 2026-11-15 (the whole state)",
   dates-label: "built",
@@ -260,7 +260,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
   wandb: (),
   records: (),
 )
-#tldr[Marco's idea: keep track of the shuffled cards and pass that to the model. The search already rolls from the exact odds, but the network's value and prior are the same whatever the deck holds. An opt-in input gives it the deck, the recent rolls and the seven balance, on the board and on each tile. It trains first in the bundled AlphaZero run (@exp:az-bundle).]
+#tldr[Marco's idea: keep track of the shuffled cards and pass that to the model. The search already rolls from the exact odds, but the network's value and prior are the same whatever the deck holds. An opt-in input gives it the deck, the recent rolls and the seven balance, on the board and on each tile. Trained in the bundled AlphaZero run (@exp:az-bundle): the network reads it (a different top move on 3% of positions), and the search gained no measurable amount.]
 
 #lead[Why.] Marco's reading, #link("https://benburk.ca/catan-law-of-small-numbers/")["Exploiting the law of small numbers in Catan"], reverse-engineers Colonist's balanced dice: a 36-card deck reshuffled when 13 cards are left, a penalty on totals rolled in the last five rolls, and in 1v1 a multiplier on sevens that evens out each player's share and breaks streaks. A player who tracks all of it puts about 20% more probability on the roll that comes (0.26 bits a roll).
 - *Same dice.* `engine/cppanatron/include/cppanatron/dice.hpp` has the post's constants: refill at 13, a window of 5, 0.34 per recent copy, a seven multiplier clamped to 0–2 with ±0.4 per streak step.
@@ -283,4 +283,4 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *Check on the GPU.* A network warm-started with `init_from.zero_new_inputs` gives e1800's logits and values bit for bit on the fused kernels in full and half precision (plain PyTorch on the GPU: within 3e-6, the same best move). After 6 learning steps the input's weights have norm 0.10 and move the policy by 0.0002 nats on probe positions.
 - *Logged.* `dice/weight_norm`, and on fixed probe positions `dice/probe_kl`, `dice/probe_flips` and `dice/probe_value_gap`: the network with the true dice state against the same network told the dice are fair.
 
-*Status.* Training in @exp:az-bundle. The PPO pair planned on 2026-11-10 (`dice-input-2p`) is dropped for the bundled run.
+*Result (@exp:az-bundle).* After 900 iterations the input's weights have norm 2.25 (2.04 on the tiles, 0.94 on the board). Against the same network told the dice are fair, on 512 probe positions: a different top move on 3.3%, policies 0.017 nats apart on average, values 0.018 apart. The search gained +0.75 pp over e1800 (interval −1.6 to +3.1), with the auxiliary targets in the same run. Its own effect is not separated. The PPO pair planned on 2026-11-10 (`dice-input-2p`) is dropped for the bundled run.

@@ -662,7 +662,7 @@ modal run tools/modal_bench.py --job l40s-b1 --out OUT   # cpu | a10g-a | l40s-a
 perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 ```)
 
-=== Auxiliary targets: each seat's final VP and the turns left #chip("running") <exp:az-aux>
+=== Auxiliary targets: each seat's final VP and the turns left #chip("done") <exp:az-aux>
 #meta(
   dates: "2026-11-15",
   dates-label: "proposed",
@@ -670,7 +670,7 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
   wandb: (),
   records: (),
 )
-#tldr[Claude's suggestion, approved by Marco on 2026-11-15. KataGo trains its trunk on more than win or loss: ownership and score heads give many labels per position and are dropped at play time (about 1.65× training speed in its ablation). Catan's analogs: each seat's final VP and the number of turns left. It trains first in the bundled run (@exp:az-bundle).]
+#tldr[Claude's suggestion, approved by Marco on 2026-11-15. KataGo trains its trunk on more than win or loss: ownership and score heads give many labels per position and are dropped at play time (about 1.65× training speed in its ablation). Catan's analogs: each seat's final VP and the number of turns left. Trained in the bundled run (@exp:az-bundle): the head learned its targets, and the search gained no measurable amount.]
 
 - *Why.* A game gives the value head one bit. Final VP and game length are known for every stored position once its game ends, at no extra self-play.
 - *Heads.* Two small heads on the pooled state, trained with small weights beside the policy and value losses and never read at play time: the search, the kernels and the deployed bots use the same logits and values as without them.
@@ -684,18 +684,17 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 - *Check on the GPU.* With the head in the network, self-play and the evals give the same logits and values as without it. In 6 learning steps the mean error fell from 6.9 to 2.0 VP and from 19 to 7.6 turns (2.1 and 8.0 on positions not trained on).
 - *Logged.* `train/outcome_vp_loss`, `train/outcome_turns_loss`, `train/outcome_vp_mae` (in VP), `train/outcome_turns_mae` (in turns) and the same under `oos/`.
 
-*Status.* Training in @exp:az-bundle.
+*Result (@exp:az-bundle).* The head learned its targets: 1.6 VP and 6.6 turns of error on positions not trained on, from 2.2 and 8.5 early in the run. The value head is no more accurate than e1800's (Brier 0.129 against 0.128) and the search gained +0.75 pp (interval −1.6 to +3.1), with the dice input in the same run. Its own effect is not separated.
 
-=== 900 more iterations with the dice input and auxiliary targets: `az-2p-bundle` #chip("running") <exp:az-bundle>
+=== 900 more iterations with the dice input and auxiliary targets: `az-2p-bundle` #chip("done") <exp:az-bundle>
 #meta(
-  dates: "2026-11-15 19:20",
-  dates-label: "started",
+  dates: "2026-11-15 19:20 – 2026-11-16 19:24",
   owner: "marco",
   config: "configs/experiments/az-2p-bundle.yaml",
   wandb: (("az-2p-bundle-main-da6d1382", "az-2p-bundle/main"),),
-  records: (),
+  records: ("b5483151",),
 )
-#tldr[Marco (2026-11-15): bundle everything into the continued training first and ablate later; the goal is the best 1v1 bot. e1800 continues for 900 iterations with the dice input (@exp:dice-input) and the auxiliary targets (@exp:az-aux) on. One held-out row at the end, on e1800's games.]
+#tldr[Marco (2026-11-15): bundle everything into the continued training first and ablate later; the goal is the best 1v1 bot. e1800 continues for 900 iterations with the dice input (@exp:dice-input) and the auxiliary targets (@exp:az-aux) on. After 160,906 more games the last checkpoint scores 63.70% on e1800's 2,000 held-out games: +0.75 pp over e1800 (interval −1.6 to +3.1, p = 0.56). No measurable gain; the 900 iterations before it gained 2.65 pp. The network does read the dice state and the new head learned its targets, but the value head is no more accurate than e1800's.]
 
 *Question.* How strong is the search after 900 more iterations with both additions?
 
@@ -714,7 +713,29 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 - *Learning.* All losses finite; the two new losses fall (@exp:az-aux); the dice weights leave zero (@exp:dice-input).
 - *Two thresholds corrected.* The tool first printed FAIL: it asked plain PyTorch on the GPU for bit equality (off by 3e-6, the same best move) and the fused values for 1e-6 of plain PyTorch. e1800 itself misses both, so they now stand at rounding and at the kernel tests' 1e-5.
 
-*Status.* Running since 2026-11-15 19:20 (config `da6d1382`). Main's code is frozen until it ends.
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Network inside the 1,024-sim search], [Score vs fr3's fair raw bot], [Wins of 2,000], [Bundle paired against it], [p]),
+    [fr3, the start], [53.85 #ci[51.7][56.0]], [1,077], [+9.85 pp (484 vs 287)], [1e-12],
+    [e300 (55,100 games)], [57.70 #ci[55.5][59.8]], [1,154], [+6.00 pp (414 vs 294)], [0.000007],
+    [e900 (165,300 games)], [60.30 #ci[58.1][62.4]], [1,206], [+3.40 pp (360 vs 292)], [0.009],
+    [e1800 (329,200 games)], [62.95 #ci[60.8][65.0]], [1,259], [+0.75 pp (301 vs 286)], [0.56],
+    mid,
+    [Bundle, 900 more (490,100 games)], [63.70 #ci[61.6][65.8]], [1,274], [], [],
+  ),
+  caption: [`heldout-2p-fr`, first 1,000 boards in both seat orders, the same 2,000 games in every row; McNemar's exact test on the games only one of the pair won.],
+) <tab:az-bundle>
+- *Strength.* 63.70% (69.2% moving first, 58.2% second). Against e1800 on the same games: +0.75 pp, interval −1.6 to +3.1, 301 games won only by the bundle and 286 only by e1800.
+- *Reading.* The two additions and 900 more iterations together did not move the search by an amount this row can see. The row cannot tell "nothing" from "the earlier rate": e900 to e1800 gained 2.65 pp, which is inside the interval. A gain above about 3 pp is ruled out.
+- *Dice input.* The network uses it, a little. Its weights grew from zero to norm 2.25. On 512 probe positions, the network with the true dice state against the same network told the dice are fair: a different top move on 3.3% of positions, policies 0.017 nats apart on average (0.57 at most), values 0.018 apart.
+- *Auxiliary targets.* On positions not trained on, the head's error fell from 2.2 to 1.6 VP and from 8.5 to 6.6 turns over the run. The value head did not get more accurate with it: Brier 0.129 on fresh games at the end, against 0.128 at e1800's end (each on its own games).
+- *Net.* It picks e1800's top move at 94.1% of probe positions. Policy loss 0.276 (0.288 at e1800's end), value loss 0.384 (0.385).
+- *Time.* 24.1 h: 21.2 h of self-play (84 s an iteration, 68,300 leaves a second, 7.36M recorded positions) and 2.4 h for the row, 10% of the wall-clock.
+- *Caveats.* The replay and the optimizer started fresh, which the earlier 900 iterations did not have to pay for: the replay took about 60 iterations to fill. One row against one opponent at one search size; the parts are not separated.
+- *Registered* as `2p-graph-s-7` (`az-2p-bundle/main@e900#ad8c2caf507b`). OpenHex keeps e1800 (`catanrl-1v1-search-v3.1`): the row gives no reason to swap.
 
 #repro(```sh
 python tools/bundle_smoke.py --runs <scratch dir>   # the GPU check, ~15 min
