@@ -945,15 +945,15 @@ python tools/explore_diag.py referee --positions pos.npz --search search.npz --o
 python tools/explore_diag.py report --search search.npz --referee referee.npz --out report.json
 ```)
 
-=== Six more KataGo pieces in one continued run: `az-2p-tricks` #chip("running") <exp:az-tricks>
+=== Six more KataGo pieces in one continued run: `az-2p-tricks` #chip("done") <exp:az-tricks>
 #meta(
-  dates: "2026-11-17 07:15 –",
+  dates: "2026-11-17 07:15 – 2026-11-18 03:37",
   owner: "marco",
   config: "configs/experiments/az-2p-tricks.yaml",
   wandb: (("az-2p-tricks-main-e2ac082a", "az-2p-tricks/main"),),
-  records: (),
+  records: ("cc4ccbcc",),
 )
-#tldr[Marco (2026-11-17) asked which other KataGo tricks would help. Of Claude's list Marco approved four ("let's try 1-4 since they seem like they would increase computational efficiency") and added two for exploration ("forced playouts and root temperature could also help?"). Weight averaging was declined. All six go into one run of 900 iterations continued from the bundle's end, as in @exp:az-bundle: bundle first, ablate later. All six are built and measured on the bundle's net. The measurements say 3 needed a much smaller weight, 4 will touch about 40% of the moves, and 1, 5 and 6 will change little. Running on the local GPU since 07:15 on 2026-11-17 at about 53 iterations an hour (the bundle: 42.7): about 17 h, then 2.4 h for the final row.]
+#tldr[Marco (2026-11-17) asked which other KataGo tricks would help. Of Claude's list Marco approved four ("let's try 1-4 since they seem like they would increase computational efficiency") and added two for exploration ("forced playouts and root temperature could also help?"). Weight averaging was declined. All six go into one run of 900 iterations continued from the bundle's end, as in @exp:az-bundle: bundle first, ablate later. All six are built and measured on the bundle's net. The measurements say 3 needed a much smaller weight, 4 will touch about 40% of the moves, and 1, 5 and 6 will change little. *Result:* in the 1,024-sim search the new net (`2p-graph-s-8`) scores 64.65% against fr3's raw bot, +0.95 pp over the bundle on the same games (p = 0.47) and +1.70 pp over e1800 (p = 0.20): no gain this row can see. The 900 iterations took 15% less time than the bundle's (18.0 h against 21.2 h).]
 
 *Question.* Does the bundle's net gain more from 900 further iterations with these six pieces than e1800 gained from the bundle's 900 (+0.75 pp, p = 0.56)?
 
@@ -1020,5 +1020,28 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 
 #lead[Evals.] As the bundle: no in-run evals, one final row: the last checkpoint in the deployed search (1,024 sims) against raw fr3 on heldout-2p-fr's first 1,000 boards × 2 seats, paired by game (exact McNemar) with the bundle's row `b5483151` (63.70%) and e1800's `ea257443` (62.95%). 2,000 games give #sym.plus.minus 2.2 pp on the row and detect a paired difference of about 2.7 pp.
 
-#lead[Cost.] The bundle ran 42.7 iterations an hour, which would make 900 iterations 21 h. With piece 4 the run makes about 53: about 17 h on the local GPU, plus 2.4 h for the final row (an eighth of the wall-clock). Launched at 07:15 on 2026-11-17 after `horizon-2p` was stopped (@exp:recipe-horizon) and the branches were merged.
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Network inside the 1,024-sim search], [Score vs fr3's fair raw bot], [Wins of 2,000], [This run paired against it], [p]),
+    [fr3, the start], [53.85 #ci[51.7][56.0]], [1,077], [+10.80 pp (488 vs 272)], [4e-15],
+    [e300 (55,100 games)], [57.70 #ci[55.5][59.8]], [1,154], [+6.95 pp (409 vs 270)], [1e-7],
+    [e900 (165,300 games)], [60.30 #ci[58.1][62.4]], [1,206], [+4.35 pp (385 vs 298)], [0.001],
+    [e1800 (329,200 games)], [62.95 #ci[60.8][65.0]], [1,259], [+1.70 pp (351 vs 317)], [0.20],
+    [Bundle, 900 more (490,100 games)], [63.70 #ci[61.6][65.8]], [1,274], [+0.95 pp (313 vs 294)], [0.47],
+    mid,
+    [This run, 900 more (650,000 games)], [64.65 #ci[62.5][66.7]], [1,293], [], [],
+  ),
+  caption: [`heldout-2p-fr`, first 1,000 boards in both seat orders, the same 2,000 games in every row; McNemar's exact test on the games only one of the pair won. Records `809619df`, `e917f9bb`, `4411825a`, `ea257443`, `b5483151`, `cc4ccbcc`.],
+) <tab:az-tricks-result>
+- *Strength.* 64.65% (68.1% moving first, 61.2% second), the highest row of the line. Against the bundle on the same games: +0.95 pp, interval −1.5 to +3.4. Against e1800: +1.70 pp, interval −0.8 to +4.2.
+- *Reading.* The six pieces and 900 more iterations did not move the search by an amount this row can see, and the step is the size of the bundle's own (+0.75 pp). The line is flattening: +6.45 pp over the first 900 iterations, +2.65 pp over the next 900, +1.70 pp over the last 1,800 together (p = 0.20).
+- *Speed.* 69.8 s an iteration (median) against the bundle's 84.4 s, at 66,300 leaves a second: 18.0 h for 900 iterations against 21.2 h. Piece 4 does it: 38% of decisions were in decided games and 18% of the moves got a full search (the bundle: 25%). The run played 159,919 games (the bundle: 160,906) and recorded 5.27M positions (the bundle: 7.36M), so each recorded position was drawn about 5.6 times.
+- *Health.* No game was cut at the turn limit in any iteration. Value loss flat at 0.545 from iteration 100 on (the target is half search value, so it is not comparable with the bundle's 0.384); policy loss 0.679 at iteration 261 and 0.654 at the end; soft policy loss 1.42. The net picks the bundle's top move on 89.1% of probe positions at the end. The surprise-weighted draws kept an effective sample size of 47% of the buffer.
+- *What it does not say.* Which piece did what: all six went in together (bundle first, ablate later), and pieces can cancel. A gain above about 3.4 pp over the bundle is ruled out; a loss is not.
+- *Name.* `2p-graph-s-8` (`az-2p-tricks/main@e900#8f4cb767d188`). Not deployed: the bot on OpenHex is still e1800.
+
+#lead[Cost.] Planned: the bundle ran 42.7 iterations an hour, which would make 900 iterations 21 h. With piece 4 the run makes about 53: about 17 h on the local GPU, plus 2.4 h for the final row (an eighth of the wall-clock). Launched at 07:15 on 2026-11-17 after `horizon-2p` was stopped (@exp:recipe-horizon) and the branches were merged. Actual: 18.0 h of self-play (51.5 iterations an hour) and 2.4 h for the row, 12% of the 20.4 h.
 

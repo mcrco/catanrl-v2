@@ -53,6 +53,12 @@ models:
     from: 2p-graph-s-6
     steps: 2_109_542_400
     use: 2p-graph-s-6 after 900 more iterations (160,906 games) with the dice-state input and the outcome head; in the 1,024-sim search 63.7% vs fr3's raw bot against 62.95% with 2p-graph-s-6 (not significant); not deployed
+  2p-graph-s-8:
+    ref: "az-2p-tricks/main@e900#8f4cb767d188"
+    rules: base-2p-fr
+    from: 2p-graph-s-7
+    steps: 2_139_033_600
+    use: 2p-graph-s-7 after 900 more iterations (159,919 games) with six KataGo pieces (search-value blend, surprise weighting, soft policy head, small searches in decided games, forced playouts, root temperature); in the 1,024-sim search 64.65% vs fr3's raw bot against 63.7% with 2p-graph-s-7 (not significant); not deployed
   2p-graph-m-1:
     ref: "graph-m-2p-lr/main@e22711#673425d606b5"
     rules: base-2p-fr

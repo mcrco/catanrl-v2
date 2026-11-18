@@ -247,15 +247,15 @@ catanrl run configs/experiments/predict-vs-belief.yaml
 
 == Open
 
-=== Head to head in 2p: true state, sampled worlds, `public` net #chip("queued") <exp:hidden-h2h-2p>
+=== Head to head in 2p: true state, sampled worlds, `public` net #chip("done") <exp:hidden-h2h-2p>
 #meta(
-  dates: "queued 2026-11-17",
+  dates: "2026-11-18 03:37 – 03:52",
   owner: "marco",
   config: "configs/experiments/puffer-graph2.yaml",
   wandb: (),
-  records: (),
+  records: ("aa4f654f", "b0142f85", "96947235"),
 )
-#tldr[Marco's experiment: the three raw 1v1 bots that differ only in what they know of the opponent's development cards, played against each other. Against F they are level (@exp:recipe-2p-public), but F loses 95% of its games either way. Queued behind `az-2p-tricks` on the local GPU; no result yet.]
+#tldr[Marco's experiment: the three raw 1v1 bots that differ only in what they know of the opponent's development cards, played against each other. Against F they are level (@exp:recipe-2p-public), but F loses 95% of its games either way. *Result:* all three are within 1.4 pp of even and no row is significant. The `public` net is not behind the `full` net (50.80% against it on the true state, 51.32% against it on sampled worlds). Seeing the cards instead of sampling them is worth about 1 pp at most (51.36% head to head, p = 0.056).]
 
 *Question.* Does seeing, sampling or not seeing the opponent's development cards change who wins between strong bots?
 
@@ -264,7 +264,25 @@ catanrl run configs/experiments/predict-vs-belief.yaml
 - *Rows.* True state against `public`, sampled against `public`, true state against sampled: 5,000 games each on `heldout-2p` (2,500 boards, both seats), ±1.4 pp at 50%. The first two rows share boards and opponent.
 - *Limits.* The October nets on the old 1v1 rules (no friendly robber, fair dice): no `public` net exists at today's strength.
 
-*Cost.* About ten minutes of GPU, after `az-2p-tricks` and its final row.
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, 1fr, auto, auto, auto, auto),
+    align: (left, left, right, right, right, left),
+    header: ([Slot 0], [Slot 1], [Slot 0's score], [Wins of 5,000], [p], [Record]),
+    [`full`, true state], [`public`], [49.20 #ci[47.8][50.6]], [2,460], [0.26], [`aa4f654f`],
+    [`full`, sampled worlds], [`public`], [48.68 #ci[47.3][50.1]], [2,434], [0.064], [`b0142f85`],
+    [`full`, true state], [`full`, sampled worlds], [51.36 #ci[50.0][52.7]], [2,568], [0.056], [`96947235`],
+  ),
+  caption: [`heldout-2p`, 2,500 boards in both seat orders. Wilson 95% intervals; p from the exact binomial test against 50%. No game was cut at the turn limit.],
+) <tab:hidden-h2h-2p>
+- *The `public` net loses nothing.* It scores 50.80% against the `full` net that reads its development cards and 51.32% against the same net on sampled worlds. Neither differs from even.
+- *Seeing against sampling.* Head to head the true state wins 51.36% (p = 0.056). Against the `public` net on the same games the true state does 0.52 pp better than sampled worlds (337 games won only by the true state, 311 only by sampled worlds; paired p = 0.33). If the opponent's cards are worth anything to this net, it is about 1 pp.
+- *Seats.* The first seat wins 52 to 55% in every row.
+- *Reading.* Between equal bots as against F (@exp:recipe-2p-public), the opponent's development cards do not decide 1v1 games for these nets. A fair `public` net is as good a base as a `full` one played through sampled worlds, and needs one forward pass instead of sixteen.
+- *What it does not say.* Whether a much stronger net would use the cards more, and whether this holds on today's rules.
+
+*Cost.* 15 minutes of GPU (1.3, 6.9 and 6.8 minutes), after `az-2p-tricks` and its final row.
 
 #repro(```sh
 catanrl eval --suite heldout-2p --device cuda "POLICY:ckpt=puffer-graph2/full@e3350#3355b5059503" "POLICY:ckpt=puffer-graph2/public@e3600#3cd78e6dafac"
