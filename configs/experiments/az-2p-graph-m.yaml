@@ -1,0 +1,109 @@
+# Search training on graph-m (Marco, 2026-11-18: "should i continue search trianing then? or try
+# search training on graph-m?"). The graph-s line has flattened: its last 1,800 iterations (39 h
+# of GPU) added 1.70 pp in the search (p = 0.20). graph-m's raw policy is the strongest we have
+# (2p-graph-m-1: 56.5% vs fr3) and has never trained on a search.
+#
+# What: ONE run from 2p-graph-m-1 (graph-m-2p-lr/main@e22711, PPO), 900 iterations of
+# az-2p-tricks' recipe with every train key unchanged (the bundle's pieces and the six KataGo
+# pieces: configs/experiments/az-2p-tricks.yaml's header describes each). Only the network, its
+# start and the time differ. Bundle first, ablate later.
+#
+# The start is as peaked as fr3 was when az-2p-kata began from it: in the 4-iteration smoke the
+# net's entropy at searched roots was 0.034-0.082 nats and the raw visit distribution sat 8-14 nats
+# of KL from it (az-2p-kata's first iterations: 0.04-0.05 and 10-15), while the pruned target sat
+# 0.18-0.46 nats away (az-2p-kata: 0.18-0.68). az-2p-kata learned from that start (+3.85 pp in the
+# search after 300 iterations). New here: the soft policy head and the surprise weighting meet a
+# peaked net for the first time (soft_policy_coef 0.125 was measured on the bundle's net; the
+# smoke's first soft loss was 17.4 against az-2p-tricks' 2.44, with the gradient clipped at 1.0
+# either way). Watch drift/agree_init, train/policy_loss and train/soft_policy_loss over the first
+# 50 iterations against az-2p-kata's (agree_init 0.96 at iteration 50).
+#
+# Kernels: graph-m runs on the fused kernels since 73c34e9 (one build per trunk width; the first
+# use compiles catanrl_graph_kernels_h192, about a minute).
+#
+# Evals: no select (eval-share-of-run-time). One final row, the lineage's: the deployed search on
+# the last checkpoint against BELIEF(fr3, 16 worlds) on heldout-2p-fr's first 1,000 boards x 2
+# seats = 2,000 games (+-2.2 pp), paired game for game with az-2p-tricks' row cc4ccbcc (64.65%,
+# 2p-graph-s-8) and with the start's row in the same search (report, exp:az-graph-m):
+# tools/search_probe.py --pair <that row> <this row's eval id>. The paired difference is
+# detectable from ~2.7 pp.
+#
+# Time (RTX 2070 SUPER): the smoke ran 123 s an iteration before the learner starts and the learner
+# adds ~8 s, so ~130 s an iteration, 27-28 an hour: 900 iterations = ~32.5 h of self-play
+# (az-2p-tricks: 70 s, 18.0 h). The final row's time is in the report (exp:az-graph-m).
+# `--smoke` cannot run this config (CUDA-only kernels; @e22711 under a pinned sha).
+#
+# Launch (main, GPU free):
+#   catanrl run configs/experiments/az-2p-graph-m.yaml
+name: az-2p-graph-m
+seed: 42                        # graph-m-2p-lr's: its training pool (map_pool from the seed)
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 512                 # games in flight
+obs: {level: full, dice_state: true}
+model: {preset: graph-m, args: {shared: true, outcome: true, soft_policy: true}}
+# 2p-graph-m-1, a PPO net: weights only, so a fresh optimizer and an empty replay. It has no dice
+# inputs (zero_new_inputs: their weights start at zero), no outcome head (fresh) and no soft policy
+# head (a copy of the policy head): at e0 its policy and value are 2p-graph-m-1's bit for bit
+init_from: {ckpt: "graph-m-2p-lr/main@e22711#673425d606b5", parts: [actor, critic], zero_new_inputs: true}
+train:                          # az-2p-tricks' train keys, unchanged (1-6: its six KataGo pieces)
+  algo: alphazero
+  iterations: 900               # ~32.5 h of self-play (header)
+  steps_per_iteration: 64       # x 512 games = 32,768 searched moves, ~8,192 of them recorded
+  root: puct
+  sims: 600                     # a full search (recorded)
+  fast_sims: 100                # the other moves (played only)
+  pending: 24                   # leaves per round of a full search
+  fast_pending: 4               # and of a fast one
+  full_search_prob: 0.25
+  decided_value: 0.9            # 4: a game is decided once one seat's search value was >= 0.9 ...
+  decided_lookback: 3           # 4: ... in its last 3 searches
+  decided_full_search_prob: 0.0625   # 4: full searches in decided games: a sixteenth of the moves
+  decided_fast_sims: 50         # 4: and their fast searches
+  record_fast: false            # only full searches enter replay
+  dets: 0                       # the true game (the network reads it whole)
+  reuse: true                   # a move's search starts from the last one's subtree
+  c_puct: 0.75
+  gumbel_m: 16                  # not read (root: puct)
+  dirichlet_noise: true         # full searches only
+  forced_playouts: 2.0          # 5: KataGo's k; a visited root move gets >= sqrt(k x prior x visits)
+  root_policy_temperature: 1.25 # 6: the root's prior ** (1 / 1.25) before the noise; full searches only
+  temperature_start: 1.0
+  temperature_end: 0.0
+  temperature_moves: 30
+  truncation_value: share
+  policy_target: pruned         # the visit distribution without the visits the noise forced
+  target_c_visit: 50.0          # not read (policy_target: gumbel's)
+  target_c_scale: 0.1
+  target_prior_temperature: 1.0
+  target_rescale: true
+  replay_capacity: 500_000      # ~61 iterations of recorded positions; 3.0 GB of RAM
+  min_replay: 50_000            # ~6 iterations of recorded positions (filed when their games end)
+  updates_per_iteration: 64     # x 512 = 32,768 samples per ~8,192 new positions
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  value_coef: 1.0
+  value_search_blend: 0.5       # 1: the value target is half the game result, half the search's root value
+  value_blend_iterations: 60    # 1: ramped in linearly over the first 60 iterations
+  surprise_weight: 0.5          # 2: half the replay draws go by policy surprise, half uniformly
+  surprise_cap: 10.0            # 2: a position's surprise counts up to 10x the buffer's mean
+  soft_policy_coef: 0.125       # 3: x the soft head's cross-entropy (az-2p-tricks' value: header)
+  soft_policy_temperature: 4.0  # 3: its target is the policy target ** (1 / 4)
+  outcome_vp_coef: 0.5          # x Huber on each seat's final victory points / 15 (header)
+  outcome_turns_coef: 0.5       # x Huber on the turns left / 100
+  max_grad_norm: 1.0            # over every parameter, the head's too
+  search_rows: 512              # rows per forward
+  kernels: fused16              # self-play forwards in float16 on the fused kernels
+  checkpoint_interval: 25       # ~55 min of self-play
+eval:
+  select: null                  # no in-run evals (header)
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}   # the lineage's 2,000 games
+      lineup:
+        - "MCTS:ckpt=${run}@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+# num_envs, infer_rows: the eval's games in flight (az-2p-tricks')
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512, time_limit_hours: 90}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

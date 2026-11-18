@@ -255,25 +255,79 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 === `graph-m` in the AlphaZero line #chip("todo") <exp:az-graph-m>
 #meta(
-  dates: "2026-11-15",
-  dates-label: "proposed",
+  dates: "2026-11-15 (proposed), 2026-11-18 (kernels built, config written)",
   owner: "marco",
+  config: "configs/experiments/az-2p-graph-m.yaml",
   wandb: (),
   records: (),
 )
-#tldr[Marco (2026-11-15): can the dice state go into `graph-m`? Yes: `graph-m` is the same network class as `graph-s` at other sizes, so the inputs of @exp:dice-input and the targets of @exp:az-aux attach unchanged, and `2p-graph-m-1` can take them with zero weights and play as before. What it lacks is speed: the fused kernels are written for `graph-s`'s width. Marco (2026-11-15): build the kernels; the run itself is not queued.]
+#tldr[*Ready to launch, not launched: the run awaits Marco's word.* Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so `graph-m` is the recommended next run. The fused kernels now fit it: an iteration of self-play takes about 130 s on this box against `graph-s`'s 70 s, so 900 iterations are about 32.5 h on the local GPU, at no cost. The start's row in the deployed search is running.]
+
+#lead[Earlier (2026-11-15).] Marco: can the dice state go into `graph-m`? Yes: `graph-m` is the same network class as `graph-s` at other sizes, so the inputs of @exp:dice-input and the targets of @exp:az-aux attach unchanged, and `2p-graph-m-1` can take them with zero weights and play as before. What it lacked was speed: the fused kernels were written for `graph-s`'s width. Marco (2026-11-15): build the kernels; the run itself is not queued.
 
 - *Sizes.* `graph-s`: hidden 96, 3 layers, 0.54M parameters. `graph-m`: hidden 192, 4 layers, 2.32M parameters (4.3×).
 - *Is Catan that complicated?* (Marco's doubt.) For small: HexN's 332k-parameter net with rollouts is rated above our search bot. For bigger: under one recipe `graph-m` ended 12.3 pp above `graph-s` against fr3 (@exp:arch-graph-m-2p-lr), the largest single gain measured here for a raw policy. Whether size still pays after self-play with search is not measured.
 - *Why.* `graph-m` beats `graph-s` as a raw policy (@exp:arch-graph-m-2p-lr), and on OpenHex's ladder raw networks sit above our search bot (@exp:deploy-ladder).
-- *Cost.* 3.4× `graph-s` per leaf on the PyTorch path (@exp:deploy-graph-m-check). Self-play runs on the fused half-precision kernels (@exp:az-speed), which are built for hidden 96; without them `graph-m` self-play is not affordable on this box. With them, an iteration should take roughly 3× `graph-s`'s 82 s (not measured).
+- *Cost.* 3.4× `graph-s` per leaf on the PyTorch path (@exp:deploy-graph-m-check). Self-play runs on the fused half-precision kernels (@exp:az-speed), which are built for hidden 96; without them `graph-m` self-play is not affordable on this box. With them, an iteration was guessed at roughly 3× `graph-s`'s 82 s; measured below at 130 s.
 - *On Modal* (Marco's question, 2026-11-17; projected, no `graph-m` self-play has been run). On an L40S `graph-m`'s search forward runs at 51,600 rows a second on the PyTorch path, against 520,000 for `graph-s` on the fused kernels (@exp:az-hardware), and an iteration evaluates 5.5M rows (@exp:az-modal-scale): about 110 s of card time beside 76 s of CPU work, so one process on 8 cores fills the card.
   - _Today's code_ (PyTorch path, one process, \$2.58 an hour): 20 to 30 iterations an hour, \$85 to \$130 per 1,000 iterations.
   - _With fused kernels_ (assumed 3 to 5× `graph-s`'s forward): \$55 to \$75 per 1,000 with one process; \$35 to \$70 with several processes on one card, which needs the trainer of @exp:az-modal-scale too.
   - _For scale._ `graph-s` costs \$59 per 1,000 with one process and \$19 to \$20 with several. fr3's line gained 3.85 pp in 300 iterations, 6.45 pp in 900 and 9.10 pp in 1,800; `graph-m` starts 4.85 pp behind e1800 (@exp:arch-graph-m-search).
   - A 5-iteration benchmark (about \$0.50) would replace these ranges with a number. Not run.
-- *Kernels.* Built after the dice input lands (`wt/dice2`), since the wide kernels must read the same new inputs.
 - *Start.* `2p-graph-m-1`, a PPO net: it has none of e1800's 329,221 games of self-play, so it starts behind in the search and has to make that up.
+
+#lead[Kernels (built 2026-11-18, commit `73c34e9`).] The trunk's width is now a constant of the build, so one source gives one compiled extension per width: `graph-s`'s is unchanged and `graph-m`'s (hidden 192) is built on first use. Depth and head widths were already free.
+- *`graph-s` unchanged.* On 3,000 positions of `2p-graph-s-8` the logits and values are bit for bit those of the code before the change, in full and half precision.
+- *`graph-m` against PyTorch* (3,000 positions self-played by `2p-graph-m-1`). Full precision: logits within 6.2e-4 on a scale of 735, values within 6e-7, the same best move on every row. Half precision: logits within 0.40, values within 3.2e-4, the same best move on 99.97% of rows, policies 2e-6 nats apart on average (6.8e-4 at most). `2p-graph-m-1`'s logits are 13× as large as `2p-graph-s-8`'s, so its absolute error is larger and its error relative to scale smaller.
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto),
+    align: (left, left, right, right),
+    header: ([Network], [Forward], [512 rows], [Rows a second]),
+    [`graph-m`], [PyTorch], [33.9 ms], [15,100],
+    [`graph-m`], [fused], [20.2 ms], [25,300],
+    [`graph-m`], [fused, half precision], [10.3 ms], [49,600],
+    mid,
+    [`graph-s`], [fused, half precision], [4.3 ms], [118,900],
+  ),
+  caption: [One 512-row forward on the RTX 2070 Super (`tools/kernels_check.py bench`). Self-play uses the half-precision kernels and the evals' search the full-precision ones.],
+) <tab:az-graph-m-kernels>
+- *Speed.* Half precision on the kernels is 3.3× the PyTorch path for `graph-m` and 2.4× slower than `graph-s` on the same kernels.
+- *Tests.* 10 new cases; the kernel file's 49 tests pass on the GPU, the CPU suite passes (1,274), and the GPU tests pass (148).
+
+#lead[Self-play, measured.] Four iterations of the run's config from `2p-graph-m-1` on this box (learner started early for the smoke; no W&B).
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([], [Seconds an iteration], [Leaves a second], [Iterations an hour]),
+    [`graph-m`, smoke], [123 (130 with the learner)], [34,600], [27 to 28],
+    [`graph-s`, `az-2p-tricks`], [70], [66,300], [51.5],
+  ),
+  caption: [Self-play with search on the RTX 2070 Super, 512 games in flight. `graph-m`: the median of iterations 2 to 4; its learner adds about 8 s (`graph-s`: about 4 s).],
+) <tab:az-graph-m-speed>
+- *Time.* 900 iterations at 130 s are about 32.5 h of self-play on this box (`az-2p-tricks`: 18.0 h), 1.9× `graph-s`, not the 3× guessed above.
+- *Warm start.* The net takes the dice inputs with zero weights, a fresh outcome head and a soft policy head copied from the policy head (2,320,100 to 3,483,177 parameters); its policy and value at the start are `2p-graph-m-1`'s exactly. No games were cut at the turn limit.
+- *A peaked start, as fr3's was.* `2p-graph-m-1`'s policy at searched roots has 0.03 to 0.08 nats of entropy, and the raw visit distribution sits 8 to 14 nats of KL from it. `az-2p-kata` began from fr3 at 0.04 to 0.05 nats and 10 to 15 nats (@exp:az-kata) and learned from there on the pruned target, which sits 0.2 to 0.5 nats from the net in both runs.
+- *New at such a start:* the soft policy head and the surprise weighting. The smoke's first soft loss was 17.4 (`az-2p-tricks`: 2.44) and its first policy loss 3.79 (0.68); the gradient is clipped at norm 1.0 either way. The smoke's learner ran on at most 17,000 positions, so its drift (85% agreement with the start after two learning iterations) says little about the run, which waits for 50,000. To watch over the first 50 iterations: `drift/agree_init` (`az-2p-kata`: 0.96 at iteration 50), the policy loss and the soft loss.
+
+#lead[The run (`az-2p-graph-m`; not launched).] From `2p-graph-m-1`, 900 iterations of `az-2p-tricks`' recipe with every training key unchanged; only the network and its start differ.
+- *Judged by* one final row, the lineage's: the 1,024-sim deployed search on the last checkpoint against fr3's fair raw bot on the same 2,000 games, paired with `2p-graph-s-8`'s row `cc4ccbcc` (64.65%) and with the start's row below. A paired difference is detectable from about 2.7 pp.
+- *The start's row* (running since 2026-11-18 12:43): `2p-graph-m-1` in the same 1,024-sim search on those 2,000 games; at 300 sims it scored 58.10% (@exp:arch-graph-m-search). About 4 to 4.5 h, estimated from its first half hour; the run's final row will take the same.
+- *Cost.* Local GPU: about 32.5 h of self-play and 4 to 4.5 h for the final row, an eval share near 12%; \$0. On Modal with one process (projected from the measured kernel speed, not run there): about 100 s an iteration, 25 h and about \$65 for 900 iterations of the \$86.96 left, so it would save about 7 h.
+- *What it cannot promise.* The first 900 iterations took the `graph-s` line from 53.85% to 60.30%. If `graph-m` gains as much from where it starts it lands near `2p-graph-s-8`; whether it goes past is the open question.
+
+#repro(```sh
+# kernels: equivalence and speed
+python tools/kernels_check.py equal --ckpt runs/graph-m-2p-lr/main/checkpoints/e022711.pt --rows 3000
+python tools/kernels_check.py bench --ckpt runs/graph-m-2p-lr/main/checkpoints/e022711.pt
+# the start's row
+catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --threads 12 --num-envs 256 --infer-rows 512 \
+  "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused" \
+  "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+# the run (after Marco's word)
+catanrl run configs/experiments/az-2p-graph-m.yaml
+```)
 
 == Inputs
 
