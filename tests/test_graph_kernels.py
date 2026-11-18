@@ -18,7 +18,7 @@ from catanatron.registry import SpecError
 
 from catanrl import games
 from catanrl.agents import check_spec_syntax
-from catanrl.envs.encoding import action_size, dims_for, row_layout
+from catanrl.envs.encoding import action_size, dims_for, make_encoder, row_layout
 from catanrl.models import build_model
 from catanrl.search import BatchEvaluator
 
@@ -243,3 +243,143 @@ def test_half_graphs_do_not_share_a_workspace_with_other_graphs(first, second):
     for _ in range(2):
         got = later(obs)
         assert np.array_equal(got[0], want[0]) and np.array_equal(got[1], want[1])
+
+
+# ---------------------------------------------------------------- other widths (graph-m)
+
+GRAPH_M = {"hidden": 192, "global_hidden": 96, "layers": 4, "head_hidden": 256}
+BUNDLE = {"outcome": True, "soft_policy": True}  # with the dice input: az-2p-tricks' network
+
+
+def wide_model(dice=False, seed=0, **args):
+    """graph-m's shape on base-2p-fr at the full level, at a trained scale (:func:`shared_model`),
+    with the dice input (``obs.dice_state``) when ``dice``."""
+    torch.manual_seed(seed)
+    dims = dims_for(["base-2p-fr"])
+    levels = {"level": "full", **({"dice_state": True} if dice else {})}
+    model = build_model({"class": "graph", "args": {**GRAPH_M, "shared": True, **args}}, dims=dims, levels=levels,
+                        num_actions=action_size(dims), layout=row_layout(dims, "full", None, dice))
+    with torch.no_grad():
+        for p in model.parameters():
+            p.mul_(3.0)
+    return model
+
+
+def wide_rows(model, count=48, seed=0):
+    """As :func:`rows`, along base-2p-fr's balanced dice and with their state in the rows when
+    the network reads it."""
+    config = games.load_game("base-2p-fr")
+    encoder = make_encoder(model.dims, "full", bool(model.levels.get("dice_state")))
+    rng = np.random.default_rng(seed)
+    out = []
+    for i in range(count):
+        game = config.cppanatron_game(map_seed=i, seed=i)
+        for _ in range(int(rng.integers(0, 300))):
+            if game.winning_color is not None:
+                break
+            actions = game.playable_actions
+            game.execute(actions[int(rng.integers(len(actions)))])
+        out.append(encoder.encode(game, game.current_player_index))
+    return np.stack(out)
+
+
+def test_the_kernels_are_built_per_width(monkeypatch):
+    """Hidden 96 is :func:`kernels` (the build graph-s always had), another multiple of 32 a
+    build of its own, anything else refused. (CPU, stub builds.)"""
+    from types import SimpleNamespace
+
+    from catanrl.models import graph_kernels
+
+    built = []
+    monkeypatch.setattr(graph_kernels, "_build", lambda hidden: built.append(hidden) or SimpleNamespace(hidden=hidden))
+    assert graph_kernels.kernels().hidden == 96 and graph_kernels.kernels_for(96).hidden == 96
+    assert graph_kernels.FusedGraph(shared_model(["base-2p"])).K.hidden == 96 and set(built) == {96}
+    fused = graph_kernels.FusedGraph(wide_model(dice=True, **BUNDLE))
+    assert fused.K.hidden == 192 and built[-1] == 192 and len(fused.layers) == 4
+    for hidden in (0, 16, 100, 200):
+        with pytest.raises(ValueError, match=f"multiple of 32, not {hidden}"):
+            graph_kernels.kernels_for(hidden)
+    sentinel = SimpleNamespace(hidden=96)
+    monkeypatch.setattr(graph_kernels, "kernels", lambda: sentinel)
+    assert graph_kernels.kernels_for(96) is sentinel
+
+
+@pytest.mark.gpu
+@needs_kernels
+@pytest.mark.parametrize("dice,args", [(False, {}), (True, BUNDLE)], ids=["plain", "bundle"])
+@pytest.mark.parametrize("mode", ["strict", "fast"])
+def test_fused_kernels_match_the_module_at_graph_m(dice, args, mode):
+    """graph-s's bounds at hidden 192 and four layers, without and with the dice input, the
+    outcome head and the soft policy head; the half kernels within theirs of the float ones."""
+    model = wide_model(dice, **args)
+    obs = wide_rows(model)
+    want = BatchEvaluator(model, device="cuda", infer_rows=16, mode=mode)(obs)
+    got = BatchEvaluator(model, device="cuda", infer_rows=16, mode=mode, kernels="fused")(obs)
+    assert_close(model, got, want, obs)
+    evaluator = BatchEvaluator(model, device="cuda", infer_rows=16, mode=mode, kernels="fused16")
+    half = evaluator(obs)
+    mask = obs[:, model.mask_offset: model.mask_offset + model.num_actions] > 0
+    assert evaluator.exact_forwards == 0 and evaluator.fused.K.hidden == 192
+    assert np.array_equal(half[0] > -1e8, mask) and np.all(half[0][~mask] == got[0][~mask])
+    assert np.isfinite(half[0]).all() and np.isfinite(half[1]).all()
+    scale = max(1.0, float(np.abs(got[0][mask]).max()))
+    assert 0 < np.abs(half[0][mask] - got[0][mask]).max() <= 4e-3 * scale
+    assert np.abs(half[1] - got[1]).max() <= 2e-3
+    log_want, log_got = (torch.log_softmax(torch.from_numpy(x[0]).double(), 1) for x in (got, half))
+    assert float((log_want.exp() * (log_want - log_got)).sum(1).max()) <= 1e-4
+    best = np.take_along_axis(got[0], half[0].argmax(1)[:, None], 1)[:, 0]
+    assert np.all(best >= got[0].max(1) - 4e-3 * scale)
+    if mode == "strict":
+        exact = evaluator.exact(obs)
+        assert np.array_equal(exact[0], got[0]) and np.array_equal(exact[1], got[1])
+
+
+@pytest.mark.gpu
+@needs_kernels
+@pytest.mark.parametrize("kernels", ["fused", "fused16"])
+def test_strict_fused_rows_do_not_depend_on_their_batch_at_graph_m(kernels):
+    model = wide_model(True, **BUNDLE)
+    obs = wide_rows(model, count=24)
+    evaluator = BatchEvaluator(model, device="cuda", infer_rows=8, mode="strict", kernels=kernels)
+    together = evaluator(obs)
+    shuffled = np.random.default_rng(1).permutation(len(obs))
+    apart = evaluator(obs[shuffled])
+    for i in range(len(obs)):
+        alone = evaluator(obs[i: i + 1])
+        assert np.array_equal(alone[0][0], together[0][i]) and np.array_equal(alone[1][0], together[1][i])
+    assert np.array_equal(apart[0], together[0][shuffled]) and np.array_equal(apart[1], together[1][shuffled])
+
+
+@pytest.mark.gpu
+@needs_kernels
+@pytest.mark.parametrize("name,factor", [
+    ("backbone.layers.3.node_self.weight", 1e4),   # the layer graph-s does not have
+    ("policy_head.road.0.weight", 1e4),
+], ids=["update", "road-1"])
+def test_a_half_past_its_range_is_evaluated_in_float_at_graph_m(name, factor):
+    model = wide_model(True, **BUNDLE)
+    with torch.no_grad():
+        dict(model.named_parameters())[name].mul_(factor)
+    obs = wide_rows(model, count=24)
+    want = BatchEvaluator(model, device="cuda", infer_rows=8, mode="strict", kernels="fused")(obs)
+    evaluator = BatchEvaluator(model, device="cuda", infer_rows=8, mode="strict", kernels="fused16")
+    got = evaluator(obs)
+    assert evaluator.exact_forwards == 3
+    assert np.array_equal(got[0], want[0]) and np.array_equal(got[1], want[1])
+
+
+@pytest.mark.gpu
+@needs_kernels
+def test_both_widths_run_side_by_side():
+    """Each width's extension is a module of its own: evaluators of graph-s and graph-m in one
+    process answer as they do alone."""
+    small, wide = shared_model(["base-2p"]), wide_model()
+    small_obs, wide_obs = rows(small, "base-2p", count=16), wide_rows(wide, count=16)
+    alone = BatchEvaluator(small, device="cuda", infer_rows=16, mode="strict", kernels="fused")(small_obs)
+    a = BatchEvaluator(small, device="cuda", infer_rows=16, mode="strict", kernels="fused")
+    b = BatchEvaluator(wide, device="cuda", infer_rows=16, mode="strict", kernels="fused")
+    assert a.fused.K is not b.fused.K and (a.fused.K.hidden, b.fused.K.hidden) == (96, 192)
+    first, other = a(small_obs), b(wide_obs)
+    again = a(small_obs)
+    assert np.array_equal(first[0], alone[0]) and np.array_equal(again[0], alone[0]) and np.array_equal(again[1], alone[1])
+    assert_close(wide, other, BatchEvaluator(wide, device="cuda", infer_rows=16, mode="strict")(wide_obs), wide_obs)

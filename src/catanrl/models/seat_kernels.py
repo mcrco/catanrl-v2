@@ -81,6 +81,7 @@ class FusedSeat(FusedGraph):
             raise ValueError("kernels=fused runs shared-trunk seat-set networks without an aux head "
                              "(model.args.aux; an outcome head is accepted: no kernel runs it)")
         K, KS = kernels(), seat_kernels()
+        self.K = K  # the heads' (FusedGraph._heads): the board is hidden 96 here
         trunk = model.backbone
         if trunk.hidden != K.hidden:
             raise ValueError(f"the graph kernels are built for hidden {K.hidden}, not {trunk.hidden}")

@@ -24,6 +24,15 @@ PyTorch module (both CUDA graphs). The outputs differ from the module's in the l
 using the kernels keys them (``MctsParams.kernels``). Built on first use with
 ``torch.utils.cpp_extension`` (nvcc on PATH; cached under ``~/.cache/torch_extensions``).
 
+The trunk's width is a constant of the build (a warp lane holds hidden / 32 units), its depth
+and the heads' widths are not: :func:`kernels` is the extension at hidden 96 (graph-s) and
+:func:`kernels_for` one of its own per other width, from the same source (graph-m's 192:
+``catanrl_graph_kernels_h192``), each built on first use and cached beside the others. On an
+RTX 2070 Super a 512-row forward of graph-m (hidden 192, four layers) takes 33.9 ms on the
+PyTorch module, 20.2 ms on :class:`FusedGraph` and 10.3 ms on :class:`FusedGraph16` (CUDA
+graphs; graph-s on :class:`FusedGraph16`: 4.3 ms), within the bounds above of the module
+(``tests/test_graph_kernels.py``, ``tools/kernels_check.py``).
+
 :class:`FusedGraph16` runs the same forward with its large GEMMs in half precision, for
 self-play search (``train.kernels: fused16``): its outputs are within half's rounding of
 these, not their bits, so the eval's agents and the deployed search stay on
@@ -41,23 +50,43 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-_KERNELS = None
+#: The trunk width ``graph_kernels.cu`` is written at (graph-s): :func:`kernels`' build.
+HIDDEN = 96
+_KERNELS: dict[int, object] = {}
 
 
 def kernels():
-    """The compiled extension (built on first use, then cached by torch)."""
-    global _KERNELS
-    if _KERNELS is None:
+    """The compiled extension at hidden 96 (built on first use, then cached by torch)."""
+    return _build(HIDDEN)
+
+
+def kernels_for(hidden: int):
+    """The compiled extension for a trunk of ``hidden`` units: :func:`kernels` at 96, and a build
+    of its own per other width (the same source with the width defined; built on first use,
+    then cached by torch under its own name). A warp lane holds hidden / 32 units, so the
+    width is a multiple of 32."""
+    if hidden == HIDDEN:
+        return kernels()
+    if hidden < 32 or hidden % 32:
+        raise ValueError(f"the graph kernels are built for a hidden that is a multiple of 32, not {hidden}")
+    return _build(hidden)
+
+
+def _build(hidden: int):
+    if hidden not in _KERNELS:
         from torch.utils.cpp_extension import load
 
         source = Path(__file__).with_name("graph_kernels.cu")
+        # Hidden 96 keeps the name and the flags it was always built with: the source's own width.
+        name, flags = "catanrl_graph_kernels", ["-O3"]
+        if hidden != HIDDEN:
+            name, flags = f"{name}_h{hidden}", [*flags, f"-DCATANRL_HPL={hidden // 32}"]
         try:
-            _KERNELS = load(name="catanrl_graph_kernels", sources=[str(source)], extra_cuda_cflags=["-O3"],
-                            verbose=False)
+            _KERNELS[hidden] = load(name=name, sources=[str(source)], extra_cuda_cflags=flags, verbose=False)
         except (OSError, RuntimeError) as error:
             raise RuntimeError(f"could not build the graph kernels ({error}); they need nvcc on PATH "
                                "(or play with kernels=torch)") from error
-    return _KERNELS
+    return _KERNELS[hidden]
 
 
 def _fold(weight: torch.Tensor, index: torch.Tensor, raw_width: int) -> torch.Tensor:
@@ -83,7 +112,7 @@ def fused_forward(model, kernels: str = "fused"):
 
 class FusedGraph:
     """The forward of a shared-trunk :class:`~catanrl.models.GraphModel` (no aux head,
-    hidden 96; an outcome head, ``model.args.outcome``, and a soft policy head,
+    hidden a multiple of 32, :func:`kernels_for`; an outcome head, ``model.args.outcome``, and a soft policy head,
     ``model.args.soft_policy``, are training only and are left out: the
     kernels read the trunk, the policy head and the value head, so the logits and values are
     those of the same weights without them) on a CUDA device: ``forward(obs)`` is (logits, values, overflow), the last
@@ -98,8 +127,8 @@ class FusedGraph:
         if getattr(model, "spec", {}).get("class") != "graph" or not getattr(model, "shared", False) or model.aux:
             raise ValueError("kernels=fused runs shared-trunk graph networks without an aux head (model.args.aux; "
                              "an outcome head and a soft policy head are accepted: no kernel runs them)")
-        K = kernels()
         trunk = model.backbone
+        K = self.K = kernels_for(trunk.hidden)
         if trunk.hidden != K.hidden:
             raise ValueError(f"the graph kernels are built for hidden {K.hidden}, not {trunk.hidden}")
         reader = trunk.reader
@@ -224,7 +253,7 @@ class FusedGraph:
 
     @torch.inference_mode()
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        K = kernels()
+        K = self.K
         obs = obs.float().contiguous()
         B, H, N, T, E = obs.shape[0], self.H, self.N, self.T, self.E
         (xn, xt, xe, vn, vt, ve, nn, nnc, ne, nec, nt, ntc, tn, tnc, en, enc, overflow) = K.topo(obs, self.layout)
@@ -272,7 +301,7 @@ class FusedGraph:
     def _heads(self, obs, nodes, tiles, edges, pooled, players, en, enc) -> tuple[torch.Tensor, torch.Tensor]:
         """(logits, values) from the final embeddings (float32). ``players``: the seat embeddings
         [B, P, width], or None for :meth:`_players`' (computed where the forward always did)."""
-        K = kernels()
+        K = self.K
         B, H, N, E = obs.shape[0], self.H, self.N, self.E
         other = self._mlp(pooled, self.other)
         sch = torch.relu_(torch.addmm(self.sc1[1], nodes, self.sc1[0]))
@@ -341,7 +370,7 @@ class FusedGraph16(FusedGraph):
 
     @torch.inference_mode()
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        K = kernels()
+        K = self.K
         obs = obs.float().contiguous()
         B, H, N, T, E = obs.shape[0], self.H, self.N, self.T, self.E
         (xn, xt, xe, vn, vt, ve, nn, nnc, ne, nec, nt, ntc, tn, tnc, en, enc, overflow) = K.topo(obs, self.layout)
@@ -386,7 +415,7 @@ class FusedGraph16(FusedGraph):
     def _heads16(self, obs, nodes, tiles, XR, pooled, players, en, enc, overflow) -> tuple[torch.Tensor, torch.Tensor]:
         """:meth:`_heads` on the half embeddings the last layer wrote: the nodes, the tiles and
         the road head's input with its edge half filled (the ends' sum is gathered here)."""
-        K = kernels()
+        K = self.K
         B, H, N, E = obs.shape[0], self.H, self.N, self.E
         other = self._mlp(pooled, self.other)
         sch = torch.addmm(self.sc1h[1], nodes, self.sc1h[0])  # the hidden layers' relus: in assemble16

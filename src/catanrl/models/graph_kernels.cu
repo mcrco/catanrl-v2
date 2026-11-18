@@ -5,6 +5,10 @@
 // products). A row's work reads only that row, so its outputs never depend on the other
 // rows of its batch. Kernel structs are selected by value per blockIdx.y: taking a
 // parameter's address puts it in local memory, which cost 30x on these kernels.
+// The trunk's width is a constant of the build: a warp works on one entity and each lane holds
+// hidden / 32 of its units in registers. This source is written at hidden 96 (graph-s);
+// graph_kernels.py builds an extension of its own per other width (-DCATANRL_HPL: graph-m's
+// 192 is 6). The heads' widths and the global state's are arguments.
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
@@ -14,7 +18,10 @@ namespace {
 
 constexpr int MAXD = 3;   // node degree caps (hex boards: <= 3 neighbours, edges, tiles)
 constexpr int CORNERS = 6;
-constexpr int HPL = 3;    // hidden / 32 (hidden 96)
+#ifndef CATANRL_HPL
+#define CATANRL_HPL 3     // hidden 96
+#endif
+constexpr int HPL = CATANRL_HPL;  // hidden / 32
 constexpr int H = 32 * HPL;
 
 __device__ __forceinline__ float warp_sum(float v) {
@@ -155,7 +162,7 @@ __global__ void gather_kernel(Gather g0, Gather g1, Gather g2, Gather g3, Gather
   if (w >= g.count) return;
   const int b = w / g.dst_per_row;
   const int c = g.cnt[w];
-  float acc[HPL] = {0.f, 0.f, 0.f};
+  float acc[HPL] = {};
   for (int j = 0; j < c && j < g.maxd; ++j) {
     const float* s = g.src + (b * g.src_per_row + g.idx[w * g.maxd + j]) * g.ss;
     for (int k = 0; k < HPL; ++k) acc[k] += s[lane + 32 * k];
@@ -331,7 +338,7 @@ __global__ void gather16_kernel(Gather16 g0, Gather16 g1, Gather16 g2, Gather16 
   if (w >= g.count) return;
   const int b = w / g.dst_per_row;
   const int c = g.cnt[w];
-  float acc[HPL] = {0.f, 0.f, 0.f};
+  float acc[HPL] = {};
   for (int j = 0; j < c && j < g.maxd; ++j) {
     const __half* s = g.src + (b * g.src_per_row + g.idx[w * g.maxd + j]) * g.ss;
     for (int k = 0; k < HPL; ++k) acc[k] += __half2float(s[lane + 32 * k]);
