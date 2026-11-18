@@ -247,6 +247,31 @@ catanrl run configs/experiments/predict-vs-belief.yaml
 
 == Open
 
+=== Head to head in 2p: true state, sampled worlds, `public` net #chip("queued") <exp:hidden-h2h-2p>
+#meta(
+  dates: "queued 2026-11-17",
+  owner: "marco",
+  config: "configs/experiments/puffer-graph2.yaml",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco's experiment: the three raw 1v1 bots that differ only in what they know of the opponent's development cards, played against each other. Against F they are level (@exp:recipe-2p-public), but F loses 95% of its games either way. Queued behind `az-2p-tricks` on the local GPU; no result yet.]
+
+*Question.* Does seeing, sampling or not seeing the opponent's development cards change who wins between strong bots?
+
+#lead[Setup.]
+- *Agents*, all raw policy, no search: the `full` net on the true state (`POLICY`, `puffer-graph2/full@e3350`; reads the opponent's development cards), the same net on sampled worlds (`BELIEF`, 16 worlds; fair), and the `public` net (`POLICY`, `puffer-graph2/public@e3600`; fair). The two nets share the recipe and budget.
+- *Rows.* True state against `public`, sampled against `public`, true state against sampled: 5,000 games each on `heldout-2p` (2,500 boards, both seats), ±1.4 pp at 50%. The first two rows share boards and opponent.
+- *Limits.* The October nets on the old 1v1 rules (no friendly robber, fair dice): no `public` net exists at today's strength.
+
+*Cost.* About ten minutes of GPU, after `az-2p-tricks` and its final row.
+
+#repro(```sh
+catanrl eval --suite heldout-2p --device cuda "POLICY:ckpt=puffer-graph2/full@e3350#3355b5059503" "POLICY:ckpt=puffer-graph2/public@e3600#3cd78e6dafac"
+catanrl eval --suite heldout-2p --device cuda "BELIEF:ckpt=puffer-graph2/full@e3350#3355b5059503:worlds=16" "POLICY:ckpt=puffer-graph2/public@e3600#3cd78e6dafac"
+catanrl eval --suite heldout-2p --device cuda "POLICY:ckpt=puffer-graph2/full@e3350#3355b5059503" "BELIEF:ckpt=puffer-graph2/full@e3350#3355b5059503:worlds=16"
+```)
+
 === What would read a better belief at 4p #chip("todo") <exp:hidden-open>
 #meta(
   owner: "assistant",
