@@ -1,0 +1,101 @@
+# Search training on graph-m, second launch: az-2p-graph-m with uniform replay draws (no surprise
+# weighting). Everything else is az-2p-graph-m's (configs/experiments/az-2p-graph-m.yaml: the idea,
+# the kernels, the evals, the time).
+#
+# Why: az-2p-graph-m/main collapsed as soon as its learner started (stopped at iteration 54,
+# 2026-11-18 18:25). Its raw policy scored 25.1% (e25) and 30.0% (e50) against its own start,
+# 2p-graph-m-1, over 5,000 games; az-2p-kata's and az-2p-tricks' e25/e50 score 48.8-50.2% against
+# theirs. Replaying the learner's first three iterations offline from e0 on the run's own replay
+# (50,906 positions of the start's self-play) reproduced the run (agreement with the start's top
+# move 0.874, 0.808, 0.765; the run: 0.871, 0.798, 0.756) and named the cause:
+#   - the recipe as run: 22.1% against the start (5,000 games) after those three iterations;
+#   - without the surprise weighting: 50.1%, agreement 0.948;
+#   - without it and the soft head's loss: 49.3%, agreement 0.975;
+#   - without the outcome head's losses: as the run; at a fifth of the learning rate: the same
+#     drift, slower.
+# On this peaked net the surprise is 0 at the median position and 4.2 nats at the 99th percentile
+# (max 65): 1.3% of positions sit at the cap and 1% of them take 27% of the draws (effective sample
+# size 0.083 of the buffer; az-2p-tricks: 0.33). The learner trained mostly on the few positions
+# where the search overruled a confident prior (policy loss 7.0 on its batches against 0.51 on
+# uniform rows) and unlearned the rest: the loss on uniform rows rose to 1.2.
+#
+# Kept: the soft policy head (its first loss is large here, 12-15 nats, but the strength held with
+# it) and every other train key.
+#
+# Watch: the raw policy against the start at e25 and e50 (5,000 games, 1 minute each; level is
+# healthy), drift/agree_init (az-2p-kata: 0.96 at iteration 50), train/policy_loss (falls from
+# ~0.5).
+#
+# Launch (main, GPU free):
+#   catanrl run configs/experiments/az-2p-graph-m-uniform.yaml
+name: az-2p-graph-m-uniform
+seed: 42                        # graph-m-2p-lr's: its training pool (map_pool from the seed)
+env:
+  scenarios: [{game: base-2p-fr, turn_limit: 1000, maps: 4096}]
+  num_envs: 512                 # games in flight
+obs: {level: full, dice_state: true}
+model: {preset: graph-m, args: {shared: true, outcome: true, soft_policy: true}}
+# 2p-graph-m-1, a PPO net: weights only, so a fresh optimizer and an empty replay. It has no dice
+# inputs (zero_new_inputs: their weights start at zero), no outcome head (fresh) and no soft policy
+# head (a copy of the policy head): at e0 its policy and value are 2p-graph-m-1's bit for bit
+init_from: {ckpt: "graph-m-2p-lr/main@e22711#673425d606b5", parts: [actor, critic], zero_new_inputs: true}
+train:                          # az-2p-tricks' train keys but the surprise weighting (1-6: its six KataGo pieces)
+  algo: alphazero
+  iterations: 900               # ~32.5 h of self-play (header)
+  steps_per_iteration: 64       # x 512 games = 32,768 searched moves, ~8,192 of them recorded
+  root: puct
+  sims: 600                     # a full search (recorded)
+  fast_sims: 100                # the other moves (played only)
+  pending: 24                   # leaves per round of a full search
+  fast_pending: 4               # and of a fast one
+  full_search_prob: 0.25
+  decided_value: 0.9            # 4: a game is decided once one seat's search value was >= 0.9 ...
+  decided_lookback: 3           # 4: ... in its last 3 searches
+  decided_full_search_prob: 0.0625   # 4: full searches in decided games: a sixteenth of the moves
+  decided_fast_sims: 50         # 4: and their fast searches
+  record_fast: false            # only full searches enter replay
+  dets: 0                       # the true game (the network reads it whole)
+  reuse: true                   # a move's search starts from the last one's subtree
+  c_puct: 0.75
+  gumbel_m: 16                  # not read (root: puct)
+  dirichlet_noise: true         # full searches only
+  forced_playouts: 2.0          # 5: KataGo's k; a visited root move gets >= sqrt(k x prior x visits)
+  root_policy_temperature: 1.25 # 6: the root's prior ** (1 / 1.25) before the noise; full searches only
+  temperature_start: 1.0
+  temperature_end: 0.0
+  temperature_moves: 30
+  truncation_value: share
+  policy_target: pruned         # the visit distribution without the visits the noise forced
+  target_c_visit: 50.0          # not read (policy_target: gumbel's)
+  target_c_scale: 0.1
+  target_prior_temperature: 1.0
+  target_rescale: true
+  replay_capacity: 500_000      # ~61 iterations of recorded positions; 3.0 GB of RAM
+  min_replay: 50_000            # ~6 iterations of recorded positions (filed when their games end)
+  updates_per_iteration: 64     # x 512 = 32,768 samples per ~8,192 new positions
+  minibatch_size: 512
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-4
+  value_coef: 1.0
+  value_search_blend: 0.5       # 1: the value target is half the game result, half the search's root value
+  value_blend_iterations: 60    # 1: ramped in linearly over the first 60 iterations
+  surprise_weight: 0.0          # 2 is OFF: uniform replay draws (header: it collapsed az-2p-graph-m/main)
+  soft_policy_coef: 0.125       # 3: x the soft head's cross-entropy (az-2p-tricks' value: header)
+  soft_policy_temperature: 4.0  # 3: its target is the policy target ** (1 / 4)
+  outcome_vp_coef: 0.5          # x Huber on each seat's final victory points / 15 (header)
+  outcome_turns_coef: 0.5       # x Huber on the turns left / 100
+  max_grad_norm: 1.0            # over every parameter, the head's too
+  search_rows: 512              # rows per forward
+  kernels: fused16              # self-play forwards in float16 on the fused kernels
+  checkpoint_interval: 25       # ~55 min of self-play
+eval:
+  select: null                  # no in-run evals (header)
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}   # the lineage's 2,000 games
+      lineup:
+        - "MCTS:ckpt=${run}@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused"
+        - "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+# num_envs, infer_rows: the eval's games in flight (az-2p-tricks')
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512, time_limit_hours: 90}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}

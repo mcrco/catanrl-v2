@@ -255,13 +255,13 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 === `graph-m` in the AlphaZero line #chip("running") <exp:az-graph-m>
 #meta(
-  dates: "2026-11-15 (proposed), 2026-11-18 16:24 (launched)",
+  dates: "2026-11-15 (proposed), 2026-11-18 16:24 (launched), 18:25 (stopped), 18:44 (relaunched)",
   owner: "marco",
-  config: "configs/experiments/az-2p-graph-m.yaml",
-  wandb: (("az-2p-graph-m-main-c5ebe625", "az-2p-graph-m/main"),),
-  records: ("9c7a904b",),
+  config: "configs/experiments/az-2p-graph-m-uniform.yaml (first launch: az-2p-graph-m.yaml)",
+  wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform/main"), ("az-2p-graph-m-main-c5ebe625", "az-2p-graph-m/main (collapsed)")),
+  records: ("9c7a904b", "8504808e", "ce1a2189"),
 )
-#tldr[*Running on the local GPU since 2026-11-18 16:24; due about 2026-11-20 05:00.* Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so the recipe moves to `graph-m` (Marco: "ok yeah lets do it"). The fused kernels now fit it: an iteration of self-play takes about 125 s on this box against `graph-s`'s 70 s. *Where it starts:* `2p-graph-m-1` in the 1,024-sim search scores 57.25% against fr3's fair raw bot, 7.40 pp behind `2p-graph-s-8` on the same games and no better than at 300 sims. No result yet.]
+#tldr[*The first launch collapsed and was stopped after 2 h; the relaunch without the surprise weighting has run on the local GPU since 2026-11-18 18:44 and is due about 2026-11-20 06:30.* Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so the recipe moves to `graph-m` (Marco: "ok yeah lets do it"). *Where it starts:* `2p-graph-m-1` in the 1,024-sim search scores 57.25% against fr3's fair raw bot, 7.40 pp behind `2p-graph-s-8` on the same games and no better than at 300 sims. *First launch:* once its learner started, the net's raw policy fell to 25% against its own start (the `graph-s` runs stay at 49 to 50%). *Cause, found offline:* the surprise weighting. On this peaked net 1% of the replay took 27% of the draws; without the weighting the same three learning iterations leave the net level with its start (50.1%). No result yet.]
 
 #lead[Earlier (2026-11-15).] Marco: can the dice state go into `graph-m`? Yes: `graph-m` is the same network class as `graph-s` at other sizes, so the inputs of @exp:dice-input and the targets of @exp:az-aux attach unchanged, and `2p-graph-m-1` can take them with zero weights and play as before. What it lacked was speed: the fused kernels were written for `graph-s`'s width. Marco (2026-11-15): build the kernels; the run itself is not queued.
 
@@ -311,7 +311,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *A peaked start, as fr3's was.* `2p-graph-m-1`'s policy at searched roots has 0.03 to 0.08 nats of entropy, and the raw visit distribution sits 8 to 14 nats of KL from it. `az-2p-kata` began from fr3 at 0.04 to 0.05 nats and 10 to 15 nats (@exp:az-kata) and learned from there on the pruned target, which sits 0.2 to 0.5 nats from the net in both runs.
 - *New at such a start:* the soft policy head and the surprise weighting. The smoke's first soft loss was 17.4 (`az-2p-tricks`: 2.44) and its first policy loss 3.79 (0.68); the gradient is clipped at norm 1.0 either way. The smoke's learner ran on at most 17,000 positions, so its drift (85% agreement with the start after two learning iterations) says little about the run, which waits for 50,000. To watch over the first 50 iterations: `drift/agree_init` (`az-2p-kata`: 0.96 at iteration 50), the policy loss and the soft loss.
 
-#lead[The run (`az-2p-graph-m`; launched 2026-11-18 16:24).] From `2p-graph-m-1`, 900 iterations of `az-2p-tricks`' recipe with every training key unchanged; only the network and its start differ.
+#lead[The run as planned (`az-2p-graph-m`; launched 2026-11-18 16:24, stopped 18:25; relaunched below).] From `2p-graph-m-1`, 900 iterations of `az-2p-tricks`' recipe with every training key unchanged; only the network and its start differ.
 - *Judged by* one final row, the lineage's: the 1,024-sim deployed search on the last checkpoint against fr3's fair raw bot on the same 2,000 games, paired with `2p-graph-s-8`'s row `cc4ccbcc` (64.65%) and with the start's row below. A paired difference is detectable from about 2.7 pp.
 - *Cost.* Local GPU, \$0: about 32.5 h of self-play and 3.7 h for the final row (the start's row took 221 minutes), an eval share near 10%. On Modal with one process it was projected at about 100 s an iteration, 25 h and about \$65; not used.
 - *What it cannot promise.* The first 900 iterations took the `graph-s` line from 53.85% to 60.30%. If `graph-m` gains as much from where it starts it lands near `2p-graph-s-8`; whether it goes past is the open question.
@@ -337,7 +337,65 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *More simulations do nothing for this net.* 1,024 sims and 300 sims give the same result in 1,927 of the 2,000 games, and the 1,024-sim row is 0.85 pp lower (p = 0.060). Its fair raw bot scores 55.0% against the same opponent (@exp:deploy-graph-m-check), so the search adds about 2 pp at either budget.
 - *Likely why* (not tested). The prior is so peaked that the search rarely leaves its first choice: in the run's first three iterations of self-play it overrules the prior on 1 to 3% of searched moves, against 5 to 6% for `2p-graph-s-8`'s line. Search training is what widens the prior (`az-2p-kata`'s entropy at roots went from 0.05 to 0.20 nats in 300 iterations), so the search's share of the strength is still to be earned here.
 
+#lead[The first launch collapsed (2026-11-18 16:24 – 18:25).] The learner started at iteration 10 (50,906 positions in the replay). Within three iterations the net had a different top move from its start on 24% of the probe positions, and it stayed there; the `graph-s` runs were at 4 to 5% by iteration 50.
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([], [`az-2p-graph-m`, iteration 10], [Iteration 12], [Iteration 50], [`az-2p-tricks`, iteration 50]),
+    [Same top move as the start, share of probe positions], [0.871], [0.756], [0.786], [0.947],
+    [Policy loss on the learner's batches], [6.92], [2.40], [1.07], [0.67],
+    [Soft policy loss], [20.1], [5.51], [1.81], [1.49],
+    [Value loss], [0.525], [0.520], [0.527], [0.543],
+    [Net's entropy at searched roots, nats], [0.05], [0.20], [0.72], [0.39],
+    [Searched moves where the search overrules the prior, %], [1.5], [5.3], [12.9], [6.3],
+  ),
+  caption: [Health signals of the first launch against the `graph-s` run of the same recipe. No game was cut at the turn limit, and an iteration took 123 to 135 s as measured.],
+) <tab:az-graph-m-collapse>
+- *The losses alone looked like learning:* both policy losses fell and the value loss was flat. The check that showed the damage was a match.
+- *Raw policy against its own start* (`2p-graph-m-1`, 5,000 games on heldout-2p-fr, played on the GPU beside the run): *25.1%* #ci[23.9][26.3] at iteration 25 and *30.0%* #ci[28.7][31.2] at iteration 50 (records `8504808e`, `ce1a2189`). The same match for the `graph-s` runs: `az-2p-kata` 49.9% at iteration 25 and 50.2% at 50 against fr3 (`6f0089a4`, `89c3db96`), `az-2p-tricks` 48.8% at 50 against the bundle (`a1ff705e`).
+- *Stopped* at iteration 54 (18:25, clean stop, checkpoint kept), under the condition agreed at launch: stop if the net falls apart. About 2 h of GPU lost. No row in the search was played on these checkpoints.
+
+#lead[Why: the surprise weighting on a peaked net (2026-11-18, offline).] The learner's first three iterations were replayed offline from the run's e0 on the replay it had then (the start's own self-play), under variants of the recipe (`tools/learner_replay.py`; 22 s a variant). The replay of the recipe as run matches the run.
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Recipe], [Same top move as the start after 1, 2, 3 iterations], [Policy loss on uniform rows after 3 (start: 0.51)], [Share of the buffer the draws act like], [Raw policy vs the start, %]),
+    [The run itself], [0.871, 0.798, 0.756], [—], [0.083], [25.1 (iteration 25)],
+    [As run, replayed], [0.874, 0.808, 0.765], [1.07], [0.083], [22.1 #ci[20.9][23.2]],
+    mid,
+    [No surprise weighting], [0.958, 0.949, 0.948], [0.51], [1], [*50.1* #ci[48.7][51.5]],
+    [No surprise weighting, no soft policy loss], [0.981, 0.975, 0.975], [0.45], [1], [49.3 #ci[47.9][50.7]],
+    [Surprise weight 0.1 (run: 0.5)], [0.935, 0.921, 0.900], [0.70], [0.69], [—],
+    mid,
+    [No soft policy loss], [0.889, 0.833, 0.794], [1.04], [0.083], [—],
+    [No outcome losses], [0.875, 0.812, 0.766], [1.08], [0.083], [—],
+    [A fifth of the learning rate], [0.959, 0.932, 0.907], [0.94], [0.083], [—],
+  ),
+  caption: [Three learning iterations (192 updates of 512 rows) from `2p-graph-m-1` on 50,906 positions of its own self-play. "Share of the buffer the draws act like": the effective sample size of the replay draws (`az-2p-tricks`: 0.33). Raw policy: 5,000 games on heldout-2p-fr against `2p-graph-m-1`'s raw policy.],
+) <tab:az-graph-m-variants>
+- *The surprise weighting is the cause.* Without it the net stays level with its start (50.1%) and its policy loss on uniform rows no longer rises. Dropping the soft policy loss or the outcome losses instead changes nothing, and a lower learning rate only slows the same drift.
+- *How.* The weighting draws half the batch in proportion to how far the search's target sits from the net's prior. `2p-graph-m-1` is so sure of itself that this distance is 0 at the median position and 4.2 nats at the 99th percentile (65 at most): 1.3% of positions sit at the cap, and 1% of the replay takes 27% of the draws. The learner trained mostly on the few positions where the search overruled a confident prior (policy loss 7.0 on its batches, 0.51 on uniform rows) and got worse everywhere else: the loss on uniform rows doubled.
+- *Why `graph-s` was fine.* `az-2p-tricks` started from a net 900 iterations into search training, with a wider prior: mean surprise 0.04 nats against 0.22 here, policy loss on its batches 0.68. A PPO net meets this weighting here for the first time (`az-2p-kata`, from fr3, had none).
+- *The soft policy head* moves the net more (5% of top moves changed against 2.5% without its loss) but costs no strength in this test. Kept.
+
+#lead[The relaunch (`az-2p-graph-m-uniform`; 2026-11-18 18:44).] The same run with uniform replay draws (`surprise_weight: 0`); every other key, the start, the final row and its pairings unchanged. W&B `az-2p-graph-m-uniform-main-a2ac6eca`.
+- *Due.* About 32 h of self-play (to about 2026-11-20 02:45) and 3.7 h for the final row: about 06:30.
+- *Checks.* The raw policy against its start at iterations 25 and 50 (one minute each on the GPU; level is healthy), then the usual signals.
+- *What is lost.* The surprise weighting was one of six pieces that together added 0.95 pp on `graph-s` (p = 0.47; @exp:az-tricks). Turning it back on once the prior has widened is possible and not planned.
+
 #repro(```sh
+# the first launch's raw policy against its start, and the offline replay of its learner
+catanrl eval --suite heldout-2p-fr --boards 2500 --device cuda --num-envs 512 \
+  "POLICY:ckpt=az-2p-graph-m/main@e25" "POLICY:ckpt=graph-m-2p-lr/main@e22711#673425d606b5"
+python tools/learner_replay.py prep     --run runs/az-2p-graph-m/main --out /tmp/gm-diag
+python tools/learner_replay.py variants --run runs/az-2p-graph-m/main --out /tmp/gm-diag
+python tools/learner_replay.py ckpt     --run runs/az-2p-graph-m/main --out /tmp/gm-diag --variants run no-surprise
+CATANRL_RUNS_DIR=/tmp/gm-diag/runs catanrl eval --suite heldout-2p-fr --boards 2500 --device cuda --num-envs 512 \
+  "POLICY:ckpt=gmdiag/no-surprise@e3" "POLICY:ckpt=graph-m-2p-lr/main@e22711#673425d606b5"
+# the relaunch
+catanrl run configs/experiments/az-2p-graph-m-uniform.yaml
 # kernels: equivalence and speed
 python tools/kernels_check.py equal --ckpt runs/graph-m-2p-lr/main/checkpoints/e022711.pt --rows 3000
 python tools/kernels_check.py bench --ckpt runs/graph-m-2p-lr/main/checkpoints/e022711.pt
@@ -345,7 +403,7 @@ python tools/kernels_check.py bench --ckpt runs/graph-m-2p-lr/main/checkpoints/e
 catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --threads 12 --num-envs 256 --infer-rows 512 \
   "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused" \
   "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
-# the run
+# the first launch
 catanrl run configs/experiments/az-2p-graph-m.yaml
 ```)
 
