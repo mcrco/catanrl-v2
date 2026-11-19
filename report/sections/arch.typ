@@ -253,15 +253,15 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-search-vs-raw.yaml
 ```)
 
-=== `graph-m` in the AlphaZero line #chip("todo") <exp:az-graph-m>
+=== `graph-m` in the AlphaZero line #chip("running") <exp:az-graph-m>
 #meta(
-  dates: "2026-11-15 (proposed), 2026-11-18 (kernels built, config written)",
+  dates: "2026-11-15 (proposed), 2026-11-18 16:24 (launched)",
   owner: "marco",
   config: "configs/experiments/az-2p-graph-m.yaml",
-  wandb: (),
-  records: (),
+  wandb: (("az-2p-graph-m-main-c5ebe625", "az-2p-graph-m/main"),),
+  records: ("9c7a904b",),
 )
-#tldr[*Ready to launch, not launched: the run awaits Marco's word.* Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so `graph-m` is the recommended next run. The fused kernels now fit it: an iteration of self-play takes about 130 s on this box against `graph-s`'s 70 s, so 900 iterations are about 32.5 h on the local GPU, at no cost. The start's row in the deployed search is running.]
+#tldr[*Running on the local GPU since 2026-11-18 16:24; due about 2026-11-20 05:00.* Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so the recipe moves to `graph-m` (Marco: "ok yeah lets do it"). The fused kernels now fit it: an iteration of self-play takes about 125 s on this box against `graph-s`'s 70 s. *Where it starts:* `2p-graph-m-1` in the 1,024-sim search scores 57.25% against fr3's fair raw bot, 7.40 pp behind `2p-graph-s-8` on the same games and no better than at 300 sims. No result yet.]
 
 #lead[Earlier (2026-11-15).] Marco: can the dice state go into `graph-m`? Yes: `graph-m` is the same network class as `graph-s` at other sizes, so the inputs of @exp:dice-input and the targets of @exp:az-aux attach unchanged, and `2p-graph-m-1` can take them with zero weights and play as before. What it lacked was speed: the fused kernels were written for `graph-s`'s width. Marco (2026-11-15): build the kernels; the run itself is not queued.
 
@@ -311,11 +311,31 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *A peaked start, as fr3's was.* `2p-graph-m-1`'s policy at searched roots has 0.03 to 0.08 nats of entropy, and the raw visit distribution sits 8 to 14 nats of KL from it. `az-2p-kata` began from fr3 at 0.04 to 0.05 nats and 10 to 15 nats (@exp:az-kata) and learned from there on the pruned target, which sits 0.2 to 0.5 nats from the net in both runs.
 - *New at such a start:* the soft policy head and the surprise weighting. The smoke's first soft loss was 17.4 (`az-2p-tricks`: 2.44) and its first policy loss 3.79 (0.68); the gradient is clipped at norm 1.0 either way. The smoke's learner ran on at most 17,000 positions, so its drift (85% agreement with the start after two learning iterations) says little about the run, which waits for 50,000. To watch over the first 50 iterations: `drift/agree_init` (`az-2p-kata`: 0.96 at iteration 50), the policy loss and the soft loss.
 
-#lead[The run (`az-2p-graph-m`; not launched).] From `2p-graph-m-1`, 900 iterations of `az-2p-tricks`' recipe with every training key unchanged; only the network and its start differ.
+#lead[The run (`az-2p-graph-m`; launched 2026-11-18 16:24).] From `2p-graph-m-1`, 900 iterations of `az-2p-tricks`' recipe with every training key unchanged; only the network and its start differ.
 - *Judged by* one final row, the lineage's: the 1,024-sim deployed search on the last checkpoint against fr3's fair raw bot on the same 2,000 games, paired with `2p-graph-s-8`'s row `cc4ccbcc` (64.65%) and with the start's row below. A paired difference is detectable from about 2.7 pp.
-- *The start's row* (running since 2026-11-18 12:43): `2p-graph-m-1` in the same 1,024-sim search on those 2,000 games; at 300 sims it scored 58.10% (@exp:arch-graph-m-search). About 4 to 4.5 h, estimated from its first half hour; the run's final row will take the same.
-- *Cost.* Local GPU: about 32.5 h of self-play and 4 to 4.5 h for the final row, an eval share near 12%; \$0. On Modal with one process (projected from the measured kernel speed, not run there): about 100 s an iteration, 25 h and about \$65 for 900 iterations of the \$86.96 left, so it would save about 7 h.
+- *Cost.* Local GPU, \$0: about 32.5 h of self-play and 3.7 h for the final row (the start's row took 221 minutes), an eval share near 10%. On Modal with one process it was projected at about 100 s an iteration, 25 h and about \$65; not used.
 - *What it cannot promise.* The first 900 iterations took the `graph-s` line from 53.85% to 60.30%. If `graph-m` gains as much from where it starts it lands near `2p-graph-s-8`; whether it goes past is the open question.
+
+#lead[Where it starts (2026-11-18 12:43 – 16:24).] `2p-graph-m-1` in the 1,024-sim deployed search against fr3's fair raw bot, on the lineage's 2,000 games: *57.25%* #ci[55.1][59.4] (1,145 wins; 61.2% first seat, 53.3% second; record `9c7a904b`).
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Row on the same 2,000 games], [Score, %], [Start minus it, pp], [Won by only one], [p]),
+    [`2p-graph-s-8` (`cc4ccbcc`)], [64.65], [−7.40], [313 vs 461], [1e-7],
+    [The bundle (`b5483151`)], [63.70], [−6.45], [318 vs 447], [4e-6],
+    [e1800 (`ea257443`)], [62.95], [−5.70], [332 vs 446], [5e-5],
+    [e900 (`4411825a`)], [60.30], [−3.05], [362 vs 423], [0.032],
+    [e300 (`e917f9bb`)], [57.70], [−0.45], [380 vs 389], [0.77],
+    [fr3 (`809619df`)], [53.85], [+3.40], [407 vs 339], [0.014],
+    mid,
+    [`2p-graph-m-1` at 300 sims (`93649969`)], [58.10], [−0.85], [28 vs 45], [0.060],
+  ),
+  caption: [The start of the run, `2p-graph-m-1` at 1,024 sims, against each earlier row. "Won by only one": games the start won and the other row lost, against the reverse. Exact McNemar.],
+) <tab:az-graph-m-start>
+- *Level with e300.* The start sits where the `graph-s` line was after 300 iterations, 7.40 pp behind `2p-graph-s-8`.
+- *More simulations do nothing for this net.* 1,024 sims and 300 sims give the same result in 1,927 of the 2,000 games, and the 1,024-sim row is 0.85 pp lower (p = 0.060). Its fair raw bot scores 55.0% against the same opponent (@exp:deploy-graph-m-check), so the search adds about 2 pp at either budget.
+- *Likely why* (not tested). The prior is so peaked that the search rarely leaves its first choice: in the run's first three iterations of self-play it overrules the prior on 1 to 3% of searched moves, against 5 to 6% for `2p-graph-s-8`'s line. Search training is what widens the prior (`az-2p-kata`'s entropy at roots went from 0.05 to 0.20 nats in 300 iterations), so the search's share of the strength is still to be earned here.
 
 #repro(```sh
 # kernels: equivalence and speed
@@ -325,7 +345,7 @@ python tools/kernels_check.py bench --ckpt runs/graph-m-2p-lr/main/checkpoints/e
 catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --threads 12 --num-envs 256 --infer-rows 512 \
   "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused" \
   "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
-# the run (after Marco's word)
+# the run
 catanrl run configs/experiments/az-2p-graph-m.yaml
 ```)
 
