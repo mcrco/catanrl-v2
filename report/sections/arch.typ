@@ -259,7 +259,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
   owner: "marco",
   config: "configs/experiments/az-2p-graph-m-uniform.yaml (first launch: az-2p-graph-m.yaml)",
   wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform/main"), ("az-2p-graph-m-main-c5ebe625", "az-2p-graph-m/main (collapsed)")),
-  records: ("9c7a904b", "8504808e", "ce1a2189"),
+  records: ("9c7a904b", "8504808e", "ce1a2189", "ce298288", "5824eca5"),
 )
 #tldr[*The first launch collapsed and was stopped after 2 h; the relaunch without the surprise weighting has run on the local GPU since 2026-11-18 18:44 and is due about 2026-11-20 06:30.* Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so the recipe moves to `graph-m` (Marco: "ok yeah lets do it"). *Where it starts:* `2p-graph-m-1` in the 1,024-sim search scores 57.25% against fr3's fair raw bot, 7.40 pp behind `2p-graph-s-8` on the same games and no better than at 300 sims. *First launch:* once its learner started, the net's raw policy fell to 25% against its own start (the `graph-s` runs stay at 49 to 50%). *Cause, found offline:* the surprise weighting. On this peaked net 1% of the replay took 27% of the draws; without the weighting the same three learning iterations leave the net level with its start (50.1%). No result yet.]
 
@@ -382,7 +382,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 
 #lead[The relaunch (`az-2p-graph-m-uniform`; 2026-11-18 18:44).] The same run with uniform replay draws (`surprise_weight: 0`); every other key, the start, the final row and its pairings unchanged. W&B `az-2p-graph-m-uniform-main-a2ac6eca`.
 - *Due.* About 32 h of self-play (to about 2026-11-20 02:45) and 3.7 h for the final row: about 06:30.
-- *Checks.* The raw policy against its start at iterations 25 and 50 (one minute each on the GPU; level is healthy), then the usual signals.
+- *Healthy at iterations 25 and 50.* The raw policy against its start, `2p-graph-m-1` (5,000 games each, on the GPU beside the run): *49.2%* #ci[47.8][50.6] at iteration 25 and *49.4%* #ci[48.0][50.8] at 50 (records `ce298288`, `5824eca5`); the first launch scored 25.1% and 30.0%. At iteration 50: the same top move as the start on 92.1% of probe positions (first launch 78.6%, `az-2p-kata` 95.8%), policy loss 0.31 (from 0.50 when the learner started), soft policy loss 1.29 (from 12.0), value loss 0.49, entropy at searched roots 0.12 nats (from 0.05), the search overrules the prior on 3.3% of searched moves (from 1.5%). No game cut at the turn limit; 126 s an iteration.
 - *What is lost.* The surprise weighting was one of six pieces that together added 0.95 pp on `graph-s` (p = 0.47; @exp:az-tricks). Turning it back on once the prior has widened is possible and not planned.
 
 #repro(```sh
