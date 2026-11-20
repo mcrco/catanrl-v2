@@ -247,21 +247,21 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *The prediction held* (about 58% ± 3 pp by chaining rows).
 - *Where it sits.* At equal time per move, `graph-m`'s stronger raw policy is worth to the search about what the first 300 iterations of self-play added to fr3's net. The 1,500 iterations after that added 5 pp more, which `graph-m` does not have.
 - *For the bot.* The fr3 AlphaZero line stays the 1v1 search bot. `2p-graph-m-1` stays the best raw policy.
-- *Not answered.* What `graph-m` would reach after its own self-play (@exp:az-graph-m), and its score at 1,024 sims, which would cost 3.4× the time per move without fused kernels.
+- *Not answered.* What `graph-m` would reach after its own self-play (since answered: 67.0% at 1,024 sims after 900 iterations, @exp:az-graph-m), and its score at 1,024 sims, which would cost 3.4× the time per move without fused kernels.
 
 #repro(```sh
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments/graph-m-search-vs-raw.yaml
 ```)
 
-=== `graph-m` in the AlphaZero line #chip("running") <exp:az-graph-m>
+=== `graph-m` in the AlphaZero line #chip("done") <exp:az-graph-m>
 #meta(
-  dates: "2026-11-15 (proposed), 2026-11-18 16:24 (launched), 18:25 (stopped), 18:44 (relaunched)",
+  dates: "2026-11-15 (proposed), 2026-11-18 16:24 (launched), 18:25 (stopped), 18:44 (relaunched), 2026-11-20 06:52 (done)",
   owner: "marco",
   config: "configs/experiments/az-2p-graph-m-uniform.yaml (first launch: az-2p-graph-m.yaml)",
   wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform/main"), ("az-2p-graph-m-main-c5ebe625", "az-2p-graph-m/main (collapsed)")),
-  records: ("9c7a904b", "8504808e", "ce1a2189", "ce298288", "5824eca5", "cd8ee47e"),
+  records: ("9c7a904b", "8504808e", "ce1a2189", "ce298288", "5824eca5", "cd8ee47e", "af97f759", "b7f7ed96"),
 )
-#tldr[*The first launch collapsed and was stopped after 2 h; the relaunch without the surprise weighting has run on the local GPU since 2026-11-18 18:44 and is due about 2026-11-20 06:30.* Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so the recipe moves to `graph-m` (Marco: "ok yeah lets do it"). *Where it starts:* `2p-graph-m-1` in the 1,024-sim search scores 57.25% against fr3's fair raw bot, 7.40 pp behind `2p-graph-s-8` on the same games and no better than at 300 sims. *First launch:* once its learner started, the net's raw policy fell to 25% against its own start (the `graph-s` runs stay at 49 to 50%). *Cause, found offline:* the surprise weighting. On this peaked net 1% of the replay took 27% of the draws; without the weighting the same three learning iterations leave the net level with its start (50.1%). No result yet.]
+#tldr[*`2p-graph-m-2`: 67.00% in the 1,024-sim search against fr3's fair raw bot, the best row of the line: +2.35 pp over `2p-graph-s-8` (p = 0.086), +4.05 pp over the deployed net (p = 0.004), +9.75 pp over its own start (p = 1e-12), after 900 iterations (32.3 h) on the local GPU.* The first launch collapsed and was stopped after 2 h; this is the relaunch without the surprise weighting. Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so the recipe moves to `graph-m` (Marco: "ok yeah lets do it"). *Where it starts:* `2p-graph-m-1` in the 1,024-sim search scores 57.25% against fr3's fair raw bot, 7.40 pp behind `2p-graph-s-8` on the same games and no better than at 300 sims. *First launch:* once its learner started, the net's raw policy fell to 25% against its own start (the `graph-s` runs stay at 49 to 50%). *Cause, found offline:* the surprise weighting. On this peaked net 1% of the replay took 27% of the draws; without the weighting the same three learning iterations leave the net level with its start (50.1%). Not deployed.]
 
 #lead[Earlier (2026-11-15).] Marco: can the dice state go into `graph-m`? Yes: `graph-m` is the same network class as `graph-s` at other sizes, so the inputs of @exp:dice-input and the targets of @exp:az-aux attach unchanged, and `2p-graph-m-1` can take them with zero weights and play as before. What it lacked was speed: the fused kernels were written for `graph-s`'s width. Marco (2026-11-15): build the kernels; the run itself is not queued.
 
@@ -381,10 +381,30 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *The soft policy head* moves the net more (5% of top moves changed against 2.5% without its loss) but costs no strength in this test. Kept.
 
 #lead[The relaunch (`az-2p-graph-m-uniform`; 2026-11-18 18:44).] The same run with uniform replay draws (`surprise_weight: 0`); every other key, the start, the final row and its pairings unchanged. W&B `az-2p-graph-m-uniform-main-a2ac6eca`.
-- *Due.* About 32 h of self-play (to about 2026-11-20 02:45) and 3.7 h for the final row: about 06:30.
 - *Healthy at iterations 25 and 50.* The raw policy against its start, `2p-graph-m-1` (5,000 games each, on the GPU beside the run): *49.2%* #ci[47.8][50.6] at iteration 25 and *49.4%* #ci[48.0][50.8] at 50 (records `ce298288`, `5824eca5`); the first launch scored 25.1% and 30.0%. At iteration 50: the same top move as the start on 92.1% of probe positions (first launch 78.6%, `az-2p-kata` 95.8%), policy loss 0.31 (from 0.50 when the learner started), soft policy loss 1.29 (from 12.0), value loss 0.49, entropy at searched roots 0.12 nats (from 0.05), the search overrules the prior on 3.3% of searched moves (from 1.5%). No game cut at the turn limit; 126 s an iteration.
 - *Still level at iteration 300* (2026-11-19 05:30): *49.2%* #ci[47.8][50.6] against the start (record `cd8ee47e`). The same top move as the start on 89.0% of probe positions, policy loss 0.25, soft policy loss 1.06, value loss 0.50; on fresh self-play positions the value's cross-entropy is flat: 0.492 over iterations 10–50, 0.494 over 201–300 (one iteration's reading swings by ±0.025, so single readings mislead). The search overrules the prior on 4.1% of searched moves, and the target's KL from the prior is down to 0.055 nats (0.33 before learning). The raw match only shows the net is intact: the strength reading is the final row.
 - *What is lost.* The surprise weighting was one of six pieces that together added 0.95 pp on `graph-s` (p = 0.47; @exp:az-tricks). Turning it back on once the prior has widened is possible and not planned.
+
+#lead[Result (2026-11-20 06:52).] The last checkpoint, e900, in the 1,024-sim deployed search against fr3's fair raw bot on the lineage's 2,000 games: *67.00%* #ci[64.9][69.0] (1,340 wins; 70.2% first seat, 63.8% second; record `af97f759`). Registered as `2p-graph-m-2`; not deployed.
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([Row on the same 2,000 games], [Score, %], [`2p-graph-m-2` minus it, pp], [Won by only one], [p]),
+    [`2p-graph-s-8` (`cc4ccbcc`)], [64.65], [+2.35], [382 vs 335], [0.086],
+    [The bundle, `2p-graph-s-7` (`b5483151`)], [63.70], [+3.30], [397 vs 331], [0.016],
+    [e1800, `2p-graph-s-6`, deployed (`ea257443`)], [62.95], [+4.05], [423 vs 342], [0.004],
+    mid,
+    [Its start, `2p-graph-m-1` (`9c7a904b`)], [57.25], [+9.75], [472 vs 277], [1e-12],
+  ),
+  caption: [`2p-graph-m-2` (`az-2p-graph-m-uniform/main@e900`) against the earlier rows. "Won by only one": games it won and the other row lost, against the reverse. Exact McNemar.],
+) <tab:az-graph-m-result>
+- *The best row of the line.* 2.35 pp above `2p-graph-s-8`, which is short of significance on 2,000 games (p = 0.086; a paired gap is detectable from about 2.7 pp), and 4.05 pp above the deployed net (p = 0.004).
+- *Search training paid on `graph-m`:* +9.75 pp over its start in 900 iterations. The `graph-s` line gained 6.45 pp in its first 900 and 1.70 pp in its last 1,800 (39.2 h; @exp:az-tricks).
+- *Time.* 32.3 h of self-play (2026-11-18 18:44 to 2026-11-20 03:03; 152,862 games, 5.15M recorded positions, 127 s an iteration) and 3.8 h for the final row: an eval share of 11%, health checks included.
+- *The gain is in the search, not the raw policy.* The raw policy at e900 scores 51.0% #ci[49.6][52.4] against its start over 5,000 games (record `b7f7ed96`), as for the `graph-s` line through e1800 (@exp:az-raw).
+- *Flat from about iteration 500.* The same top move as the start on 88.3% of probe positions over iterations 401–500 and 87.1% over 801–847; the search overrules the prior on 4.5 to 4.6% of searched moves, mean depth 9.1 levels, value cross-entropy on fresh positions 0.49 throughout. The target's KL from the prior kept shrinking slowly (0.048 to 0.039 nats). Whether the last 400 iterations added strength is not measured: no row in the search was played on an earlier checkpoint.
+- *Not done.* No row at other simulation counts, no head to head with `2p-graph-s-8`, no continuation queued. *best-2p* stays `2p-graph-m-1` until Marco moves it.
 
 #repro(```sh
 # the first launch's raw policy against its start, and the offline replay of its learner
@@ -395,8 +415,12 @@ python tools/learner_replay.py variants --run runs/az-2p-graph-m/main --out /tmp
 python tools/learner_replay.py ckpt     --run runs/az-2p-graph-m/main --out /tmp/gm-diag --variants run no-surprise
 CATANRL_RUNS_DIR=/tmp/gm-diag/runs catanrl eval --suite heldout-2p-fr --boards 2500 --device cuda --num-envs 512 \
   "POLICY:ckpt=gmdiag/no-surprise@e3" "POLICY:ckpt=graph-m-2p-lr/main@e22711#673425d606b5"
-# the relaunch
+# the relaunch (its final row is af97f759), the pairings and the raw policy against the start
 catanrl run configs/experiments/az-2p-graph-m-uniform.yaml
+python tools/search_probe.py --pair runs/az-2p-graph-m-uniform/main/evals/heldout-2p-fr/af97f7595f82b53d.json \
+  runs/az-2p-tricks/main/evals/heldout-2p-fr/cc4ccbcc8cb418f6.json
+catanrl eval --suite heldout-2p-fr --boards 2500 --device cuda --num-envs 512 \
+  "POLICY:ckpt=az-2p-graph-m-uniform/main@e900" "POLICY:ckpt=graph-m-2p-lr/main@e22711#673425d606b5"
 # kernels: equivalence and speed
 python tools/kernels_check.py equal --ckpt runs/graph-m-2p-lr/main/checkpoints/e022711.pt --rows 3000
 python tools/kernels_check.py bench --ckpt runs/graph-m-2p-lr/main/checkpoints/e022711.pt
