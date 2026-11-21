@@ -259,7 +259,7 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
   owner: "marco",
   config: "configs/experiments/az-2p-graph-m-uniform.yaml (first launch: az-2p-graph-m.yaml)",
   wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform/main"), ("az-2p-graph-m-main-c5ebe625", "az-2p-graph-m/main (collapsed)")),
-  records: ("9c7a904b", "8504808e", "ce1a2189", "ce298288", "5824eca5", "cd8ee47e", "af97f759", "b7f7ed96"),
+  records: ("9c7a904b", "8504808e", "ce1a2189", "ce298288", "5824eca5", "cd8ee47e", "af97f759", "b7f7ed96", "0d49a45d"),
 )
 #tldr[*`2p-graph-m-2`: 67.00% in the 1,024-sim search against fr3's fair raw bot, the best row of the line: +2.35 pp over `2p-graph-s-8` (p = 0.086), +4.05 pp over the deployed net (p = 0.004), +9.75 pp over its own start (p = 1e-12), after 900 iterations (32.3 h) on the local GPU.* The first launch collapsed and was stopped after 2 h; this is the relaunch without the surprise weighting. Marco (2026-11-18): continue search training, or try it on `graph-m`? The `graph-s` line has flattened (+1.70 pp over its last 1,800 iterations, p = 0.20; @exp:az-tricks), so the recipe moves to `graph-m` (Marco: "ok yeah lets do it"). *Where it starts:* `2p-graph-m-1` in the 1,024-sim search scores 57.25% against fr3's fair raw bot, 7.40 pp behind `2p-graph-s-8` on the same games and no better than at 300 sims. *First launch:* once its learner started, the net's raw policy fell to 25% against its own start (the `graph-s` runs stay at 49 to 50%). *Cause, found offline:* the surprise weighting. On this peaked net 1% of the replay took 27% of the draws; without the weighting the same three learning iterations leave the net level with its start (50.1%). Released for OpenHex as search-v4 (@exp:deploy-openhex-search-v4).]
 
@@ -404,7 +404,8 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True catanrl run configs/experiments
 - *Time.* 32.3 h of self-play (2026-11-18 18:44 to 2026-11-20 03:03; 152,862 games, 5.15M recorded positions, 127 s an iteration) and 3.8 h for the final row: an eval share of 11%, health checks included.
 - *The gain is in the search, not the raw policy.* The raw policy at e900 scores 51.0% #ci[49.6][52.4] against its start over 5,000 games (record `b7f7ed96`), as for the `graph-s` line through e1800 (@exp:az-raw).
 - *Flat from about iteration 500.* The same top move as the start on 88.3% of probe positions over iterations 401–500 and 87.1% over 801–847; the search overrules the prior on 4.5 to 4.6% of searched moves, mean depth 9.1 levels, value cross-entropy on fresh positions 0.49 throughout. The target's KL from the prior kept shrinking slowly (0.048 to 0.039 nats). Whether the last 400 iterations added strength is not measured: no row in the search was played on an earlier checkpoint.
-- *Not done.* No head to head with `2p-graph-s-8`, no continuation queued. A 4,096-sim row on the same games is playing (Marco, 2026-11-20). *best-2p* stays `2p-graph-m-1` until Marco moves it.
+- *More simulations help it* (Marco, 2026-11-20). The same search at 4,096 sims on the same 2,000 games: *70.75%* #ci[68.7][72.7] (1,415 wins; 73.5% first seat, 68.0% second; record `0d49a45d`), +3.75 pp on the 1,024-sim row (268 games won only at 4,096, 193 only at 1,024; paired p = 0.0006). 15.2 h with 64 games in flight; the deployed search runs up to 131,072 sims a move.
+- *Not done.* No head to head with `2p-graph-s-8`, no continuation queued. *best-2p* stays `2p-graph-m-1` until Marco moves it.
 
 #repro(```sh
 # the first launch's raw policy against its start, and the offline replay of its learner
@@ -421,6 +422,12 @@ python tools/search_probe.py --pair runs/az-2p-graph-m-uniform/main/evals/heldou
   runs/az-2p-tricks/main/evals/heldout-2p-fr/cc4ccbcc8cb418f6.json
 catanrl eval --suite heldout-2p-fr --boards 2500 --device cuda --num-envs 512 \
   "POLICY:ckpt=az-2p-graph-m-uniform/main@e900" "POLICY:ckpt=graph-m-2p-lr/main@e22711#673425d606b5"
+# the 4,096-sim row (0d49a45d; 15.2 h) and its pairing with the 1,024-sim row
+catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --threads 12 --num-envs 64 --infer-rows 512 \
+  "MCTS:ckpt=az-2p-graph-m-uniform/main@e900:sims=4096:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused" \
+  "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+python tools/search_probe.py --pair runs/az-2p-graph-m-uniform/main/evals/heldout-2p-fr/0d49a45d48520aaa.json \
+  runs/az-2p-graph-m-uniform/main/evals/heldout-2p-fr/af97f7595f82b53d.json
 # kernels: equivalence and speed
 python tools/kernels_check.py equal --ckpt runs/graph-m-2p-lr/main/checkpoints/e022711.pt --rows 3000
 python tools/kernels_check.py bench --ckpt runs/graph-m-2p-lr/main/checkpoints/e022711.pt
