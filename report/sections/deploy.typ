@@ -21,7 +21,8 @@ The bots that play people are in @tab:deploy-bots. To serve a 1v1 net raw, use t
     [`catanrl-1v1-v2`], [`BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16`],
     [`catanrl-1v1-search-v2` \ #sub[2026-11-04 to 2026-11-13; retired for search-v3]], [`MCTS:ckpt=ppo-2p-fr3/full@e4350:sims=131072:dets=1:` \ `pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`],
     [`catanrl-1v1-search-v3` \ #sub[bot `1154c5f058024665`, live since 2026-11-13 (@exp:deploy-openhex-search-v3); retired in the file for search-v3.1 on 2026-11-15]], [`MCTS:ckpt=az-2p-kata/main@e300:` the same search],
-    [`catanrl-1v1-search-v3.1` \ #sub[bot `e296048b5a1c4a83`, live since 2026-11-15 (@exp:deploy-openhex-search-v3-1)]], [`MCTS:ckpt=az-2p-kata/main+1500@e1800:` the same search],
+    [`catanrl-1v1-search-v3.1` \ #sub[bot `e296048b5a1c4a83`, live since 2026-11-15 (@exp:deploy-openhex-search-v3-1); retired in the file for search-v4 on 2026-11-21]], [`MCTS:ckpt=az-2p-kata/main+1500@e1800:` the same search],
+    [`catanrl-1v1-search-v4` \ #sub[released 2026-11-21, not yet registered (@exp:deploy-openhex-search-v4)]], [`MCTS:ckpt=az-2p-graph-m-uniform/main@e900:` the same search],
   ),
   caption: [The deploy files in this checkout, sha pins omitted. `@best` is e3350 for `puffer-graph2/full`, e3650 for `ppo-4p/main` and e3550 for `ppo-mixed/main`.],
 ) <tab:deploy-bots>
@@ -311,6 +312,41 @@ catanrl openhex deploy/openhex.yaml --describe catanrl-1v1-search-v3.1 > /tmp/bo
 catanrl openhex deploy/openhex.yaml --check --keys --device cuda
 # Anywhere: both bots' records by opponent
 catanrl openhex stats deploy/openhex.yaml --since 2026-11-13
+```)
+
+=== OpenHex search-v4: the `graph-m` net #chip("queued") <exp:deploy-openhex-search-v4>
+#meta(
+  dates: "2026-11-21 (released; waits for Marco to register it on yang)",
+  owner: "marco",
+  config: "deploy/openhex.yaml at tag openhex-1v1-v4",
+  wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform/main"),),
+  records: ("af97f759", "ea257443", "cc4ccbcc", "9c7a904b"),
+)
+#tldr[`az-2p-graph-m-uniform/main@e900` (`2p-graph-m-2`) is released on GitHub as #link("https://github.com/mcrco/catanrl-v2/releases/tag/openhex-1v1-v4")[`openhex-1v1-v4`] for a new bot, `catanrl-1v1-search-v4` (Marco, 2026-11-21: "lets deploy this as the next version on openhex"): search-v3.1's search with the first `graph-m` net, which is also the first deployed net that reads the balanced-dice state. search-v3.1 is retired in the same file. Marco registers it on yang.]
+
+*Question.* Does the `graph-m` net do better on OpenHex's ladder than search-v3.1's `graph-s` net, at the deployed 2#super[17] sims?
+
+- *Why this net.* In the 1,024-sim search against fr3's fair raw bot, on the same 2,000 held-out games: 67.00% with this net, 62.95% with search-v3.1's (paired +4.05 pp, p = 0.004), 64.65% with `2p-graph-s-8` (p = 0.086) and 57.25% with its own start (@exp:az-graph-m). Not measured: 2#super[17] sims, and this net against search-v3.1's head to head.
+- *More simulations help it* (interim, the row was still playing at the release). At 4,096 sims on the same games, 1,601 of 2,000 played: 70.9%, against 67.2% at 1,024 sims on those 1,601 (219 games won only at 4,096, 159 only at 1,024). Marco released on this reading; the finished row goes to @exp:az-graph-m.
+- *Spec.* search-v3.1's with the checkpoint swapped: `MCTS:ckpt=az-2p-graph-m-uniform/main@e900#73249d10e959:` \ `sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45`.
+- *Through the bridge.* The spec at 1,024 sims replayed a recorded OpenHex game from both seats (184 decisions, on balanced dice up to the roll the record's dice could not give and on fair dice after it): every plan an OpenHex action, and the only fallbacks the three at the record's last moves that every agent has there. The bridge's 125 deploy, release and dice tests pass.
+- *Move time.* A fresh 2#super[17] search took 16.5 to 17.1 s on the RTX 2070 Super (six opening decisions, beside a running eval; none reached the 45 s deadline; 2.0 GB of host RAM). search-v3.1's `graph-s` net takes 7.5 to 9.9 s on yang's GTX 1080, and `graph-m`'s forward costs about 2.4× `graph-s`'s, so expect roughly 18 to 24 s there. Not measured on yang: `games.jsonl` counts the searches the deadline cut.
+- *Release.* Tag `openhex-1v1-v4`. The play source moved since `openhex-1v1-v3.1` (the dice input, the outcome and soft policy heads and the `graph-m` kernels in `src/`; the engine submodule to `2b291fa`, catanatron to `c26dd4f`), so `catanrl-4p-greedy-v1` carries the new tag too, and yang needs `git submodule update` and `uv sync` (which rebuilds the engine). The fused kernels for `graph-m`'s width compile on the bot's first start.
+- *No overlap.* search-v4 replaces search-v3.1 (one GPU on yang, and a `graph-m` search fills more of the move clock). To run both for a head to head, set search-v3.1's `retired: false` and its tag to `openhex-1v1-v4`.
+- *Baseline.* search-v3.1's record to date by opponent (`catanrl openhex stats`); as before, a 5 pp gap needs about 1,500 games a side on the same opponents.
+
+#repro(```sh
+# Here: the bridge smoke, build, tag, publish (done 2026-11-21)
+catanrl openhex deploy/openhex.yaml --check --device cuda
+catanrl openhex release deploy/openhex.yaml openhex-1v1-v4
+git tag openhex-1v1-v4 && git push origin main openhex-1v1-v4   # then the printed gh release create
+# On yang
+git fetch --tags origin && git checkout origin/main && git submodule update --init && uv sync --extra cu126
+catanrl openhex fetch deploy/openhex.yaml
+catanrl openhex deploy/openhex.yaml --check --device cuda
+catanrl openhex deploy/openhex.yaml --describe catanrl-1v1-search-v4 > /tmp/body.json   # then register (handoff, step 7)
+# key into the env file as OPENHEX_KEY_1V1_SEARCH_V4; bot_id into deploy/openhex.yaml
+catanrl openhex deploy/openhex.yaml --check --keys --device cuda
 ```)
 
 === OpenHex's 1v1 ladder on 2026-11-15 #chip("done") <exp:deploy-ladder>

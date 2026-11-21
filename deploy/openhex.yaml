@@ -30,7 +30,7 @@ bots:
     key_env: OPENHEX_KEY_4P
     bot_id: 068460ec188f4a2c
     deployed: 2026-10-17
-    tag: openhex-1v1-v3.1
+    tag: openhex-1v1-v4
     retired: false
   - name: catanrl-1v1-search-v1  # catanrl-1v1-search until 2026-11-16
     mode: 1v1
@@ -105,4 +105,24 @@ bots:
     deployed: 2026-11-15
     tag: openhex-1v1-v3.1
     evidence: [ea2574432c1ce3fc, 4411825addefb873, e917f9bb47b8ad4c, 809619df11e87cc8]
+    retired: true
+    retired_at: 2026-11-21  # replaced by catanrl-1v1-search-v4
+  # v4 (2026-11-21, Marco): az-2p-graph-m-uniform/main@e900 (2p-graph-m-2), the first graph-m
+  # net (hidden 192, 4 layers; graph-s: 96, 3) and the first with the balanced-dice state as
+  # an input: 2p-graph-m-1 (PPO from scratch) after 900 iterations of search training
+  # (152,862 games), in search-v3.1's search. Measured at 1,024 sims against fr3's fair raw
+  # bot on the same 2,000 heldout-2p-fr games: 67.00% with this net, 62.95% with
+  # search-v3.1's (paired +4.05 pp, p = 0.004), 64.65% with 2p-graph-s-8 (p = 0.086), 57.25%
+  # with its own start. Not measured at 2^17 sims or against search-v3.1 itself. A fresh
+  # 2^17 search takes about 17 s on an RTX 2070 Super (6 opening positions, none cut;
+  # search-v3.1's graph-s: 7.5-9.9 s on yang's GTX 1080), so more moves may reach the 45 s
+  # deadline on yang than before ("cut" in games.jsonl's search).
+  - name: catanrl-1v1-search-v4
+    mode: 1v1
+    version: 1v1-search-v4
+    spec: MCTS:ckpt=az-2p-graph-m-uniform/main@e900#73249d10e959:sims=131072:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45
+    key_env: OPENHEX_KEY_1V1_SEARCH_V4
+    deployed: 2026-11-21
+    tag: openhex-1v1-v4
+    evidence: [af97f7595f82b53d, ea2574432c1ce3fc, cc4ccbcc8cb418f6, 9c7a904b68e6fb51]
     retired: false
