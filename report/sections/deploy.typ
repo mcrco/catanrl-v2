@@ -9,10 +9,10 @@ The bots that play people are in @tab:deploy-bots. To serve a 1v1 net raw, use t
     columns: (auto, 1fr),
     align: (left, left),
     header: ([Table or bot], [Agent spec]),
-    tgroup(2)[catan.marcoya.ng (`deploy/house.yaml`)],
-    ["1v1 OpenHex rules vs ppo-2p-fr3" \ #sub[waits on the house machine (@exp:deploy-site-openhex-rules)]], [`BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16`],
-    ["1v1 vs puffer-graph2" \ #sub[served until the swap]], [`BELIEF:ckpt=puffer-graph2/full@best:worlds=16`],
-    ["4p vs ppo-4p"], [`POLICY:ckpt=ppo-4p/main@best`],
+    tgroup(2)[catan.marcoya.ng (`deploy/house.yaml` as of `1e894c8`, 2026-11-18: the best raw net per mode)],
+    ["1v1 OpenHex rules vs graph-m" \ #sub[`2p-graph-m-1`; @exp:deploy-site-openhex-rules]], [`BELIEF:ckpt=graph-m-2p-lr/main@e22711:worlds=16`],
+    ["3p vs gen-base"], [`POLICY:ckpt=gen-base-2/main@e3800`],
+    ["4p vs gen-base"], [`POLICY:ckpt=gen-base-2/main@e3800`],
     ["4p island vs ppo-mixed" \ #sub[15–30 tile islands]], [`POLICY:ckpt=ppo-mixed/main@best`],
     tgroup(2)[OpenHex (`deploy/openhex.yaml`); the first three are v1; `catanrl-1v1-search` and `catanrl-1v1-v2` were retired on 2026-11-04],
     [`catanrl-1v1`], [`BELIEF:ckpt=puffer-graph2/full@e3350:worlds=16`],
@@ -24,7 +24,7 @@ The bots that play people are in @tab:deploy-bots. To serve a 1v1 net raw, use t
     [`catanrl-1v1-search-v3.1` \ #sub[bot `e296048b5a1c4a83`, live since 2026-11-15 (@exp:deploy-openhex-search-v3-1); retired in the file for search-v4 on 2026-11-21]], [`MCTS:ckpt=az-2p-kata/main+1500@e1800:` the same search],
     [`catanrl-1v1-search-v4` \ #sub[released 2026-11-21, not yet registered (@exp:deploy-openhex-search-v4)]], [`MCTS:ckpt=az-2p-graph-m-uniform/main@e900:` the same search],
   ),
-  caption: [The deploy files in this checkout, sha pins omitted. `@best` is e3350 for `puffer-graph2/full`, e3650 for `ppo-4p/main` and e3550 for `ppo-mixed/main`.],
+  caption: [The deploy files in this checkout, sha pins omitted. `@best` is e3550 for `ppo-mixed/main`.],
 ) <tab:deploy-bots>
 
 == Tables on catan.marcoya.ng
