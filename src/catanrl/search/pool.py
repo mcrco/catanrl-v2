@@ -51,7 +51,9 @@ def free_backlog() -> dict[str, int]:
 def search_config(params: Any, *, max_players: int, threads: int | None = None) -> cpp.SearchConfig:
     """The engine ``SearchConfig`` of MCTS agent params (catanrl.agents.spec.MctsParams).
 
-    ``dets = K`` samples K root worlds from the hand tracker; ``oracle =
+    ``dets = K`` samples K root worlds from the hand tracker, or with
+    ``world_choice = likely`` takes the K most likely deals of the hidden cards
+    and searches each by its probability among them; ``oracle =
     true`` searches the true game (``determinizations = 0``). ``c_puct`` is
     in engine units (0.75 = v1's 1.5). ``transpositions`` turns on the engine's
     transposition table (one node for a position reached by reordered actions).
@@ -73,6 +75,13 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
         raise ValueError(f"root must be puct or gumbel, not {root!r}")
     noise = bool(get("noise", False))
     threads = int(get("threads", 0) if threads is None else threads)
+    world_choice = str(get("world_choice", "sample") or "sample")
+    if world_choice not in ("sample", "likely"):
+        raise ValueError(f"world_choice must be sample or likely, not {world_choice!r}")
+    if oracle and world_choice != "sample":
+        raise ValueError("oracle=true searches the true game; it takes no world_choice")
+    # Passed only when set, as free_backlog: the engine's default is the sampled worlds.
+    worlds = {"world_choice": cpp.WorldChoice.LIKELY} if world_choice == "likely" else {}
     return cpp.SearchConfig(
         c_puct=float(get("c_puct", 0.75)),
         simulations=int(get("sims", 256)),
@@ -88,6 +97,7 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
         transpositions=bool(get("transpositions", False)),
         root_policy_temperature=float(get("root_policy_temperature", 1.0)),
         forced_playouts=float(get("forced_playouts", 0.0)),
+        **worlds,
         **free_backlog(),
     )
 

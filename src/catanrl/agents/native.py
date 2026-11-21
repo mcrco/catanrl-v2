@@ -7,7 +7,9 @@ agent spec (``catanrl.agents.spec.ResolvedAgent``) into one of:
   ``temperature`` from a per-decision seed (never torch's global RNG);
 * :class:`MctsAgent` (``MCTS``): one SearchPool search per decision, all of a
   batch's decisions in lockstep; ``dets = K`` samples K root worlds from the
-  deciding seat's hand tracker, ``oracle = true`` searches the true game;
+  deciding seat's hand tracker (``world_choice = likely``: the K most likely
+  deals instead, each searched by its probability), ``oracle = true`` searches
+  the true game;
 * :class:`BeliefAgent` (``BELIEF``): the policy averaged over K worlds
   sampled from the deciding seat's hand tracker;
 * :class:`PredictAgent` (``PREDICT``): a public/full policy on one row, the

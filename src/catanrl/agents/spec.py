@@ -13,6 +13,10 @@ params (a positional value is ``ckpt``)::
 ``tracker`` (MCTS with dets, BELIEF) picks how the hand tracker deals the
 worlds: ``pool`` (the default) deals the unknown cards uniformly, ``exact``
 draws from the exact posterior over hidden steals (``cpp.TrackerMode``).
+``world_choice`` (MCTS with dets) picks the worlds: ``sample`` (the default)
+draws ``dets`` of them, ``likely`` takes the ``dets`` most likely deals of the
+hidden cards and searches each by its probability among them
+(``cpp.WorldChoice``; keyed only when set).
 
 ``PREDICT`` (DESIGN 2.1) plays a ``public`` or ``full`` policy (``ckpt``) on one
 row: the game's private row with the other seats' hidden features filled in
@@ -108,6 +112,12 @@ class MctsParams:
     #: play depends on the machine: the server harness only, for a ladder's per-move limit,
     #: where the bridge spreads it over every decision one move of the ladder takes.
     deadline: float = field(default=0.0, metadata={"key_if_set": True})
+    #: ``likely``: the ``dets`` most likely deals of the hidden cards in place of ``dets``
+    #: sampled ones, each searched by its probability among them (the engine's
+    #: ``SearchConfig.world_choice``): the worlds no longer depend on the decision's seed.
+    #: The engine refuses a position with too many deals to list (several seats holding
+    #: unknown resource cards; a two-player position always lists).
+    world_choice: Literal["sample", "likely"] = field(default="sample", metadata={"key_if_set": True})
     dedup: bool = field(default=True, metadata={"execution": True})
     #: Leaves one search sends to the network per forward (virtual visits while they
     #: wait). More leaves per forward is what makes a GPU pay: at 1 the search is one
@@ -202,7 +212,8 @@ def key_params(params: Any) -> dict:
 
 #: ``SearchConfig`` attributes in ``key_dict()["search"]`` only at a non-default value: engine
 #: options added after records were stored (an older engine build has no such attribute).
-SEARCH_KEY_IF_SET = ("transpositions", "canonical_discards", "root_policy_temperature", "forced_playouts")
+SEARCH_KEY_IF_SET = ("transpositions", "canonical_discards", "root_policy_temperature", "forced_playouts",
+                     "world_choice")
 #: ``SearchConfig`` attributes that are never in ``key_dict()["search"]``: how a search is run
 #: (on how many threads, which of them frees its trees), which no result depends on.
 SEARCH_KEY_NEVER = ("threads", "free_backlog")
@@ -351,6 +362,8 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
             raise SpecError("MCTS: oracle=true searches the true game and takes no tracker")
         if params.dets < 1:
             raise SpecError("MCTS: dets counts sampled worlds (>= 1); use oracle=true for the true game")
+        if params.oracle and params.world_choice != "sample":
+            raise SpecError("MCTS: oracle=true searches the true game and takes no world_choice")
         if params.sims < 1:
             raise SpecError("MCTS: sims must be positive")
         if params.pending < 1:

@@ -194,6 +194,54 @@ def test_a_deadline_is_keyed_only_when_set_and_only_the_server_takes_it(ckpts):
         resolve_agent("MCTS:ckpt=exp/v:sims=8:deadline=-1", harness="server")
 
 
+def test_world_choice_is_keyed_only_when_set(ckpts):
+    """world_choice=likely searches the dets most likely worlds by their probabilities: keyed when
+    set, in the params and in the engine SearchConfig, and the default leaves every canonical
+    spec, key and eval id as it was."""
+    from catanrl import canon
+    from catanrl.eval import results
+    from catanrl.eval.suites import Suite
+
+    suite = Suite(name="t", purpose="dev", seed=1, boards=1, scenarios=({"game": "base-2p"},), turn_limit=500)
+
+    def eval_id(agent) -> str:
+        return canon.digest(results.eval_key([agent, resolve_agent("F")], suite, harness="native"))
+
+    base = resolve_agent("MCTS:ckpt=exp/v:sims=8:dets=8")
+    written = resolve_agent("MCTS:ckpt=exp/v:sims=8:dets=8:world_choice=sample")
+    assert base.canonical.endswith(":allow_drift=false:tracker=pool")
+    assert written.canonical == base.canonical and written.key_dict() == base.key_dict()
+    assert eval_id(written) == eval_id(base)
+    assert "world_choice" not in base.key_dict()["params"] and "world_choice" not in base.key_dict()["search"]
+    assert "world_choice" not in keyed_fields(base.params)
+    assert base.native(device="cpu").config.world_choice == cpp.WorldChoice.SAMPLE
+    assert search_details(search_config(base.params, max_players=2)) == base.key_dict()["search"]
+
+    likely = resolve_agent("MCTS:ckpt=exp/v:sims=8:dets=8:world_choice=likely:reuse=true")
+    assert likely.canonical == base.canonical + ":reuse=true:world_choice=likely" and likely.fair
+    assert resolve_agent(likely.canonical).canonical == likely.canonical
+    assert likely.key_dict()["params"] == {**base.key_dict()["params"], "reuse": True, "world_choice": "likely"}
+    assert likely.key_dict()["search"] == {**base.key_dict()["search"], "world_choice": "LIKELY"}
+    assert eval_id(likely) != eval_id(resolve_agent("MCTS:ckpt=exp/v:sims=8:dets=8:reuse=true"))
+    assert resolve_agent(likely.canonical, harness="server").canonical == likely.canonical
+    native = likely.native(device="cpu")
+    assert native.config.world_choice == cpp.WorldChoice.LIKELY and native.config.determinizations == 8
+    assert native.needs_trackers and native.reuse
+    # One world is the single most likely deal.
+    assert resolve_agent("MCTS:ckpt=exp/v:sims=8:world_choice=likely").native(device="cpu").config.determinizations == 1
+
+    with pytest.raises(SpecError):
+        resolve_agent("MCTS:ckpt=exp/v:sims=8:dets=8:world_choice=best")
+    with pytest.raises(SpecError, match="world_choice"):
+        resolve_agent("MCTS:ckpt=exp/v:sims=8:oracle=true:world_choice=likely")
+    with pytest.raises(ValueError, match="world_choice"):
+        search_config({"sims": 8, "oracle": True, "world_choice": "likely"}, max_players=2)
+    with pytest.raises(ValueError, match="world_choice"):
+        search_config({"sims": 8, "dets": 4, "world_choice": "best"}, max_players=2)
+    config = search_config({"sims": 8, "dets": 4, "world_choice": "likely"}, max_players=2)
+    assert config.world_choice == cpp.WorldChoice.LIKELY and config.determinizations == 4
+
+
 def test_root_exploration_is_self_plays_and_keyed_only_when_set(ckpts):
     """The engine's forced playouts and root policy temperature are ``search_config`` params that no
     MCTS agent has: an agent's key holds neither, and a config that sets them reads back with them."""

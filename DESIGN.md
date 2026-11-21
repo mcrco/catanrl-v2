@@ -692,6 +692,14 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   spec and `key_dict()`, so eval records tell the two apart. The native
   harness keeps VecEnv's trackers exact when any agent asks, and each agent
   passes its own deal, so a lineup can mix both.
+* **`world_choice`** (MCTS with dets): `sample` (default) draws the `dets`
+  worlds; `likely` takes the `dets` most likely deals of the hidden cards
+  (the engine lists every deal with its exact probability) and searches each
+  by its probability among them, so the worlds no longer depend on the
+  decision's seed. It is in the canonical spec and `key_dict()` only when
+  set. A position with too many deals to list (several seats holding unknown
+  resource cards) is refused by the engine; a two-player position always
+  lists.
 * **PREDICT** (2.1) takes `ckpt` (a `public` or `full` policy; a `private`
   one has nothing to fill and is refused), `predictor` (a `private`
   checkpoint whose network has the aux head; any other level, no head, or a
