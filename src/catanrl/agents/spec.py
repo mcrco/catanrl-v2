@@ -203,14 +203,17 @@ def key_params(params: Any) -> dict:
 #: ``SearchConfig`` attributes in ``key_dict()["search"]`` only at a non-default value: engine
 #: options added after records were stored (an older engine build has no such attribute).
 SEARCH_KEY_IF_SET = ("transpositions", "canonical_discards", "root_policy_temperature", "forced_playouts")
+#: ``SearchConfig`` attributes that are never in ``key_dict()["search"]``: how a search is run
+#: (on how many threads, which of them frees its trees), which no result depends on.
+SEARCH_KEY_NEVER = ("threads", "free_backlog")
 
 
 def search_details(config: Any) -> dict:
-    """``key_dict()["search"]``: every public ``SearchConfig`` attribute but ``threads``, the
-    :data:`SEARCH_KEY_IF_SET` options only when set."""
+    """``key_dict()["search"]``: every public ``SearchConfig`` attribute but the
+    :data:`SEARCH_KEY_NEVER` ones, the :data:`SEARCH_KEY_IF_SET` options only when set."""
     default = type(config)()
     return {name: _plain(getattr(config, name)) for name in dir(config)
-            if not name.startswith("_") and name != "threads"
+            if not name.startswith("_") and name not in SEARCH_KEY_NEVER
             and not (name in SEARCH_KEY_IF_SET and getattr(config, name) == getattr(default, name))}
 
 

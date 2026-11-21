@@ -10,6 +10,7 @@ completion; :func:`search_config` maps agent parameters onto the engine's
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -24,6 +25,28 @@ from catanrl.search.evaluator import BatchEvaluator
 DIRICHLET_ALPHA = 0.3
 DIRICHLET_FRACTION = 0.25
 
+#: Environment variable setting the engine's ``SearchConfig.free_backlog`` for every pool this
+#: process builds: the most tree nodes that ``remove``, ``advance`` and ``reroot`` may leave for
+#: the pool's threads to free (0: each call frees its own, as before the engine had the option).
+#: Where the memory is freed, like ``threads``: no result and no key depends on it
+#: (catanrl.agents.spec.search_details), so it is the environment's, not an agent's or a run's.
+FREE_BACKLOG_ENV = "CATANRL_FREE_BACKLOG"
+
+
+def free_backlog() -> dict[str, int]:
+    """``SearchConfig``'s ``free_backlog`` argument from :data:`FREE_BACKLOG_ENV`; none when it
+    is unset (the engine's default; an engine build without the option takes no argument)."""
+    text = os.environ.get(FREE_BACKLOG_ENV, "").strip()
+    if not text:
+        return {}
+    try:
+        nodes = int(text)
+    except ValueError:
+        nodes = -1
+    if nodes < 0:
+        raise ValueError(f"{FREE_BACKLOG_ENV} must be a number of tree nodes (0 or more), not {text!r}")
+    return {"free_backlog": nodes}
+
 
 def search_config(params: Any, *, max_players: int, threads: int | None = None) -> cpp.SearchConfig:
     """The engine ``SearchConfig`` of MCTS agent params (catanrl.agents.spec.MctsParams).
@@ -35,6 +58,7 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
     ``root_policy_temperature`` (unset: 1.0) and ``forced_playouts`` (unset: 0.0)
     are the engine's root exploration settings of the same names (PUCT roots;
     self-play's full searches, catanrl.train.alphazero): no MCTS agent has them.
+    ``free_backlog`` is not a parameter: :data:`FREE_BACKLOG_ENV` sets it.
     """
     get = params.get if isinstance(params, Mapping) else lambda key, default=None: getattr(params, key, default)
     oracle = bool(get("oracle", False))
@@ -64,6 +88,7 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
         transpositions=bool(get("transpositions", False)),
         root_policy_temperature=float(get("root_policy_temperature", 1.0)),
         forced_playouts=float(get("forced_playouts", 0.0)),
+        **free_backlog(),
     )
 
 

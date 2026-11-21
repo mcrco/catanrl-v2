@@ -209,6 +209,43 @@ def test_root_exploration_is_self_plays_and_keyed_only_when_set(ckpts):
     assert search_details(shaped) == {**search_details(plain), "forced_playouts": 2.0, "root_policy_temperature": 1.25}
 
 
+def test_free_backlog_is_the_environments_and_reaches_no_key(ckpts, monkeypatch):
+    """``CATANRL_FREE_BACKLOG`` sets the engine's ``free_backlog`` (which thread frees the trees a
+    search discards) for every pool this process builds, the MCTS agent's among them, and like
+    ``threads`` it is in no key: the agent's key and an eval's key and id are the same with it."""
+    from catanrl import canon
+    from catanrl.eval import results
+    from catanrl.eval.suites import Suite
+    from catanrl.search.pool import FREE_BACKLOG_ENV
+
+    spec = "MCTS:ckpt=exp/v:sims=8:dets=2:reuse=true:device=cpu"
+    suite = Suite(name="t", purpose="dev", seed=1, boards=1, scenarios=({"game": "base-2p"},), turn_limit=500)
+
+    def keys() -> tuple:
+        agent = resolve_agent(spec)
+        key = results.eval_key([agent, resolve_agent("F")], suite, harness="native")
+        return agent, (agent.canonical, agent.key_dict(), key, canon.digest(key))
+
+    monkeypatch.delenv(FREE_BACKLOG_ENV, raising=False)
+    engine = cpp.SearchConfig().free_backlog
+    plain, unset = keys()
+    assert not {"free_backlog", "threads"} & set(plain.key_dict()["search"])
+    assert plain.native().config.free_backlog == engine
+    for nodes in (0, 1 << 20):
+        monkeypatch.setenv(FREE_BACKLOG_ENV, str(nodes))
+        agent, with_it = keys()
+        assert with_it == unset
+        config = search_config(agent.params, max_players=2, threads=3)
+        assert (config.free_backlog, config.threads) == (nodes, 3) != (engine, 3)
+        assert search_details(config) == plain.key_dict()["search"]
+        native = agent.native()
+        assert native.config.free_backlog == nodes  # the config its pool is built with
+    for bad in ("-1", "many", "1.5"):
+        monkeypatch.setenv(FREE_BACKLOG_ENV, bad)
+        with pytest.raises(ValueError, match=FREE_BACKLOG_ENV):
+            search_config(plain.params, max_players=2)
+
+
 def _rebuilds_unchanged(entry: dict) -> None:
     params = MctsParams(ckpt="x", **entry["params"])
     assert key_params(params) == entry["params"]
