@@ -145,6 +145,44 @@ catanrl eval "MCTS:ckpt=puffer-graph2/public@e3600:sims=4096:dets=1" \
 catanrl run configs/experiments/gumbel-edge-2p.yaml
 ```)
 
+=== Gumbel root on the search-trained net #chip("running") <exp:search-gumbel-az>
+#meta(
+  dates: "2026-11-21 04:14–08:06",
+  owner: "Marco (from a list of recommendations by another model, which Marco passed on)",
+  wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform (the net's training run)"),),
+  records: ("0959d391", "af97f759", "0d49a45d"),
+)
+#tldr[`2p-graph-m-2` with a Gumbel root instead of PUCT, everything else as deployed: *71.80%* at 1,024 sims against fr3's fair raw bot, +4.80 pp on the PUCT row on the same 2,000 games (p = 0.0001) and level with PUCT at 4,096 sims (+1.05 pp, p = 0.40) in a quarter of the time. Whether the gap holds at 4,096 sims decides if it goes to OpenHex.]
+
+*Question.* The Gumbel root beat PUCT by 7 pp on a PPO net in the plain search (@exp:search-gumbel-edge-2p). Does it still, on a net trained on PUCT searches and with tree reuse and transpositions?
+
+*Setup.* `az-2p-graph-m-uniform/main@e900` in the deployed search with `root=gumbel:gumbel_m=16` (sequential halving over the 16 best moves by prior plus Gumbel noise; below the root the search is unchanged), 1,024 sims, against `BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16` on the lineage's 2,000 games (`heldout-2p-fr`, first 1,000 boards × 2 seats). Paired game by game with the PUCT rows of @exp:az-graph-m. With reuse the kept subtree does not count towards the budget, for either root. Power: a paired gap is detectable from about 2.7 pp.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, left),
+    header: ([Root], [Sims], [Score], [Gumbel 1,024 minus this row], [Wall time], [Record]),
+    [Gumbel], [1,024], [*71.80* #ci[69.8][73.7]], [], [3.9 h], [`0959d391`],
+    [PUCT], [1,024], [67.00 #ci[64.9][69.0]], [+4.80 pp (352 vs 256; p = 0.0001)], [3.8 h], [`af97f759`],
+    [PUCT], [4,096], [70.75 #ci[68.7][72.7]], [+1.05 pp (293 vs 272; p = 0.40)], [15.2 h], [`0d49a45d`],
+  ),
+  caption: [`2p-graph-m-2` in the deployed search against fr3's fair raw bot, 2,000 games a row. In brackets: games won only by the Gumbel row against games won only by the other. Exact McNemar.],
+) <tab:search-gumbel-az>
+- *At 1,024 sims the Gumbel root is worth about a 4× budget.* 1,436 wins (73.6% first seat, 70.0% second) in the same wall time as PUCT at 1,024.
+- *Not known: the deployed budget.* OpenHex's search runs up to 131,072 sims a move. Sequential halving spends a fixed share of the budget on every one of the 16 candidates, which costs more as the budget grows, so the gap may close. A row at 4,096 sims (about 16 h) shows the trend.
+- *Not tried:* other `gumbel_m`; Gumbel roots in self-play (the 2,048-sim Gumbel run made the raw policy worse, @exp:az-2p-2048).
+
+#repro(```sh
+catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --threads 12 --num-envs 256 --infer-rows 512 \
+  "MCTS:ckpt=az-2p-graph-m-uniform/main@e900#73249d10e959:sims=1024:dets=1:root=gumbel:gumbel_m=16:pending=64:reuse=true:transpositions=true:kernels=fused" \
+  "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+E=runs/az-2p-graph-m-uniform/main/evals/heldout-2p-fr
+python tools/search_probe.py --pair $E/0959d3913d7f095e.json $E/af97f7595f82b53d.json
+python tools/search_probe.py --pair $E/0959d3913d7f095e.json $E/0d49a45d48520aaa.json
+```)
+
 === Search depth vs strength across training #chip("parked") <exp:search-depth-2p>
 #meta(
   dates: "2026-10-29 00:47 – 11-03 06:46; paused",
