@@ -666,11 +666,11 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 #meta(
   dates: "2026-11-21",
   owner: "Claude (suggested in the hardware study; taken up from a list of recommendations Marco passed on)",
-  config: "wt/free-trees, engine branch v2-free-trees (unmerged)",
+  config: "src/catanrl/search/pool.py, engine v2 at d779ee8",
   wandb: (),
   records: (),
 )
-#tldr[The main thread spent 19% of self-play freeing finished search trees (@exp:az-hardware). The search pool now hands them to its worker threads. `graph-s` self-play on this box: *82.9 → 68.0 s an iteration (1.22×)*, the same games and positions. Built and tested in `wt/free-trees`; not merged until OpenHex's v4 runs, because the runner needs the checkout's play code to equal the release tag's.]
+#tldr[The main thread spent 19% of self-play freeing finished search trees (@exp:az-hardware). The search pool now hands them to its worker threads. `graph-s` self-play on this box: *82.9 → 68.0 s an iteration (1.22×)*, the same games and positions. In main since 2026-11-21 (Marco). The OpenHex runner refuses a tagged bot from code that is not its tag's, so the bots need a new tag (or `--allow-dirty`) to run from it.]
 
 *Question.* Does moving the freeing of trees off the main thread give the 1.2× the profile promised?
 
@@ -700,12 +700,11 @@ perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 - *1.22×, the profile's bound.* The 15 s saved are all main-thread time.
 - *A larger bound adds nothing* (0.6%) and lets an idle pool hold gigabytes; the default stays 65,536.
 - *The card matters more now.* Replaying the trace with a card 1.5× as fast gives 51.1 s (1.26×); before the change, 65.6 s from 79.1 (1.21×).
-- *Not measured:* `graph-m` self-play (the same trees, so about the same seconds off a 127 s iteration, near 12%), evals, the deployed search.
+- *Not measured:* `graph-m` self-play (the same trees, so about the same seconds off a 127 s iteration, near 12%) and evals. The deployed search frees one tree's cut branches a move, by this run's rate about 0.3 s of a 16 s move: no visible gain there.
 
 #repro(```sh
-# from the wt/free-trees worktree
-CATANRL_FREE_BACKLOG=0 python tools/gpu_bench.py b1 --iterations 6 --runs RUNS-off --out OUT-off --tag off --real-runs ../catanrl-v2/runs
-python tools/gpu_bench.py b1 --iterations 6 --runs RUNS-on --out OUT-on --tag on --real-runs ../catanrl-v2/runs
+CATANRL_FREE_BACKLOG=0 python tools/gpu_bench.py b1 --iterations 6 --runs RUNS-off --out OUT-off --tag off
+python tools/gpu_bench.py b1 --iterations 6 --runs RUNS-on --out OUT-on --tag on
 ```)
 
 === Several self-play processes on one rented card, and what \$100 buys #chip("done") <exp:az-modal-scale>
