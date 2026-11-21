@@ -653,13 +653,59 @@ pytest tests/test_search_pipeline.py tests/test_alphazero.py tests/test_graph_ke
 - *A GPU simulator* is not supported by these numbers: the time goes to tree bookkeeping on one thread, not to stepping games.
 - *Limits.* 5 iterations and 8 epochs a cell; this box was measured with other processes on the CPU (load average 3.0 before the self-play benchmark); Modal's cores are 0.83× this box's on one thread; `graph-m` in self-play (@exp:az-graph-m) was not measured.
 
-*Next* (Claude's suggestions, not queued). Free trees on an idle worker thread, a small engine change that leaves results as they are (up to 1.2× on self-play, the profile's bound). Keep the board's sets as bit masks, a larger change that removes most allocations.
+*Next* (Claude's suggestions). Free trees on the worker threads, a small engine change that leaves results as they are: built, 1.22× (@exp:az-free-trees). Keep the board's sets as bit masks, a larger change that removes most allocations: not queued.
 
 #repro(```sh
 # from the wt/modal worktree
 python tools/gpu_bench.py a --out OUT --runs RUNS     # then: b1 --iterations 5 | b2 --epochs 8 --precision float16
 modal run tools/modal_bench.py --job l40s-b1 --out OUT   # cpu | a10g-a | l40s-a | l40s-b1-t8 | l40s-b1-t32 | l40s-b2
 perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
+```)
+
+=== Freeing search trees on the pool's threads #chip("done") <exp:az-free-trees>
+#meta(
+  dates: "2026-11-21",
+  owner: "Claude (suggested in the hardware study; taken up from a list of recommendations Marco passed on)",
+  config: "wt/free-trees, engine branch v2-free-trees (unmerged)",
+  wandb: (),
+  records: (),
+)
+#tldr[The main thread spent 19% of self-play freeing finished search trees (@exp:az-hardware). The search pool now hands them to its worker threads. `graph-s` self-play on this box: *82.9 → 68.0 s an iteration (1.22×)*, the same games and positions. Built and tested in `wt/free-trees`; not merged until OpenHex's v4 runs, because the runner needs the checkout's play code to equal the release tag's.]
+
+*Question.* Does moving the freeing of trees off the main thread give the 1.2× the profile promised?
+
+#lead[Change.]
+- *What.* `remove`, `advance` and `reroot` no longer free the trees they drop. The pool keeps them in a list and its worker threads free them in parallel at the start of the next `collect`, or at once when more than `free_backlog` nodes wait (65,536 by default, about 160 MB; 0 is the old behaviour).
+- *Not a background thread.* A dedicated thread that frees while the search runs was measured slower: it fights the workers for the allocator.
+- *Results unchanged.* `free_backlog` enters no agent key or eval id; set by `CATANRL_FREE_BACKLOG`. Tests: the engine's C++ and Python suites, the search and AlphaZero tests of this repo, thread and address sanitizers clean.
+
+*Setup.* `tools/gpu_bench.py b1`: e1800's stored `graph-s` config (512 games, 600 and 100 sims, tree reuse), 6 iterations an arm, medians of iterations 4 to 6, W&B off, nothing else on the GPU.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([], [Old (`free_backlog` 0)], [New (65,536)], [New (1,048,576)]),
+    [Seconds an iteration], [82.9], [*68.0*], [67.6],
+    [of which self-play], [80.0], [65.1], [64.7],
+    [Main thread on the CPU, s], [65.0], [50.6], [50.2],
+    [GPU busy, s], [55.5], [55.5], [55.5],
+    [GPU busy share], [70%], [86%], [86%],
+    [Leaves a second], [69,100], [85,000], [85,500],
+    [Games an hour], [8,920], [10,960], [11,030],
+  ),
+  caption: [`graph-s` self-play on this box with the trees freed by the main thread and by the pool's threads. All three arms played the same 837 games (36,889 positions, the same network rows).],
+) <tab:az-free-trees>
+- *1.22×, the profile's bound.* The 15 s saved are all main-thread time.
+- *A larger bound adds nothing* (0.6%) and lets an idle pool hold gigabytes; the default stays 65,536.
+- *The card matters more now.* Replaying the trace with a card 1.5× as fast gives 51.1 s (1.26×); before the change, 65.6 s from 79.1 (1.21×).
+- *Not measured:* `graph-m` self-play (the same trees, so about the same seconds off a 127 s iteration, near 12%), evals, the deployed search.
+
+#repro(```sh
+# from the wt/free-trees worktree
+CATANRL_FREE_BACKLOG=0 python tools/gpu_bench.py b1 --iterations 6 --runs RUNS-off --out OUT-off --tag off --real-runs ../catanrl-v2/runs
+python tools/gpu_bench.py b1 --iterations 6 --runs RUNS-on --out OUT-on --tag on --real-runs ../catanrl-v2/runs
 ```)
 
 === Several self-play processes on one rented card, and what \$100 buys #chip("done") <exp:az-modal-scale>
