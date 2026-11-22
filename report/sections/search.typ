@@ -145,33 +145,36 @@ catanrl eval "MCTS:ckpt=puffer-graph2/public@e3600:sims=4096:dets=1" \
 catanrl run configs/experiments/gumbel-edge-2p.yaml
 ```)
 
-=== Gumbel root on the search-trained net #chip("running") <exp:search-gumbel-az>
+=== Gumbel root on the search-trained net #chip("done") <exp:search-gumbel-az>
 #meta(
-  dates: "2026-11-21 04:14–08:06",
+  dates: "2026-11-21 04:14–23:39",
   owner: "Marco (from a list of recommendations by another model, which Marco passed on)",
   wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform (the net's training run)"),),
-  records: ("0959d391", "af97f759", "0d49a45d"),
+  records: ("0959d391", "0e14c16e", "af97f759", "0d49a45d"),
 )
-#tldr[`2p-graph-m-2` with a Gumbel root instead of PUCT, everything else as deployed: *71.80%* at 1,024 sims against fr3's fair raw bot, +4.80 pp on the PUCT row on the same 2,000 games (p = 0.0001) and level with PUCT at 4,096 sims (+1.05 pp, p = 0.40) in a quarter of the time. Whether the gap holds at 4,096 sims decides if it goes to OpenHex.]
+#tldr[`2p-graph-m-2` with a Gumbel root instead of PUCT, everything else as deployed: *71.80%* at 1,024 sims against fr3's fair raw bot, +4.80 pp on the PUCT row on the same 2,000 games (p = 0.0001). At 4,096 sims the gain is gone: *70.85%* against PUCT's 70.75% (p = 0.97). A Gumbel root helps a small budget and does nothing for the deployed one, so OpenHex keeps PUCT.]
 
 *Question.* The Gumbel root beat PUCT by 7 pp on a PPO net in the plain search (@exp:search-gumbel-edge-2p). Does it still, on a net trained on PUCT searches and with tree reuse and transpositions?
 
-*Setup.* `az-2p-graph-m-uniform/main@e900` in the deployed search with `root=gumbel:gumbel_m=16` (sequential halving over the 16 best moves by prior plus Gumbel noise; below the root the search is unchanged), 1,024 sims, against `BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16` on the lineage's 2,000 games (`heldout-2p-fr`, first 1,000 boards × 2 seats). Paired game by game with the PUCT rows of @exp:az-graph-m. With reuse the kept subtree does not count towards the budget, for either root. Power: a paired gap is detectable from about 2.7 pp.
+*Setup.* `az-2p-graph-m-uniform/main@e900` in the deployed search with `root=gumbel:gumbel_m=16` (sequential halving over the 16 best moves by prior plus Gumbel noise; below the root the search is unchanged), at 1,024 and at 4,096 sims, against `BELIEF:ckpt=ppo-2p-fr3/full@e4350:worlds=16` on the lineage's 2,000 games (`heldout-2p-fr`, first 1,000 boards × 2 seats). Paired game by game with the PUCT rows of @exp:az-graph-m. With reuse the kept subtree does not count towards the budget, for either root. Power: a paired gap is detectable from about 2.7 pp.
 
 #lead[Result.]
 #figure(
   btable(
     columns: (auto, auto, auto, auto, auto, auto),
     align: (left, right, right, right, right, left),
-    header: ([Root], [Sims], [Score], [Gumbel 1,024 minus this row], [Wall time], [Record]),
-    [Gumbel], [1,024], [*71.80* #ci[69.8][73.7]], [], [3.9 h], [`0959d391`],
-    [PUCT], [1,024], [67.00 #ci[64.9][69.0]], [+4.80 pp (352 vs 256; p = 0.0001)], [3.8 h], [`af97f759`],
-    [PUCT], [4,096], [70.75 #ci[68.7][72.7]], [+1.05 pp (293 vs 272; p = 0.40)], [15.2 h], [`0d49a45d`],
+    header: ([Root], [Sims], [Score], [Gumbel minus PUCT at these sims], [Wall time], [Record]),
+    [Gumbel], [1,024], [*71.80* #ci[69.8][73.7]], [+4.80 pp (352 vs 256; p = 0.0001)], [3.9 h], [`0959d391`],
+    [PUCT], [1,024], [67.00 #ci[64.9][69.0]], [], [3.8 h], [`af97f759`],
+    [Gumbel], [4,096], [70.85 #ci[68.8][72.8]], [+0.10 pp (310 vs 308; p = 0.97)], [15.1 h], [`0e14c16e`],
+    [PUCT], [4,096], [70.75 #ci[68.7][72.7]], [], [15.2 h], [`0d49a45d`],
   ),
-  caption: [`2p-graph-m-2` in the deployed search against fr3's fair raw bot, 2,000 games a row. In brackets: games won only by the Gumbel row against games won only by the other. Exact McNemar.],
+  caption: [`2p-graph-m-2` in the deployed search against fr3's fair raw bot, 2,000 games a row. In brackets: games won only by the Gumbel row against games won only by the PUCT row. Exact McNemar.],
 ) <tab:search-gumbel-az>
-- *At 1,024 sims the Gumbel root is worth about a 4× budget.* 1,436 wins (73.6% first seat, 70.0% second) in the same wall time as PUCT at 1,024.
-- *Not known: the deployed budget.* OpenHex's search runs up to 131,072 sims a move. Sequential halving spends a fixed share of the budget on every one of the 16 candidates, which costs more as the budget grows, so the gap may close. A row at 4,096 sims (about 16 h) shows the trend.
+- *At 1,024 sims the Gumbel root is worth about a 4× budget.* 1,436 wins (73.6% first seat, 70.0% second) in the same wall time as PUCT at 1,024, and level with PUCT at 4,096 (+1.05 pp; 293 vs 272; p = 0.40).
+- *At 4,096 sims it is worth nothing.* Gumbel does not gain from the larger budget (70.85% against its own 71.80% at 1,024; 257 vs 276; p = 0.44), while PUCT gains 3.75 pp and catches up.
+- *Reading.* Sequential halving gives every one of the 16 candidates a fair share, which rescues good moves a small PUCT budget starves. With more simulations PUCT reaches those moves on its own. OpenHex's search runs up to 131,072 sims a move, so its root stays PUCT.
+- *Where it would pay:* a bot with a small budget (a weak machine, a tight clock), and evals at 1,024 sims.
 - *Not tried:* other `gumbel_m`; Gumbel roots in self-play (the 2,048-sim Gumbel run made the raw policy worse, @exp:az-2p-2048).
 
 #repro(```sh
@@ -181,6 +184,8 @@ catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --threads 12 --nu
 E=runs/az-2p-graph-m-uniform/main/evals/heldout-2p-fr
 python tools/search_probe.py --pair $E/0959d3913d7f095e.json $E/af97f7595f82b53d.json
 python tools/search_probe.py --pair $E/0959d3913d7f095e.json $E/0d49a45d48520aaa.json
+# 4,096 sims: sims=4096 in the spec, --num-envs 64 (256 does not fit in RAM)
+python tools/search_probe.py --pair $E/0e14c16e0163c3c8.json $E/0d49a45d48520aaa.json
 ```)
 
 === Search depth vs strength across training #chip("parked") <exp:search-depth-2p>
@@ -336,6 +341,60 @@ catanrl run configs/experiments/mcts-reuse-4p-both.yaml
 catanrl run configs/experiments/mcts-reuse-4p.yaml
 # Pair a new row with its stored row on the shared games, e.g.
 uv run python tools/search_probe.py --pair aca296e23ff93a67 72819d1a1a072278
+```)
+
+=== The most likely worlds instead of sampled ones #chip("running") <exp:search-likely-worlds>
+#meta(
+  dates: "2026-11-21 14:10–",
+  owner: "marco",
+  config: "src/catanrl/agents/spec.py, src/catanrl/search/pool.py, engine v2 at 2036ca2",
+  wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform (the net's training run)"),),
+  records: ("dbbf084c", "af97f759"),
+)
+#tldr[A search with `dets=N:world_choice=likely` takes the N most likely hands the opponent can hold, each with its exact probability, and spends its simulations on them in that proportion. Built, tested and in main. The top 8 hands cover 97% of the probability on average, where 8 sampled draws land on only 3.3 to 4.9 distinct hands. Strength row at `dets=8` running (2,000 games, due about 04:00 on 2026-11-22).]
+
+*Idea (Marco).* A search with `dets=N` draws N hidden worlds at random and pools their trees. With 8 or 16 draws that is a noisy picture of what the opponent holds. Take the N most likely worlds instead and weight each by its probability.
+
+*What a world is.* In 1v1 the only hidden cards are the opponent's unplayed development cards. A world is one hand they could hold (and which of those cards they bought this turn). Its probability is the share of deals of the unseen cards that give that hand, among the deals that fit what is known of their victory point cards. The order of the deck is not part of a world: a development card bought inside the search is a chance node with that world's odds (as before).
+
+*As built* (`world_choice=likely`; the default `sample` is unchanged, and so are all stored keys):
+- *List.* `likely_worlds` lists every hand with its exact probability, most likely first, ties in a fixed order. It takes 1 to 3 µs.
+- *Keep.* The first N, renormalised. With fewer than N hands the search covers all of them exactly. The worlds do not depend on the seed.
+- *Weight.* Simulations go to the worlds in proportion to their probabilities, interleaved, so a search cut short by its deadline is still in proportion. Root visits are pooled as for sampled worlds. A Gumbel root averages the worlds' priors and values by the same weights.
+- *Reuse.* A kept tree keeps its worlds and weights. Reuse only carries over the searcher's own moves with nothing drawn or revealed, and those leave the opponent's hand as it was.
+- *Limits.* More than 65,536 possible deals (three or more players with unknown resource cards) is refused with an error. `oracle=true` with it is refused.
+
+#lead[What the top 8 cover.]
+#figure(
+  btable(
+    columns: (auto, auto, auto),
+    align: (left, right, right),
+    header: ([Opponent's hidden development cards], [Possible hands], [Probability in the top 8]),
+    [0], [1], [100%],
+    [1], [5], [100%],
+    [2], [13–15], [88–94%],
+    [3, or one bought this turn], [24–25], [74–80%],
+    [4], [8–45], [57–100%],
+    [5], [18–35], [51–80%],
+  ),
+  caption: [The hands `likely_worlds` lists on the engine tests' 2p positions. Fewer hands at 4 and 5 cards are positions where most kinds are already seen.],
+) <tab:search-likely-worlds>
+- *Coverage.* Over random 2p positions the top 8 hold 97% of the probability with at least one hidden card (6.7 hands on average) and 83% with at least three (17.1 hands, 45 at most).
+- *Sampling wastes draws.* 8 sampled draws give 3.3 distinct hands on average on the first set and 4.9 on the second: the likely hands repeat, and which rare hand gets a tree is luck.
+- *Checks.* On the engine's test positions the listed probabilities match 20,000 to 60,000 draws of the sampler per position, with the same support. Each world's share of the simulations follows its weight at a full and at a cut budget. Sampled searches are bit for bit as before. The engine's tests also pass under the thread and address sanitizers.
+- *One cost seen.* A world with a tiny weight may never search the move that is played, and then the tree is not reused. With a toy evaluator on 60 positions at 1,024 sims, PUCT root: 5 of 35 reuses refused, against 1 of 35 with sampled worlds.
+
+*Running.* `2p-graph-m-2` in the deployed search with `dets=8:world_choice=likely` at 1,024 sims against fr3's fair raw bot, on the lineage's 2,000 games, paired with the `dets=1` row (`af97f759`, 67.00%, @exp:az-graph-m). Power: a paired gap is detectable from about 2.7 pp. Record `dbbf084c`.
+
+*Not done:* a sampled `dets=8` row on the same games (it would say whether a gain comes from the weighting or from searching more than one world; we have no `dets=8` row at 1v1 at all); equal simulations per world with a weighted vote; `world_choice` in the trainers' configs.
+
+#repro(```sh
+pytest tests/test_likely_worlds.py tests/test_agent_spec.py -q
+catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --threads 12 --num-envs 256 --infer-rows 512 \
+  "MCTS:ckpt=az-2p-graph-m-uniform/main@e900#73249d10e959:sims=1024:dets=8:world_choice=likely:pending=64:reuse=true:transpositions=true:kernels=fused" \
+  "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+E=runs/az-2p-graph-m-uniform/main/evals/heldout-2p-fr
+python tools/search_probe.py --pair $E/dbbf084c51cbbd06.json $E/af97f7595f82b53d.json
 ```)
 
 == Sampling noise at chance nodes
