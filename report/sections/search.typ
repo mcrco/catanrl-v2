@@ -349,9 +349,9 @@ uv run python tools/search_probe.py --pair aca296e23ff93a67 72819d1a1a072278
   owner: "marco",
   config: "src/catanrl/agents/spec.py, src/catanrl/search/pool.py, engine v2 at 2036ca2",
   wandb: (("az-2p-graph-m-uniform-main-a2ac6eca", "az-2p-graph-m-uniform (the net's training run)"),),
-  records: ("dbbf084c", "af97f759"),
+  records: ("dbbf084c", "af97f759", "cfba6927"),
 )
-#tldr[A search with `dets=N:world_choice=likely` takes the N most likely hands the opponent can hold, each with its exact probability, and spends its simulations on them in that proportion. Built, tested and in main. The top 8 hands cover 97% of the probability on average, where 8 sampled draws land on only 3.3 to 4.9 distinct hands. Strength row at `dets=8` running (2,000 games, due about 04:00 on 2026-11-22).]
+#tldr[A search with `dets=N:world_choice=likely` takes the N most likely hands the opponent can hold, each with its exact probability, and spends its simulations on them in that proportion. Built, tested and in main. The top 8 hands cover 97% of the probability on average, where 8 sampled draws land on only 3.3 to 4.9 distinct hands. At 1,024 sims it loses to one sampled world: *63.60%* against 67.00% on the same 2,000 games (−3.40 pp, p = 0.0009). That row changes two things, the choice of worlds and a budget split over 8 trees; a sampled `dets=8` row on the same games is running to tell them apart.]
 
 *Idea (Marco).* A search with `dets=N` draws N hidden worlds at random and pools their trees. With 8 or 16 draws that is a noisy picture of what the opponent holds. Take the N most likely worlds instead and weight each by its probability.
 
@@ -384,9 +384,25 @@ uv run python tools/search_probe.py --pair aca296e23ff93a67 72819d1a1a072278
 - *Checks.* On the engine's test positions the listed probabilities match 20,000 to 60,000 draws of the sampler per position, with the same support. Each world's share of the simulations follows its weight at a full and at a cut budget. Sampled searches are bit for bit as before. The engine's tests also pass under the thread and address sanitizers.
 - *One cost seen.* A world with a tiny weight may never search the move that is played, and then the tree is not reused. With a toy evaluator on 60 positions at 1,024 sims, PUCT root: 5 of 35 reuses refused, against 1 of 35 with sampled worlds.
 
-*Running.* `2p-graph-m-2` in the deployed search with `dets=8:world_choice=likely` at 1,024 sims against fr3's fair raw bot, on the lineage's 2,000 games, paired with the `dets=1` row (`af97f759`, 67.00%, @exp:az-graph-m). Power: a paired gap is detectable from about 2.7 pp. Record `dbbf084c`.
+*Strength.* `2p-graph-m-2` in the deployed search with `dets=8:world_choice=likely` at 1,024 sims against fr3's fair raw bot, on the lineage's 2,000 games, paired with the `dets=1` row of @exp:az-graph-m. Power: a paired gap is detectable from about 2.7 pp.
 
-*Not done:* a sampled `dets=8` row on the same games (it would say whether a gain comes from the weighting or from searching more than one world; we have no `dets=8` row at 1v1 at all); equal simulations per world with a weighted vote; `world_choice` in the trainers' configs.
+#figure(
+  btable(
+    columns: (auto, auto, auto, auto, auto, auto),
+    align: (left, right, right, left, right, left),
+    header: ([Worlds], [Score], [First / second seat], [Minus the one-world row], [Wall time], [Record]),
+    [8 most likely, by probability], [63.60 #ci[61.5][65.7]], [66.3 / 60.9], [−3.40 pp (170 vs 238; p = 0.0009)], [3.8 h], [`dbbf084c`],
+    [1 sampled (`dets=1`)], [*67.00* #ci[64.9][69.0]], [70.2 / 63.8], [], [3.8 h], [`af97f759`],
+    [8 sampled (`dets=8`)], [running], [], [], [], [`cfba6927`],
+  ),
+  caption: [`2p-graph-m-2` at 1,024 sims against fr3's fair raw bot, 2,000 games a row. In brackets: games won only by this row against games won only by the one-world row. Exact McNemar.],
+) <tab:search-likely-worlds-strength>
+- *At 1,024 sims eight likely worlds lose 3.4 pp to one sampled world,* from both seats.
+- *What the row cannot say.* It changes two things at once. The 1,024 simulations are split over up to 8 trees, so each tree is shallower, and depth is worth a lot here (+3.75 pp from 1,024 to 4,096 sims, @exp:az-graph-m). Seeing the opponent's true hand was worth 0.5 pp to the raw policy (@exp:hidden-h2h-2p). So the split alone may explain the loss, whatever the choice of worlds.
+- *Running:* 8 sampled worlds on the same games (started 2026-11-22 03:29, about 4 h). Against the likely row it tests the idea itself (likely against sampled at the same `dets`); against the one-world row it measures the cost of the split.
+- *Not known:* large budgets. At OpenHex's up to 131,072 sims a move an eighth of the budget is still a deep tree, so the trade may turn there. A 4,096-sim row takes about 15 h.
+
+*Not done:* equal simulations per world with a weighted vote; `world_choice` in the trainers' configs.
 
 #repro(```sh
 pytest tests/test_likely_worlds.py tests/test_agent_spec.py -q
@@ -395,6 +411,7 @@ catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --threads 12 --nu
   "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
 E=runs/az-2p-graph-m-uniform/main/evals/heldout-2p-fr
 python tools/search_probe.py --pair $E/dbbf084c51cbbd06.json $E/af97f7595f82b53d.json
+# the sampled control: the same spec without world_choice=likely (record cfba69278af79d33)
 ```)
 
 == Sampling noise at chance nodes
