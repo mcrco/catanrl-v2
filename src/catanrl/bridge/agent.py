@@ -180,12 +180,16 @@ class ViewAgent:
     raises :class:`BridgeError` where a fallback would be counted.
     ``max_games``: games (and seats) followed at once; a reusing MCTS agent
     holds at most one live search per seat of each, and a game whose end
-    :meth:`observe` saw leaves at the next decision.
+    :meth:`observe` saw leaves at the next decision. ``trades``: in rooms
+    with domestic trades, answer, confirm and propose them with the agent's
+    own network (:class:`catanrl.bridge.trading.TradeJudge`; ``True`` or its
+    keyword arguments); without it the seat rejects and cancels.
     """
 
     def __init__(self, agent: Any, *, device: str = "cpu", infer_rows: int = 1, mode: str = "strict",
                  supply: Any = None, strict: bool = False,
-                 seed_fn: Callable[[Mapping[str, Any], int], int] | None = None, max_games: int = 8) -> None:
+                 seed_fn: Callable[[Mapping[str, Any], int], int] | None = None, max_games: int = 8,
+                 trades: Any = None) -> None:
         self.native, fair, self.label = native_agent(agent, device=device, infer_rows=infer_rows, mode=mode,
                                                      memory=True)
         if fair is False:
@@ -212,6 +216,11 @@ class ViewAgent:
         self._free_envs: list[int] = []
         self._inbox: deque[dict] = deque()
         self._lock = threading.Lock()
+        self.judge = None
+        if trades:
+            from catanrl.bridge.trading import TradeJudge
+
+            self.judge = TradeJudge(self.native, device=device, **({} if trades is True else dict(trades)))
 
     # ------------------------------------------------------------ the stream
 
@@ -284,15 +293,27 @@ class ViewAgent:
         """One of ``playable_actions`` (the object itself) for ``view``."""
         if not playable_actions:
             raise ValueError("nothing to decide: no playable actions")
+        from catanrl.bridge.trading import TRADE_PROMPTS
+
         with self._lock:
             self._drain()
-            if len(playable_actions) == 1:
+            # (A seat that may offer a trade has a choice even with one move listed.)
+            may_offer = self.judge is not None and view.get("offer_trade") is True
+            if len(playable_actions) == 1 and not may_offer:
                 self.stats["forced"] += 1
                 return playable_actions[0]
             tracker = self._tracker(view, playable_actions[0][0])
             self.stats["decisions"] += 1
             try:
                 position = tracker.sync(view)
+                if view.get("current_prompt") in TRADE_PROMPTS:
+                    return self._negotiate(view, playable_actions, tracker, position)
+                if may_offer:
+                    offer = self._offer(view, tracker, position)
+                    if offer is not None:
+                        return offer
+                    if len(playable_actions) == 1:
+                        return playable_actions[0]
                 return self._choose(view, playable_actions, tracker, position)
             except (BridgeError, UnfairAgent):
                 raise
@@ -326,6 +347,37 @@ class ViewAgent:
             raise BridgeError(f"{reason}: {detail}")
         logger.warning("%s: %s (%s); playing the default move", self.label, reason, detail)
         return default_choice(playable_actions)
+
+    def _negotiate(self, view: Mapping[str, Any], playable_actions: Sequence[Any], tracker: SeatTracker,
+                   position: Position) -> Any:
+        """An answer to an offer (DECIDE_TRADE) or the offerer's pick of an
+        acceptee (DECIDE_ACCEPTEES): the judge's, or reject / cancel (the
+        first listed entry) without one or without a position."""
+        if self.judge is None or position.method == "broken":
+            self.stats["trade_defaults"] += 1
+            return playable_actions[0]
+        game, seat = position.game, tracker.seat
+        seed = derive_seed(self._seed(view, seat), "trade")
+        if view["current_prompt"] == "DECIDE_TRADE":
+            wanted = "ACCEPT_TRADE" if self.judge.answer(game, seat, tracker.tracker, seed) else "REJECT_TRADE"
+            return next((a for a in playable_actions if a[1] == wanted), playable_actions[0])
+        partner = self.judge.confirm(game, seat)
+        if partner is not None:
+            color = tracker.colors[partner]
+            for action in playable_actions:
+                if action[1] == "CONFIRM_TRADE" and action[2][-1] == color:
+                    return action
+        return next((a for a in playable_actions if a[1] == "CANCEL_TRADE"), playable_actions[0])
+
+    def _offer(self, view: Mapping[str, Any], tracker: SeatTracker, position: Position) -> list | None:
+        """A trade the judge offers now (the seat's decide allows one), as its OFFER_TRADE."""
+        from catanrl.bridge.trading import offer_json
+
+        if position.method == "broken" or not position.exact:
+            return None
+        seed = derive_seed(self._seed(view, tracker.seat), "offer")
+        trade = self.judge.propose(position.game, tracker.seat, tracker.tracker, seed, (tracker.game_id, tracker.color))
+        return None if trade is None else offer_json(tracker.color, trade)
 
     def _choose(self, view: Mapping[str, Any], playable_actions: Sequence[Any], tracker: SeatTracker,
                 position: Position) -> Any:

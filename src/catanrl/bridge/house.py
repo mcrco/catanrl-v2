@@ -62,10 +62,15 @@ class Table:
     #: room gets a fresh board from it, sent as the room config's explicit ``map``. None: the
     #: room config's own ``map`` or ``map_type``.
     map: Mapping[str, Any] | None = None
+    #: Domestic trades: ``True`` or the :class:`~catanrl.bridge.trading.TradeJudge` keywords.
+    #: The rooms allow them (config ``trades``) and the bots answer, confirm and propose them.
+    trades: Any = None
 
     def room_config(self, seed: int) -> dict:
         """The config of the next room: ``room.config``, with a board drawn by ``seed``."""
         config = dict(self.room.get("config") or {})
+        if self.trades:
+            config["trades"] = True
         if self.map is not None:
             from catanrl import maps
 
@@ -122,7 +127,7 @@ class House:
                         raise ValueError(message) from error
             # One network per table, loaded once, shared by every seat.
             state.agent = t.spec if isinstance(t.spec, ViewAgent) else ViewAgent(
-                t.spec, device=self.device, max_games=8 * t.max_games * t.bot_seats)
+                t.spec, device=self.device, max_games=8 * t.max_games * t.bot_seats, trades=t.trades)
             logger.info("table %s: %s, %d bot seats, up to %d games", t.name, state.agent.label, t.bot_seats,
                         t.max_games)
         await asyncio.gather(*(self._keep_open(state) for state in self.states))
@@ -245,7 +250,7 @@ def _error_of(task: asyncio.Task) -> str:
 def load_tables(path: str | os.PathLike) -> tuple[dict, list[Table]]:
     """(settings, tables) from a YAML file: ``server``, ``server_key``,
     ``think_s`` and a list of ``tables`` (``name``, ``spec``, ``room``,
-    ``max_games``, optional ``bots``, ``label`` and ``map``)."""
+    ``max_games``, optional ``bots``, ``label``, ``map`` and ``trades``)."""
     import yaml
 
     data = yaml.safe_load(Path(path).read_text())
