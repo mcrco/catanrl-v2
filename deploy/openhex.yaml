@@ -125,6 +125,7 @@ bots:
     version: 1v1-search-v4
     spec: MCTS:ckpt=az-2p-graph-m-uniform/main@e900#73249d10e959:sims=262144:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused:deadline=45
     key_env: OPENHEX_KEY_1V1_SEARCH_V4
+    bot_id: 6010bbe3010142f5
     deployed: 2026-11-22
     tag: openhex-1v1-v4
     evidence: [af97f7595f82b53d, ea2574432c1ce3fc, cc4ccbcc8cb418f6, 9c7a904b68e6fb51]
