@@ -707,6 +707,65 @@ CATANRL_FREE_BACKLOG=0 python tools/gpu_bench.py b1 --iterations 6 --runs RUNS-o
 python tools/gpu_bench.py b1 --iterations 6 --runs RUNS-on --out OUT-on --tag on
 ```)
 
+=== A position cache for self-play's searches #chip("done") <exp:az-eval-cache>
+#meta(
+  dates: "2026-11-24",
+  owner: "Marco (\"we should totally do the position caching stuff\")",
+  config: "runtime.eval_cache_mb (unset: off); engine v2 at a4f69e1, main at cfd2276",
+  wandb: (),
+  records: (),
+)
+#tldr[The search pool now remembers the network's answer for every position it has sent to the GPU and reuses it when the same position comes up again before the weights change. On `graph-m` self-play at the continued run's settings, 21% of the positions are answered from the cache and self-play makes *1.21× the decisions a second* (258 → 312). With the cache on and off a strict-mode run plays the same games. In main since 2026-11-24 and on in the continued run's second leg (@exp:az-graph-m-deeper).]
+
+*Question.* How often does self-play ask the network about a position it has already evaluated, and how much time does skipping those forwards save?
+
+#lead[How often positions repeat] (CPU count, 24 games at the continued run's settings, one iteration). 23.9% of the positions a search sends to the network were already sent earlier in the same iteration:
+#figure(
+  btable(
+    columns: (1fr, auto),
+    align: (left, right),
+    header: ([Where the earlier copy was], [Share of all positions]),
+    [The same search, an earlier round], [14.6%],
+    [The same game, an earlier move's search (a fresh tree)], [7.5%],
+    [The same game, an earlier move's search (the kept tree)], [1.0%],
+    [The same round of the same search], [0.8%],
+    [Another game], [0%],
+    [*Any*], [*23.9%*],
+  ),
+  caption: [Positions evaluated more than once inside one iteration of `graph-m` self-play. Games never share positions: each is on its own board.],
+) <tab:az-eval-cache-repeats>
+
+#lead[Change.]
+- *What.* The engine keeps a table from a position's input row (a 128-bit hash of its bytes) to the network's output for it. A search still expands the same leaves in the same order; only rows the table does not hold go to the GPU, and their answers are stored. Roots are always forwarded.
+- *When it is emptied.* At every learning step, since the weights change. Within an iteration the weights are fixed, so a stored answer is the answer the network would give.
+- *Size.* One `graph-m` entry is 1,296 bytes: 256 MB hold 207,000 positions. Counted on the CPU, the table answers 6.9% of the positions at 16 MB, about 14% at 64 MB, about 21% at 256 MB and 23.6% with no limit.
+- *Off by default.* `runtime.eval_cache_mb` is not part of a config's hash, so no stored config or record changes. Logged: `selfplay/cache_hits`, `selfplay/cache_replaced`.
+
+#lead[Result] (this box's GPU, the continued run's config and its iteration-900 net, 512 games, 64 steps after 150 warm-up steps).
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, right),
+    header: ([], [No cache], [256 MB]),
+    [Decisions a second], [258.3], [*311.9*],
+    [Seconds a step (512 moves)], [1.98], [1.64],
+    [Positions searched a second], [38,260], [46,146],
+    [Share sent to the GPU], [100%], [78.8%],
+    [Host memory (GB)], [3.3], [4.1],
+  ),
+  caption: [`graph-m` self-play with and without the cache, half-precision kernels. The two arms do not play the same games in this mode (results depend on batch composition).],
+) <tab:az-eval-cache>
+- *1.21× the decisions a second*, for 0.8 GB of host memory. An iteration of the continued run should fall from about 139 s to about 115 s.
+- *Same games in strict mode.* With full-precision kernels and strict determinism, 8 steps with the cache on and off played identical games (and were 1.11× as fast).
+- *Not done:* the cache in the evals' search agent, which still skips repeats by hashing rows in Python (16% of an eval's time; @exp:search-eval-groups).
+
+#repro(```sh
+python tools/eval_cache_check.py --config runs/az-2p-graph-m-uniform/main+300/config.json \
+  --ckpt runs/az-2p-graph-m-uniform/main/checkpoints/e000900.pt --cache-mb 0 256 --out OUT.json
+# the bit check: add --mode strict --kernels fused --steps 8
+# in a run: catanrl fork ... --set runtime.eval_cache_mb=256
+```)
+
 === Several self-play processes on one rented card, and what \$100 buys #chip("done") <exp:az-modal-scale>
 #meta(
   dates: "2026-11-17",
@@ -1090,15 +1149,15 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 
 #lead[Cost.] Planned: the bundle ran 42.7 iterations an hour, which would make 900 iterations 21 h. With piece 4 the run makes about 53: about 17 h on the local GPU, plus 2.4 h for the final row (an eighth of the wall-clock). Launched at 07:15 on 2026-11-17 after `horizon-2p` was stopped (@exp:recipe-horizon) and the branches were merged. Actual: 18.0 h of self-play (51.5 iterations an hour) and 2.4 h for the row, 12% of the 20.4 h.
 
-=== 900 more iterations for `graph-m` on deeper recorded searches: `az-2p-graph-m-uniform/main+300` #chip("running") <exp:az-graph-m-deeper>
+=== 900 more iterations for `graph-m` on deeper recorded searches: `az-2p-graph-m-uniform/main+300` and `main+900` #chip("running") <exp:az-graph-m-deeper>
 #meta(
   dates: "2026-11-23 19:30 –",
   owner: "Marco (from a list of recommendations by another model, which Marco passed on)",
   config: "configs/experiments/az-2p-graph-m-uniform.yaml, forked with the overrides below",
-  wandb: (("az-2p-graph-m-uniform-main-300-b441114b", "az-2p-graph-m-uniform/main+300"),),
-  records: ("af97f759",),
+  wandb: (("az-2p-graph-m-uniform-main-300-b441114b", "az-2p-graph-m-uniform/main+300"), ("az-2p-graph-m-uniform-main-900-5728c09a", "az-2p-graph-m-uniform/main+900")),
+  records: ("af97f759", "348e9bb4"),
 )
-#tldr[`2p-graph-m-2` (@exp:az-graph-m) continued from iteration 900 for 900 more with three changes kept from the list (Marco, 2026-11-23: "ok yes lets do it"): recorded searches of 1,600 simulations on a tenth of the moves (were 600 on a quarter), learning rate 1.5e-5 (was 5e-5), and a quarter of the fast-searched moves stored as value-only rows (were none). Bundle first, ablate later. Two legs: 300 iterations and a row, then 600 more and a row. Leg one is running since 19:30 on 2026-11-23: self-play ends about 06:40 on 2026-11-24 and its row about 10:30.]
+#tldr[`2p-graph-m-2` (@exp:az-graph-m) continued from iteration 900 with three changes kept from the list (Marco, 2026-11-23: "ok yes lets do it"): recorded searches of 1,600 simulations on a tenth of the moves (were 600 on a quarter), learning rate 1.5e-5 (was 5e-5), and a quarter of the fast-searched moves stored as value-only rows (were none). *Leg one (300 iterations, 11.8 h): no gain.* 65.45% in the 1,024-sim search against 67.00% for its start on the same 2,000 games (−1.55 pp, p = 0.17), and the net hardly moved. *Leg two is running* since 12:52 on 2026-11-24: 600 more iterations at the parent's learning rate, 5e-5 (Marco: "lets do higher lr"), with the position cache on (@exp:az-eval-cache; 108 s an iteration, was 139) and on the rules the engine plays since that day. Self-play ends about 07:30 on 2026-11-25; its row and a replay of the baseline on the new rules follow, done about 15:00.]
 
 *Question.* Does `2p-graph-m-2` (67.00% in the 1,024-sim search against fr3's fair raw bot) gain from 900 more iterations on this recipe, and is the gain already visible after 300?
 
@@ -1146,13 +1205,44 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 
 #lead[Cost.] Local GPU. 900 iterations at about 133 s are 33 h, and the two rows 3.8 h each: about 41 h in all, 19% of it evals. The estimate given to Marco before the check was 35 h.
 
+#lead[Leg one: no gain] (300 iterations, 2026-11-23 19:30 to 2026-11-24 07:19 at 139 s an iteration; the row took 3.7 h).
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([Net in the 1,024-sim search], [Score against fr3's fair raw bot], [95% interval], [Record]),
+    [`2p-graph-m-2` (iteration 900, the start)], [67.00%], [#ci[64.9][69.0]], [`af97f759`],
+    [Leg one's end (iteration 1,200)], [65.45%], [#ci[63.3][67.5]], [`348e9bb4`],
+  ),
+  caption: [The same 2,000 held-out games. Paired by game: 220 won only by the new net, 251 only by the start, −1.55 pp, exact McNemar p = 0.17.],
+) <tab:az-graph-m-deeper-leg1>
+- *Not a real drop, and no gain:* 11.8 h of self-play bought nothing the row can see.
+- *The net hardly moved.* It picks the same move as the iteration-900 net on 85.8% of a fixed set of positions at the end, against 86.8% a few iterations into the leg.
+- *Health was steady* over the last 150 iterations (25-iteration means, first to last): policy loss 0.324 to 0.334, entropy of the search targets 0.258 to 0.269 nats, value loss 0.499 to 0.495, the search's top move differing from the net's on 6% of full searches. No truncated games.
+- *The replay at the end* (500,000 positions, the last 65 iterations, about 11,000 games). 99.2% of the positions are distinct. 30.5% carry a policy target; 48% of those targets put all their weight on one move and their mean entropy is 0.27 nats.
+
+#lead[Leg two: the parent's learning rate] (Marco, 2026-11-24: "lets do higher lr. but maybe also we should sample more per iteration? maybe our games arent diverse enough"). A fork of leg one's end (weights, optimizer moments, replay), 600 iterations to iteration 1,800.
+- *Learning rate 5e-5*, the rate of the first 900 iterations (leg one: 1.5e-5). Everything else in the training config is leg one's.
+- *Sampling more per iteration: not changed.* Each update draws from the whole replay, not from the last iteration, so more games per learning step would not widen what the learner sees; it would only make the steps rarer. More updates per iteration (64 → 128, about 4% more time, each position drawn 8.6 times instead of 4.3) is held back so that the learning rate is judged alone.
+- *Diversity: not changed.* The replay's positions are 99.2% distinct. Moves are sampled from the search's visits for the first 30 decisions of a game of about 193 (the temperature falls from 1 to 0 over them); after that the most visited move is played, and the variety comes from the dice, the cards and the root noise of the full searches. Options if Marco wants more (Claude's suggestions, not queued): a longer temperature schedule, more than 4,096 training boards.
+- *Position cache on* (`runtime.eval_cache_mb=256`; @exp:az-eval-cache). First iterations: 107 to 110 s (leg one: 139 s), 20 to 22% of the positions answered from the cache.
+- *New rules.* On 2026-11-24 the engine followed OpenHex's rules of 2026-11-22 (engine `ec0792b`: the balanced dice's refill and streak, the friendly robber's shields, the short bank). Leg two trains on them; its replay starts with leg one's positions from the old rules, which leave it within 65 iterations.
+- *Evals.* The stored rows above were played on the old rules, so leg two's row has no stored baseline. Two rows at the end, both on the new rules and the same 2,000 games: leg two's last checkpoint, then `2p-graph-m-2`, each in the 1,024-sim search against fr3's fair raw bot (each #sym.plus.minus 2.1 pp; a paired difference of about 2.7 pp is detectable).
+- *Cost.* About 18.5 h of self-play and 7.5 h for the two rows: 26 h, 29% of it evals.
+- *First iterations* (1,201 to 1,203): learning rate 5e-5 in every logged row, policy loss 0.33 to 0.34, value loss 0.49, no truncated games.
+
 #repro(```sh
 catanrl fork az-2p-graph-m-uniform/main --as main+300 --set train.iterations=1200 \
   --set train.sims=1600 --set train.full_search_prob=0.1 --set train.decided_full_search_prob=0.025 \
   --set train.pending=64 --set train.learning_rate=1.5e-5 \
   --set train.record_fast=true --set train.record_fast_prob=0.25
 catanrl run az-2p-graph-m-uniform/main+300     # 300 iterations, then the row
-# leg two, after the row
-catanrl fork az-2p-graph-m-uniform/main+300 --as main+900 --set train.iterations=1800
-catanrl run az-2p-graph-m-uniform/main+900
+# leg two, after the row (main at cfd2276: the new rules and the position cache)
+catanrl fork az-2p-graph-m-uniform/main+300 --as main+900 --set train.iterations=1800 \
+  --set train.learning_rate=5e-5 --set runtime.eval_cache_mb=256
+catanrl run az-2p-graph-m-uniform/main+900     # 600 iterations, then the row
+# the baseline replayed on the new rules
+catanrl eval --suite heldout-2p-fr --boards 1000 --num-envs 256 --threads 12 --infer-rows 512 \
+  "MCTS:ckpt=az-2p-graph-m-uniform/main@e900#73249d10e959:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused" \
+  "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
 ```)
