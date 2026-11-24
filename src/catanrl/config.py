@@ -39,7 +39,7 @@ its ``train.soft_policy_coef`` / ``soft_policy_temperature`` with the optional
 ``model.args.soft_policy`` (the soft policy head), and its ``train.value_search_blend``
 / ``value_blend_iterations``, ``train.surprise_weight`` / ``surprise_cap`` and
 ``train.decided_value`` / ``decided_lookback`` / ``decided_full_search_prob`` /
-``decided_fast_sims`` (:func:`check_alphazero_kata`).
+``decided_fast_sims`` and ``train.record_fast_prob`` (:func:`check_alphazero_kata`).
 ``runtime.search_groups`` is optional too (``runtime`` is not hashed; unset,
 the AlphaZero trainer takes its default). So is ``obs.dice_state``
 (:data:`OPTIONAL`), the opt-in dice input: the balanced dice state in every
@@ -152,7 +152,8 @@ FREEZE_PARTS = ("actor", "critic", "aux")
 #: does; :func:`check_alphazero_kata` checks them): the value target's share of the search's own
 #: value and the iterations it ramps over, replay sampling by policy surprise and its cap, the
 #: soft policy head's loss (``model.args.soft_policy``) and its target's temperature, and the
-#: smaller searches of decided games.
+#: smaller searches of decided games. ``record_fast_prob``: the share of the fast-searched moves
+#: that ``record_fast: true`` stores (1.0: all of them).
 TRAIN_OPTIONAL["alphazero"].update({
     "value_search_blend": 0.0,
     "value_blend_iterations": 0,
@@ -164,6 +165,7 @@ TRAIN_OPTIONAL["alphazero"].update({
     "decided_lookback": 0,
     "decided_full_search_prob": 0.0,
     "decided_fast_sims": 0,
+    "record_fast_prob": 1.0,
 })
 RESTORE = ("weights", "weights+optimizer")
 #: Execution keys: set by the runner from ``runtime``, never under ``train``.
@@ -590,8 +592,8 @@ def check_alphazero_kata(train: dict) -> None:
     """The AlphaZero trainer's optional keys after KataGo (:data:`TRAIN_OPTIONAL`; each absent
     or at its unset value when off), at resolution and again in the trainer
     (alphazero.check_train): the value target's blend with the search value, replay sampling by
-    policy surprise, the soft policy loss and the smaller searches of decided games. Numbers are
-    kept as floats, in place."""
+    policy surprise, the soft policy loss, the smaller searches of decided games and the share of
+    the fast-searched moves stored. Numbers are kept as floats, in place."""
     unset = TRAIN_OPTIONAL["alphazero"]
 
     def number(key: str, rule: str, ok: Any) -> float:
@@ -632,6 +634,11 @@ def check_alphazero_kata(train: dict) -> None:
     number("decided_full_search_prob", "a decided game's full-search probability, in [0, 1]",
            lambda v: 0.0 <= v <= 1.0)
     fast = count("decided_fast_sims", "a decided game's fast-search simulations (0: fast_sims)")
+    keep = number("record_fast_prob", "the share of the fast-searched moves that enter the replay, in (0, 1] (1: "
+                  "all of them)", lambda v: 0.0 < v <= 1.0)
+    if keep != unset["record_fast_prob"] and not train["record_fast"]:
+        raise ConfigError("train.record_fast_prob thins the fast-searched moves that record_fast: true stores; "
+                          "record_fast: false stores none (leave record_fast_prob out)")
     if not decided:
         extra = [key for key in ("decided_lookback", "decided_full_search_prob", "decided_fast_sims")
                  if train.get(key, unset[key]) != unset[key]]

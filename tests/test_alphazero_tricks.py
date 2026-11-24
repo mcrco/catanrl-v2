@@ -12,7 +12,8 @@ surprise (``surprise_weight``), a soft policy head (``model.args.soft_policy``,
   warm start from a checkpoint without it makes it a copy of the policy head;
 * self-play that records the labels, or that watches for decided games without treating them
   differently, is self-play without (the same moves, targets and rng draws); a decided game's
-  searches take their own full-search probability and fast budget;
+  searches take their own full-search probability and fast budget, and its fast rows are thinned
+  with them under ``record_fast_prob``;
 * learning: the blended value target, the weighted draws, the soft loss; a tiny run with all
   four on logs them and resumes;
 * ``init_from`` carries the outcome head as the part ``outcome`` (a continued run keeps the
@@ -792,6 +793,31 @@ def test_decided_games_are_searched_less(monkeypatch):
     assert stats["decided"] == decided.sum() and stats["simulations"] == simulations.sum()
     assert simulations[(decided == 1)].max() <= 1 < simulations[(decided == 0) & (full == 0)].max()
     assert all(not leaders for env, leaders in enumerate(play.leaders) if env in over)  # reset at a game's end
+
+
+def test_record_fast_prob_thins_a_decided_games_fast_rows_as_its_full_searches():
+    """record_fast_prob below 1 stores a fast-searched move with that probability, and a decided
+    game's with it times decided_full_search_prob / full_search_prob (a quarter of it here): a
+    second draw per acting row, after the full searches'."""
+    play, replay = selfplay(network(seed=3), **PUCT, decided_value=0.5001, decided_lookback=1,
+                            decided_full_search_prob=0.125, record_fast_prob=0.8)
+    rng, twin, stats = np.random.default_rng(1), np.random.default_rng(1), dict(STATS)
+    b, rows, stored = play.buffers, [], 0
+    for step in range(200):
+        decided = np.array([play._decided(int(env)) for env in b["env_index"][np.flatnonzero(b["acting"])]], dtype=bool)
+        full = twin.random(len(decided)) < np.where(decided, 0.125, TRAIN["full_search_prob"])
+        kept = twin.random(len(decided)) < np.where(decided, 0.2, 0.8)
+        play.step(0, step, rng, replay, stats)
+        stored += int((full | kept).sum())
+        assert replay.added + sum(len(waiting) for waiting in play.pending) == stored
+        rows += zip(decided, full, kept)
+    assert rng.random() == twin.random()  # the two draws a step, no other
+    decided, full, kept = np.array(rows).T
+    assert stats["full"] == full.sum() and stats["recorded_fast"] == (kept & ~full).sum()
+    assert stats["decided"] == decided.sum() and play.games > 4
+    fast = ~full
+    assert (fast & ~decided).sum() >= 30 and (fast & decided).sum() >= 300
+    assert kept[fast & ~decided].mean() > 0.6 and 0.13 < kept[fast & decided].mean() < 0.27  # 0.8 and 0.2
 
 
 # ---------------------------------------------------------------- learning

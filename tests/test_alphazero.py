@@ -369,6 +369,113 @@ def test_record_fast_false_stores_only_the_full_searches():
     assert np.allclose(replay.policy[: replay.size].astype(np.float32).sum(1), 1.0, atol=2e-3)
 
 
+def recorded(play, replay) -> tuple[int, int]:
+    """The decisions stored so far, in the replay or waiting for their game's end: with a policy
+    target, and without."""
+    waiting = [r for rows in play.pending for r in rows]
+    full = sum(r.policy is not None for r in waiting) + (int(replay.has_policy[: replay.size].sum()) if replay.size else 0)
+    return full, replay.added + len(waiting) - full
+
+
+@pytest.mark.parametrize("record_fast", [True, False])
+def test_record_fast_prob_at_one_draws_nothing(record_fast):
+    play, replay, _ = selfplay(full_search_prob=0.5, record_fast=record_fast, record_fast_prob=1.0)
+    stats = {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+    rng, twin = np.random.default_rng(0), np.random.default_rng(0)
+    for step in range(40):
+        twin.random(int(play.buffers["acting"].sum()))  # the full-search draws, the step's only ones
+        play.step(0, step, rng, replay, stats)
+    assert rng.random() == twin.random()
+    fast = play.decisions - stats["full"] if record_fast else 0  # every fast search, or none
+    assert recorded(play, replay) == (stats["full"], fast) and stats["recorded_fast"] == fast
+    assert 0 < stats["full"] < play.decisions
+
+
+def test_record_fast_prob_stores_that_share_of_the_fast_searches():
+    """Each fast-searched move is stored with probability record_fast_prob, by a second draw per
+    acting row from the step's generator; the full searches all are, as before."""
+    play, replay, _ = selfplay(full_search_prob=0.5, record_fast_prob=0.25)
+    stats = {"leaves": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+    rng, twin = np.random.default_rng(0), np.random.default_rng(0)
+    want = np.zeros(2, np.int64)
+    for step in range(150):
+        acting = int(play.buffers["acting"].sum())
+        full, kept = twin.random(acting) < 0.5, twin.random(acting) < 0.25
+        want += (full.sum(), (kept & ~full).sum())
+        play.step(0, step, rng, replay, stats)
+        assert recorded(play, replay) == tuple(want)
+    assert rng.random() == twin.random()
+    assert (stats["full"], stats["recorded_fast"]) == tuple(want) and play.games > 0
+    fast = play.decisions - stats["full"]
+    assert fast > 200 and 0.17 < stats["recorded_fast"] / fast < 0.33  # 0.25 +- 3 sd of 200 draws
+    has = replay.has_policy[: replay.size]
+    assert has.any() and not has.all() and not replay.policy[: replay.size][~has].any()  # value-only rows, as ever
+
+
+def test_record_fast_prob_is_optional_hashed_and_checked():
+    """Absent from ALPHAZERO_KEYS and alphazero.yaml, so configs without it hash as before it
+    existed (az-2p-kata's pinned hash); in (0, 1], and below 1 only with record_fast: true."""
+    assert "record_fast_prob" not in ALPHAZERO_KEYS and ALPHAZERO_OPTIONAL["record_fast_prob"] == 1.0
+    assert "record_fast_prob" not in check_train(ALPHAZERO_KEYS)
+    assert check_train({**TRAIN, "record_fast_prob": 0.25})["record_fast_prob"] == 0.25
+    for bad in (0.0, -0.5, 1.5, True, "0.25", None):
+        with pytest.raises(ValueError, match=r"record_fast_prob is .* in \(0, 1\]"):
+            check_train({**TRAIN, "record_fast_prob": bad})
+    with pytest.raises(ValueError, match="record_fast: false stores none"):
+        check_train({**TRAIN, "record_fast": False, "record_fast_prob": 0.25})
+    assert check_train({**TRAIN, "record_fast": False, "record_fast_prob": 1.0})["record_fast"] is False
+    plain = variant("plain")
+    assert "record_fast_prob" not in plain.config["train"]
+    for unset in ({"record_fast_prob": 1.0}, {"record_fast_prob": 1}, {"record_fast_prob": None},
+                  {"record_fast": True, "record_fast_prob": 1.0}):
+        same = variant("plain", **unset)
+        assert same.config_hash == plain.config_hash and same.config["train"] == plain.config["train"]
+    assert variant("plain", record_fast=False, record_fast_prob=1.0).config["train"]["record_fast"] is False
+    thinned = variant("plain", record_fast_prob=0.25)
+    assert thinned.config["train"]["record_fast_prob"] == 0.25 and thinned.config_hash != plain.config_hash
+    for bad, match in (({"record_fast_prob": 0.0}, r"in \(0, 1\]"), ({"record_fast_prob": 1.01}, r"in \(0, 1\]"),
+                       ({"record_fast_prob": "0.25"}, r"in \(0, 1\]"),
+                       ({"record_fast": False, "record_fast_prob": 0.25}, "record_fast: false stores none"),
+                       ({"record_fast_probs": 0.25}, "record_fast_prob")):
+        with pytest.raises(ConfigError, match=match):
+            variant(**bad)
+    assert load_plan("az-2p-kata").variants[0].config_hash == "2e3b1866f7a37e4a"
+
+
+@pytest.mark.train
+def test_a_run_that_thins_its_fast_rows_logs_them_and_resumes(monkeypatch):
+    """record_fast_prob in a run: the rows it logs are the rows it stores, the learner's share of
+    policy rows rises with it, and a stopped run goes on with the draws of the uninterrupted one
+    (they come from the iteration's generator; the games under way at the stop are lost as ever)."""
+    run(variant("whole", iterations=3, record_fast_prob=0.25))
+    real = RunWriter.should_stop
+
+    def stop_each_iteration(self):
+        if len(canon.read_jsonl(self.path / "metrics.jsonl")) >= self.launch + 1:
+            self.stop_reason = "interrupted"
+            return True
+        return real(self)
+
+    monkeypatch.setattr(RunWriter, "should_stop", stop_each_iteration)
+    for name in ("cut", "again"):
+        statuses = [run(variant(name, iterations=3, record_fast_prob=0.25)).status for _ in range(3)]
+        assert statuses == ["interrupted", "interrupted", "finished"]
+    whole, cut, again = (load_experiment(f"az/{name}") for name in ("whole", "cut", "again"))
+    shas = [[c.weights_sha256 for c in r.checkpoints()] for r in (whole, cut, again)]
+    assert shas[1] == shas[2] and shas[0][:2] == shas[1][:2]  # a resume is reproducible
+    keys = ("selfplay/recorded_full", "selfplay/recorded_fast")
+    counts = [[tuple(m[k] for k in keys) for m in r.metrics()] for r in (whole, cut, again)]
+    assert counts[0] == counts[1] == counts[2] and [m["launch"] for m in cut.metrics()] == [0, 1, 2]
+    full, fast = np.array(counts[0]).sum(0)
+    decisions = whole.metrics()[-1]["decisions"]
+    assert 0.1 < fast / (decisions - full) < 0.4 and fast > 0
+    state = torch.load(whole.path / "trainer_state.pt", weights_only=False)["replay"]
+    assert state["added"] <= full + fast and int(state["has_policy"][: state["size"]].sum()) <= full
+    assert all(0.6 < m["train/policy_rows"] <= 1.0 for m in whole.metrics())  # about 0.5 / (0.5 + 0.5 * 0.25)
+    run(variant("all", iterations=1))
+    assert load_experiment("az/all").metrics()[0]["train/policy_rows"] < 0.75  # about 0.5 with every fast row
+
+
 @pytest.mark.train
 def test_a_run_that_records_only_full_searches_learns_and_logs(capsys):
     run(variant(record_fast=False))

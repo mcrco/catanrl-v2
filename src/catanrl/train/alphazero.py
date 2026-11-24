@@ -19,9 +19,16 @@
    moves get ``sims`` simulations and become policy targets, the rest get
    ``fast_sims``, without the Dirichlet noise, and serve as value targets
    only, or with ``record_fast: false`` are played but not stored (KataGo
-   records its full searches only). A search sends up to ``pending``
-   (``fast_pending``) leaves to the network per round, counted as visits
-   while they wait; at 1 a step takes ``sims + 1`` rounds of one leaf a search.
+   records its full searches only). ``record_fast_prob`` in (0, 1] (optional;
+   unset 1: all of them) stores each fast-searched move with that probability,
+   drawn from the iteration's self-play generator after the full-search draws
+   (no draw at 1).
+   Logged: ``selfplay/recorded_full`` and ``selfplay/recorded_fast`` (the
+   iteration's decisions stored with and without a policy target) and
+   ``train/policy_rows`` (the share of a minibatch's rows that have one). A
+   search sends up to ``pending`` (``fast_pending``) leaves to the network per
+   round, counted as visits while they wait; at 1 a step takes ``sims + 1``
+   rounds of one leaf a search.
    With ``reuse: true`` (optional; PUCT roots on the true game) a game keeps
    its search tree from one decision to the next, whichever seat moves: when
    the game moved by exactly the action played, and that action was searched
@@ -151,9 +158,14 @@ existed):
   searched at the full budget with probability ``decided_full_search_prob``
   instead of ``full_search_prob``, and its fast searches run ``decided_fast_sims``
   (unset: ``fast_sims``; a budget of its own needs ``reuse``, whose searches each
-  carry theirs). Full searches keep ``sims``. Logged: ``selfplay/decided`` (the
-  share of decisions made in decided games) and ``selfplay/sims_per_decision``
-  (the simulations a search ran, on top of what a re-rooted tree carried).
+  carry theirs). Full searches keep ``sims``. With ``record_fast_prob`` below 1 a
+  decided game's fast-searched moves are stored with probability
+  ``record_fast_prob * decided_full_search_prob / full_search_prob``, thinned by
+  as much as its full searches (KataGo likewise records fewer positions from
+  lopsided games); with the decided logic off, or at 1, no game is thinned
+  further. Logged: ``selfplay/decided`` (the share of decisions made in decided
+  games) and ``selfplay/sims_per_decision`` (the simulations a search ran, on
+  top of what a re-rooted tree carried).
 
 With ``obs.dice_state`` the self-play VecEnv, every search leaf and the replay
 carry the dice input (:data:`catanrl.envs.encoding.DICE_STATE`: 127 more floats
@@ -271,6 +283,8 @@ ALPHAZERO_OPTIONAL.update({
     "decided_full_search_prob": 0.0,
     "decided_fast_sims": 0,
 })
+#: The share of the fast-searched moves that record_fast: true stores (1.0: all of them, no draw).
+ALPHAZERO_OPTIONAL["record_fast_prob"] = 1.0
 #: The replay's search labels (value_search_blend, surprise_weight): the full search's value
 #: per slot, whether the position has one, and its policy surprise.
 SEARCH_LABELS = ("search_value", "has_search_value", "surprise")
@@ -994,6 +1008,14 @@ class SelfPlay:
         decided = np.array([self._decided(int(env)) for env in b["env_index"][acting]], dtype=bool)
         full = rng.random(len(acting)) < np.where(decided, float(self.train.get("decided_full_search_prob", 0.0)),
                                                   float(self.train["full_search_prob"]))
+        # record_fast: the fast-searched rows that enter the replay too. record_fast_prob below 1 draws
+        # them (no draw at 1), in a decided game at the probability scaled as its full searches' is
+        stored = np.full(len(acting), bool(self.train["record_fast"]))
+        keep = float(self.train.get("record_fast_prob", 1.0))
+        if self.train["record_fast"] and keep < 1.0:
+            scale = float(self.train.get("decided_full_search_prob", 0.0)) / float(self.train["full_search_prob"])
+            stored = rng.random(len(acting)) < np.where(decided, keep * scale, keep)
+        stored |= full
         searches = []
         targets = []  # the full searches' own policy targets (pool.policy_target), in acting order, for the monitor
         rebuilt = []  # policy_target: gumbel's or pruned's targets of the same searches (the ones trained on), and
@@ -1071,7 +1093,7 @@ class SelfPlay:
                 b["actions"][row] = pool.select(sid, temperature(self.train, int(self.ply[env])))
                 if self.reuse:
                     self.trees[env] = (*self.trees[env][:3], int(b["actions"][row]))
-                if full[i] or self.train["record_fast"]:
+                if stored[i]:
                     self.pending[env].append(_Pending(b["observations"][row].astype(np.float16), policy, seat,
                                                       int(b["num_players"][env]),
                                                       int(self.vec.num_turns(env)) if self.outcome else 0,
@@ -1092,6 +1114,7 @@ class SelfPlay:
         stats["leaves"] += leaves
         stats["rounds"] = stats.get("rounds", 0.0) + evaluator.count
         stats["full"] += int(full.sum())
+        stats["recorded_fast"] = stats.get("recorded_fast", 0.0) + int((stored & ~full).sum())
         self.decisions += len(acting)
         if self.monitor is not None and targets:  # before step() rewrites rows
             self.monitor.searched(b["observations"][acting[full]], np.stack(targets),
@@ -1302,7 +1325,8 @@ def learn(model: CatanModel, optimizer: torch.optim.Optimizer, replay: ReplayBuf
                 for key, value in zip(("target_entropy", "net_entropy", "kl_target_net"),
                                       policy_stats(target, logp[has], probs[has])):
                     sums[key] = sums.get(key, 0.0) + float(value.mean()) / updates
-            for key, value in (("policy_loss", policy_loss), ("value_loss", value_loss), *extra):
+            for key, value in (("policy_loss", policy_loss), ("value_loss", value_loss),
+                               ("policy_rows", has.float().mean()), *extra):
                 sums[key] = sums.get(key, 0.0) + float(value) / updates
             predicted = (torch.sigmoid(value_logits.float()) * present).sum(1)
             n = present.sum(1).long().cpu().numpy()
@@ -1713,6 +1737,9 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             "selfplay/decisions_per_s": new / played, "selfplay/leaves_per_s": stats["leaves"] / played,
             "selfplay/games_per_hour": (selfplay.games - games) * 3600.0 / played,
             "selfplay/full_fraction": stats["full"] / max(new, 1),
+            # the decisions stored for the replay (they enter it when their game ends): the full searches,
+            # with a policy target, and the fast ones record_fast (record_fast_prob) kept, value only
+            "selfplay/recorded_full": stats["full"], "selfplay/recorded_fast": stats.get("recorded_fast", 0.0),
             "selfplay/rounds": stats["rounds"] / int(train["steps_per_iteration"]),  # network rounds per step
             "search/mean_depth": stats["depth"] / full, "search/max_depth": stats["max_depth"] / full,
             "environment/episodes": episodes["episodes"], "environment/truncated": episodes["truncated"],
