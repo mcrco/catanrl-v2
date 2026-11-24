@@ -137,7 +137,12 @@ def _position_game(pos: Mapping[str, Any]):
     if "prompt" in options:
         options["prompt"] = cpp.ActionPrompt[options["prompt"]]
     if pos.get("dice") is not None:  # a balanced dice state (positions of dice-input self-tests)
-        options["dice"] = cpp.BalancedDice(**{**pos["dice"], "deck": [tuple(c) for c in pos["dice"]["deck"]]})
+        deck = [tuple(c) for c in pos["dice"]["deck"]]
+        if pos.get("dice_rule") != DICE_RULE and len(deck) <= 13:
+            # Saved under OpenHex's dice before 2026-11-16, which refilled a deck of 13 before
+            # the next draw: the same state as a full deck under the rule the engine plays.
+            deck = [(a, b) for a in range(1, 7) for b in range(1, 7)]
+        options["dice"] = cpp.BalancedDice(**{**pos["dice"], "deck": deck})
     game.apply_setup([cpp.PlayerSetup(**p) for p in pos["players"]], **options)
     return game
 
@@ -270,6 +275,11 @@ def _outputs(model: nn.Module, obs: torch.Tensor, *, aux: bool = True) -> tuple[
     return logits.float(), values.float(), open_logits.float(), predictions
 
 
+#: The balanced dice rule a saved dice state is read by (``dice_rule`` of a position):
+#: OpenHex's since 2026-11-16 (a deck is refilled when fewer than 13 cards remain, and only a
+#: 7 moves the streak). A position without it was saved under the rule before (refilled at 13).
+DICE_RULE = "openhex-2026-11-16"
+
 #: Rolls replayed into the dice state of self-test position ``i`` of a dice-input network:
 #: from a fresh deck, ``DICE_ROLLS[i % len]`` of them, the seats rolling in turn.
 DICE_ROLLS = (0, 3, 9, 17, 23, 30, 6, 41)
@@ -297,7 +307,7 @@ def with_dice_states(positions: Sequence[Mapping[str, Any]]) -> list[dict]:
     out = []
     for i, pos in enumerate(positions):
         seats = int(pos["game"]["num_players"])
-        out.append({**pos, "game": {**pos["game"], "dice_mode": "balanced"},
+        out.append({**pos, "game": {**pos["game"], "dice_mode": "balanced"}, "dice_rule": DICE_RULE,
                     "dice": balanced_state(seats, DICE_ROLLS[i % len(DICE_ROLLS)], f"selftest-dice|{i}")})
     return out
 

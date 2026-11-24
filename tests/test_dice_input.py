@@ -703,3 +703,20 @@ def test_the_probes_fair_rows_are_a_fresh_states(game_name):
             moved += not torch.equal(out, row)
         game.execute(rng.choice(game.playable_actions))
     assert (moved > 0) == (game_name == "base-2p-fr")
+
+
+def test_a_dice_state_saved_under_the_rule_before_reads_as_the_same_state_under_this_one():
+    """OpenHex's dice until 2026-11-16 refilled a deck of 13 before the next draw; the rule
+    played now draws from it. A self-test position saved before (no ``dice_rule``) with 13
+    cards is a full deck, so the rows a checkpoint stored for it are the rows it gets."""
+    pos = ck.with_dice_states(ck.packaged_positions())[4]  # (DICE_ROLLS[4]: 23 rolls, 13 cards left)
+    assert pos["dice_rule"] == ck.DICE_RULE and len(pos["dice"]["deck"]) == 13
+    now = ck._position_game(pos).balanced_dice
+    before = ck._position_game({k: v for k, v in pos.items() if k != "dice_rule"}).balanced_dice
+    assert now.remaining == 13 and before.remaining == 36
+    assert (before.recent, before.sevens, before.streak_count) == (now.recent, now.sevens, now.streak_count)
+    assert before.sum_probabilities(0) != now.sum_probabilities(0)
+    # A larger deck reads the same under both.
+    pos = ck.with_dice_states(ck.packaged_positions())[2]
+    assert ck._position_game(pos).balanced_dice == ck._position_game(
+        {k: v for k, v in pos.items() if k != "dice_rule"}).balanced_dice

@@ -31,7 +31,8 @@ bots:
     bot_id: 068460ec188f4a2c
     deployed: 2026-10-17
     tag: openhex-1v1-v4
-    retired: false
+    retired: true
+    retired_at: 2026-11-23  # replaced by catanrl-4p-greedy-v2 (the same net, trading)
   - name: catanrl-1v1-search-v1  # catanrl-1v1-search until 2026-11-16
     mode: 1v1
     version: 1v1-search-v1
@@ -127,6 +128,20 @@ bots:
     key_env: OPENHEX_KEY_1V1_SEARCH_V4
     bot_id: 6010bbe3010142f5
     deployed: 2026-11-22
-    tag: openhex-1v1-v4
+    tag: openhex-4p-v2  # (2026-11-23: the bridge and engines on OpenHex's rules of 2026-11-22)
     evidence: [af97f7595f82b53d, ea2574432c1ce3fc, cc4ccbcc8cb418f6, 9c7a904b68e6fb51]
+    retired: false
+  # 4p v2 (2026-11-23, Marco: "bot trades with players"): 4p-v1's net and spec, and trades
+  # with the other players by the net's own value head (bridge.trading.TradeJudge at its
+  # defaults: it answers the current player's offers, and offers up to twice on its own move,
+  # 6 s for the answers, at most 20 s of the move). No eval record: the trading was tested
+  # for correctness against OpenHex's engine (open-hex 57e47d0), not measured for strength.
+  - name: catanrl-4p-greedy-v2
+    mode: 4p
+    version: 4p-v2
+    spec: POLICY:ckpt=ppo-4p/main@e3650#813b2c61338f
+    key_env: OPENHEX_KEY_4P_V2
+    deployed: 2026-11-23
+    tag: openhex-4p-v2
+    trades: true
     retired: false
