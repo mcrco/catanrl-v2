@@ -1648,6 +1648,10 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             raise RuntimeError("the map pool changed since the run started; refusing to resume")
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])
+        # The stored state has the options it was saved under too: a continued run (catanrl fork with
+        # --set) learns at its own config's rate and weight decay, on the stored moments
+        for group in optimizer.param_groups:
+            group["lr"], group["weight_decay"] = float(train["learning_rate"]), float(train["weight_decay"])
         replay.restore(state["replay"])
         iteration = int(state["epoch"])
         selfplay.decisions, selfplay.games = int(state["decisions"]), int(state["games"])

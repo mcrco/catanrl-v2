@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from catanrl import canon
+from catanrl import canon, runs
 from catanrl.config import TRAIN_OPTIONAL, ConfigError, Variant, config_hash, load_plan, resolve
 from catanrl.envs.encoding import encoder_dims
 from catanrl.envs.puffer import POINTS_KEYS, STYLE_KEYS, plan_env
@@ -257,6 +257,81 @@ def test_the_start_scores_half_against_itself():
     assert records[str(warm_run.resolve(0))].summary["score_rate"] == 0.5
     best = warm_run.aliases()["best"]
     assert best["epoch"] == 0 or best["metric"] > 0.5
+
+
+def first_update(monkeypatch) -> dict:
+    """What the optimizer holds when a launch first learns: filled by the launches that follow."""
+    import catanrl.train.alphazero as az
+
+    seen, original = {}, az.learn
+
+    def spy(model, optimizer, *args, **kwargs):
+        seen.setdefault("optimizer", copy.deepcopy(optimizer.state_dict()))
+        return original(model, optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(az, "learn", spy)
+    return seen
+
+
+def same_optimizer(a: dict, b: dict, *, but: tuple[str, ...] = ()) -> bool:
+    """Two optimizer states: the same moments and step counts, and the same options but ``but``."""
+    groups = all({k: v for k, v in x.items() if k not in but} == {k: v for k, v in y.items() if k not in but}
+                 for x, y in zip(a["param_groups"], b["param_groups"], strict=True))
+    return groups and a["state"].keys() == b["state"].keys() and all(
+        torch.equal(torch.as_tensor(a["state"][i][k]), torch.as_tensor(b["state"][i][k]))
+        for i in a["state"] for k in a["state"][i])
+
+
+def test_a_fork_trains_at_its_own_learning_rate_and_weight_decay(monkeypatch):
+    """optimizer.load_state_dict restores the stored options with the moments: a continued run
+    takes the two its config sets from the config, and keeps Adam's moments."""
+    assert run(variant(iterations=1)).status == "finished"
+    parent = load_experiment("az/t")
+    saved = torch.load(parent.path / "trainer_state.pt", weights_only=False)["optimizer"]
+    assert [(g["lr"], g["weight_decay"]) for g in saved["param_groups"]] == [(TRAIN["learning_rate"],
+                                                                             TRAIN["weight_decay"])]
+    child = runs.fork("az/t", as_="t+lr", overrides=["train.iterations=3", "train.learning_rate=2.5e-5",
+                                                     "train.weight_decay=0.01"])
+    seen = first_update(monkeypatch)
+    assert run(child).status == "finished"
+    assert [(g["lr"], g["weight_decay"]) for g in seen["optimizer"]["param_groups"]] == [(2.5e-5, 0.01)]
+    assert same_optimizer(seen["optimizer"], saved, but=("lr", "weight_decay")) and saved["state"]
+    forked = load_experiment("az/t+lr")
+    assert [m["learning_rate"] for m in forked.metrics()] == [2.5e-5, 2.5e-5]
+    final = torch.load(forked.path / "trainer_state.pt", weights_only=False)["optimizer"]
+    assert [(g["lr"], g["weight_decay"]) for g in final["param_groups"]] == [(2.5e-5, 0.01)]
+    assert [m["learning_rate"] for m in parent.metrics()] == [TRAIN["learning_rate"]]
+
+
+def test_a_resume_keeps_its_optimizer_and_takes_a_changed_learning_rate(monkeypatch):
+    """A resume under the run's own config restores the optimizer as it was saved, bit for bit.
+    The launch paths refuse a resume under another config (check_stored); handed one all the
+    same, the trainer learns at that config's rate."""
+    v = variant(iterations=3)
+    real = RunWriter.should_stop
+
+    def stop_each_iteration(self):
+        if len(canon.read_jsonl(self.path / "metrics.jsonl")) >= self.launch + 1:
+            self.stop_reason = "interrupted"
+            return True
+        return real(self)
+
+    monkeypatch.setattr(RunWriter, "should_stop", stop_each_iteration)
+    assert run(v).status == "interrupted"
+    path = load_experiment("az/t").path
+    saved = torch.load(path / "trainer_state.pt", weights_only=False)["optimizer"]
+    seen = first_update(monkeypatch)
+    assert run(v).status == "interrupted"
+    assert same_optimizer(seen["optimizer"], saved) and saved["state"]
+    seen.clear()
+    saved = torch.load(path / "trainer_state.pt", weights_only=False)["optimizer"]
+    slower = {**v.config, "train": {**v.config["train"], "learning_rate": 1e-5}}
+    with RunWriter.open(v, argv=["test"]) as writer:
+        train_alphazero(SimpleNamespace(config=slower), writer)
+    assert writer.status == "finished"
+    assert [g["lr"] for g in seen["optimizer"]["param_groups"]] == [1e-5]
+    assert same_optimizer(seen["optimizer"], saved, but=("lr",))
+    assert [m["learning_rate"] for m in load_experiment("az/t").metrics()] == [TRAIN["learning_rate"]] * 2 + [1e-5]
 
 
 @pytest.mark.train
