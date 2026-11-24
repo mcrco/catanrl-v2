@@ -477,11 +477,12 @@ def _card_upper(count: int, victory_points: int) -> list[int]:
 
 def public_mismatches(game: cpp.Game, view: Mapping[str, Any], seat: int | None = None) -> list[str]:
     """What ``game`` shows differently from ``view``: the board, the bank, the
-    deck size, the prompt and turn state, the balanced dice and a knight's
-    Largest Army award (when the view shows them), every seat's public
-    counts, pieces, awards and road lengths, and the viewing seat's hand,
-    cards and which of them it may play. Empty when the game is what the seat
-    sees (everything a PRIVATE row reads is among these)."""
+    deck size, the prompt and turn state, the balanced dice (when the view
+    shows them), every seat's public counts, pieces, awards and road lengths,
+    and the viewing seat's hand, cards and which of them it may play. Empty
+    when the game is what the seat sees (everything a PRIVATE row reads is
+    among these). A view's ``largest_army_taken_from`` is not compared: play
+    no longer sets it, and the engine ignores the one an older view names."""
     sv = SeatView(view, seat_of(view) if seat is None else seat)
     out: list[str] = []
 
@@ -518,10 +519,6 @@ def public_mismatches(game: cpp.Game, view: Mapping[str, Any], seat: int | None 
     if "balanced_dice" in view:
         ours = None if game.balanced_dice is None else dice_json(game.balanced_dice, sv.colors)
         check("balanced dice", ours, view["balanced_dice"])
-    if "largest_army_taken_from" in view:
-        taken = game.largest_army_taken_from
-        check("largest army taken from", None if taken is None else sv.colors[taken],
-              view["largest_army_taken_from"])
 
     for i in range(n):
         p = game.player(i)
@@ -625,9 +622,11 @@ def snapshot(view: Mapping[str, Any], *, color: Any = None, rules: cpp.GameRules
     seat's settlements in building order), the prompt with the seat to act,
     cards left to discard, free roads, the seat's own cards and which of
     them it held when its turn began, Catanatron's road networks and cached
-    and published road lengths, awards, the balanced dice and the seat a
-    knight took Largest Army from (``friendly_public``), and from the log the
-    turns of every seat's last knight and purchase. Hidden hands are
+    and published road lengths, awards and the balanced dice, and from the
+    log the turns of every seat's last knight and purchase (the seat a knight
+    took Largest Army from too, when an older ``friendly_public`` view names
+    it: the engine checks it and then ignores it, as the friendly robber is
+    judged after the award). Hidden hands are
     :func:`placeholder_hands`. ``mismatches`` is empty when the game shows
     exactly what the view shows.
     """
@@ -664,7 +663,7 @@ def snapshot(view: Mapping[str, Any], *, color: Any = None, rules: cpp.GameRules
     if rules.dice_mode == cpp.DiceMode.BALANCED:
         declared["dice"] = view_balanced_dice(view)
     taken = view.get("largest_army_taken_from")
-    if taken is not None:
+    if taken is not None:  # only a view from before the robber was judged after the award
         declared["largest_army_taken_from"] = sv.colors.index(taken)
     game = fresh_game(view, rules, catan_map, seed)
     game.apply_setup(

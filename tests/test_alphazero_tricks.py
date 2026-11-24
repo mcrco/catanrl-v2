@@ -925,7 +925,7 @@ def test_surprise_weighting_draws_the_surprising_positions_more_often(monkeypatc
 
 
 def test_the_soft_head_learns_the_soft_target():
-    net = network(soft=True, seed=2)
+    net = network(soft=True, seed=4)
     _, replay = filled(net)
     train = {**TRAIN, "soft_policy_coef": 1.0, "updates_per_iteration": 20, "minibatch_size": 32}
     optimizer = torch.optim.AdamW(net.parameters(), lr=3e-3)

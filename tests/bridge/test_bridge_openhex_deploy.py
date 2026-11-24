@@ -351,6 +351,21 @@ def test_the_stamp_names_version_spec_weights_code_and_engine():
     assert pid != deploy.provenance_id(_stamp(other))
 
 
+def test_a_version_that_trades_says_so_in_its_stamp_and_one_that_does_not_keeps_its_stamp():
+    plain = _parse(_bot(bot_id="0123456789abcdef", tag="openhex-1v1-v2"))[1][0]
+    off = _parse(_bot(bot_id="0123456789abcdef", tag="openhex-1v1-v2", trades=False))[1][0]
+    on = _parse(_bot(bot_id="0123456789abcdef", tag="openhex-1v1-v2", trades=True))[1][0]
+    tuned = _parse(_bot(bot_id="0123456789abcdef", tag="openhex-1v1-v2", trades={"margin": 2, "budget": 15}))[1][0]
+    assert plain.trades is None and off.trades is None and deploy.trades_of(plain) is None
+    assert on.trades is True and deploy.trades_of(on) is True
+    assert deploy.trades_of(tuned) == {"budget": 15, "margin": 2}
+    assert "trades" not in _stamp(plain) and _stamp(off) == _stamp(plain)
+    assert _stamp(on)["trades"] is True and _stamp(tuned)["trades"] == {"budget": 15, "margin": 2}
+    assert len({deploy.provenance_id(_stamp(e)) for e in (plain, on, tuned)}) == 3
+    with pytest.raises(deploy.DeployError, match="trades must be"):
+        _parse(_bot(trades="yes"))
+
+
 def test_build_stamps_takes_the_code_id_once(monkeypatch):
     from catanrl import provenance
 

@@ -125,6 +125,8 @@ class GameConfig:
             vps_to_win=self.victory_points_to_win,
             discard_limit=self.discard_limit,
             friendly_robber=self.friendly_robber,
+            # (cppanatron's friendly robber is OpenHex's: public points, the mover's seat too.)
+            robber_mode="friendly_public" if self.friendly_robber else None,
             supply=Supply(
                 resource_bank=self.resource_bank,
                 development_deck=self.development_deck,

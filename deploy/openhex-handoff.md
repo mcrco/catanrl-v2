@@ -73,7 +73,20 @@ bots:
     deployed: 2026-10-26          # optional, free-form
     retired: false                # optional, default false
     retired_at: 2026-11-02        # optional, free-form; only with retired: true
+    trades: true                  # optional: trade with the other players (below)
 ```
+
+**Trades.** Every seat follows the trades between the other players. With
+`trades: true` a seat also makes them, by its own network's value
+(`catanrl.bridge.trading.TradeJudge`): it answers the current player's
+offers, and on its own move it may offer, wait for the answers and confirm
+one or cancel, before the move itself. `trades` may instead be a mapping of
+the judge's keywords (`margin`, `accept_margin`, `dets`, `offers`, ...) and of
+the seat's `wait` (seconds to wait for answers, default 6) and `budget`
+(seconds of a move the trading may take, default 20; OpenHex does not restart
+the 60 seconds for trading). Trading changes what a version plays: it is part
+of the stamp, and turning it on is a new version. It needs an agent with a
+value head (POLICY, BELIEF, MCTS).
 
 **What the runner checks before it queues** (`catanrl openhex deploy/openhex.yaml`):
 
@@ -346,7 +359,15 @@ record. Games still `active` are only counted as ongoing. Names from OpenHex
   with an error body; `/state` lags `/events` slightly.
 - **60 seconds per action; a missed deadline aborts the game** (a loss).
 - Rules: 1v1 is 15 VP, discard limit 9 (discard when holding 10+), friendly
-  robber, balanced dice; 4p is 10 VP, limit 7, normal robber, random dice. The
+  robber, balanced dice; 4p is 10 VP, limit 7, normal robber, random dice.
+  Both engines carry OpenHex's forms of these as of open-hex `57e47d0`
+  (2026-11-22): the balanced deck is refilled when fewer than 13 cards are
+  left; the friendly robber shields every seat of at most two public points
+  (the mover's too), and stays where it is when every tile is shielded; a
+  resource the bank cannot pay in full goes to a sole claimant as far as it
+  lasts and to nobody otherwise. Players trade with each other
+  (`proposeTrade`, `acceptTrade`, `rejectTrade`, `confirmTrade`,
+  `cancelTrade`; a counter-offer names `counterTo`). The
   board is a standard 19-hex layout with cube coordinates; the bridge maps
   vertices to Catanatron nodes by geometry. No dev card may be played before the
   roll (the policy sometimes wants to; the bridge rolls first).

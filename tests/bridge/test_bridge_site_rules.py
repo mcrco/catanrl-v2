@@ -3,8 +3,9 @@
 balanced``): every seat's replay of its views stays exactly the server's
 game, its hand tracker equals one fed by the true transitions, the robber
 moves and the balanced dice's odds the replay offers are the game's, an
-edited view re-anchors on a snapshot that declares the dice and a knight's
-award, and our agents play whole verified games on a real server."""
+edited view re-anchors on a snapshot that declares the dice (at the robber
+prompt of a knight that took Largest Army, judged after the award), and our
+agents play whole verified games on a real server."""
 
 from __future__ import annotations
 
@@ -81,7 +82,6 @@ def _play(index: int) -> Counter:
                     stats["robber_prompts"] += 1
                     tiles = {tuple(a.value[0]) for a in offered}
                     stats["shielded"] += len(tiles) < len(truth.board.map.land_tiles) - 1
-                    stats["after_an_award"] += game.largest_army_taken_from is not None
     assert ls.over and ls.truth.winning_color() is not None
     for tracker in bridged:
         stats.update(tracker.stats)
@@ -98,29 +98,44 @@ def test_seat_replays_follow_whole_games_exactly():
 
 
 def _knight_award():
-    """A site game at the robber prompt of a knight that took Largest Army."""
+    """A site game at the robber prompt of a knight that took Largest Army from
+    the other seat, and that seat."""
     for index in range(40):
         ls = lockstep(GAME, index, site=True)
         for _ in range(3000):
             if ls.over:
                 break
-            ls.step(ls.choose())
-            if ls.truth.state.largest_army_taken_from is not None:
-                return ls
+            holder = next((i for i, p in enumerate(ls.native.players) if p.has_army), None)
+            action = ls.choose()
+            ls.step(action)
+            if (action.action_type.name == "PLAY_KNIGHT_CARD" and holder not in (None, ls.current_seat)
+                    and ls.native.player(ls.current_seat).has_army
+                    and ls.native.current_prompt == cpp.ActionPrompt.MOVE_ROBBER):
+                return ls, holder
     raise AssertionError("no knight took Largest Army")
 
 
-def test_a_snapshot_declares_the_dice_and_a_knights_award():
-    ls = _knight_award()
+def test_a_snapshot_declares_the_dice_at_a_knights_award():
+    """The robber of a knight that took Largest Army is judged on the points
+    after the award (the seat that lost it has its 2 points less): neither
+    engine names that seat any more, and the snapshot offers the game's moves.
+    A view of an older game that still names it loads alike."""
+    ls, loser = _knight_award()
     seat = ls.current_seat
     view = ls.view(seat)
-    assert view["largest_army_taken_from"] is not None
+    assert view["largest_army_taken_from"] is None and ls.truth.state.largest_army_taken_from is None
     position = snapshot(view)
     assert position.exact, position.mismatches
     game = position.game
-    assert game.largest_army_taken_from == ls.native.largest_army_taken_from is not None
+    assert game.largest_army_taken_from is None and ls.native.largest_army_taken_from is None
     assert game.balanced_dice == ls.native.balanced_dice == view_balanced_dice({**view, "balanced_dice": None})
-    assert sorted(map(repr, game.playable_actions)) == sorted(map(repr, ls.native.playable_actions))
+    offered = [from_catanatron_action(a) for a in ls.truth.playable_actions]
+    assert sorted(map(repr, game.playable_actions)) == sorted(map(repr, ls.native.playable_actions)) \
+        == sorted(map(repr, offered))
+    older = snapshot({**view, "largest_army_taken_from": ls.colors[loser]})
+    assert older.exact, older.mismatches
+    assert older.game.largest_army_taken_from is None
+    assert sorted(map(repr, older.game.playable_actions)) == sorted(map(repr, offered))
     # A view the log does not explain (an edit) re-anchors there, exactly.
     agent = ViewAgent(tiny_agent("POLICY", "private", ls.dims), strict=True)
     playable = ls.playable_json()

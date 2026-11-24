@@ -7,10 +7,10 @@ of OpenHex is imported. OpenHex's code is authoritative where its SPEC.md disagr
 
 The model, per roll by ``roller`` (the seat whose turn it is):
 
-1. **Reshuffle.** If at most 13 cards remain, the deck becomes the full 36 (d1, d2) cards
+1. **Reshuffle.** If fewer than 13 cards remain, the deck becomes the full 36 (d1, d2) cards
    again. Only the deck resets: the recent totals, the sevens per seat and the streak carry
    over. The deck is also refilled when the main phase starts; no roll happens before, so a
-   fresh :class:`BalancedDice` stands for that state. A deck yields 23 draws (36 down to 13).
+   fresh :class:`BalancedDice` stands for that state. A deck yields 24 draws (36 down to 12).
 2. **Weights per sum** k in 2..12 over the (possibly refilled) deck of T cards holding
    ``c_k`` cards of sum k: ``w_k = c_k / T * max(0, 1 - 0.34 * a_k)``, ``a_k`` the
    appearances of k among the last 5 totals (3 appearances zero it, 2 leave 0.32, 1 leaves
@@ -21,11 +21,11 @@ The model, per roll by ``roller`` (the seat whose turn it is):
    so far ``S >= n`` (``s`` the roller's), else 1.
 4. **Draw.** Every remaining card of sum k weighs ``w_k / c_k``: the sum comes up with
    probability ``w_k / sum(w)``, and then each of its remaining cards equally. If every weight
-   is zero, a card is drawn uniformly (unreachable: at least 14 cards span at least three
+   is zero, a card is drawn uniformly (unreachable: at least 13 cards span at least three
    sums, and recency can zero only one of them, the seven multiplier only the 7).
 5. **Update.** The card leaves the deck; its total joins the last-5 window (oldest dropped);
    a 7 counts for the roller and extends the roller's streak (a 7 by another seat starts a
-   new streak of 1); any other total clears the streak.
+   new streak of 1); any other total leaves the streak, owner and count, as it is.
 
 The deck order never matters (a card's chance depends only on its sum), so the per-sum counts
 of the remaining cards are a sufficient statistic for every future total; the faces only name
@@ -47,8 +47,8 @@ Card = tuple[int, int]
 #: The 36 cards, one per ordered pair of faces.
 FULL_DECK: tuple[Card, ...] = tuple((a, b) for a in range(1, 7) for b in range(1, 7))
 SUMS: tuple[int, ...] = tuple(range(2, 13))
-#: A draw first refills the deck when at most this many cards remain.
-RESHUFFLE_AT = 13
+#: A draw first refills the deck when fewer than this many cards remain.
+RESHUFFLE_BELOW = 13
 #: Totals remembered for the recency penalty.
 WINDOW = 5
 RECENCY_PENALTY = Fraction(34, 100)
@@ -83,7 +83,7 @@ class BalancedDice:
 
     ``sevens`` has one entry per seat (seats are turn-order indices); ``num_players`` is
     OpenHex's ``config.num_players`` (the seats when unset). ``streak_player`` owns the current
-    run of sevens, ``streak_count`` long (None and 0 when there is none).
+    run of sevens, ``streak_count`` long (None and 0 until the first 7; other totals do not end it).
     """
 
     sevens: tuple[int, ...] = (0, 0)
@@ -121,7 +121,7 @@ class BalancedDice:
 
     def drawable(self) -> frozenset[Card]:
         """The deck the next draw takes from: the full deck if it is refilled first (step 1)."""
-        return frozenset(FULL_DECK) if len(self.deck) <= RESHUFFLE_AT else self.deck
+        return frozenset(FULL_DECK) if len(self.deck) < RESHUFFLE_BELOW else self.deck
 
     def counts(self) -> dict[int, int]:
         """Cards per sum in :meth:`drawable`."""
@@ -188,8 +188,6 @@ class BalancedDice:
                     streak_count += 1
                 else:
                     streak_player, streak_count = roller, 1
-            else:
-                streak_player, streak_count = None, 0
         return BalancedDice(sevens=sevens, deck=deck - {card},
                             recent=(self.recent + (total,))[-WINDOW:], streak_player=streak_player,
                             streak_count=streak_count, num_players=self.num_players)

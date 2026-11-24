@@ -10,14 +10,17 @@ forcing every outcome the log shows. Both engines follow the same rules
 public state at every prompt, and every transition it passes through is
 what the seat's hand tracker learns from (:mod:`catanrl.bridge.tracking`).
 The friendly robber: the engine plays OpenHex's rule (public points, so no
-placeholder changes the legal robber moves, and a knight's tile judged on
-the points before its Largest Army award), which is Catanatron's
-``robber_mode="friendly_public"`` (catanatron-server's room config
-``robber_mode: friendly_public``) exactly. Catanatron's own friendly robber
-(``friendly_robber``, which catanatron-server refuses) counts hidden victory
-point cards and awards first, and a game under it may rob a seat the replay
-shields (the step then fails like any move the replay cannot follow;
-tests/bridge/bridge_games.py re-rules it as OpenHex's for the tests).
+placeholder changes the legal robber moves; any seat's low points shield a
+tile, the mover's own too; no robber move when every tile but the robber's
+is shielded; a knight's tile judged on the points after its Largest Army
+award), which is Catanatron's ``robber_mode="friendly_public"``
+(catanatron-server's room config ``robber_mode: friendly_public``) exactly.
+Catanatron's own friendly robber (``friendly_robber``, which
+catanatron-server refuses) counts hidden victory point cards, shields
+opponents only and opens every tile when all are shielded, and a game under
+it may make a robber move the replay does not offer (the step then fails
+like any move the replay cannot follow; the tests' truth plays
+``friendly_public``, tests/bridge/bridge_games.py).
 
 The other seats' hidden cards are placeholders. They start as the fresh
 game's (empty hands) and change only by public moves and by placeholder
@@ -33,17 +36,19 @@ development cards stay the deck plus their hands. No placeholder ever comes
 from hidden information, and none can make a seat win the replay that has
 not won the game.
 
-A roll pays by the engine's rule: nothing of a resource the bank cannot pay
-everyone. A game that pays otherwise (OpenHex pays in full unless one
-player's share alone exceeds the bank, and its bank goes negative) tells
-:meth:`Replay.step` the public payout (``produced``); where the engine paid
-nothing for want of bank, the step raises :class:`BankShort` with the cards
-short, and the caller replays the game on rules whose bank is that much
-larger (the hands and the tracker then stay exact; the engine's bank is the
-game's plus the margin). Any other difference (the engine paying where the
-game withheld, or a board the replay has wrong) is logged and counted in
-``repairs["production"]``; the engine's payout stands, since its bank cannot
-be set from here.
+A roll pays by the engine's rule, which is OpenHex's since 2026-10-18 and
+our Catanatron's: of a resource the bank cannot pay everyone, a sole
+claimant takes what is left and several claimants get nothing. A game that
+pays otherwise (OpenHex before that date paid in full unless one player's
+share alone exceeded the bank, and its bank went negative; its recorded
+games of then still replay) tells :meth:`Replay.step` the public payout
+(``produced``); where the engine paid nothing for want of bank, the step
+raises :class:`BankShort` with the cards short, and the caller replays the
+game on rules whose bank is that much larger (the hands and the tracker
+then stay exact; the engine's bank is the game's plus the margin). Any
+other difference (the engine paying where the game withheld, or a board the
+replay has wrong) is logged and counted in ``repairs["production"]``; the
+engine's payout stands, since its bank cannot be set from here.
 
 Under balanced dice (``GameRules.dice_mode``, OpenHex's 1v1 rules, and
 Catanatron's ``dice_mode="balanced"``) every roll replayed updates the game's

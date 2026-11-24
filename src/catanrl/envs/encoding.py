@@ -44,7 +44,8 @@ MAX_PLAYERS = 6
 #:   when seat k rolls (``Game.roll_probabilities``); the fair 7 reads 1;
 #: * ``dice_deck_<t>`` [11]: cards of total t the next draw can take / the full deck's;
 #: * ``dice_recent_<t>`` [11]: min(times t is among the last five totals / 3, 1);
-#: * ``dice_draws_left``: draws before the next refill / 23 (1 on a full deck);
+#: * ``dice_draws_left``: draws before the next refill, less one, / 23 (1 on a full deck, 0 on
+#:   the 13 cards of a deck's last draw);
 #: * ``dice_sevens_<k>`` [P]: min(seat k's sevens so far / 10, 1);
 #: * ``dice_seven_share_<k>`` [P]: seat k's share of all sevens so far (0 before the first);
 #: * ``dice_streak_<k>`` [P]: min(the current run of sevens / 5, 1) in its owner's slot;

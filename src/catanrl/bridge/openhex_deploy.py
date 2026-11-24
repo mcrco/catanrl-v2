@@ -17,6 +17,7 @@ keeps every version ever registered, the retired ones too::
         evidence: [4b223fd273477fcf]   # eval records that justified it
         deployed: 2026-10-26
         retired: false                 # true: kept for the record, never run
+        trades: true                   # trade with the other players (or TradeJudge's keywords)
 
 This module reads that file (:func:`load_deploy`), refuses a checkpoint not
 pinned by its weights (:func:`check_pins`), a checkout whose play source is not
@@ -47,7 +48,7 @@ from catanrl.canon import digest
 MODES = ("1v1", "4p")
 #: The keys of a bot entry; any other is refused (a typo would otherwise be a silent default).
 REQUIRED = ("name", "mode", "spec", "key_env", "version")
-OPTIONAL = ("bot_id", "tag", "evidence", "retired", "deployed", "retired_at")
+OPTIONAL = ("bot_id", "tag", "evidence", "retired", "deployed", "retired_at", "trades")
 #: The keys of the file: ``releases`` names the GitHub repository whose releases ship the
 #: checkpoints (``catanrl.bridge.openhex_release``; default :data:`REPO_URL`'s).
 SETTINGS = ("bots", "api", "releases")
@@ -93,6 +94,10 @@ class DeployEntry:
     retired: bool = False
     deployed: str | None = None
     retired_at: str | None = None
+    #: Trade with the other players by the agent's own value head: ``True``, or the keywords
+    #: of :class:`catanrl.bridge.trading.TradeJudge` (and the seat's ``wait`` and ``budget``
+    #: seconds) as sorted pairs. Part of what the version plays, so of its stamp.
+    trades: Any = None
 
 
 # ---------------------------------------------------------------- the file
@@ -165,6 +170,10 @@ def _entry(raw: Mapping[str, Any]) -> tuple[DeployEntry | None, list[str]]:
         errors.append(f"retired must be true or false, not {retired!r}")
     elif raw.get("retired_at") is not None and not retired:
         errors.append("retired_at is set but retired is not true")
+    trades = raw.get("trades")
+    if trades is not None and not isinstance(trades, bool) and not (
+            isinstance(trades, Mapping) and all(isinstance(k, str) for k in trades)):
+        errors.append(f"trades must be true, false or a mapping of TradeJudge keywords, not {trades!r}")
     if errors:
         return None, errors
     return DeployEntry(
@@ -172,6 +181,7 @@ def _entry(raw: Mapping[str, Any]) -> tuple[DeployEntry | None, list[str]]:
         bot_id=raw.get("bot_id"), tag=raw.get("tag"), evidence=tuple(evidence), retired=retired,
         deployed=None if raw.get("deployed") is None else _date(raw["deployed"]),
         retired_at=None if raw.get("retired_at") is None else _date(raw["retired_at"]),
+        trades=(tuple(sorted(trades.items())) if isinstance(trades, Mapping) else True) if trades else None,
     ), []
 
 
@@ -489,7 +499,14 @@ def stamp(entry: DeployEntry, resolved: Any, git: Mapping[str, Any], *, code: Ma
         "spec": entry.spec, "canonical": resolved.canonical,
         "checkpoints": [{"ref": str(ref), "weights_sha256": ref.weights_sha256} for ref in resolved.checkpoints],
         "git": dict(git), "code_id": dict(code), "engine": dict(engine),
+        # (Only where set: a version that does not trade keeps the stamp it had.)
+        **({"trades": trades_of(entry)} if entry.trades else {}),
     }
+
+
+def trades_of(entry: DeployEntry) -> Any:
+    """``entry.trades`` as :class:`~catanrl.bridge.openhex.OpenHexBot` takes it: None, True or a dict."""
+    return dict(entry.trades) if isinstance(entry.trades, tuple) else entry.trades
 
 
 def provenance_id(stamp: Mapping[str, Any]) -> str:

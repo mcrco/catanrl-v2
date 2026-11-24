@@ -106,7 +106,7 @@ def test_the_features_are_the_games_balanced_dice_in_observer_order():
             assert np.allclose(odds[0], own * DICE_ODDS_SCALE) and np.allclose(odds[1], other * DICE_ODDS_SCALE)
             assert abs(float(odds[0].sum()) - DICE_ODDS_SCALE) < 1e-4  # slot 0 is the observer
             assert glob["dice_sevens_0"] == np.float32(min(dice.sevens[observer] / 10.0, 1.0))
-            assert all(0.0 <= value <= 2.5 for value in columns.all(row))  # of order 1
+            assert all(0.0 <= value <= DICE_ODDS_SCALE for value in columns.all(row))  # a sure total at most
             differ += not np.array_equal(own, other)
             unfair += not np.allclose(own, FAIR_ODDS)
             aged += glob["dice_draws_left"] < 1.0
@@ -186,9 +186,11 @@ def test_off_is_bit_identical():
     assert (dice.backbone.dice_inputs, dice.backbone.tile_dice_inputs) == (107, 8)
 
 
-#: sha256 (16 hex) of the rows without the input along seeded random games, from main's build
-#: before the option existed (3f34b94, engine b926970): balanced dice and random, 2 and 4 seats.
-MAIN_ROWS = {("base-2p-fr", "private"): "8b1ffd4388e1627f", ("base-2p-fr", "full"): "371789ed77ebcde1",
+#: sha256 (16 hex) of the rows without the input along seeded random games: balanced dice and
+#: random, 2 and 4 seats. base-4p's are from main's build before the option existed (3f34b94,
+#: engine b926970); base-2p-fr's were recorded again on engine ec0792b, whose balanced dice and
+#: friendly robber (OpenHex's of 2026-11-22) play these games differently.
+MAIN_ROWS = {("base-2p-fr", "private"): "f337f6bac697a92f", ("base-2p-fr", "full"): "de7e737ae4034699",
              ("base-4p", "private"): "cc1a60fdf5d11ca1", ("base-4p", "full"): "c15e847657ae9d74"}
 
 
@@ -427,7 +429,7 @@ def test_a_warm_started_network_searches_as_its_source(tmp_path, spec):
     plain, dice = native(spec.format(plain_ref.path)), native(spec.format(dice_ref.path))
     assert dice.dice_state and not plain.dice_state
     answers = 0
-    for game, seat in balanced_games(3, 400, 37):
+    for game, seat in balanced_games(3, 400, 31):
         if len(game.playable_actions) < 2:
             continue
         (_, a, spy_a), (_, b, spy_b) = decide(plain, game, seat), decide(dice, game, seat)

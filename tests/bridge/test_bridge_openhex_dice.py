@@ -168,7 +168,7 @@ def _balanced_game(rolls: int = 80):
 @pytest.mark.parametrize("color", ["blue", "red"])
 def test_a_balanced_game_replays_with_its_dice_state(color):
     record, events, after, generator = _balanced_game()
-    assert sum(1 for s, _c, _r in after if s.remaining == 13) == 3  # three decks drawn down to the refill
+    assert sum(1 for s, _c, _r in after if s.remaining == 12) == 3  # three decks drawn down to the refill
     assert any(card[0] + card[1] == 7 for _s, card, _r in after)
     assert any(e["event"]["type"] == "resourcesDiscarded" for e in events)
     seat = OpenHexSeat(_Never(), "balanced", record, color)

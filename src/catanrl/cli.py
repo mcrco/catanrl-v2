@@ -398,7 +398,7 @@ def _cmd_openhex(args) -> int:
     stop = threading.Event()
     bots = [OpenHexBot(resolved[entry.name], keys[entry.name], entry.mode, base=api, device=args.device,
                        state_dir=Path(args.state) / entry.name, name=entry.name, stamp=stamps[entry.name],
-                       stop=stop)
+                       stop=stop, trades=deploy.trades_of(entry))
             for entry in running]
     for bot in bots:
         bot.announce()

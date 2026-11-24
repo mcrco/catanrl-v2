@@ -27,7 +27,8 @@ from catanrl.bridge.replay import ReplayError
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "openhex" / "game-004a8250.json"
 #: A ladder game (aborted at turn 95) whose turn 89 produced 7 wood with 5 in
-#: the bank: OpenHex paid in full, the engine's rule would pay nobody.
+#: the bank: OpenHex (before its short-bank rule of 2026-10-18) paid in full; the
+#: rule replayed, OpenHex's since, pays two claimants nothing.
 OVERPAID = Path(__file__).parent.parent / "fixtures" / "openhex" / "game-881a71bc.json"
 DATA = Path(__file__).parent.parent / "data"
 RESOURCE_NAMES = ("wood", "brick", "sheep", "wheat", "ore")
@@ -117,7 +118,7 @@ def _assert_state(seat, bank, players):
 @pytest.mark.parametrize("color", ["blue", "red"])
 def test_a_roll_the_bank_cannot_cover_pays_what_the_game_paid(color):
     # Turn 89 (seq 374): 7 wood produced with 5 in the bank. OpenHex paid in
-    # full; the engine's rule pays nobody. The replay starts over on a bank
+    # full; the rule replayed pays its two claimants nothing. The replay starts over on a bank
     # two cards larger and follows the game exactly (the checkpoint is the
     # public record's state after seq 379).
     game = _fair(json.loads(OVERPAID.read_text()))
@@ -510,6 +511,7 @@ def _idle_bot(stop=None):
     bot.mode = "1v1"
     bot.name = "test"
     bot.poll_s = 0.0
+    bot.judge, bot.trade_times = None, {}
     bot.stop = stop if stop is not None else threading.Event()
     return bot
 
@@ -568,6 +570,9 @@ class _TimedSeat:
     def mismatches(self, _state):
         return []
 
+    def sent(self, _action, _reply):
+        pass
+
     def close(self):
         pass
 
@@ -603,7 +608,7 @@ def test_a_plans_first_action_reports_the_search_time(monkeypatch):
     clock = [100.0]
     monkeypatch.setattr("catanrl.bridge.openhex.time.monotonic", lambda: clock[0])
     monkeypatch.setattr("catanrl.bridge.openhex.time.sleep", lambda _s: None)
-    monkeypatch.setattr("catanrl.bridge.openhex.OpenHexSeat", lambda *a: _TimedSeat(clock, *a))
+    monkeypatch.setattr("catanrl.bridge.openhex.OpenHexSeat", lambda *a, **_k: _TimedSeat(clock, *a))
     bot = _idle_bot()
     bot.client = _TimedClient(clock)
     bot.native = None

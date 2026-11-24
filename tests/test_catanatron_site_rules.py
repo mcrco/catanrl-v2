@@ -5,10 +5,11 @@ equal exactly.
 
 Random games run in lockstep on both engines (cppanatron forced to
 Catanatron's dice, cards and steals): at every step both offer the same
-actions, robber moves included (the shields read public points only, and a
-knight's tile the points before its Largest Army award), both hold the same
-balanced dice with the same integer weights for every roller, and both mark
-the same seat a knight took Largest Army from. Random roll histories, and
+actions, robber moves included (the shields read public points only, the
+mover's own buildings among them, a knight's tile the points after its Largest
+Army award, and no robber move follows a 7 or a knight when every tile is
+shielded), and both hold the same balanced dice with the same integer weights
+for every roller. Random roll histories, and
 random dice states no game need reach, give both engines' ``BalancedDice``
 the same weights too.
 """
@@ -56,19 +57,6 @@ def _native_dice(native) -> tuple:
     return tuple(sorted(d.deck)), tuple(d.recent), tuple(d.sevens), d.streak_player, d.streak_count
 
 
-def _post_award_tiles(truth) -> set:
-    """The robber tiles under the points after the knight's award (Catanatron's
-    own order): where it differs, the order of the knight and its award mattered."""
-    state = truth.state
-    taken, state.largest_army_taken_from = state.largest_army_taken_from, None
-    try:
-        from catanatron.models.actions import robber_possibilities
-
-        return {a.value[0] for a in robber_possibilities(state, state.current_color())}
-    finally:
-        state.largest_army_taken_from = taken
-
-
 def _lockstep(config: games.GameConfig, index: int, stats: Counter) -> None:
     truth, native = _engines(config, index)
     rng = random.Random(index)
@@ -76,15 +64,11 @@ def _lockstep(config: games.GameConfig, index: int, stats: Counter) -> None:
     while truth.winning_color() is None and truth.state.num_turns < TURNS_LIMIT:
         ours = sorted(repr(from_catanatron_action(a)) for a in truth.playable_actions)
         assert ours == sorted(map(repr, native.playable_actions)), (config.name, index)
-        taken = truth.state.largest_army_taken_from
-        assert native.largest_army_taken_from == (None if taken is None else truth.state.colors.index(taken))
+        assert truth.state.largest_army_taken_from is None and native.largest_army_taken_from is None
         if truth.state.current_prompt == ActionPrompt.MOVE_ROBBER:
             stats["robber_prompts"] += 1
             tiles = {a.value[0] for a in truth.playable_actions}
             stats["shielded"] += len(tiles) < len(truth.state.board.map.land_tiles) - 1
-            if taken is not None:
-                stats["after_an_award"] += 1
-                stats["the_order_mattered"] += _post_award_tiles(truth) != tiles
         if config.dice_mode == "balanced":
             assert _dice(truth) == _native_dice(native)
             for roller in [None, *range(seats)]:
@@ -97,9 +81,13 @@ def _lockstep(config: games.GameConfig, index: int, stats: Counter) -> None:
         action = rng.choice(busy) if busy and rng.random() < 0.8 else rng.choice(actions)
         record = truth.execute(action)
         forced = {}
+        if action.action_type == ActionType.PLAY_KNIGHT_CARD:
+            stats["knights"] += 1
+            stats["robber_stays"] += truth.state.current_prompt != ActionPrompt.MOVE_ROBBER
         if action.action_type == ActionType.ROLL:
             forced["dice"] = tuple(record.result)
             stats["rolls"] += 1
+            stats["robber_stays"] += sum(record.result) == 7 and truth.state.current_prompt == ActionPrompt.PLAY_TURN
         elif action.action_type == ActionType.BUY_DEVELOPMENT_CARD:
             forced["development_card"] = cpp.DevelopmentCard[record.result]
         elif action.action_type == ActionType.MOVE_ROBBER and record.result is not None:
@@ -118,8 +106,8 @@ def test_openhex_1v1_plays_alike_in_both_engines():
     for index in range(60):
         _lockstep(config, index, stats)
     assert stats["rolls"] > 20_000 and stats["robber_prompts"] > 3000 and stats["shielded"] > 1000
-    # Knights that took Largest Army, some where the points after the award would have shielded otherwise.
-    assert stats["after_an_award"] > 10 and stats["the_order_mattered"] > 3, stats
+    # (No random game shields every tile: the engines' own tests build those positions.)
+    assert stats["knights"] > 500, stats
 
 
 @pytest.mark.parametrize("name, dice_mode", [("base-3p", "balanced"), ("base-4p", "random")])

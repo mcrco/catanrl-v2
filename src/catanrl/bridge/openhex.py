@@ -2,9 +2,12 @@
 
 OpenHex runs its own rules engine and speaks its own JSON: cube coordinates
 for hexes and vertices, an event stream per game, and actions that differ
-from Catanatron's in a few places (a knight names its hex, the robber's
-steal is a separate action, discards go in one batch, free roads have their
-own action). This module puts an OpenHex game into the bridge's terms:
+from Catanatron's in a few places (a knight is played and the robber then
+moved, the robber's steal is a separate action, discards go in one batch,
+free roads have their own action, one bank trade may pay several cards of
+several kinds, and trades between players are offers that the other seats
+answer at any time). This module puts an OpenHex game into the bridge's
+terms:
 
 * :class:`Board`: the board as a Catanatron map (and so a cppanatron one),
   with OpenHex vertices matched to Catanatron nodes by geometry (a vertex is
@@ -22,6 +25,21 @@ own action). This module puts an OpenHex game into the bridge's terms:
   in ``deploys.jsonl``, see :mod:`catanrl.bridge.openhex_deploy`).
 
 Nothing here reads hidden information: OpenHex sends each bot its own view.
+
+Trades between players are followed for every seat (``tradeExecuted`` moves
+the cards in the replay and the hand tracker; offers and answers move
+nothing). A seat with a :class:`catanrl.bridge.trading.TradeJudge` (a deploy
+entry's ``trades``) also makes them: it answers the current player's offers
+by its own network's value, and on its own move it may offer, wait for the
+answers, and confirm one or cancel, all inside the move's one deadline
+(OpenHex does not restart it for trading).
+
+The rules replayed are OpenHex's as of open-hex ``57e47d0`` (2026-11-22): its
+balanced dice (a deck refilled when fewer than 13 cards are left), its
+friendly robber (any seat of at most two public points is shielded, the
+mover's too; with every tile shielded the robber stays), and its short bank
+(a resource the bank cannot pay in full goes to a sole claimant as far as it
+lasts, to nobody otherwise). Both engines carry them.
 
 OpenHex's 1v1 rules roll balanced dice (``config.diceMode``): the replayed
 game rolls them too (``cppanatron.BalancedDice``), and every observed roll,
@@ -81,6 +99,15 @@ DERIVED = frozenset({"setupResourcesGranted", "setupResourcesCollected", "resour
                      "longestRoadAwarded", "longestRoadClaimed", "largestArmyAwarded", "largestArmyClaimed",
                      "gameWon"})
 AWARDS = frozenset({"longestRoadAwarded", "longestRoadClaimed", "largestArmyAwarded", "largestArmyClaimed"})
+#: The events of an offer between players that move no card: the seat keeps the
+#: standing offers from them (:meth:`OpenHexSeat.feed`), the log passes them by.
+#: (``tradeExecuted`` moves the cards: the log's ``TRADE`` entry.)
+NEGOTIATION = frozenset({"tradeProposed", "tradeAccepted", "tradeRejected", "tradeAnswerWithdrawn",
+                         "tradeCancelled"})
+#: OpenHex's actions between players (they restart no move deadline, and a refused one
+#: is no move of ours gone wrong: the offer closed first).
+TRADE_ACTIONS = frozenset({"proposeTrade", "acceptTrade", "rejectTrade", "withdrawTradeAnswer", "confirmTrade",
+                           "cancelTrade"})
 
 
 class OpenHexError(RuntimeError):
@@ -241,6 +268,11 @@ def _counts(resources: Mapping[str, int]) -> list[int]:
     return [int(resources.get(RES_NAME[r], 0)) for r in RESOURCES]
 
 
+def _named(counts: Sequence[int]) -> dict[str, int]:
+    """Counts in RESOURCES order as OpenHex's resource map."""
+    return {RES_NAME[r]: int(n) for r, n in zip(RESOURCES, counts) if n}
+
+
 # ---------------------------------------------------------------- events as a log
 
 
@@ -263,14 +295,22 @@ class EventLog:
     instant (nothing follows when nothing was produced, or on a 7), so the
     replay pays what the game paid. A robber move waits for the steal that
     may follow it (award events can come between); a knight is its card plus
-    the robber move it carries. Discards are held until the next other event
+    the robber move it carries (none when friendly robber shields every hex:
+    the event has no location). Discards are held until the next other event
     and come out in seat order, one card each, as Catanatron's discard prompt
-    takes them.
+    takes them. A bank trade of several cards comes out one card bought at a
+    time, each offered kind at the trader's rate for it (``rates``, asked when
+    more than one kind is offered). A trade between players is one ``TRADE``
+    entry (the creator's ten counts and the partner), which the seat replays
+    as the current player's offer, the answers and the confirmation; the rest
+    of a negotiation (:data:`NEGOTIATION`) moves nothing and yields nothing.
     """
 
-    def __init__(self, board: Board, colors: Sequence[str]) -> None:
+    def __init__(self, board: Board, colors: Sequence[str], rates: Any = None) -> None:
         self.board = board
         self.colors = list(colors)
+        #: ``rates(color)``: the bank's rate per resource kind for that seat (RESOURCES order).
+        self.rates = rates
         self.robber: tuple[str, tuple] | None = None
         self.discards: dict[str, list[str]] = {}
         self.won: str | None = None
@@ -279,6 +319,8 @@ class EventLog:
     def feed(self, event: Mapping[str, Any]) -> list[Entry]:
         kind = event.get("type")
         out: list[Entry] = []
+        if kind in NEGOTIATION:
+            return out
         if kind == "gameWon":
             # The game can end on a knight (Largest Army) before its steal:
             # whatever was pending never happens.
@@ -309,7 +351,9 @@ class EventLog:
             self.robber = (color, cube(field_of(event, "hex", "location")))
         elif kind == "knightPlayed":
             out.append(Entry([[color, "PLAY_KNIGHT_CARD", None], None]))
-            self.robber = (color, cube(field_of(event, "hex", "location")))
+            # No location: friendly robber shields every hex, the robber stays.
+            if event.get("hex") is not None or event.get("location") is not None:
+                self.robber = (color, cube(field_of(event, "hex", "location")))
         elif kind == "resourceStolen":
             if self.robber is None or self.robber[0] != color:
                 raise OpenHexError(f"a steal without a robber move: {event!r}")
@@ -331,13 +375,10 @@ class EventLog:
         elif kind == "roadBuildingPlayed":
             out.append(Entry([[color, "PLAY_ROAD_BUILDING", None], None]))
         elif kind == "bankTradeExecuted":
-            (give, n), = [(RES[r], int(k)) for r, k in event["offering"].items() if int(k)]
-            (take, m), = [(RES[r], int(k)) for r, k in event["requesting"].items() if int(k)]
-            if n % m:
-                raise OpenHexError(f"an uneven bank trade: {event!r}")
-            rate = n // m
-            value = [give] * rate + [None] * (4 - rate) + [take]
-            out += [Entry([[color, "MARITIME_TRADE", value], None]) for _ in range(m)]
+            out += self._bank_trade(color, event)
+        elif kind == "tradeExecuted":
+            value = [*_counts(event["offering"]), *_counts(event["requesting"]), color_of(event["partner"])]
+            out.append(Entry([[color, "TRADE", value], None]))
         elif kind == "turnEnded":
             out.append(Entry([[color, "END_TURN", None], None]))
         elif kind == "resourcesProduced":
@@ -346,6 +387,26 @@ class EventLog:
         elif kind not in DERIVED:
             logger.warning("openhex: an event the bridge does not know: %s", json.dumps(event)[:200])
         return out
+
+    def _bank_trade(self, color: str, event: Mapping[str, Any]) -> list[Entry]:
+        """One MARITIME_TRADE per card bought: OpenHex takes several cards and
+        kinds in one trade, each offered kind at the seat's rate for it."""
+        offering, requesting = _counts(event["offering"]), _counts(event["requesting"])
+        bought = [r for r, n in zip(RESOURCES, requesting) for _ in range(n)]
+        offered = [(r, n) for r, n in zip(RESOURCES, offering) if n]
+        if not bought or not offered:
+            raise OpenHexError(f"an empty bank trade: {event!r}"[:300])
+        if len(offered) == 1:
+            rates = {offered[0][0]: offered[0][1] // len(bought)}
+        elif self.rates is not None:
+            rates = dict(zip(RESOURCES, self.rates(color)))
+        else:
+            raise OpenHexError(f"a bank trade of several kinds, and no rates to split it by: {event!r}"[:300])
+        paid = [r for r, n in offered for _ in range(n // rates[r] if 2 <= rates[r] <= 4 and n % rates[r] == 0 else 0)]
+        if len(paid) != len(bought):
+            raise OpenHexError(f"an uneven bank trade: {event!r}"[:300])
+        return [Entry([[color, "MARITIME_TRADE", [give] * rates[give] + [None] * (4 - rates[give]) + [take]], None])
+                for give, take in zip(paid, bought)]
 
     def _production(self, event: Mapping[str, Any]) -> list[list[int]]:
         amounts = [[0] * 5 for _ in self.colors]
@@ -451,6 +512,28 @@ class Plan:
     actions: list[dict]
     #: The robber's victim, for the steal OpenHex asks for next.
     victim: str | None = None
+    #: Trading between players (:data:`TRADE_ACTIONS`) and no move: with no actions,
+    #: the seat waits on the answers to its offer.
+    trade: bool = False
+
+
+@dataclass
+class Offer:
+    """A standing offer between players: what its ``proposer`` gives and gets
+    (counts in RESOURCES order), and the seats that answered it."""
+
+    id: int
+    proposer: str
+    give: tuple[int, ...]
+    get: tuple[int, ...]
+    #: The offer this one answers (put to the current player alone), else None.
+    counter_to: int | None = None
+    accepting: set = field(default_factory=set)
+    rejected: set = field(default_factory=set)
+    #: When the seat learned of it (``time.monotonic()``).
+    at: float = 0.0
+    #: Acceptees whose confirmation OpenHex refused (their cards went elsewhere).
+    refused: set = field(default_factory=set)
 
 
 @dataclass
@@ -473,6 +556,21 @@ class OpenHexSeat:
     end drops the searches and frees the slot. The game replayed again on fair
     dice (a roll its balanced dice cannot give, or a lasting difference in the
     deck size, see the module doc) restarts the stream the same way.
+
+    Trades between players: the seat follows every one (a ``TRADE`` entry is
+    replayed as the current player's offer, the other seats' answers and the
+    confirmation, and its tracker moves the cards) and keeps the standing
+    offers from the events (:attr:`offers`). With a ``judge``
+    (:class:`catanrl.bridge.trading.TradeJudge`, the agent's own value head)
+    it also trades: it answers the current player's offers when it is not to
+    move (accept or reject, once each), and on its own turn, before the move,
+    takes or rejects the counter-offers put to it, offers what the judge
+    proposes (one offer at a time; it waits ``trade_wait`` seconds, or until
+    every seat answered, then confirms the acceptee the judge picks or cancels)
+    for at most ``trade_budget`` seconds a move. OpenHex restarts no move
+    deadline for trading, so the move after it has what the trading left
+    (:attr:`move_started` is where the trading began). Without a judge the
+    seat answers nothing, which OpenHex allows: no game waits on an answer.
     """
 
     native: Any
@@ -480,6 +578,9 @@ class OpenHexSeat:
     state: Mapping[str, Any]
     color: str
     stats: dict = field(default_factory=dict)
+    judge: Any = None
+    trade_wait: float = 6.0
+    trade_budget: float = 20.0
 
     def __post_init__(self) -> None:
         state = self.state
@@ -508,8 +609,18 @@ class OpenHexSeat:
         #: The entries replayed so far (replayed again on a larger bank).
         self.entries: list[Entry] = []
         self._build()
-        self.log = EventLog(self.board, self.colors)
+        self.log = EventLog(self.board, self.colors, self._rates)
         self.last_seq = -1
+        #: The standing offers between players, by OpenHex's ``tradeId``.
+        self.offers: dict[int, Offer] = {}
+        #: The offers this seat answered (each once).
+        self.answered: set[int] = set()
+        #: When this move's trading began, None outside it.
+        self.trading_since: float | None = None
+        #: When our offer went out, until OpenHex's ``tradeProposed`` shows it.
+        self.awaiting: float | None = None
+        #: When the confirmation or cancellation of our offer went out, by ``tradeId``.
+        self.closing: dict[int, float] = {}
         self.victim: str | None = None
         self.discarded_at: int | None = None
         self.waited = 0
@@ -541,8 +652,47 @@ class OpenHexSeat:
                 continue
             self.last_seq = item["seq"]
             event = item["event"] if "event" in item else item
+            self._negotiation(event)
             for entry in self.log.feed(event):
                 self._step(entry)
+
+    def _negotiation(self, event: Mapping[str, Any]) -> None:
+        """Keep :attr:`offers` as the trading events say."""
+        kind = event.get("type")
+        if kind == "turnEnded":
+            self.offers.clear()
+            self.closing.clear()
+            self.awaiting = None
+            return
+        if kind != "tradeExecuted" and kind not in NEGOTIATION:
+            return
+        trade_id, color = int(event["tradeId"]), color_of(event["player"])
+        me = self.colors[self.seat]
+        if kind == "tradeProposed":
+            counter = event.get("counterTo")
+            self.offers.setdefault(trade_id, Offer(
+                trade_id, color, tuple(_counts(event["offering"])), tuple(_counts(event["requesting"])),
+                None if counter is None else int(counter), at=time.monotonic()))
+            if color == me:
+                self.awaiting = None
+        elif kind in ("tradeExecuted", "tradeCancelled"):
+            self.offers.pop(trade_id, None)
+            self.closing.pop(trade_id, None)
+            if kind == "tradeExecuted" and me in (color, color_of(event["partner"])):
+                self.stats["trades"] = self.stats.get("trades", 0) + 1
+        elif trade_id in self.offers:
+            offer = self.offers[trade_id]
+            offer.accepting.discard(color)
+            offer.rejected.discard(color)
+            if kind == "tradeAccepted":
+                offer.accepting.add(color)
+            elif kind == "tradeRejected":
+                offer.rejected.add(color)
+
+    def _rates(self, color: str) -> list[int]:
+        """The bank's rate per resource kind for ``color``, by its ports in the replay."""
+        ports = self.replay.game.board.player_port_resources(cpp.Color[color])
+        return [2 if cpp.Resource[r] in ports else 3 if None in ports else 4 for r in RESOURCES]
 
     def _step(self, entry: Entry) -> None:
         handled: set[type] = set()
@@ -554,8 +704,9 @@ class OpenHexSeat:
                 if BankShort in handled:
                     raise
                 handled.add(BankShort)
-                # OpenHex paid a roll its bank could not; the engine pays nobody
-                # then. The game replays on a bank that much larger: the hands
+                # The game paid a roll its bank could not by the rule replayed (an
+                # OpenHex before its short-bank rule of 2026-10-18, or a bank that
+                # differs). The game replays on a bank that much larger: the hands
                 # and the tracker stay exact, the bank features scale by it.
                 self.bank_margin = [m + d for m, d in zip(self.bank_margin, short.deficit)]
                 self.stats["bank_short"] = self.stats.get("bank_short", 0) + 1
@@ -588,14 +739,49 @@ class OpenHexSeat:
             self._apply(past)
 
     def _apply(self, entry: Entry) -> None:
+        if entry.record[0][1] == "TRADE":
+            self._apply_trade(entry)
+        else:
+            self._apply_record(entry.record, entry)
+        self.entries.append(entry)
+
+    def _apply_trade(self, entry: Entry) -> None:
+        """A trade between players as the engine plays one: the current player
+        offers, the partner accepts and every other seat rejects (in the
+        engine's order), the current player confirms the partner. (A
+        counter-offer's creator is the partner of the current player's trade.)"""
+        from catanatron.serialization import action_to_json
+        from cppanatron.catanatron import to_catanatron_action
+
+        creator, _, value = entry.record[0]
+        game = self.replay.game
+        mover = self.colors[game.current_player_index]
+        if mover == creator:
+            give, get, other = value[:5], value[5:10], value[10]
+        elif mover == value[10]:
+            give, get, other = value[5:10], value[:5], creator
+        else:
+            raise OpenHexError(f"a trade between {creator} and {value[10]} on {mover}'s turn")
+        plain = Entry([])
+        self._apply_record([[mover, "OFFER_TRADE", [*give, *get]], None], plain)
+        for _ in self.colors:
+            if game.current_prompt != cpp.ActionPrompt.DECIDE_TRADE:
+                break
+            reject = next(a for a in game.playable_actions if a.action_type == cpp.ActionType.REJECT_TRADE)
+            color, _, offer = action_to_json(to_catanatron_action(reject))
+            self._apply_record([[color, "ACCEPT_TRADE" if color == other else "REJECT_TRADE", list(offer)], None],
+                               plain)
+        self._apply_record([[mover, "CONFIRM_TRADE", [*give, *get, other]], None], plain)
+
+    def _apply_record(self, record: list, entry: Entry) -> None:
         sizes = None
         if entry.amounts is not None:
             game = self.replay.game
             sizes = [sum(game.player(i).resources) for i in range(len(self.colors))]
             total = sum(entry.amounts)
-            sizes = [s + total if i == self.colors.index(entry.record[0][0]) else s - entry.amounts[i]
+            sizes = [s + total if i == self.colors.index(record[0][0]) else s - entry.amounts[i]
                      for i, s in enumerate(sizes)]
-        tr = self.replay.step(entry.record, sizes_after=sizes, produced=entry.produced)
+        tr = self.replay.step(record, sizes_after=sizes, produced=entry.produced)
         if self.replay.repairs["production"]:
             self.stats["production_mismatch"] = self.replay.repairs["production"]
         events = transition_events(tr, self.seat, amounts=entry.amounts)
@@ -603,7 +789,6 @@ class OpenHexSeat:
             events.append(points_event(tr))
         for event in events:
             self.tracker.apply(event)
-        self.entries.append(entry)
 
     @property
     def over(self) -> bool:
@@ -639,10 +824,8 @@ class OpenHexSeat:
         """What the replayed game shows differently from OpenHex's state."""
         game = self.replay.game
         out = []
-        if game.is_initial_build_phase:
-            # OpenHex grants the second settlement's resources after its
-            # road, Catanatron at the settlement: hands differ in between.
-            return out
+        # (The second settlement's resources come at the settlement on both sides:
+        # OpenHex's since 2026-11-16, as Catanatron's.)
         bank = state.get("bank") or state.get("resourceBank")
         if bank and self.bank != _counts(bank):
             out.append(f"bank {tuple(self.bank)} vs {_counts(bank)}")
@@ -728,12 +911,173 @@ class OpenHexSeat:
                 return None
         game = self.replay.game
         if game.is_discarding or game.current_player_index != self.seat or not mine:
+            if self.judge is not None and not mine and not game.is_discarding:
+                return self._answer(game, color_of(state.get("currentPlayer") or ""))
             return None
         if "roll" in kind:
             # OpenHex takes nothing before the roll (Catanatron would let a
             # development card go first).
             return Plan([{"type": "rollDice"}])
+        if self.judge is not None:
+            trading = self._negotiate(game)
+            if trading is not None:
+                return trading
         return self._decide(game)
+
+    # ------------------------------------------------------------ trading with players
+
+    def _seed(self, what: str) -> int:
+        return derive_seed(self.game_id, what, self.seat, len(self.replay.entries))
+
+    def _answer(self, game: cpp.Game, current: str) -> Plan | None:
+        """Our answers to the current player's offers we have not answered:
+        the judge's, on the replayed game at our turn to answer."""
+        from catanrl.agents.trade import tradeable
+
+        mover = game.current_player_index
+        me = self.colors[self.seat]
+        if mover == self.seat or self.colors[mover] != current or not tradeable(game, mover):
+            return None
+        actions = []
+        for offer in list(self.offers.values()):
+            if offer.proposer != current or offer.counter_to is not None or offer.id in self.answered \
+                    or me in offer.accepting or me in offer.rejected:
+                continue
+            self.answered.add(offer.id)
+            accept = self._accepts(game, mover, offer)
+            self.stats["trade_answers"] = self.stats.get("trade_answers", 0) + 1
+            actions.append({"type": "acceptTrade" if accept else "rejectTrade", "tradeId": offer.id})
+        return Plan(actions, trade=True) if actions else None
+
+    def _accepts(self, game: cpp.Game, mover: int, offer: Offer) -> bool:
+        from catanrl.agents.trade import Trade, offer_action, response
+
+        ahead = game.copy()
+        try:
+            ahead.execute(offer_action(ahead, mover, Trade(offer.give, offer.get)))
+            while ahead.current_prompt == cpp.ActionPrompt.DECIDE_TRADE and ahead.current_player_index != self.seat:
+                ahead.execute(response(ahead, accept=False))
+            if ahead.current_prompt != cpp.ActionPrompt.DECIDE_TRADE:
+                return False
+            self._bind(ahead)
+            return bool(self.judge.answer(ahead, self.seat, self.tracker, self._seed("trade")))
+        except (ValueError, RuntimeError) as error:
+            logger.warning("game %s: offer %d could not be judged (%s); rejecting", self.game_id, offer.id,
+                           str(error)[:120])
+            return False
+
+    def _negotiate(self, game: cpp.Game) -> Plan | None:
+        """This turn's trading before the move (see the class doc): a plan of
+        trade actions, a plan of none while the answers to our offer come in,
+        or None when the move is next."""
+        from catanrl.agents.trade import Trade, tradeable
+
+        if not tradeable(game, self.seat):
+            return None
+        now = time.monotonic()
+        if self.trading_since is None:
+            self.trading_since = now
+        me = self.colors[self.seat]
+        self._bind(game)
+        actions: list[dict] = []
+        for offer in list(self.offers.values()):  # counter-offers, put to us alone
+            if offer.proposer == me or offer.counter_to is None or offer.id in self.answered:
+                continue
+            self.answered.add(offer.id)
+            self.stats["trade_answers"] = self.stats.get("trade_answers", 0) + 1
+            try:
+                take = self.judge.take(game, self.seat, self.colors.index(offer.proposer), Trade(offer.get, offer.give))
+            except (ValueError, RuntimeError):
+                take = False
+            actions.append({"type": "confirmTrade" if take else "rejectTrade", "tradeId": offer.id})
+            if take:
+                break  # the hand it was judged on is gone
+        if actions:
+            return Plan(actions, trade=True)
+        for offer in self.offers.values():
+            if offer.proposer != me:
+                continue
+            closing = self.closing.get(offer.id)
+            if closing is not None and now - closing < 5.0:
+                return Plan([], trade=True)  # its event is on its way
+            answered = (offer.accepting | offer.rejected) >= set(self.colors) - {me}
+            if closing is None and now - offer.at < self.trade_wait and not (answered and offer.accepting):
+                return Plan([], trade=True)
+            partner = self._acceptee(game, offer) if closing is None else None
+            self.closing[offer.id] = now
+            if partner is not None:
+                return Plan([{"type": "confirmTrade", "tradeId": offer.id, "partner": partner.lower()}], trade=True)
+            return Plan([{"type": "cancelTrade", "tradeId": offer.id}], trade=True)
+        if self.awaiting is not None and now - self.awaiting < 5.0:
+            return Plan([], trade=True)
+        self.awaiting = None
+        if now - self.trading_since > self.trade_budget:
+            return None
+        try:
+            trade = self.judge.propose(game, self.seat, self.tracker, self._seed("offer"), (self.game_id, me))
+        except (ValueError, RuntimeError) as error:
+            logger.warning("game %s: no offer (%s)", self.game_id, str(error)[:120])
+            trade = None
+        if trade is None:
+            return None
+        self.awaiting = now
+        return Plan([{"type": "proposeTrade", "offering": _named(trade.give), "requesting": _named(trade.get)}],
+                    trade=True)
+
+    def _acceptee(self, game: cpp.Game, offer: Offer) -> str | None:
+        """The seat to confirm our ``offer`` with (the judge's pick among those
+        that accepted, each given a stand-in hand of its size that holds the
+        ask), or None to cancel."""
+        from catanrl.agents.trade import Trade, can_pay, offer_action, response, standin_hand
+
+        trade = Trade(offer.give, offer.get)
+        ahead = game.copy()
+        accepting = []
+        for color in sorted(offer.accepting - offer.refused, key=self.colors.index):
+            q = self.colors.index(color)
+            size = sum(ahead.player(q).resources)
+            if size >= sum(trade.get):
+                ahead.set_resources(q, standin_hand(size, trade.get))
+                accepting.append(q)
+        if not accepting or not can_pay(ahead.player(self.seat).resources, trade.give):
+            return None
+        try:
+            ahead.execute(offer_action(ahead, self.seat, trade))
+            while ahead.current_prompt == cpp.ActionPrompt.DECIDE_TRADE:
+                ahead.execute(response(ahead, accept=ahead.current_player_index in accepting))
+            if ahead.current_prompt != cpp.ActionPrompt.DECIDE_ACCEPTEES:
+                return None
+            partner = self.judge.confirm(ahead, self.seat)
+        except (ValueError, RuntimeError) as error:
+            logger.warning("game %s: offer %d could not be confirmed (%s); cancelling", self.game_id, offer.id,
+                           str(error)[:120])
+            return None
+        return None if partner is None else self.colors[partner]
+
+    def sent(self, action: Mapping[str, Any], reply: Any) -> None:
+        """OpenHex took ``action``: an offer of ours stands from its reply on."""
+        if action.get("type") == "proposeTrade":
+            self.stats["offers"] = self.stats.get("offers", 0) + 1
+            for item in (reply.get("events") if isinstance(reply, Mapping) else None) or []:
+                event = item.get("event", item)
+                if event.get("type") == "tradeProposed":
+                    self._negotiation(event)
+        elif action.get("type") == "acceptTrade":
+            self.stats["accepts"] = self.stats.get("accepts", 0) + 1
+
+    def refused(self, action: Mapping[str, Any]) -> None:
+        """OpenHex refused the trade ``action``: the offer closed first, or the
+        acceptee no longer holds the cards (another acceptee, or a
+        cancellation, is next)."""
+        kind, trade_id = action.get("type"), action.get("tradeId")
+        if kind == "proposeTrade":
+            self.awaiting = None
+        elif kind == "confirmTrade" and trade_id in self.offers and action.get("partner"):
+            self.offers[trade_id].refused.add(color_of(action["partner"]))
+            self.closing.pop(trade_id, None)
+        elif kind == "cancelTrade":
+            self.offers.pop(trade_id, None)
+            self.closing.pop(trade_id, None)
 
     def _victim(self) -> str:
         if self.victim is not None:
@@ -826,13 +1170,17 @@ class OpenHexSeat:
         self._restart_stream()
 
     def _decide(self, game: cpp.Game) -> Plan:
-        self.move_started = time.monotonic()
+        # (OpenHex's deadline did not restart for the trading before this move.)
+        self.move_started, self.trading_since = self.trading_since or time.monotonic(), None
         action = self._choose(game, self.tracker)
         kind = action.action_type.name
         if kind == "PLAY_KNIGHT_CARD":
             # OpenHex takes the knight with its hex: decide the robber now.
             ahead = game.copy()
             ahead.execute(action)
+            if not ahead.is_moving_robber:
+                # Friendly robber shields every hex: the knight is played, the robber stays.
+                return Plan([{"type": "playKnight"}])
             tracker = self.tracker.copy()
             tracker.apply(cpp.TrackerEvent.play_development_card(self.seat, cpp.DevelopmentCard.KNIGHT))
             tracker.apply(cpp.TrackerEvent.public_victory_points(
@@ -1004,10 +1352,20 @@ class OpenHexBot:
 
     def __init__(self, spec: Any, api_key: str, mode: str, *, base: str = API, device: str = "cpu",
                  state_dir: str | Path = "openhex", poll_s: float = 1.0, name: str | None = None,
-                 stamp: Mapping[str, Any] | None = None, stop: threading.Event | None = None) -> None:
+                 stamp: Mapping[str, Any] | None = None, stop: threading.Event | None = None,
+                 trades: Any = None) -> None:
         from catanrl.bridge.openhex_deploy import provenance_id
 
         self.native, self.label = native_for(spec, device=device)
+        #: Trades with the other players (``trades``: True, or TradeJudge's keywords with the
+        #: seat's own ``wait`` and ``budget`` seconds); None: the bot follows them only.
+        self.judge, self.trade_times = None, {}
+        if trades:
+            from catanrl.bridge.trading import TradeJudge
+
+            options = {} if trades is True else dict(trades)
+            self.trade_times = {f"trade_{k}": float(options.pop(k)) for k in ("wait", "budget") if k in options}
+            self.judge = TradeJudge(self.native, device=device, **options)
         self.client = OpenHexClient(api_key, base)
         self.mode = mode
         self.poll_s = float(poll_s)
@@ -1103,7 +1461,7 @@ class OpenHexBot:
     def play(self, game_id: str) -> dict:
         reply = self.client.state(game_id)
         state = {**reply["state"], "board": self.board_of(game_id, reply["state"])}
-        seat = OpenHexSeat(self.native, game_id, state, reply["your_color"])
+        seat = OpenHexSeat(self.native, game_id, state, reply["your_color"], judge=self.judge, **self.trade_times)
         logger.info("%s: game %s as %s against %s", self.name, game_id, reply["your_color"],
                     [p.get("name") for p in reply["game"].get("players", [])])
         refused = 0
@@ -1123,7 +1481,7 @@ class OpenHexBot:
                     logger.warning("%s: game %s: no plan (%s); playing the default move", self.name, game_id,
                                    str(error)[:160])
                     plan = Plan(seat.fallback(state))
-                if plan is None:
+                if plan is None or not plan.actions:
                     time.sleep(self.poll_s)
                     continue
                 problems = seat.check(state)  # (a lasting dice difference: fair dice from here on)
@@ -1132,12 +1490,18 @@ class OpenHexBot:
                                    "; ".join(problems[:3]))
                 for action in plan.actions:
                     try:
-                        self.client.act(game_id, action, int(1000 * (time.monotonic() - started)))
+                        reply = self.client.act(game_id, action, int(1000 * (time.monotonic() - started)))
                         started = time.monotonic()
                         refused = 0
+                        seat.sent(action, reply)
                     except OpenHexHTTPError as error:
                         if error.status >= 500:
                             raise
+                        if action.get("type") in TRADE_ACTIONS:
+                            # Trading is no move: the offer closed first, or a hand changed.
+                            logger.info("%s: game %s: %s refused (%s)", self.name, game_id, action, error.detail[:200])
+                            seat.refused(action)
+                            continue
                         refused += 1
                         logger.warning("%s: game %s: %s refused (%s)", self.name, game_id, action, error.detail[:200])
                         for fallback in seat.fallback(state) if refused <= 3 else []:

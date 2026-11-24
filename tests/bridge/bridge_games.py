@@ -7,15 +7,15 @@ features, hand trackers and agents of a seat can be compared with what the
 bridge builds from that seat's views alone.
 
 The friendly robber is the one rule the engines differ on: Catanatron's own
-(``friendly_robber``, what ``GameConfig.catanatron_game`` builds) shields seats
-under 3 actual points (hidden victory point cards count) after a knight's
-Largest Army award, the engine follows OpenHex (at most 2 public points, a
-knight's tile on the points before its award). The bridge tests' conftest makes
-the truth play the engine's rule for each bridge test
-(:func:`openhex_friendly_robber`), and undoes it after. A ``site`` lockstep's
-truth is a catanatron-server room's game instead (:func:`site_game`):
-Catanatron's ``robber_mode="friendly_public"``, which is OpenHex's rule, and the
-config's dice, balanced ones included.
+(``friendly_robber``, what ``GameConfig.catanatron_game`` builds) shields the
+mover's opponents under 3 actual points (hidden victory point cards count) and
+opens every tile when all are shielded, the engine follows OpenHex (any seat
+with at most 2 public points, the mover included, and no robber move when every
+tile but the robber's is shielded). A lockstep with the friendly robber
+therefore takes its truth from :func:`site_game`, as a ``site`` lockstep does:
+a catanatron-server room's game, with Catanatron's
+``robber_mode="friendly_public"``, which is OpenHex's rule, and the config's
+dice, balanced ones included.
 """
 
 from __future__ import annotations
@@ -37,46 +37,6 @@ from catanrl.agents.native import make_native_agent
 from catanrl.envs.encoding import action_size, covering_dims, row_layout
 from catanrl.models import build_model
 
-
-def openhex_friendly_robber(monkeypatch) -> None:
-    """Re-rule stock Catanatron's friendly robber as OpenHex's (open-hex
-    engine.py ``_friendly_robber_shields``), through ``monkeypatch`` so it ends
-    with the test: a tile is shielded when an opponent of the mover with at
-    most 2 visible points has a building on it (Catanatron's own fallback,
-    every tile when all are shielded, is OpenHex's), and a knight's tile is
-    judged on the points before the knight's Largest Army award (OpenHex
-    validates it first): the seat the knight took the award from keeps its 2
-    points for that robber move."""
-    from catanatron import state_functions
-    from catanatron.models import actions
-    from catanatron.state_functions import get_visible_victory_points, player_key
-
-    award = state_functions.maintain_largest_army
-
-    def maintain_largest_army(state, color, previous_army_color, previous_army_size):
-        award(state, color, previous_army_color, previous_army_size)
-        took = (previous_army_color is not None and previous_army_color != color
-                and not state.player_state[f"{player_key(state, previous_army_color)}_HAS_ARMY"])
-        state.openhex_army_taken_from = previous_army_color if took else None
-
-    def blocks(state, color, action) -> bool:
-        coordinate, _ = action.value
-        records = state.action_records
-        after_knight = bool(records) and records[-1].action.action_type == ActionType.PLAY_KNIGHT_CARD
-        taken = getattr(state, "openhex_army_taken_from", None) if after_knight else None
-        for node_id in state.board.map.land_tiles[coordinate].nodes.values():
-            building = state.board.buildings.get(node_id)
-            if building is None or building[0] == color:
-                continue
-            points = get_visible_victory_points(state, building[0]) + (2 if building[0] == taken else 0)
-            if points <= 2:
-                return True
-        return False
-
-    monkeypatch.setattr(state_functions, "maintain_largest_army", maintain_largest_army)
-    monkeypatch.setattr(actions, "_robber_action_blocks_low_vp_enemy", blocks)
-
-
 DATA = Path(__file__).resolve().parents[1] / "data"
 GAMES = ("base-2p", "base-3p", "base-4p", "extension-5p", "extension-6p", "hexagon-3p")
 CHANCE = {ActionType.ROLL: "dice", ActionType.BUY_DEVELOPMENT_CARD: "development_card",
@@ -90,7 +50,8 @@ class Lockstep:
     seed: int
     friendly_robber: bool | None = None
     vps_to_win: int | None = None
-    #: The truth as a catanatron-server room plays the config (:func:`site_game`).
+    #: The truth as a catanatron-server room plays the config (:func:`site_game`);
+    #: a config with the friendly robber always is.
     site: bool = False
     truth: object = field(init=False)
     native: cpp.Game = field(init=False)
@@ -105,7 +66,7 @@ class Lockstep:
             data = {**self.config.to_dict(), **overrides}
             self.config = games.GameConfig.from_dict(data)
         players = [SimplePlayer(c) for c in list(Color)[: self.config.num_players]]
-        build = site_game if self.site else games.GameConfig.catanatron_game
+        build = site_game if self.site or self.config.friendly_robber else games.GameConfig.catanatron_game
         self.truth = build(self.config, players, self.map_seed, self.seed)
         spec = cpp.MapSpec.from_dict(self.config.map_spec(self.map_seed))
         colors = [cpp.Color[c.value] for c in self.truth.state.colors]

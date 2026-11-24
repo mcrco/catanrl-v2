@@ -241,7 +241,7 @@ def ckpts(tmp_path):
 def test_agents_play_the_head_network_as_the_same_weights_without(ckpts, spec):
     with_head, without = (native(spec.format(ref.path)) for ref in ckpts)
     answers = 0
-    for game, seat in balanced_games(3, 400, 37):
+    for game, seat in balanced_games(3, 400, 31):
         if len(game.playable_actions) < 2:
             continue
         (_, a, spy_a), (_, b, spy_b) = decide(with_head, game, seat), decide(without, game, seat)

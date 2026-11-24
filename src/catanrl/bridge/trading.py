@@ -20,7 +20,9 @@ probabilities, ego order) on the rows the policy reads:
   is voted by dealt worlds, nothing of its hand read but its size) against
   every partner, keep the bundles that gain both seats more than ``margin``,
   their Pareto front ordered by the seat's own gain, and offer them in turn,
-  at most ``offers`` a turn.
+  at most ``offers`` a turn;
+* **take** (an offer put to the seat to move alone, as OpenHex's
+  counter-offers are): take it when the seat gains more than ``margin``.
 
 Nothing it reads of another seat's hand is more than its public size: the
 offerer's and partners' hands come from worlds the tracker deals.
@@ -181,6 +183,24 @@ class TradeJudge:
                 best = (acceptee, gain)
         self.stats["confirms" if best else "cancels"] += 1
         return None if best is None else best[0]
+
+    def take(self, game: cpp.Game, seat: int, partner: int, trade: Trade) -> bool:
+        """Take ``trade`` (what the seat gives and gets) from ``partner`` at the seat's own
+        play turn? An offer made to the seat to move alone (OpenHex's counter-offer): yes
+        when the seat's win probability gains more than ``margin``, read as a proposal's is
+        (the partner's hand a stand-in of its public size)."""
+        self.stats["answers"] += 1
+        if not tradeable(game, seat) or partner == seat or not can_pay(game.player(seat).resources, trade.give) \
+                or sum(trade.get) > sum(game.player(partner).resources):
+            return False
+        try:
+            post = post_row_clone(game, seat, partner, trade)
+        except (ValueError, RuntimeError):  # an offer the engine does not take
+            return False
+        values = self._values(self._rows([(game, seat), (post, seat)]))
+        accept = float(values[1, 0] - values[0, 0]) > self.margin
+        self.stats["accepts"] += accept
+        return accept
 
     # ------------------------------------------------------------ proposing
 

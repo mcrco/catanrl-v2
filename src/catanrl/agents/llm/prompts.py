@@ -465,8 +465,9 @@ ROBBER_RULES = {
     "normal": "The robber may be moved to any land tile other than the one it is on.",
     "friendly": ("Friendly robber: the robber may not be moved to a tile where an opponent with fewer than 3 victory "
                  "points (hidden Victory Point cards count) has a building, unless every other tile is barred."),
-    "friendly_public": ("Friendly robber: the robber may not be moved to a tile where an opponent with at most 2 "
-                        "visible victory points has a building, unless every other tile is barred."),
+    "friendly_public": ("Friendly robber: the robber may not be moved to a tile where any player with at most 2 "
+                        "visible victory points (you included) has a building. If every other tile is barred, the "
+                        "robber stays where it is: a 7 or a knight then moves no robber and steals nothing."),
 }
 
 
@@ -517,8 +518,8 @@ def rules_section(game: Any, observer: Any) -> str:
         (f"- Setup: in the order {snake}, each player places a settlement and a road touching it (no cost); the "
          "second settlement pays one card of each resource tile it touches."),
         ("- Each turn: roll two fair dice; every tile with the rolled number pays 1 card per touching settlement and 2 "
-         "per city to their owners, unless the robber is on it (if the bank cannot pay everyone a resource, nobody "
-         "gets it). Then build, buy, trade and play development cards in any order, then end the turn."),
+         "per city to their owners, unless the robber is on it (if the bank cannot pay everyone a resource, a lone "
+         "claimant takes what the bank has left and several claimants get none). Then build, buy, trade and play development cards in any order, then end the turn."),
         (f"- A roll of 7 pays nothing: every player holding more than {limit} resource cards discards half of them "
          "(rounded down); then the roller moves the robber and steals one random resource card from a player with a "
          "building on the robber's new tile."),

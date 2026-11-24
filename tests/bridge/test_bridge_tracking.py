@@ -77,7 +77,7 @@ def test_tracker_equals_the_native_tracker(name):
 
 
 def test_tracker_equals_the_native_tracker_with_the_friendly_robber():
-    """The friendly robber (OpenHex's rule, the truth re-ruled alike: see
+    """The friendly robber (OpenHex's rule, the truth's ``friendly_public``: see
     bridge_games) reads public points: the seat's robber options reveal no
     victory point cards, and the replay offers the truth's robber moves
     whatever its placeholders hold, so it follows without a repair."""
@@ -85,6 +85,60 @@ def test_tracker_equals_the_native_tracker_with_the_friendly_robber():
     for name, index in (("base-2p", 2), ("base-3p", 1), ("base-4p", 0), ("extension-5p", 1)):
         stats += _play(name, index, friendly_robber=True)
     assert stats["robber_prompts"] > 20 and stats["shielded_robber_prompts"] > 5
+    assert not stats["broken"] and not stats["tracker_resets"] and not stats["mismatched_syncs"]
+    assert not stats["reanchored"]
+
+
+def test_a_seven_and_a_knight_move_no_robber_when_every_tile_is_shielded():
+    """The friendly robber has no fallback. Eight setup settlements that touch
+    every tile but the desert's, and nobody builds after: each seat keeps its
+    2 points, so every tile the robber could go to is shielded. A 7 (after its
+    discards) and a knight are then followed by no robber move in either
+    engine, the knight still counts, and every seat's replay follows it."""
+    ls = lockstep("base-4p", 3, friendly_robber=True)
+    state, n = ls.truth.state, len(ls.colors)
+    tiles, desert = state.board.map.land_tiles, tuple(state.board.robber_coordinate)
+    bridged = [SeatTracker(view) for view in ls.views()]
+    native = [cpp.HandTracker(ls.native, seat) for seat in range(n)]
+    shielded: set = set()
+    seen: Counter = Counter()
+    turn = ("ROLL", "DISCARD_RESOURCE", "PLAY_KNIGHT_CARD", "BUY_DEVELOPMENT_CARD", "END_TURN")
+    for _ in range(MAX_STEPS):
+        actions = ls.truth.playable_actions
+        if state.is_initial_build_phase:
+            def touched(action):
+                return {c for c, tile in tiles.items() if c != desert and action.value in tile.nodes.values()}
+
+            action = max(actions, key=lambda a: len(touched(a) - shielded))  # a road: the first offered
+            if action.action_type.name == "BUILD_SETTLEMENT":
+                shielded |= touched(action)
+        else:
+            action = next(a for kind in turn for a in actions if a.action_type.name == kind)
+        before = ls.native.copy()
+        ls.step(action)
+        seen["sevens"] += action.action_type.name == "ROLL" and sum(state.action_records[-1].result) == 7
+        seen["knights"] += action.action_type.name == "PLAY_KNIGHT_CARD"
+        assert ls.native.current_prompt != cpp.ActionPrompt.MOVE_ROBBER
+        views = ls.views()
+        for seat, tracker in enumerate(bridged):
+            native[seat].observe(before, from_catanatron_action(action), ls.native)
+            tracker.sync(views[seat])
+            assert tracker.position.exact and not tracker.mismatches, tracker.mismatches
+            assert tracker.tracker == native[seat]
+            if ls.current_seat == seat:
+                offered = [from_catanatron_action(a) for a in ls.truth.playable_actions]
+                tracker.options(offered)
+                assert sorted(map(repr, tracker.game.playable_actions)) == sorted(map(repr, offered)) \
+                    == sorted(map(repr, ls.native.playable_actions))
+        if seen["sevens"] and seen["knights"] >= 2:
+            break
+    assert len(shielded) == len(tiles) - 1 and seen["sevens"] and seen["knights"] == 2
+    assert tuple(state.board.robber_coordinate) == tuple(ls.native.board.robber_coordinate) == desert
+    assert [p.victory_points for p in ls.native.players] == [2] * n
+    assert sum(p.played_development_cards[0] for p in ls.native.players) == 2
+    stats = Counter()
+    for tracker in bridged:
+        stats.update(tracker.stats)
     assert not stats["broken"] and not stats["tracker_resets"] and not stats["mismatched_syncs"]
     assert not stats["reanchored"]
 

@@ -50,7 +50,7 @@ def test_after_an_opening_seven_the_other_seat_gets_the_streak_boost():
     assert by_sum[7] == F(231, 1731)
     assert by_sum[2] == F(50, 1731) and by_sum[6] == F(250, 1731)
     assert by_card[(1, 6)] == F(231, 1731 * 5) and by_card[(3, 4)] == 0
-    # The streak's owner rolling again (not a normal turn order): 1 - 0.4 = 3/5.
+    # The streak's owner rolling again (as after the other seat's non-7, which leaves the streak): 1 - 0.4 = 3/5.
     assert state.seven_multiplier(0) == F(3, 5)
     assert state.sum_probabilities(0)[7] == F(99, 1599)
 
@@ -82,7 +82,7 @@ def test_the_multiplier_is_clamped_to_zero_and_two():
     assert low.seven_multiplier(0) == 0
     by_sum, _ = check_consistent(low, 0)
     assert by_sum[7] == 0 and by_sum[8] == F(5, 30)
-    # A longer streak (possible only if a seat rolls twice running): 0.4 per seven.
+    # A longer streak (the owner's next 7, whatever the other seats rolled between): 0.4 per seven.
     assert BalancedDice(sevens=(2, 0), streak_player=0, streak_count=2).seven_multiplier(1) == 2
     assert BalancedDice(sevens=(1, 0), streak_player=0, streak_count=1).seven_multiplier(1) == F(7, 5)
 
@@ -116,32 +116,34 @@ def test_a_sum_with_no_card_left_never_comes():
 
 
 def test_reshuffle_refills_only_the_deck():
-    # 14 cards left: no refill, the draw leaves 13.
-    fourteen = frozenset(FULL_DECK[:14])
-    state = BalancedDice(sevens=(1, 2), deck=fourteen, recent=(7, 7, 4, 5, 9),
+    # 13 cards left: no refill, the draw leaves 12.
+    thirteen = frozenset(FULL_DECK[:13])
+    state = BalancedDice(sevens=(1, 2), deck=thirteen, recent=(7, 7, 4, 5, 9),
                          streak_player=1, streak_count=1)
-    assert state.drawable() == fourteen
+    assert state.drawable() == thirteen
+    assert state.card_probabilities(0)[FULL_DECK[13]] == 0
     after = state.apply((1, 2), 0)
-    assert len(after.deck) == 13 and after.recent == (7, 4, 5, 9, 3)
-    assert (after.streak_player, after.streak_count) == (None, 0) and after.sevens == (1, 2)
-    # 13 left: the next draw sees the full deck, with the history kept.
+    assert len(after.deck) == 12 and after.recent == (7, 4, 5, 9, 3)
+    assert (after.streak_player, after.streak_count) == (1, 1) and after.sevens == (1, 2)
+    # 12 left: the next draw sees the full deck, with the history kept.
     assert after.drawable() == frozenset(FULL_DECK)
     assert after.counts() == sum_counts(FULL_DECK)
     assert after.card_probabilities(1)[(1, 2)] > 0
     again = after.apply((1, 2), 1)
     assert len(again.deck) == 35 and (1, 2) not in again.deck
     assert again.recent == (4, 5, 9, 3, 3) and again.sevens == (1, 2)
+    assert (again.streak_player, again.streak_count) == (1, 1)
 
 
-def test_a_deck_lasts_twenty_three_draws():
+def test_a_deck_lasts_twenty_four_draws():
     state, sizes = BalancedDice.new(2), []
     order = [c for c in FULL_DECK if card_sum(c) != 7] + [c for c in FULL_DECK if card_sum(c) == 7]
     for i in range(50):
         card = next(c for c in order if c in state.drawable())
         state = state.apply(card, i % 2)
         sizes.append(len(state.deck))
-    assert sizes[:23] == list(range(35, 12, -1))
-    assert sizes[23:46] == list(range(35, 12, -1)) and sizes[46] == 35
+    assert sizes[:24] == list(range(35, 11, -1))
+    assert sizes[24:48] == list(range(35, 11, -1)) and sizes[48] == 35
 
 
 def test_window_and_streak_updates():
@@ -150,10 +152,16 @@ def test_window_and_streak_updates():
         state = state.apply(card, roller)
     assert state.recent == (7, 6, 7, 7, 7)
     assert state.sevens == (2, 2, 1) and (state.streak_player, state.streak_count) == (1, 2)
+    # Another total leaves the streak as it is, whoever rolls it: only a 7 moves it.
     state = state.apply((2, 2), 0)
-    assert state.recent == (6, 7, 7, 7, 4) and (state.streak_player, state.streak_count) == (None, 0)
+    assert state.recent == (6, 7, 7, 7, 4) and (state.streak_player, state.streak_count) == (1, 2)
+    assert state.apply((1, 1), 1).streak_count == 2 and state.apply((1, 1), 1).sevens == (2, 2, 1)
     # Five 7s drawn of six, three in the window: the 7 is out whatever the multiplier.
     assert state.sum_probabilities(2)[7] == 0
+    # The last 7 by another seat starts a new streak of 1; by the owner it would be the third.
+    other, owner = state.apply((3, 4), 2), state.apply((3, 4), 1)
+    assert (other.streak_player, other.streak_count) == (2, 1)
+    assert (owner.streak_player, owner.streak_count) == (1, 3)
     # A roll with no roller (OpenHex's current_player None) moves the window only.
     unowned = BalancedDice.new(2).apply((3, 4), None)
     assert unowned.recent == (7,) and unowned.sevens == (0, 0) and unowned.streak_count == 0
@@ -172,9 +180,9 @@ def test_only_per_sum_counts_matter():
 def test_all_zero_weights_fall_back_to_uniform_cards():
     counts = sum_counts(FULL_DECK[:20])
     assert distribution(counts, {k: F(0) for k in SUMS}) == {k: F(counts[k], 20) for k in SUMS}
-    # Unreachable in play: the most adversarial deck a draw sees (14 cards on three sums, the
+    # Unreachable in play: the most adversarial deck a draw sees (13 cards on three sums, the
     # 6 thrice in the window, the 8 twice, the 7 multiplied by zero) keeps the 8.
-    deck = [c for c in FULL_DECK if card_sum(c) in (6, 7)] + [(2, 6), (3, 5), (4, 4)]
+    deck = [c for c in FULL_DECK if card_sum(c) in (6, 7)] + [(2, 6), (3, 5)]
     state = BalancedDice(sevens=(4, 0), deck=deck, recent=(6, 6, 6, 8, 8), streak_player=0, streak_count=1)
     assert state.sum_probabilities(0) == {k: F(int(k == 8)) for k in SUMS}
 
