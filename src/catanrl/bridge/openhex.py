@@ -1312,16 +1312,22 @@ class OpenHexClient:
         self.headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
                         "User-Agent": "catanrl-openhex/1"}
         self.timeout = timeout
+        self.retry_s = 1.5  # between the tries of a read OpenHex failed on
 
     def request(self, method: str, path: str, body: Any = None) -> Any:
         data = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(self.base + path, data=data, method=method, headers=self.headers)
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as reply:
-                text = reply.read().decode()
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode(errors="replace")[:500]
-            raise OpenHexHTTPError(error.code, detail) from None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as reply:
+                    text = reply.read().decode()
+                break
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode(errors="replace")[:500]
+                # A read that fails on OpenHex's side is asked again (a POST may have gone through).
+                if error.code < 500 or method != "GET" or attempt == 2:
+                    raise OpenHexHTTPError(error.code, detail, f"{method} {path.split('?')[0]}") from None
+                time.sleep(self.retry_s)
         return json.loads(text) if text else None
 
     def active_games(self) -> list:
@@ -1357,8 +1363,8 @@ class OpenHexClient:
 
 
 class OpenHexHTTPError(OpenHexError):
-    def __init__(self, status: int, detail: str) -> None:
-        super().__init__(f"HTTP {status}: {detail}")
+    def __init__(self, status: int, detail: str, request: str = "") -> None:
+        super().__init__(f"HTTP {status}{' on ' + request if request else ''}: {detail}")
         self.status = status
         self.detail = detail
 
@@ -1516,6 +1522,15 @@ class OpenHexBot:
                         refused = 0
                         seat.sent(action, reply)
                     except OpenHexHTTPError as error:
+                        if error.status >= 500 and action.get("type") in TRADE_ACTIONS:
+                            # OpenHex failed on its side (seen live 2026-11-24, once a game with
+                            # four seats trading). Trading is no move and the events say what
+                            # became of it: the seat stays in the game.
+                            logger.warning("%s: game %s: %s failed on OpenHex's side (%s)", self.name, game_id,
+                                           action, str(error)[:120])
+                            seat.refused(action)
+                            time.sleep(self.poll_s)
+                            break
                         if error.status >= 500:
                             raise
                         if action.get("type") in TRADE_ACTIONS:

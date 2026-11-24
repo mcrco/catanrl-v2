@@ -128,7 +128,7 @@ bots:
     key_env: OPENHEX_KEY_1V1_SEARCH_V4
     bot_id: 6010bbe3010142f5
     deployed: 2026-11-22
-    tag: openhex-4p-v2.1  # (2026-11-23: the bridge and engines on OpenHex's rules of 2026-11-22)
+    tag: openhex-4p-v2.2  # (2026-11-23: the bridge and engines on OpenHex's rules of 2026-11-22)
     evidence: [af97f7595f82b53d, ea2574432c1ce3fc, cc4ccbcc8cb418f6, 9c7a904b68e6fb51]
     retired: false
   # 4p v2 (2026-11-23, Marco: "bot trades with players"): 4p-v1's net and spec, and trades
@@ -143,7 +143,7 @@ bots:
     key_env: OPENHEX_KEY_4P_V2
     bot_id: bd60a755aa724519
     deployed: 2026-11-24
-    tag: openhex-4p-v2.1
+    tag: openhex-4p-v2.2
     trades: true
     device: cpu  # (off search-v4's GPU: CUDA refuses its allocations while a graph is captured)
     retired: false

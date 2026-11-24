@@ -267,7 +267,8 @@ def test_the_bot_tells_the_seat_what_openhex_said_and_a_refused_trade_action_cos
 
     from catanrl.bridge.openhex import OpenHexHTTPError, Plan
 
-    plans = [Plan([{"type": "proposeTrade"}], trade=True), Plan([]), Plan([{"type": "confirmTrade"}], trade=True),
+    plans = [Plan([{"type": "proposeTrade"}], trade=True),
+             Plan([{"type": "proposeTrade"}], trade=True), Plan([]), Plan([{"type": "confirmTrade"}], trade=True),
              Plan([{"type": "endTurn"}])]
     told = []
 
@@ -298,13 +299,15 @@ def test_the_bot_tells_the_seat_what_openhex_said_and_a_refused_trade_action_cos
     class Client(_TimedClient):
         def state(self, _game_id):
             self.polls += 1
-            status = "active" if self.polls <= 6 else "completed"
+            status = "active" if self.polls <= 7 else "completed"
             return {"state": {}, "game": {"status": status, "players": []}, "your_color": "red"}
 
         def act(self, _game_id, action, duration_ms):
             self.acted.append(action["type"])
             if action["type"] == "confirmTrade":
                 raise OpenHexHTTPError(400, "Partner can no longer afford the trade")
+            if action["type"] == "proposeTrade" and self.acted.count("proposeTrade") == 1:
+                raise OpenHexHTTPError(500, "Internal Server Error")  # (OpenHex's own failure: the seat stays)
             return {"success": True, "events": [{"seq": 7, "event": {"type": "x"}}]}
 
     clock = [0.0]
@@ -316,9 +319,34 @@ def test_the_bot_tells_the_seat_what_openhex_said_and_a_refused_trade_action_cos
     bot.board_of = lambda _game_id, _state: {}
     bot._record = lambda *_a: {}
     bot.play("g")
-    assert bot.client.acted == ["proposeTrade", "confirmTrade", "endTurn"]
-    assert [t[:2] for t in told] == [("sent", "proposeTrade"), ("refused", "confirmTrade"), ("sent", "endTurn")]
-    assert told[0][2]["events"][0]["seq"] == 7
+    assert bot.client.acted == ["proposeTrade", "proposeTrade", "confirmTrade", "endTurn"]
+    assert [t[:2] for t in told] == [("refused", "proposeTrade"), ("sent", "proposeTrade"),
+                                     ("refused", "confirmTrade"), ("sent", "endTurn")]
+    assert told[1][2]["events"][0]["seq"] == 7
+
+
+def test_a_read_openhex_fails_on_is_asked_again_and_a_write_is_not(monkeypatch):
+    import io
+    import urllib.error
+
+    from catanrl.bridge import openhex
+    from catanrl.bridge.openhex import OpenHexClient, OpenHexHTTPError
+
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append(request.get_method())
+        if len(calls) < 3 or request.get_method() == "POST":
+            raise urllib.error.HTTPError(request.full_url, 500, "Internal Server Error", {}, io.BytesIO(b"down"))
+        return io.BytesIO(b'{"state": {}}')
+
+    monkeypatch.setattr(openhex.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(openhex.time, "sleep", lambda _s: None)
+    client = OpenHexClient("k" * 8)
+    assert client.state("g") == {"state": {}} and calls == ["GET"] * 3
+    with pytest.raises(OpenHexHTTPError, match="HTTP 500 on POST /games/g/actions: down") as raised:
+        client.act("g", {"type": "endTurn"}, 0)
+    assert calls == ["GET"] * 3 + ["POST"] and raised.value.status == 500
 
 
 def test_a_discard_seen_before_the_others_waits_for_them_when_the_state_is_behind():
