@@ -1090,3 +1090,69 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 
 #lead[Cost.] Planned: the bundle ran 42.7 iterations an hour, which would make 900 iterations 21 h. With piece 4 the run makes about 53: about 17 h on the local GPU, plus 2.4 h for the final row (an eighth of the wall-clock). Launched at 07:15 on 2026-11-17 after `horizon-2p` was stopped (@exp:recipe-horizon) and the branches were merged. Actual: 18.0 h of self-play (51.5 iterations an hour) and 2.4 h for the row, 12% of the 20.4 h.
 
+=== 900 more iterations for `graph-m` on deeper recorded searches: `az-2p-graph-m-uniform/main+300` #chip("running") <exp:az-graph-m-deeper>
+#meta(
+  dates: "2026-11-23 19:30 –",
+  owner: "Marco (from a list of recommendations by another model, which Marco passed on)",
+  config: "configs/experiments/az-2p-graph-m-uniform.yaml, forked with the overrides below",
+  wandb: (("az-2p-graph-m-uniform-main-300-b441114b", "az-2p-graph-m-uniform/main+300"),),
+  records: ("af97f759",),
+)
+#tldr[`2p-graph-m-2` (@exp:az-graph-m) continued from iteration 900 for 900 more with three changes kept from the list (Marco, 2026-11-23: "ok yes lets do it"): recorded searches of 1,600 simulations on a tenth of the moves (were 600 on a quarter), learning rate 1.5e-5 (was 5e-5), and a quarter of the fast-searched moves stored as value-only rows (were none). Bundle first, ablate later. Two legs: 300 iterations and a row, then 600 more and a row. Leg one is running since 19:30 on 2026-11-23: self-play ends about 06:40 on 2026-11-24 and its row about 10:30.]
+
+*Question.* Does `2p-graph-m-2` (67.00% in the 1,024-sim search against fr3's fair raw bot) gain from 900 more iterations on this recipe, and is the gain already visible after 300?
+
+#lead[Setup.] A fork of `az-2p-graph-m-uniform/main` at iteration 900: the same weights, optimizer moments and replay (500,000 positions), the same config except:
+#figure(
+  btable(
+    columns: (auto, 1fr, 1fr, 1.7fr),
+    align: (left, left, left, left),
+    header: ([Change], [Before], [Now], [Why]),
+    [1. Deeper recorded searches], [600 sims on 25% of the moves (6.25% in decided games), 24 leaves a round], [1,600 sims on 10% (2.5% in decided games), 64 leaves a round], [The net is trained to match its own search. This net gains 3.75 pp from 1,024 to 4,096 sims (@exp:az-graph-m), so a deeper search is a better teacher than the 600-sim one, at about the same simulations per move.],
+    [2. Lower learning rate], [5e-5], [1.5e-5], [A step down for the late stretch of the same run. The optimizer's moments are kept.],
+    [3. Value-only rows], [Fast-searched moves are played, not stored], [25% of them are stored without a policy target (6.25% in decided games)], [With fewer full searches the replay would get fewer positions. Fast moves cost nothing extra and still carry the game's result for the value head.],
+  ),
+  caption: [The three changes. Fast searches stay at 100 sims (50 in decided games). Everything else is the parent's config.],
+) <tab:az-graph-m-deeper>
+- *Value-only rows.* Their value target is the game's result alone; rows with a full search keep the half-and-half mix with the search's value. The policy loss is averaged over the rows that have a target.
+- *Not included.* The list's other items; ablations of these three (later, if the bundle helps).
+
+#lead[Two code changes first] (in main at `af5d52a`, tests pass).
+- *`train.record_fast_prob`* (new, optional; unset stores every fast move as before, with no extra random draw, so older configs and their hashes are unchanged). In a decided game the probability is scaled by as much as the full searches are. Logged: `selfplay/recorded_full`, `selfplay/recorded_fast`, `train/policy_rows`.
+- *A continued run now learns at its own config's learning rate.* Before, a fork restored the optimizer's stored rate and weight decay over the config's: `--set train.learning_rate=…` on a fork was silently ignored (confirmed by a test before the fix). No earlier fork here changed either value.
+
+#lead[GPU check before the launch] (2026-11-23 19:20, the same fork in a separate runs folder, four iterations, W&B off). Passed.
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, right),
+    header: ([Per iteration], [Parent at iteration 900], [Check, iterations 2 to 4]),
+    [Time (s)], [129], [128 to 143],
+    [Simulations per move], [132], [139 to 159],
+    [Moves with a full search], [18.0%], [6.4 to 7.4%],
+    [Rows with a policy target], [about 5,900], [2,110 to 2,430],
+    [Value-only rows], [0], [4,840 to 5,690],
+    [Share of moves in decided games], [37.8%], [31 to 47%],
+    [Mean depth of a full search], [9.0], [10.6],
+    [Full searches whose top move is not the net's], [4.4%], [3.5 to 6.4%],
+  ),
+  caption: [The fork's first iterations against the parent's last. The games restart at the fork, so the check's first iterations hold more early-game moves than the parent's last one.],
+) <tab:az-graph-m-deeper-check>
+- *Cost per iteration is unchanged*, as planned: about 133 s against 129 s.
+- *Fewer, deeper policy targets.* About 2,300 policy rows an iteration against 5,900, each from 2.7× the simulations, plus about 5,300 value-only rows: 7,600 rows an iteration, each drawn about 4.3 times by the 64 updates of 512 rows (the parent: 5.6 times). About 30% of new rows carry a policy target.
+- *Learning rate* 1.5e-5 in every logged row. *Memory:* 8.2 GB of RAM left free, at most 3.2 GB on the GPU.
+
+#lead[Evals.] No in-run evals (the in-run hook cannot use the held-out boards). Each leg ends with one row: its last checkpoint in the deployed search (1,024 sims, one sampled world) against fr3's fair raw bot on the lineage's 2,000 held-out games, paired by game (exact McNemar) with `2p-graph-m-2`'s row `af97f759` (67.00%). A row is #sym.plus.minus 2.1 pp and detects a paired difference of about 2.7 pp. After leg one's row (iteration 1,200) Marco can stop or go on; leg two is a second fork to iteration 1,800.
+
+#lead[Cost.] Local GPU. 900 iterations at about 133 s are 33 h, and the two rows 3.8 h each: about 41 h in all, 19% of it evals. The estimate given to Marco before the check was 35 h.
+
+#repro(```sh
+catanrl fork az-2p-graph-m-uniform/main --as main+300 --set train.iterations=1200 \
+  --set train.sims=1600 --set train.full_search_prob=0.1 --set train.decided_full_search_prob=0.025 \
+  --set train.pending=64 --set train.learning_rate=1.5e-5 \
+  --set train.record_fast=true --set train.record_fast_prob=0.25
+catanrl run az-2p-graph-m-uniform/main+300     # 300 iterations, then the row
+# leg two, after the row
+catanrl fork az-2p-graph-m-uniform/main+300 --as main+900 --set train.iterations=1800
+catanrl run az-2p-graph-m-uniform/main+900
+```)
