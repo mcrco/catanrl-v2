@@ -41,7 +41,8 @@ its ``train.soft_policy_coef`` / ``soft_policy_temperature`` with the optional
 ``train.decided_value`` / ``decided_lookback`` / ``decided_full_search_prob`` /
 ``decided_fast_sims`` and ``train.record_fast_prob`` (:func:`check_alphazero_kata`).
 ``runtime.search_groups`` is optional too (``runtime`` is not hashed; unset,
-the AlphaZero trainer takes its default). So is ``obs.dice_state``
+the AlphaZero trainer takes its default), and ``runtime.eval_cache_mb`` (unset:
+self-play's searches have no evaluation cache). So is ``obs.dice_state``
 (:data:`OPTIONAL`), the opt-in dice input: the balanced dice state in every
 row (:data:`catanrl.envs.encoding.DICE_STATE`), with
 ``init_from.zero_new_inputs`` to start such a network from a checkpoint
@@ -124,6 +125,9 @@ OPTIONAL: dict[str, Any] = {"eval.monitor": [], "eval.champion": None, "obs.dice
 #: ``runtime.search_groups`` (unhashed like all of ``runtime``; unset: the trainer's default): the
 #: groups AlphaZero self-play splits its searches into (catanrl.search.pipeline; 1: the serial loop).
 OPTIONAL["runtime.search_groups"] = None
+#: ``runtime.eval_cache_mb`` (unhashed too; unset: none): the megabytes of the evaluation cache
+#: AlphaZero self-play's search pools share (catanrl.search.pool.NetworkCache).
+OPTIONAL["runtime.eval_cache_mb"] = None
 #: Train keys of an algo that its ``configs/train/<algo>.yaml`` leaves out, with the value that
 #: means "unset": like :data:`OPTIONAL`, a config without them (or with them unset, dropped at
 #: resolution) hashes as it did before they existed. ``stop_epoch``: end the run after that

@@ -53,6 +53,18 @@
    ``runtime.search_groups`` (unset: 2) splits a step's searches into groups
    that take turns on the GPU while the engine collects and applies the
    others' leaves (:mod:`catanrl.search.pipeline`); 1 is the serial loop.
+   ``runtime.eval_cache_mb`` (unset: none) gives the pools an evaluation
+   cache of that many megabytes (:class:`catanrl.search.pool.NetworkCache`):
+   a leaf whose row the network has evaluated since its weights last
+   changed, or that another leaf of the same round has, takes that row's
+   outputs and no row in the batch. The searches are the same (to the bit
+   with ``runtime.determinism: strict``; with ``fast`` a row's outputs
+   depend on its batch's size in their last bits, with or without a cache).
+   Logged: ``selfplay/cache_hits`` (the share of the iteration's leaves that
+   took no row) and ``selfplay/cache_replaced`` (the share of the rows
+   stored that displaced a row still in use: the table is small when it
+   nears 1); ``selfplay/leaves_per_s`` counts every leaf, and
+   ``selfplay/rounds`` the rounds that reached the network.
 2. **Targets.** Policy: the search's ``policy_target`` (the visit
    distribution, or Gumbel's improved policy), over legal actions; or, with
    ``policy_target: gumbel`` (Gumbel roots), Gumbel's improved policy rebuilt
@@ -208,7 +220,7 @@ from catanrl.models import CatanModel, feature_names
 from catanrl.models.graph import OUTCOME_TURNS
 from catanrl.search import BatchEvaluator, make_pool, run_pools, search_config
 from catanrl.search.pipeline import Group, Pipeline, run_groups
-from catanrl.search.pool import DIRICHLET_ALPHA
+from catanrl.search.pool import DIRICHLET_ALPHA, NetworkCache
 from catanrl.seeding import derive_seed, determinism, rng_state, seed_everything, set_rng_state
 from catanrl.train.dice_probe import PROBE_ROWS as DICE_PROBE_ROWS
 from catanrl.train.dice_probe import DiceProbe
@@ -830,12 +842,20 @@ class SelfPlay:
     with its own pools (game e searches in group e % groups, so a kept tree stays in its pool),
     and runs a step's searches with :func:`~catanrl.search.pipeline.run_groups`: the device
     evaluates one group's leaves while the engine collects and applies the others'. One group is
-    ``run_pools``. The searches are the same either way (pipeline.py says to which bits)."""
+    ``run_pools``. The searches are the same either way (pipeline.py says to which bits).
+
+    ``cache_mb`` (``runtime.eval_cache_mb``; 0: none) is the megabytes of the evaluation cache
+    every pool shares (:class:`~catanrl.search.pool.NetworkCache`): leaves whose rows the
+    network has evaluated since its weights last changed take no row in the batch. Every step
+    starts by clearing it unless the evaluator and its network's weights are the ones it was
+    filled with, so no caller has to say when they changed."""
 
     def __init__(self, plan: Any, train: Mapping[str, Any], *, model: CatanModel, num_envs: int, threads: int,
-                 seed: int, device: str, mode: str, groups: int = 1) -> None:
+                 seed: int, device: str, mode: str, groups: int = 1, cache_mb: float = 0.0) -> None:
         if int(groups) < 1:
             raise ValueError("runtime.search_groups must be at least 1")
+        if float(cache_mb) < 0:
+            raise ValueError("runtime.eval_cache_mb must be 0 (no cache) or the cache's megabytes")
         self.train = dict(train)
         self.seed = int(seed)
         self.dims = dict(plan.dims)
@@ -860,6 +880,9 @@ class SelfPlay:
                              f"move alone); these games seat up to {self.players}")
         self.model, self.device, self.mode = model, device, mode
         self.evaluator = self._evaluator()
+        #: The pools' evaluation cache (None: none), synced with the evaluator at every step.
+        self.cache = (NetworkCache(self.evaluator.num_actions, self.evaluator.num_players, float(cache_mb))
+                      if float(cache_mb) > 0 else None)
 
         def pool(sims: int, pending: int, noise: bool, **explore: float) -> cpp.SearchPool:
             params = {"sims": sims, "dets": self.dets, "oracle": self.dets == 0, "root": train["root"],
@@ -867,7 +890,7 @@ class SelfPlay:
             params.update(explore)
             config = search_config(params, max_players=self.players, threads=threads)
             return make_pool(self.dims, levels["level"], config, critic_level=levels["critic_level"],
-                             dice_state=dice_state_of(levels))
+                             dice_state=dice_state_of(levels), cache=self.cache.table if self.cache else None)
 
         #: Leaves a search sends per round, by pool (full, fast).
         self.leaves = int(train["pending"]), int(train["fast_pending"])
@@ -931,6 +954,8 @@ class SelfPlay:
         if self.train["kernels"] != "torch":
             self.evaluator = None  # its graphs and static rows go before the new ones are captured
             self.evaluator = self._evaluator()
+        if self.cache is not None:  # (step() would: the weights are not the ones it was filled with)
+            self.cache.sync(self.evaluator)
 
     def check_kernels(self, rows: int = 64) -> None:
         """``kernels: fused``: the evaluator's values against the module's own on acting rows. The
@@ -1022,6 +1047,10 @@ class SelfPlay:
         pruned = []  # pruned's share of each of those searches' root visits that it removed, for the monitor
         groups = len(self.groups)
         rebuild = self.train["policy_target"] != "engine"
+        answered = 0
+        if self.cache is not None:  # before any search: nothing of other weights is served
+            self.cache.sync(self.evaluator)
+            answered = self.cache.answered()
         # reuse: a re-rooted root is not evaluated again, so its prior is read from the tree instead
         roots = [RootOutputs(pools[0], self.mask) for pools in self.groups] if rebuild and not self.reuse else None
         try:
@@ -1111,7 +1140,10 @@ class SelfPlay:
                 for sid in pool.ids:
                     if (id(pool), sid) not in kept:
                         pool.remove(sid)
-        stats["leaves"] += leaves
+        if self.cache is not None:  # the leaves that took no row: counted as leaves all the same
+            answered = self.cache.answered() - answered
+            stats["cached"] = stats.get("cached", 0.0) + answered
+        stats["leaves"] += leaves + answered
         stats["rounds"] = stats.get("rounds", 0.0) + evaluator.count
         stats["full"] += int(full.sum())
         stats["recorded_fast"] = stats.get("recorded_fast", 0.0) + int((stored & ~full).sum())
@@ -1642,7 +1674,8 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
     selfplay = SelfPlay(plan, train, model=model, num_envs=int(env_cfg["num_envs"]),
                         threads=int(runtime.get("threads", 1)), seed=derive_seed(seed, "rollout", launch),
                         device=device, mode="strict" if strict else "fast",
-                        groups=int(runtime.get("search_groups") or SEARCH_GROUPS))
+                        groups=int(runtime.get("search_groups") or SEARCH_GROUPS),
+                        cache_mb=float(runtime.get("eval_cache_mb") or 0.0))
     replay = ReplayBuffer(int(train["replay_capacity"]), selfplay.vec.observation_size, selfplay.vec.action_size,
                           selfplay.players, outcome=selfplay.outcome, search=selfplay.search)
     monitors = Monitors(model, device=device, rows=int(train["search_rows"])) if monitoring else None
@@ -1704,6 +1737,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
         rng = np.random.default_rng(derive_seed(seed, "selfplay", iteration))
         decisions, games = selfplay.decisions, selfplay.games
         stats = {"leaves": 0.0, "rounds": 0.0, "full": 0.0, "depth": 0.0, "max_depth": 0.0}
+        cache_stats = selfplay.cache.table.stats if selfplay.cache is not None else None
         added = replay.added
         model.eval()
         selfplay.check_kernels()
@@ -1756,6 +1790,14 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
             logs["selfplay/reused"] = stats.get("reused", 0.0) / max(new, 1)
             logs["selfplay/carried_full"] = stats.get("carried_full", 0.0) / full
             logs["selfplay/carried_fast"] = stats.get("carried_fast", 0.0) / max(new - stats["full"], 1.0)
+        if selfplay.cache is not None:
+            # runtime.eval_cache_mb: the share of the leaves that took their outputs from the cache
+            # (or from another leaf's row of their round), and of the rows it stored the share that
+            # displaced a row still in use (near 1: the table is too small for an iteration)
+            now = selfplay.cache.table.stats
+            logs["selfplay/cache_hits"] = stats.get("cached", 0.0) / max(stats["leaves"], 1.0)
+            logs["selfplay/cache_replaced"] = (now.replaced - cache_stats.replaced) / max(
+                now.stored - cache_stats.stored, 1)
         if selfplay.decided:
             # decided_value: the share of decisions made in decided games, and the simulations a
             # search ran (a re-rooted one on top of the visits it carried)

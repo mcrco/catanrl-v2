@@ -6,12 +6,19 @@ leaf and writes the leaves' rows, the evaluator runs them on the GPU in one
 batch, and ``apply`` expands and backs up. :func:`run_searches` loops that to
 completion; :func:`search_config` maps agent parameters onto the engine's
 ``SearchConfig``.
+
+:class:`NetworkCache` is the engine's evaluation cache (``cppanatron.EvalCache``)
+for the pools of one network: a leaf whose row was evaluated before, or is
+another leaf's of the same round, takes that row's outputs instead of a row of
+its own in the batch. The searches are the ones without it wherever a row's
+outputs do not depend on its batch (a strict evaluator: to the bit).
 """
 
 from __future__ import annotations
 
 import os
 import time
+import weakref
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -102,8 +109,68 @@ def search_config(params: Any, *, max_players: int, threads: int | None = None) 
     )
 
 
+class NetworkCache:
+    """A ``cppanatron.EvalCache`` of ``megabytes`` that answers for one network's weights only.
+
+    ``table`` goes to every pool of the network (``make_pool(cache=...)``): the pools then
+    write, and count, a row only for a leaf whose outputs are not known (``SearchPool.cache``),
+    and a round that needs no row never reaches the caller, so the loops here and in
+    pipeline.py run as they do without a cache.
+
+    The table's outputs are the evaluator's for the weights it had when they were stored, so
+    :meth:`sync` belongs before every run of searches (between runs: never between a collect
+    and its apply, which the engine refuses). It clears the table unless the evaluator is the
+    object of the last sync (the fused kernels read copies of the weights made when their
+    evaluator was built) and no parameter or buffer of its network was written since: the
+    tensors are the same objects on the same memory with the same version counters, which
+    torch advances on every in-place write (an optimizer step, ``load_state_dict``). A caller
+    therefore cannot forget to clear after a change it made by any of those means; a tensor
+    whose counter cannot be read (made in inference mode) clears on every sync. The counters
+    do not see a write through ``tensor.data`` or through a NumPy view of a tensor's memory
+    (nothing in this package writes weights that way): ``table.clear()`` after one.
+
+    The table is a fixed number of entries (``megabytes`` over the bytes of one entry: the
+    logits and values of a row and 32 bytes), taken from the system as they are written; a new
+    row replaces the entry of its set of four that was used longest ago.
+    """
+
+    def __init__(self, num_actions: int, num_players: int, megabytes: float) -> None:
+        if not megabytes > 0:
+            raise ValueError("the evaluation cache's size (megabytes) must be above 0")
+        entries = int(float(megabytes) * 2**20) // cpp.EvalCache.entry_bytes(int(num_actions), int(num_players))
+        self.table = cpp.EvalCache(int(num_actions), int(num_players), entries=max(entries, 4))
+        self._evaluator: weakref.ref | None = None
+        self._weights: tuple | None = None
+
+    @staticmethod
+    def weights(model: Any) -> tuple | None:
+        """What changes whenever one of the network's tensors is written or replaced; None if
+        that cannot be told."""
+        try:
+            return tuple((id(t), t.data_ptr(), t._version) for t in (*model.parameters(), *model.buffers()))
+        except RuntimeError:  # an inference tensor has no version counter
+            return None
+
+    def sync(self, evaluator: Any) -> bool:
+        """Clear the table unless it holds this evaluator's outputs for its network's weights
+        as they are now; whether it was cleared."""
+        weights = self.weights(evaluator.model)
+        same = (self._evaluator is not None and self._evaluator() is evaluator
+                and weights is not None and weights == self._weights)
+        if not same:
+            self.table.clear()
+            self._evaluator, self._weights = weakref.ref(evaluator), weights
+        return not same
+
+    def answered(self) -> int:
+        """Leaves that took their outputs from the table or from another leaf's row so far."""
+        stats = self.table.stats
+        return int(stats.hits + stats.repeats)
+
+
 def make_pool(dims: Mapping[str, int], level: str, config: cpp.SearchConfig,
-              critic_level: str | None = None, dice_state: bool = False) -> cpp.SearchPool:
+              critic_level: str | None = None, dice_state: bool = False,
+              cache: cpp.EvalCache | None = None) -> cpp.SearchPool:
     """A pool whose leaf rows are the network's training rows.
 
     With a critic at another level the leaves carry the critic block too
@@ -112,13 +179,18 @@ def make_pool(dims: Mapping[str, int], level: str, config: cpp.SearchConfig,
     ``dice_state`` (a network with the dice input) gives every leaf row its
     position's dice state: a leaf is a game (or a world, a copy of it) with
     its own dice state, as the search's chance nodes leave it.
+    ``cache`` (a :class:`NetworkCache`'s ``table``) is the evaluation cache the
+    pool shares with the other pools of its network.
     """
     if critic_level_of(level, critic_level) is not None:
         encoder = cpp.ActorCriticEncoder(encoder_dims(dims), info_level(level), info_level(critic_level),
                                          dice_state=bool(dice_state))
     else:
         encoder = make_encoder(dims, level, dice_state)
-    return cpp.SearchPool(encoder.action_space, encoder, config)
+    pool = cpp.SearchPool(encoder.action_space, encoder, config)
+    if cache is not None:
+        pool.cache = cache
+    return pool
 
 
 def run_searches(pool: cpp.SearchPool, evaluator: BatchEvaluator, *, batch_rows: int,

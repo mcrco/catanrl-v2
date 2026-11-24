@@ -48,5 +48,7 @@ runtime:                     # not hashed: how, not what
   allow_stale_build: false
   # search_groups: 2          # alphazero self-play: groups of searches that take turns on the GPU while the
                              # CPU collects and applies the others' leaves (unset: 2; 1: the serial loop)
+  # eval_cache_mb: 256        # alphazero self-play: megabytes of network outputs kept by leaf row, so a leaf
+                             # whose row was evaluated since the weights last changed skips the GPU (unset: none)
   canopy_dir: null           # the Canopy build CANOPY agents play ($CATANRL_CANOPY_DIR for the evals;
                              # relative: under the runs root, as the default _canopy)
