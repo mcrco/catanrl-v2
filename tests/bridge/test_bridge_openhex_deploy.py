@@ -366,6 +366,14 @@ def test_a_version_that_trades_says_so_in_its_stamp_and_one_that_does_not_keeps_
         _parse(_bot(trades="yes"))
 
 
+def test_a_bot_may_name_its_own_device_which_is_not_in_its_stamp():
+    plain = _parse(_bot(bot_id="0123456789abcdef", tag="openhex-1v1-v2"))[1][0]
+    cpu = _parse(_bot(bot_id="0123456789abcdef", tag="openhex-1v1-v2", device="cpu"))[1][0]
+    assert plain.device is None and cpu.device == "cpu" and _stamp(cpu) == _stamp(plain)
+    with pytest.raises(deploy.DeployError, match="device must be"):
+        _parse(_bot(device=0))
+
+
 def test_build_stamps_takes_the_code_id_once(monkeypatch):
     from catanrl import provenance
 

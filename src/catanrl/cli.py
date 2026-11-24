@@ -396,7 +396,8 @@ def _cmd_openhex(args) -> int:
     resolved = {entry.name: resolve_agent(entry.spec, harness="server") for entry in running}
     stamps = deploy.build_stamps(running, resolved, gits)
     stop = threading.Event()
-    bots = [OpenHexBot(resolved[entry.name], keys[entry.name], entry.mode, base=api, device=args.device,
+    bots = [OpenHexBot(resolved[entry.name], keys[entry.name], entry.mode, base=api,
+                       device=entry.device or args.device,
                        state_dir=Path(args.state) / entry.name, name=entry.name, stamp=stamps[entry.name],
                        stop=stop, trades=deploy.trades_of(entry))
             for entry in running]
@@ -455,7 +456,7 @@ def _openhex_check(args, settings, entries) -> int:
         if entry in running:
             try:
                 resolved = resolve_agent(entry.spec, harness="server")
-                native_for(resolved, device=args.device)  # the network loads and passes its self-test
+                native_for(resolved, device=entry.device or args.device)  # the network loads and passes its self-test
                 weights = ",".join(ref.weights_sha256[:12] for ref in resolved.checkpoints)
             except Exception as error:  # noqa: BLE001 - report every bot's failure, not the first
                 problems.append(f"{entry.name}: the agent does not load: {type(error).__name__}: {error}")

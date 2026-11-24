@@ -319,3 +319,22 @@ def test_the_bot_tells_the_seat_what_openhex_said_and_a_refused_trade_action_cos
     assert bot.client.acted == ["proposeTrade", "confirmTrade", "endTurn"]
     assert [t[:2] for t in told] == [("sent", "proposeTrade"), ("refused", "confirmTrade"), ("sent", "endTurn")]
     assert told[0][2]["events"][0]["seq"] == 7
+
+
+def test_a_discard_seen_before_the_others_waits_for_them_when_the_state_is_behind():
+    """Live game 8ca81b9c (2026-11-24): red rolled a 7, orange discarded before white, and a
+    poll whose state showed no discard pending replayed orange's discard out of turn."""
+    game = _recorded("live-4p-8ca81b9c.json")
+    events = _redacted(game["events"], "red")
+    first = next(i for i, e in enumerate(events) if e["seq"] == 322)
+    assert [e["event"]["player"] for e in events[first:first + 2]] == ["orange", "white"]
+    seat = OpenHexSeat(_native(), "fixture", game, "red")
+    seat.feed(events[:first + 1])
+    behind = {"currentPlayer": "red", "pendingAction": None}
+    entries = len(seat.replay.entries)
+    assert seat.plan(behind) is None and seat.plan(behind) is None
+    assert len(seat.replay.entries) == entries  # (nothing replayed out of turn)
+    seat.feed(events[first + 1:first + 2])
+    plan = seat.plan({"currentPlayer": "red", "pendingAction": {"type": "moveRobber"}})
+    assert [a["type"] for a in plan.actions][0] == "moveRobber"
+    seat.close()

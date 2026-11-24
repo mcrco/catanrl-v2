@@ -18,6 +18,7 @@ keeps every version ever registered, the retired ones too::
         deployed: 2026-10-26
         retired: false                 # true: kept for the record, never run
         trades: true                   # trade with the other players (or TradeJudge's keywords)
+        device: cpu                    # run this bot's network here, not on the runner's --device
 
 This module reads that file (:func:`load_deploy`), refuses a checkpoint not
 pinned by its weights (:func:`check_pins`), a checkout whose play source is not
@@ -48,7 +49,7 @@ from catanrl.canon import digest
 MODES = ("1v1", "4p")
 #: The keys of a bot entry; any other is refused (a typo would otherwise be a silent default).
 REQUIRED = ("name", "mode", "spec", "key_env", "version")
-OPTIONAL = ("bot_id", "tag", "evidence", "retired", "deployed", "retired_at", "trades")
+OPTIONAL = ("bot_id", "tag", "evidence", "retired", "deployed", "retired_at", "trades", "device")
 #: The keys of the file: ``releases`` names the GitHub repository whose releases ship the
 #: checkpoints (``catanrl.bridge.openhex_release``; default :data:`REPO_URL`'s).
 SETTINGS = ("bots", "api", "releases")
@@ -98,6 +99,8 @@ class DeployEntry:
     #: of :class:`catanrl.bridge.trading.TradeJudge` (and the seat's ``wait`` and ``budget``
     #: seconds) as sorted pairs. Part of what the version plays, so of its stamp.
     trades: Any = None
+    #: The device this bot's network runs on; None: the runner's ``--device``.
+    device: str | None = None
 
 
 # ---------------------------------------------------------------- the file
@@ -174,6 +177,9 @@ def _entry(raw: Mapping[str, Any]) -> tuple[DeployEntry | None, list[str]]:
     if trades is not None and not isinstance(trades, bool) and not (
             isinstance(trades, Mapping) and all(isinstance(k, str) for k in trades)):
         errors.append(f"trades must be true, false or a mapping of TradeJudge keywords, not {trades!r}")
+    device = raw.get("device")
+    if device is not None and not (isinstance(device, str) and device.strip()):
+        errors.append(f"device must be a torch device (cpu, cuda, cuda:0), not {device!r}")
     if errors:
         return None, errors
     return DeployEntry(
@@ -182,6 +188,7 @@ def _entry(raw: Mapping[str, Any]) -> tuple[DeployEntry | None, list[str]]:
         deployed=None if raw.get("deployed") is None else _date(raw["deployed"]),
         retired_at=None if raw.get("retired_at") is None else _date(raw["retired_at"]),
         trades=(tuple(sorted(trades.items())) if isinstance(trades, Mapping) else True) if trades else None,
+        device=device.strip() if device else None,
     ), []
 
 

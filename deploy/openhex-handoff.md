@@ -74,7 +74,15 @@ bots:
     retired: false                # optional, default false
     retired_at: 2026-11-02        # optional, free-form; only with retired: true
     trades: true                  # optional: trade with the other players (below)
+    device: cpu                   # optional: this bot's device, in place of the runner's --device
 ```
+
+**Devices.** The bots are threads of one process. A search with CUDA graphs
+(`kernels=fused`) captures a graph per batch size as it meets it, and CUDA
+refuses another thread's allocations during a capture: both fail (`CUDA error:
+operation not permitted when stream is capturing`, seen live 2026-11-24: 30
+moves in an hour once the 4p bot traded, each played as the default move).
+Keep every other bot off that GPU: `device: cpu` on the small networks.
 
 **Trades.** Every seat follows the trades between the other players. With
 `trades: true` a seat also makes them, by its own network's value

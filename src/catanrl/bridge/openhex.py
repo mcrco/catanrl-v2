@@ -536,6 +536,11 @@ class Offer:
     refused: set = field(default_factory=set)
 
 
+def _drawable(remaining: int) -> int:
+    """The cards the next balanced roll draws from, given those left in the deck."""
+    return 36 if remaining < 13 else remaining
+
+
 @dataclass
 class OpenHexSeat:
     """One of our seats in one OpenHex game.
@@ -624,6 +629,7 @@ class OpenHexSeat:
         self.victim: str | None = None
         self.discarded_at: int | None = None
         self.waited = 0
+        self.owed = 0  # polls a discard still owed has been waited for (plan)
         #: The kinds of difference from OpenHex's state at the last poll, and the polls they have lasted.
         self.lagging: tuple[list[str], int] = ([], 0)
         self.decisions = 0
@@ -841,9 +847,11 @@ class OpenHexSeat:
         if robber and tuple(game.board.robber_coordinate) != cube(robber):
             out.append(f"robber {tuple(game.board.robber_coordinate)} vs {cube(robber)}")
         # A view shows the balanced dice's deck size only (the rest follows from the rolls).
+        # A deck of fewer than 13 cards is refilled before its next draw, so it is the full
+        # one: OpenHex's deck is empty until the first roll, the replay's full from the start.
         dice, ours = state.get("balancedDice"), game.balanced_dice
         if isinstance(dice, Mapping) and dice.get("remaining") is not None and ours is not None \
-                and int(dice["remaining"]) != ours.remaining:
+                and _drawable(int(dice["remaining"])) != _drawable(ours.remaining):
             out.append(f"dice deck {ours.remaining} cards vs {int(dice['remaining'])}")
         return out
 
@@ -890,6 +898,12 @@ class OpenHexSeat:
                     and self.discarded_at != len(self.replay.entries):
                 return self._discard()
             return None
+        if self.log.discards and self.owed < 5 and not self._discards_complete():
+            # OpenHex's state is behind its events (it shows no discard pending, and a seat
+            # has discarded while another still owes): wait for the rest, a few polls.
+            self.owed += 1
+            return None
+        self.owed = 0
         # Nobody discards any more: what was discarded is complete.
         for entry in self.log.settle(robber=False):
             self._step(entry)
@@ -923,6 +937,13 @@ class OpenHexSeat:
             if trading is not None:
                 return trading
         return self._decide(game)
+
+    def _discards_complete(self) -> bool:
+        """Whether every seat the replay has discarding has its discard in the log."""
+        game = self.replay.game
+        return not game.is_discarding or all(
+            len(self.log.discards.get(color, [])) >= game.remaining_discards(i)
+            for i, color in enumerate(self.colors))
 
     # ------------------------------------------------------------ trading with players
 

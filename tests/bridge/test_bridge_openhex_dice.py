@@ -203,7 +203,8 @@ def test_a_lasting_deck_difference_replays_on_fair_dice():
     seat.feed(_redacted(events, "blue"))
     rolls = _rolls_applied(seat)
     view = {"players": [], "board": {}, "balancedDice": {"remaining": generator.balanced_dice.remaining}}
-    wrong = {**view, "balancedDice": {"remaining": 0}}  # OpenHex lost its state: an empty deck, drawn on use
+    lost = 36 if generator.balanced_dice.remaining != 36 else 20  # OpenHex lost its state
+    wrong = {**view, "balancedDice": {"remaining": lost}}
     # A difference that does not last (OpenHex's state lags its events) changes nothing.
     assert [seat.check(wrong), seat.check(wrong), seat.check(view)] == [[], [], []]
     assert not seat.fair_dice and "mismatches" not in seat.stats
@@ -275,3 +276,17 @@ def test_a_recorded_game_follows_its_dice_until_a_roll_they_cannot_give(name, co
             assert sum(seat.replay.game.player(i).resources) == sum(player["hand"].values())
     seat.close()  # (a game replayed again on a larger bank restarts the stream too)
     assert native.forgotten == [env] * (2 + seat.stats.get("bank_short", 0))
+
+
+def test_openhex_s_empty_deck_before_the_first_roll_is_the_replay_s_full_one():
+    """OpenHex's deck is empty until its first roll refills it (seen live 2026-11-24: every
+    game left balanced dice at roll 0 with "36 cards vs 0")."""
+    record, events, _after, _generator = _balanced_game()
+    seat = OpenHexSeat(_Forgetful(), "balanced", record, "blue")
+    first = next(i for i, e in enumerate(events) if e["event"]["type"] == "diceRolled")
+    seat.feed(_redacted(events[:first], "blue"))
+    assert seat.replay.game.balanced_dice.remaining == 36
+    view = {"players": [], "board": {}, "balancedDice": {"remaining": 0}}
+    assert [seat.check(view) for _ in range(5)] == [[]] * 5 and not seat.fair_dice
+    assert [p.split(" ")[0] for p in seat.mismatches({**view, "balancedDice": {"remaining": 35}})] == ["dice"]
+    seat.close()
