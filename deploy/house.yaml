@@ -7,6 +7,9 @@
 # 2026-11-18). `trades: true` lets the person and the bots trade with each other (room config
 # `trades`, catanatron 2026-11-23 or later on the server): the bots answer, confirm and propose
 # by their own value head (catanrl.bridge.trading; or a dict of TradeJudge keywords).
+# `bots: 1` with `add_bots: true` opens each room with one bot: people join it, and anyone
+# seated may ask for more bots until the room is full (the server's add_bot, catanatron
+# 2026-11-24 or later).
 server: wss://catan.marcoya.ng
 server_key: 36da1994b58ca3dc627a0dd495210cf279977c0871f604396e87c5bf1a9c9f2f
 think_s: 0.8
@@ -34,6 +37,8 @@ tables:
       config: {num_players: 3, decision_timeout_ms: 120000}
     max_games: 4
     trades: true
+    bots: 1
+    add_bots: true
   - name: gen-base-4p
     label: gen-base
     spec: "POLICY:ckpt=gen-base-2/main@e3800#ac792590f9f1"
@@ -42,6 +47,8 @@ tables:
       config: {num_players: 4, decision_timeout_ms: 120000}
     max_games: 4
     trades: true
+    bots: 1
+    add_bots: true
   # The generalist ppo-mixed on a fresh random island per room (15-30 land tiles, Table.map).
   # It never trained on blobs: a graph network, it plays each island at dims covering it
   # (ViewAgent rebinds), and on heldout-random-4p it beats the blob-trained ppo-mixed-blob
@@ -55,3 +62,5 @@ tables:
       config: {num_players: 4, decision_timeout_ms: 120000}
     max_games: 4
     trades: true
+    bots: 1
+    add_bots: true

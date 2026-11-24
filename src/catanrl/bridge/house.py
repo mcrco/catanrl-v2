@@ -2,8 +2,12 @@
 
 A *table* is one kind of game (a room config and an agent spec). For each
 table the house keeps exactly one room waiting, with our bots in every seat
-but one, so a person who arrives always finds a free seat; when a person
-sits and the game starts, the house opens the next room at once. Rooms in
+but one (or in ``bots`` seats), so a person who arrives always finds a free
+seat; when every seat is taken and the game starts, the house opens the next
+room at once. A table with ``add_bots`` lets the people seated in its room
+ask for more bots (the server's ``add_bot``): the house joins one to an open
+seat per request, so a room opened with one bot fills with people, bots or
+both. Rooms in
 play count against the table's ``max_games`` (the waiting one included), so
 the house never runs more games than the server and this machine can carry::
 
@@ -54,8 +58,10 @@ class Table:
     room: Mapping[str, Any]
     #: Rooms at once, the waiting one included.
     max_games: int = 4
-    #: Seats our bots take (default: all but one).
+    #: Seats our bots take when the room opens (default: all but one).
     bots: int | None = None
+    #: People seated may ask for more bots, one per open seat (the server's ``add_bot``).
+    add_bots: bool = False
     #: A display name for the bots' seats (default: the table's name).
     label: str | None = None
     #: A ``catanrl.maps`` generator (e.g. ``{"type": "blob", "land_tiles": [15, 30]}``): every
@@ -84,6 +90,11 @@ class Table:
     @property
     def bot_seats(self) -> int:
         return self.num_players - 1 if self.bots is None else int(self.bots)
+
+    @property
+    def max_bot_seats(self) -> int:
+        """Seats our bots may hold in one room (every seat but a person's, given ``add_bots``)."""
+        return self.num_players - 1 if self.add_bots else self.bot_seats
 
 
 @dataclass
@@ -127,9 +138,9 @@ class House:
                         raise ValueError(message) from error
             # One network per table, loaded once, shared by every seat.
             state.agent = t.spec if isinstance(t.spec, ViewAgent) else ViewAgent(
-                t.spec, device=self.device, max_games=8 * t.max_games * t.bot_seats, trades=t.trades)
-            logger.info("table %s: %s, %d bot seats, up to %d games", t.name, state.agent.label, t.bot_seats,
-                        t.max_games)
+                t.spec, device=self.device, max_games=8 * t.max_games * t.max_bot_seats, trades=t.trades)
+            logger.info("table %s: %s, %d bot seats%s, up to %d games", t.name, state.agent.label, t.bot_seats,
+                        f" (up to {t.max_bot_seats} on request)" if t.add_bots else "", t.max_games)
         await asyncio.gather(*(self._keep_open(state) for state in self.states))
 
     async def _keep_open(self, state: TableState) -> None:
@@ -158,46 +169,81 @@ class House:
             await asyncio.sleep(delay)
 
     async def _game(self, state: TableState, started: asyncio.Event) -> None:
-        from catanatron.server.client import GameClient, create_room
+        from catanatron.server.client import GameClient, Refused, create_room
 
         table = state.table
         assert state.agent is not None
         agent = state.agent
         config = table.room_config(secrets.randbits(63))  # a fresh board per room, given a map
         room = await create_room(self.url, config, [None] * table.num_players,
-                                 name=str(table.room.get("name", table.name)), house_token=self.house_token)
+                                 name=str(table.room.get("name", table.name)), house_token=self.house_token,
+                                 bots_on_request=table.add_bots)
         state.stats["opened"] += 1
         url = room_url(self.url, room["id"])
         transcripts = self.state_dir / "transcripts" / table.name
         transcripts.mkdir(parents=True, exist_ok=True)
+        decide = self._decide_fn(agent)
+        seats: list[tuple[Any, asyncio.Task]] = []
+        grew = asyncio.Event()
+        requests = 0  # bot requests answered (the room's bot_requests only grows)
+        keys = 0  # key files handed out: a seat dropped unseated never lends its key to a seated one
+
+        def seat_bot(on_request: bool = False) -> None:
+            nonlocal keys
+            client = GameClient(url, name=table.label or table.name, server_key=self.server_key,
+                                key_path=str(self.state_dir / f"{table.name}-{keys}.key"),
+                                transcript_dir=str(transcripts), house_token=self.house_token)
+            keys += 1
+            client.on_message = on_message
+            client.on_request = on_request
+            seats.append((client, asyncio.create_task(client.play(decide))))
+            grew.set()
 
         def on_message(body: dict) -> None:
-            if body.get("type") == "commitments":
-                started.set()  # every seat is taken: a person sat
+            nonlocal requests
+            kind = body.get("type")
+            if kind == "commitments":
+                started.set()  # every seat is taken
+            elif kind == "room" and table.add_bots:
+                wanted = int((body.get("room") or {}).get("bot_requests") or 0)
+                while requests < wanted and len(seats) < table.max_bot_seats:
+                    requests += 1
+                    seat_bot(on_request=True)
+                    logger.info("table %s: room %s: a bot on request (%d seats)", table.name, room["id"],
+                                len(seats))
             agent.observe(body)
 
-        clients = []
-        for index in range(table.bot_seats):
-            client = GameClient(url, name=table.label or table.name, server_key=self.server_key,
-                                key_path=str(self.state_dir / f"{table.name}-{index}.key"),
-                                transcript_dir=str(transcripts), house_token=self.house_token)
-            client.on_message = on_message
-            clients.append(client)
+        for _ in range(table.bot_seats):
+            seat_bot()
         logger.info("table %s: room %s open", table.name, room["id"])
-        tasks = [asyncio.create_task(client.play(self._decide_fn(agent))) for client in clients]
         try:
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            while True:
+                grew.clear()
+                tasks = [task for _, task in seats]
+                waiter = asyncio.create_task(grew.wait())
+                done, _ = await asyncio.wait([*tasks, waiter], return_when=asyncio.FIRST_COMPLETED)
+                waiter.cancel()
+                failed = [(c, t) for c, t in seats if t.done() and not t.cancelled() and t.exception() is not None]
+                # A bot sent on request that found the seats gone (a person took the last one): no seat lost.
+                late = [(c, t) for c, t in failed
+                        if c.on_request and c.seat is None and isinstance(t.exception(), Refused)]
+                seats[:] = [s for s in seats if s not in late]
+                if len(failed) > len(late):
+                    break  # a seat failed: the room cannot be played
+                if all(task.done() for _, task in seats):
+                    break
         except asyncio.CancelledError:
-            for task in tasks:
+            for _, task in seats:
                 task.cancel()
             raise
-        for task in pending:  # a seat failed: the room cannot be played
+        pending = [task for _, task in seats if not task.done()]
+        for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        errors = [t.exception() for t in done if not t.cancelled() and t.exception() is not None]
+        errors = [t.exception() for _, t in seats if t.done() and not t.cancelled() and t.exception() is not None]
         if errors:
             raise errors[0]
-        self._record(state, room, [t.result() for t in tasks])
+        self._record(state, room, [task.result() for _, task in seats])
         self._prune(transcripts)
 
     def _decide_fn(self, agent: ViewAgent):
@@ -250,7 +296,8 @@ def _error_of(task: asyncio.Task) -> str:
 def load_tables(path: str | os.PathLike) -> tuple[dict, list[Table]]:
     """(settings, tables) from a YAML file: ``server``, ``server_key``,
     ``think_s`` and a list of ``tables`` (``name``, ``spec``, ``room``,
-    ``max_games``, optional ``bots``, ``label``, ``map`` and ``trades``)."""
+    ``max_games``, optional ``bots``, ``add_bots``, ``label``, ``map`` and
+    ``trades``)."""
     import yaml
 
     data = yaml.safe_load(Path(path).read_text())

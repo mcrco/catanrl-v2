@@ -1,6 +1,8 @@
 """The house keeps a room open per table on a house-mode server: when a
 person sits and the game starts, the next room opens at once; rooms in play
 count against the table's limit; every finished game is recorded. A table
+with ``add_bots`` opens its rooms with ``bots`` bots and adds one per
+request of a person seated, so people play each other, bots or both. A table
 with a map generator opens each room on a fresh board, and a generator that
 fails, or draws boards the server would refuse, fails before any room opens."""
 
@@ -85,6 +87,60 @@ def test_the_house_keeps_one_seat_open_and_respects_its_limit(tmp_path, monkeypa
     # Two seats' transcripts per game (and the room open at shutdown's, of no game).
     saved = [p for p in (tmp_path / "transcripts" / "tiny-3p").glob("*.json") if "-nogame-" not in p.name]
     assert len(saved) == 4
+
+
+def test_a_table_with_add_bots_opens_with_one_bot_and_adds_bots_on_request(tmp_path, monkeypatch):
+    dims = {"max_players": 4, "max_tiles": 19, "max_nodes": 54, "max_edges": 72}
+    agent = ViewAgent(tiny_agent("POLICY", "private", dims))
+    table = Table("tiny-4p", agent, {"name": "4p vs tiny", "config": {"num_players": 4, "vps_to_win": 5}},
+                  max_games=2, bots=1, add_bots=True)
+
+    def person(room, name, bots):
+        """A person who takes a seat and asks for ``bots`` bots."""
+        client = GameClient(room_url(base_url[0], room["id"]), name=name, transcript_dir=None)
+
+        def on_message(body):
+            if body.get("type") == "joined":
+                for _ in range(bots):
+                    asyncio.ensure_future(client.add_bot())
+
+        client.on_message = on_message
+        return asyncio.create_task(client.play(lambda view, actions: actions[0]))
+
+    base_url = [None]
+
+    async def scenario():
+        server = GameServer(house_token=TOKEN)
+        ws_server = await run_server(server, "127.0.0.1", 0)
+        base = base_url[0] = f"ws://127.0.0.1:{ws_server.sockets[0].getsockname()[1]}"
+        monkeypatch.delenv("CATANATRON_HOUSE_TOKEN", raising=False)
+        house = asyncio.create_task(House(base, [table], state_dir=tmp_path, think_s=0, house_token=TOKEN).run())
+        try:
+            # Two people and one bot asked for: the room is full, the game plays.
+            first = (await _until(lambda: _open(base)))[0]
+            assert first["bots_on_request"] and len(first["house_seats"]) == 1
+            games = [person(first, "alice", 1), person(first, "bob", 0)]
+            # The next room opens once that game starts; one person asks for two bots.
+            second = (await _until(lambda: _open(base, other_than=first["id"])))[0]
+            games.append(person(second, "carol", 2))
+            return await asyncio.wait_for(asyncio.gather(*games), 300)
+        finally:
+            house.cancel()
+            await asyncio.gather(house, return_exceptions=True)
+            server.shutdown()
+            ws_server.close()
+            await ws_server.wait_closed()
+
+    async def _open(base, other_than=None):
+        return [r for r in await list_rooms(base) if r["status"] == "waiting" and r["id"] != other_than
+                and r["house_seats"] and all(r["seats"][i]["connected"] for i in r["house_seats"])
+                and all(s["kind"] == "open" for i, s in enumerate(r["seats"]) if i not in r["house_seats"])]
+
+    results = asyncio.run(scenario())
+    assert all(r.winning_color and r.verified for r in results)
+    lines = [json.loads(line) for line in (tmp_path / "games.jsonl").read_text().splitlines()]
+    assert sorted(len(line["house_colors"]) for line in lines) == [2, 3]
+    assert all(line["verified"] for line in lines)
 
 
 def test_a_table_with_a_map_generator_opens_each_room_on_a_fresh_board(tmp_path, monkeypatch):
