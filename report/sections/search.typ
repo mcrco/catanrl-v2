@@ -416,6 +416,49 @@ python tools/search_probe.py --pair $E/dbbf084c51cbbd06.json $E/cfba69278af79d33
 python tools/search_probe.py --pair $E/cfba69278af79d33.json $E/af97f7595f82b53d.json
 ```)
 
+=== Two search groups in the evals' search agent #chip("done") <exp:search-eval-groups>
+#meta(
+  dates: "2026-11-24",
+  owner: "Marco (\"we should definitely speed up the mcts evals\")",
+  config: "MCTS spec parameter groups (branch wt/eval-groups, not merged)",
+  wandb: (),
+  records: (),
+)
+#tldr[Marco asked whether the evals keep the GPU busy, for example by letting one set of games search while another set's positions are on the card. During the continued run's row the card was 62% busy. Built as `groups=2` for the search agent, as self-play already does: the same games, but *0.94× the games a minute* (7.40 against 7.91). Not merged. The measurement shows where an eval's time goes: 72% waiting for the card, 16% hashing rows in Python to skip repeats, 10% in the engine.]
+
+*Question.* Does splitting an eval's searches into two groups that alternate on the GPU make the row faster?
+
+*Setup.* The standard row's two agents (`2p-graph-m-2` in the 1,024-sim search against fr3's fair raw bot), 64 held-out games with all 64 in flight, strict determinism, 12 threads, `groups=1` then `groups=2` in separate processes on an otherwise idle GPU. With two groups the agent's Python-side skipping of repeated rows is off (it needs the whole batch at once).
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, right),
+    header: ([], [One group], [Two groups]),
+    [Games a minute], [*7.91*], [7.40],
+    [Positions searched a second], [12,181], [11,392],
+    [Positions sent to the GPU a second], [10,600], [11,392],
+    [Share sent to the GPU], [87.0%], [100%],
+    [Waiting for the GPU], [352 s (72.5%)], [448 s (86.2%)],
+    [Hashing rows to skip repeats], [77 s (15.8%)], [0 s],
+    [Engine (collect, apply)], [49 s (10.0%)], [59 s (11.4%)],
+    [The opponent's moves], [6 s (1.2%)], [6 s (1.1%)],
+    [The search's score], [0.719], [0.719],
+  ),
+  caption: [64 games of the standard row with one and two search groups. Both arms played the same games (the same digest over every game's rows).],
+) <tab:search-eval-groups>
+- *Slower.* Two groups send 15% more positions to the card and wait 27% longer for it. The overlap buys nothing here: the wait for the card is the bottleneck, not the engine's share between forwards.
+- *The Python hashing is expensive.* It skips 13% of the positions and costs 16% of the time. The engine's cache (@exp:az-eval-cache) does the same skipping in C++.
+- *Evals forward far fewer positions a second than self-play:* 10,600 here on the full-precision kernels against 38,000 in self-play on the half-precision ones (different batch sizes, so not a clean comparison).
+
+*Next* (Claude's suggestions, not queued). Move the search agent's repeat-skipping to the engine's cache (about 15% of a row's time). Allow the half-precision kernels in evals; rows would then no longer be bit-identical to the stored ones, so the baselines would be replayed.
+
+#repro(```sh
+# in the wt/eval-groups worktree
+python tools/eval_groups_check.py --json OUT.json
+```)
+
 == Sampling noise at chance nodes
 
 === What limits the search: seed agreement and depth in dice rolls #chip("done") <exp:search-noise>
