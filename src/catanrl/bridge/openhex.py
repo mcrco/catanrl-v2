@@ -929,9 +929,9 @@ class OpenHexSeat:
                 return self._answer(game, color_of(state.get("currentPlayer") or ""))
             return None
         if "roll" in kind:
-            # OpenHex takes nothing before the roll (Catanatron would let a
-            # development card go first).
-            return Plan([{"type": "rollDice"}])
+            # Before the roll OpenHex takes the roll or a development card (any, since
+            # 2026-10-18), as the engine does: no trading yet.
+            return self._decide(game)
         if self.judge is not None:
             trading = self._negotiate(game)
             if trading is not None:
@@ -1202,6 +1202,11 @@ class OpenHexSeat:
             if not ahead.is_moving_robber:
                 # Friendly robber shields every hex: the knight is played, the robber stays.
                 return Plan([{"type": "playKnight"}])
+            if ahead.winning_color is not None:
+                # The knight wins (largest army): OpenHex ends the game on it, wherever the
+                # robber goes, and the tracker has no position after a win.
+                coordinate, _victim = self._robber(default_of(list(ahead.playable_actions)))
+                return Plan([{"type": "playKnight", "location": self.board.hex_doc(coordinate)}])
             tracker = self.tracker.copy()
             tracker.apply(cpp.TrackerEvent.play_development_card(self.seat, cpp.DevelopmentCard.KNIGHT))
             tracker.apply(cpp.TrackerEvent.public_victory_points(

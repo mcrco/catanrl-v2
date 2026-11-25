@@ -463,6 +463,7 @@ turnOrderJson, "config": configJson}, our_color)` with
 `native_for(spec)`, redact the events as `tests/bridge/test_bridge_openhex.py`
 does (drop `card` from the other seat's `devCardBought`, `resource` from steals
 we are not part of), feed them in seq order and call `seat.plan(...)` where the
-seat moves. Decisions reproduce the live ones move for move except for the
-pre-roll knights OpenHex forbids. Per-move latency is the gap between
+seat moves. Decisions reproduce the live ones move for move from `openhex-4p-v2.3`
+on; before it the bridge always rolled first (OpenHex has taken any development
+card before the roll since 2026-10-18). Per-move latency is the gap between
 consecutive events' `createdAt`.

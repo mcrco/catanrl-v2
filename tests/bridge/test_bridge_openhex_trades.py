@@ -366,3 +366,32 @@ def test_a_discard_seen_before_the_others_waits_for_them_when_the_state_is_behin
     plan = seat.plan({"currentPlayer": "red", "pendingAction": {"type": "moveRobber"}})
     assert [a["type"] for a in plan.actions][0] == "moveRobber"
     seat.close()
+
+
+def test_a_knight_that_wins_by_largest_army_is_played(monkeypatch):
+    """Live game df01e888 (2026-11-24): red at 13 points held the knight that took the largest
+    army; the bridge handed the tracker a position after the win, failed, and rolled instead."""
+    game = _recorded("live-1v1-df01e888.json")
+    seat = OpenHexSeat(_native(), "fixture", game, "red")
+    seat.feed(_redacted(game["events"], "red"))
+    knight = next(a for a in seat.replay.game.playable_actions if a.action_type.name == "PLAY_KNIGHT_CARD")
+    monkeypatch.setattr(seat, "_choose", lambda game, tracker, share=1: knight)
+    plan = seat.plan({"currentPlayer": "red", "pendingAction": {"type": "rollDice"}})
+    assert [a["type"] for a in plan.actions] == ["playKnight"] and plan.actions[0]["location"]
+    seat.feed([{"seq": 330, "event": {"type": "knightPlayed", "player": "red", "hex": plan.actions[0]["location"]}},
+               {"seq": 331, "event": {"type": "gameWon", "player": "red", "victoryPoints": 15}}])
+    assert seat.over and seat.log.won == "RED"
+    seat.close()
+
+
+def test_before_the_roll_the_seat_decides_between_the_roll_and_a_development_card(monkeypatch):
+    game = _recorded("live-1v1-df01e888.json")
+    seat = OpenHexSeat(_native(), "fixture", game, "red", judge=_Judge())
+    seat.feed(_redacted(game["events"], "red"))
+    legal = list(seat.replay.game.playable_actions)
+    assert {a.action_type.name for a in legal} == {"ROLL", "PLAY_KNIGHT_CARD"}
+    roll = next(a for a in legal if a.action_type.name == "ROLL")
+    monkeypatch.setattr(seat, "_choose", lambda game, tracker, share=1: roll)
+    plan = seat.plan({"currentPlayer": "red", "pendingAction": {"type": "rollDice"}})
+    assert plan.actions == [{"type": "rollDice"}] and not plan.trade
+    seat.close()

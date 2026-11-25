@@ -267,10 +267,13 @@ def test_a_reusing_search_follows_the_seats_own_moves(color):
     assert [a["first"] for a in log] == \
         [True] + [log[i - 1]["raised"] or id(log[i - 1]) in ends for i in range(1, len(log))]
     assert c["reused"] + c["refused_diverged"] + c["refused_engine"] == sum(not a["first"] for a in log)
-    knights = discards = reused_knights = 0
+    knights = discards = reused_knights = won = 0
     for _seq, plan, acts in plans:
         kind = plan.actions[0]["type"]
         if kind == "playKnight":
+            if len(acts) == 1:
+                won += 1  # (a knight that would win the game: no robber to decide)
+                continue
             assert [a["prompt"] for a in acts] == ["PLAY_TURN", "MOVE_ROBBER"]
             # (The agent raises at the game's last moves: no search there to re-root.)
             assert acts[1].get("reused") == 1 or acts[1]["raised"]
@@ -280,7 +283,7 @@ def test_a_reusing_search_follows_the_seats_own_moves(color):
             assert len(acts) >= 2 and all(a["prompt"] == "DISCARD" for a in acts)
             assert all(a.get("reused") == 1 for a in acts[1:])
             discards += 1
-    assert knights > 0 and reused_knights > 0 and discards == (1 if color == "blue" else 0)
+    assert won <= 2 and knights > 0 and reused_knights > 0 and discards == (1 if color == "blue" else 0)
     assert len(native.pool) == 1 and set(native._live) == {seat.env * 2 + seat.seat}
     assert all(entry[1] is not seat.replay.game for entry in native._live.values())
     assert seat.search == dict(c)
@@ -339,7 +342,9 @@ def test_the_robber_after_a_knight_reuses_the_knights_search():
     seat = OpenHexSeat(native, "fixture", game, "red")
     knights = [acts for _seq, plan, acts in _record(seat, game, log=log) if plan.actions[0]["type"] == "playKnight"]
     assert len(knights) > 10 and seat.fallbacks == sum(a["raised"] for a in log)
-    for acts in knights:
+    winning = [acts for acts in knights if len(acts) == 1]  # (no robber to decide after a win)
+    assert len(winning) <= 2
+    for acts in (acts for acts in knights if len(acts) == 2):
         assert [a["prompt"] for a in acts] == ["PLAY_TURN", "MOVE_ROBBER"]
         # (The agent raises at the game's last moves, as above: no search there to re-root.)
         assert acts[1].get("reused") == 1 or acts[1]["raised"]
