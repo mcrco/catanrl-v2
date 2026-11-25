@@ -191,12 +191,16 @@ class Pipeline:
         ``[start:start + rows]``), or refused. What ``BatchEvaluator._run`` does with the flag:
 
         - bit 2 with ``kernels=fused16`` (a half overflowed in the forward): the chunk again on
-          the float32 kernels (the evaluator's ``_exact``), counted in its ``exact_forwards``;
+          the float32 kernels (the evaluator's ``_exact``), counted in its ``exact_forwards``
+          and ``exact_rows``. The whole chunk, in strict mode too: self-play's searches, the
+          pipeline's only callers, need no row to be its batch's stranger, where the
+          evaluator's own strict call resolves row by row (``BatchEvaluator._resolve``);
           the flag is then the one that forward returns;
         - any flag left (bit 1: a node with more neighbours than the kernels take) raises."""
         ev = self.evaluator
         if flag & 2 and ev.kernels == "fused16":
             ev.exact_forwards += 1
+            ev.exact_rows += rows
             results = ev._exact(batch.observations[start : start + rows], ev.bucket(rows))
             batch._logits.numpy()[start : start + rows] = results[0]
             batch._values.numpy()[start : start + rows] = results[1]

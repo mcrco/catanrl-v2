@@ -404,6 +404,14 @@ class PredictAgent(NativeAgent):
         return _choose(logits, masks, decision_seeds, sample=self.sample, temperature=self.temperature)
 
 
+#: ``kernels=fused16``: the most a half-precision value may be from the float32 kernels' value of
+#: the same row at an MCTS agent's check before a model's first searches (the tolerance of
+#: ``SelfPlay.check_kernels``; rounding moved a value by at most 1.5e-3 on 53,000 real rows).
+HALF_VALUE_TOLERANCE = 1e-2
+#: The acting rows that check takes (the first of the agent's first decision).
+HALF_CHECK_ROWS = 64
+
+
 class MctsAgent(NativeAgent):
     """``MCTS``: one SearchPool search per decision.
 
@@ -451,6 +459,15 @@ class MctsAgent(NativeAgent):
     hashes in Python, only where a merge can save a forward, and also merges the roots' rows
     (the engine gives every root a row of its own). Neither the variable nor ``dedup`` is in
     a key.
+
+    ``kernels=fused16`` (keyed: an agent of its own) searches on the half-precision kernels,
+    whose outputs are within half's rounding of ``fused``'s. A strict evaluator's rows are
+    still their own whatever their batch (an overflowing half included:
+    ``BatchEvaluator._resolve``), so the cache above and a replay hold as they do for
+    ``fused``. Before a model's first searches the agent holds the half values of up to
+    :data:`HALF_CHECK_ROWS` of the rows it is asked to act on against the float32 kernels' own
+    (``evaluator.exact``) and refuses to search past :data:`HALF_VALUE_TOLERANCE`: weights on
+    which half's rounding is no longer small are told at once, not found in a score.
     """
 
     key = "MCTS"
@@ -479,6 +496,8 @@ class MctsAgent(NativeAgent):
 
     def _set_model(self, model) -> None:
         super()._set_model(model)
+        #: kernels=fused16: whether this model's half values were held against the float32 ones.
+        self._halves_checked = False
         #: The engine's evaluation cache of this network's rows (None: ``dedup`` is off, or the
         #: Python dedup stands in). A new one per model: nothing of another network is served.
         self.cache: NetworkCache | None = None
@@ -510,6 +529,8 @@ class MctsAgent(NativeAgent):
             raise ValueError("MCTS with dets searches worlds sampled from hand trackers")
         if self.reuse:
             streams, first = self._streams(len(games), streams, first)
+        if not self._halves_checked:
+            self._check_halves(rows)
         ids: list[int | None] = [None] * len(games)
         try:
             if self.reuse:
@@ -552,6 +573,32 @@ class MctsAgent(NativeAgent):
             self._live.clear()
             self._started.clear()
             raise
+
+    def _check_halves(self, rows) -> None:
+        """``kernels=fused16``, once per model and before anything is searched with it: the half
+        values of the first :data:`HALF_CHECK_ROWS` acting rows against the float32 kernels' on
+        the weights the halves were converted from (``BatchEvaluator.exact``), within
+        :data:`HALF_VALUE_TOLERANCE` or a RuntimeError (raised at every decision until a model
+        passes). The rows are the network's own: the fused kernels run networks that read no
+        critic block. Evaluations only, with the evaluator's counters put back: the games are
+        the ones of an agent that checks nothing. A row whose half overflows passes, as it
+        takes the float32 outputs."""
+        inner = self.evaluator.evaluator if isinstance(self.evaluator, DedupEvaluator) else self.evaluator
+        if getattr(inner, "kernels", "torch") == "fused16" and len(rows):
+            sample = np.ascontiguousarray(rows[:HALF_CHECK_ROWS], dtype=np.float32)
+            names = ("rows", "forwards", "exact_forwards", "exact_rows")
+            counts = [getattr(inner, name) for name in names]
+            try:
+                gap = float(np.abs(inner(sample)[1] - inner.exact(sample)[1]).max())
+            finally:
+                for name, count in zip(names, counts):
+                    setattr(inner, name, count)
+            if not gap <= HALF_VALUE_TOLERANCE:  # (a NaN is refused too)
+                raise RuntimeError(
+                    f"kernels=fused16: the half-precision values are {gap:.2g} from the float32 kernels' on "
+                    f"{len(sample)} acting rows (rounding moves them by about 1e-3; the most allowed is "
+                    f"{HALF_VALUE_TOLERANCE:g}): search this network with kernels=fused")
+        self._halves_checked = True
 
     @staticmethod
     def _streams(n: int, streams, first) -> tuple[list[int], list[bool]]:

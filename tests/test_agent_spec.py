@@ -295,7 +295,8 @@ def test_free_backlog_is_the_environments_and_reaches_no_key(ckpts, monkeypatch)
 
 
 def _rebuilds_unchanged(entry: dict) -> None:
-    params = MctsParams(ckpt="x", **entry["params"])
+    # ``pending`` is no key param (and in no canonical spec): it is keyed as the search's max_pending.
+    params = MctsParams(ckpt="x", **entry["params"], pending=entry["search"]["max_pending"])
     assert key_params(params) == entry["params"]
     config = search_config(params, max_players=entry["search"]["max_players"], threads=0)
     assert search_details(config) == entry["search"]

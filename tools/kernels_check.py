@@ -52,7 +52,8 @@ import time
 from pathlib import Path
 
 #: (kernels, mode) of the evaluators held against the module: the evals search with fused in
-#: strict, the trainer self-plays with fused16 (and fused) in fast.
+#: strict (fused16 in strict, an agent's ``kernels=fused16``, has the same per-row outputs as
+#: fused16 here unless a half overflows), the trainer self-plays with fused16 (and fused) in fast.
 EVALUATORS = (("fused", "strict"), ("fused", "fast"), ("fused16", "fast"))
 #: tests/test_graph_kernels.py's bounds: fused against the module (x the logits' scale, plus,
 #: values), fused16 against fused (x scale, values).

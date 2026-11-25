@@ -16,10 +16,14 @@ model's device:
 (:class:`~catanrl.models.graph_kernels.FusedGraph`): the same outputs to the last
 bits, 2.5x faster on a GTX 1080. Its rows are as batch-independent as the module's.
 ``kernels="fused16"`` runs their half-precision variant
-(:class:`~catanrl.models.graph_kernels.FusedGraph16`, for self-play search: the outputs
-within half's rounding in the trunk, about 1.5x faster again on an RTX 2070 Super);
-a chunk in which a half overflowed is evaluated again by the float32 kernels. A
-shared-trunk seat-set network (model class ``seat``) runs both on
+(:class:`~catanrl.models.graph_kernels.FusedGraph16`, for self-play search and an agent
+that asks for it: the outputs within half's rounding in the trunk, about 1.5x faster
+again on an RTX 2070 Super). The kernels flag a forward in which a half overflowed, one
+flag for the whole forward. ``fast``: its chunk is evaluated again by the float32 kernels.
+``strict``: a row's outputs may not depend on its chunk, so the chunk is split until
+each row that overflows is alone (:meth:`BatchEvaluator._resolve`): those rows take the
+float32 kernels' outputs and every other row its half ones, whatever else was in the
+batch. A shared-trunk seat-set network (model class ``seat``) runs both on
 :mod:`catanrl.models.seat_kernels` (``FusedSeat`` / ``FusedSeat16``), under the same
 contract.
 
@@ -85,8 +89,10 @@ class BatchEvaluator:
             raise ValueError(f"kernels must be torch, fused or fused16, not {kernels!r}")
         self.kernels = kernels
         self.fused = None
-        #: kernels=fused16: chunks evaluated again in float32 (a half overflowed in their forward).
+        #: kernels=fused16: chunks in whose forward a half overflowed, and the rows that took the
+        #: float32 kernels' outputs for it (fast: the whole chunk; strict: the rows that overflow).
         self.exact_forwards = 0
+        self.exact_rows = 0
         if kernels != "torch":
             from catanrl.models.graph_kernels import fused_forward
 
@@ -224,8 +230,27 @@ class BatchEvaluator:
             # captured graph's static memory holds what the last step left there, and a replay
             # reads whatever the static inputs hold.
             memory = tuple(np.zeros((k, self.hidden_size), dtype=np.float32) for _ in range(2))
-        sources = (torch.from_numpy(chunk), *(torch.from_numpy(m) for m in memory or ()))
         self.rows += k
+        results = self._replay(chunk, memory, size)
+        if self.fused is not None:
+            if self.kernels == "fused16" and int(results[-1][0]) & 2:
+                self.exact_forwards += 1
+                if self.mode == "strict":
+                    results = self._resolve(chunk, size)
+                else:
+                    self.exact_rows += k
+                    results = self._exact(chunk, size)
+            if results[-1].any():
+                raise RuntimeError("kernels=fused: a node with more than three neighbours, edges or tiles "
+                                   "(hex boards only); play this board with kernels=torch")
+            results = results[:-1]
+        return results
+
+    def _replay(self, chunk: np.ndarray, memory: tuple[np.ndarray, ...] | None, size: int) -> tuple[np.ndarray, ...]:
+        """One forward of ``chunk`` padded to ``size`` rows with copies of its first: the outputs'
+        first ``len(chunk)`` rows (the fused kernels': with their flag last)."""
+        k = len(chunk)
+        sources = (torch.from_numpy(chunk), *(torch.from_numpy(m) for m in memory or ()))
         self.forwards += 1
         with torch.inference_mode():
             if self.use_graphs:
@@ -243,16 +268,32 @@ class BatchEvaluator:
                         tensor = torch.cat((tensor, tensor[:1].expand(size - k, -1)), dim=0)
                     batch.append(tensor)
                 outputs = self._forward(batch[0], tuple(batch[1:]) if memory is not None else None)
-            results = tuple(out[:k].float().cpu().numpy() for out in outputs)
-        if self.fused is not None:
-            if self.kernels == "fused16" and int(results[-1][0]) & 2:
-                self.exact_forwards += 1
-                results = self._exact(chunk, size)
-            if results[-1].any():
-                raise RuntimeError("kernels=fused: a node with more than three neighbours, edges or tiles "
-                                   "(hex boards only); play this board with kernels=torch")
-            results = results[:-1]
-        return results
+            return tuple(out[:k].float().cpu().numpy() for out in outputs)
+
+    def _resolve(self, chunk: np.ndarray, size: int) -> tuple[np.ndarray, ...]:
+        """kernels=fused16, strict: the outputs of a chunk whose forward flagged an overflow, each
+        row's a function of the row alone. The flag is the forward's, not a row's, so the chunk is
+        halved and each half forwarded again (the same forward: ``size`` rows, padded with the
+        half's first) until a flagged one is a single row, which overflows whatever it is batched
+        with and takes the float32 kernels' outputs (:meth:`_exact`); a half that raises no flag
+        keeps its half-precision outputs, the ones its rows have in any batch with no overflow.
+        About ``2 log2(len(chunk))`` forwards per overflowing row, for a case the networks here
+        never reach (their halves stay under 1,100 of 65,504). (logits, values, flag): the flag
+        without the overflow bit."""
+        k = len(chunk)
+        if k == 1:
+            self.exact_rows += 1
+            return self._exact(chunk, size)
+        logits = np.empty((k, self.num_actions), dtype=np.float32)
+        values = np.empty((k, self.num_players), dtype=np.float32)
+        flag = np.zeros(1, dtype=np.int32)
+        for start, end in ((0, k // 2), (k // 2, k)):
+            results = self._replay(chunk[start:end], None, size)
+            if int(results[-1][0]) & 2:
+                results = self._resolve(chunk[start:end], size)
+            logits[start:end], values[start:end] = results[0], results[1]
+            flag |= results[-1].astype(np.int32)
+        return logits, values, flag
 
     def _exact(self, chunk: np.ndarray, size: int) -> tuple[np.ndarray, ...]:
         """kernels=fused16: a chunk whose forward flagged a half that is not finite (bit 2 of the

@@ -105,8 +105,12 @@ class MctsParams:
     #: ``fused``: the network on custom CUDA kernels (models/graph_kernels.py, and
     #: models/seat_kernels.py for a seat-set network; shared-trunk networks on a CUDA device:
     #: the graph class at a hidden that is a multiple of 32, the seat class at 96). Its outputs
-    #: differ from the module's in the last bits, so it is keyed when set.
-    kernels: Literal["torch", "fused"] = field(default="torch", metadata={"key_if_set": True})
+    #: differ from the module's in the last bits, so it is keyed when set. ``fused16``: their
+    #: half-precision variant (FusedGraph16 / FusedSeat16), about 1.5x the rows a second of
+    #: ``fused``; its outputs are within half's rounding of those (values within 1.5e-3, the same
+    #: best action on 99.97% of rows), not their bits, so it is a value of its own in the key:
+    #: another agent than ``fused``, to be compared with it like one.
+    kernels: Literal["torch", "fused", "fused16"] = field(default="torch", metadata={"key_if_set": True})
     #: Seconds a decision may search (0: no limit): the search stops at the first round past
     #: it and plays its most-visited move so far (at least one round runs). A wall clock, so
     #: play depends on the machine: the server harness only, for a ladder's per-move limit,

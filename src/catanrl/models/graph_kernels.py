@@ -34,9 +34,10 @@ graphs; graph-s on :class:`FusedGraph16`: 4.3 ms), within the bounds above of th
 (``tests/test_graph_kernels.py``, ``tools/kernels_check.py``).
 
 :class:`FusedGraph16` runs the same forward with its large GEMMs in half precision, for
-self-play search (``train.kernels: fused16``): its outputs are within half's rounding of
-these, not their bits, so the eval's agents and the deployed search stay on
-:class:`FusedGraph`.
+self-play search (``train.kernels: fused16``) and for an MCTS agent whose spec says
+``kernels=fused16``: its outputs are within half's rounding of these, not their bits, so
+that agent has a key of its own, and an agent with ``kernels=fused`` (the stored records,
+the deployed search) stays on :class:`FusedGraph`.
 
 A seat-set network (model class ``seat``) runs on :mod:`catanrl.models.seat_kernels`
 (``FusedSeat`` / ``FusedSeat16``): these kernels for the board and the heads, with kernels of
@@ -324,7 +325,7 @@ class FusedGraph:
 
 class FusedGraph16(FusedGraph):
     """:class:`FusedGraph` with its large GEMMs in half precision (cuBLAS's tensor-core
-    kernels), for self-play search: float32 logits and values in the same conventions, within
+    kernels), for self-play search and ``kernels=fused16`` agents: float32 logits and values in the same conventions, within
     rounding of :class:`FusedGraph`'s. On 26,000 self-play rows each of two base-2p networks
     (logits reaching 290 and 1,090): mean KL of the masked policies 1.6e-6 and 3.8e-6, the
     same best action on 99.98% and 99.97% of rows, legal logits within 0.09 and 0.49, values

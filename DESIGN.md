@@ -690,7 +690,12 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   default true) evaluates byte-identical leaf rows once (the engine's
   evaluation cache, 1.6; its size is the environment's, in no key). `reuse` and
   `transpositions` are in the canonical spec and `key_dict()` only when set,
-  so adding them moved no stored record's key.
+  so adding them moved no stored record's key. `kernels` (keyed when set, the
+  same way) names what runs the network: `torch` (default, the module),
+  `fused` (custom CUDA kernels, the module's outputs to the last bits) or
+  `fused16` (their half-precision variant, about 1.5x the rows a second;
+  outputs within half's rounding of `fused`'s, so another agent with a key
+  and eval ids of its own, compared with `fused` like any other agent).
 * **`tracker`** (MCTS with dets, BELIEF): `pool` (default) or `exact`, the
   hand tracker mode the worlds are dealt from (1.5). It is in the canonical
   spec and `key_dict()`, so eval records tell the two apart. The native

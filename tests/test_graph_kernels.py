@@ -3,7 +3,8 @@ module's outputs (to the last bits) on real rows, padded dims included; its stri
 rows do not depend on their batch; a board the neighbour lists cannot hold raises; and
 the evaluator refuses what the kernels do not run. kernels=fused16: the same forward
 with half GEMMs stays within rounding of fused, masks and finiteness intact, and a half
-past its range sends the batch to the float32 kernels."""
+past its range sends the batch (strict: the rows that overflow, tests/test_agent_fused16.py)
+to the float32 kernels."""
 
 from __future__ import annotations
 
@@ -119,8 +120,9 @@ def test_the_evaluator_refuses_what_the_kernels_do_not_run():
         BatchEvaluator(model, device="cpu", infer_rows=8, kernels="fused16")
     with pytest.raises(ValueError, match="kernels must be"):
         BatchEvaluator(model, device="cpu", infer_rows=8, kernels="triton")
-    with pytest.raises(SpecError, match="not one of torch, fused"):  # self-play's: no agent searches with it
-        check_spec_syntax("MCTS:ckpt=exp/v@best:kernels=fused16")
+    with pytest.raises(SpecError, match="not one of torch, fused, fused16"):
+        check_spec_syntax("MCTS:ckpt=exp/v@best:kernels=triton")
+    check_spec_syntax("MCTS:ckpt=exp/v@best:kernels=fused16")  # an agent of its own (tests/test_agent_fused16.py)
     if torch.cuda.is_available():
         with pytest.raises(ValueError, match="CUDA"):
             BatchEvaluator(model, device="cuda", infer_rows=8, kernels="fused", heads="policy")
