@@ -33,13 +33,22 @@ def write_record(path: Path, eval_id: str, winners: dict[str, int | None], *, co
     return EvalRecord.load(path)
 
 
-def test_a_probe_report_names_every_counter():
+def test_a_probe_report_names_every_counter(monkeypatch):
     report = search_probe.probe(agent("MCTS", tiny_model(), sims=4, reuse=True))
     assert report["counters"] == {name: 0 for name in search_probe.COUNTERS}
     assert report["reuse_rate"] == 0 and report["per_decision"] == {}
+    cache = report["cache"]  # the engine's evaluation cache: an agent's default
+    assert {name: cache[name] for name in search_probe.CACHE if name != "capacity"} == {
+        name: 0 for name in search_probe.CACHE if name != "capacity"}
+    assert cache["capacity"] > 0 and cache["hit_fraction"] == 0 and cache["forwarded_fraction"] == 0
+    assert "dedup" not in report
+    off = search_probe.probe(agent("MCTS", tiny_model(), sims=4, dedup=False))
+    assert "dedup" not in off and "cache" not in off
+    monkeypatch.setenv("CATANRL_EVAL_CACHE_MB", "0")  # the Python dedup
+    report = search_probe.probe(agent("MCTS", tiny_model(), sims=4, reuse=True))
     assert {name: report["dedup"][name] for name in search_probe.DEDUP} == {name: 0 for name in search_probe.DEDUP}
     assert report["dedup"]["batch_hit_fraction"] == 0 and report["dedup"]["forwarded_fraction"] == 0
-    assert "dedup" not in search_probe.probe(agent("MCTS", tiny_model(), sims=4, dedup=False))
+    assert "cache" not in report
 
 
 def test_pair_scores_the_shared_games_and_says_what_differs(tmp_path):

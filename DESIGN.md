@@ -168,8 +168,11 @@ from one decision to the next when the real game evolved by exactly the
 action played (most of the gain is the discard chain after a 7 and the bank
 trades before a build). Byte-identical leaf rows of a batch (a determinized
 search's worlds at `private` level, one position reached by two action
-orders) are evaluated once by `DedupEvaluator`, bitwise the plain evaluation
-under the strict contract.
+orders) and rows a search evaluated before are evaluated once: the engine's
+evaluation cache (`cppanatron.EvalCache`, one table per agent and network)
+hands the network only the rows it does not know, bitwise the plain
+evaluation under the strict contract (`CATANRL_EVAL_CACHE_MB` sizes it, 256
+unless set; 0 is the Python `DedupEvaluator` it replaced).
 
 The **AlphaZero / expert-iteration loop** (`catanrl.train.alphazero`) is:
 self-play games through `SearchPool` with a network (fresh, or a PPO
@@ -684,7 +687,8 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   decisions; the Catanatron player decides one position at a time);
   `transpositions=true` turns on the engine's transposition table (one node
   for a position reached by reordered actions); `dedup` (execution-only,
-  default true) evaluates byte-identical leaf rows once. `reuse` and
+  default true) evaluates byte-identical leaf rows once (the engine's
+  evaluation cache, 1.6; its size is the environment's, in no key). `reuse` and
   `transpositions` are in the canonical spec and `key_dict()` only when set,
   so adding them moved no stored record's key.
 * **`tracker`** (MCTS with dets, BELIEF): `pool` (default) or `exact`, the

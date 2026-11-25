@@ -11,7 +11,9 @@ completion; :func:`search_config` maps agent parameters onto the engine's
 for the pools of one network: a leaf whose row was evaluated before, or is
 another leaf's of the same round, takes that row's outputs instead of a row of
 its own in the batch. The searches are the ones without it wherever a row's
-outputs do not depend on its batch (a strict evaluator: to the bit).
+outputs do not depend on its batch (a strict evaluator: to the bit). Self-play's
+searches have one (``runtime.eval_cache_mb``) and so has every MCTS agent, of
+:func:`eval_cache_mb` megabytes.
 """
 
 from __future__ import annotations
@@ -39,6 +41,15 @@ DIRICHLET_FRACTION = 0.25
 #: (catanrl.agents.spec.search_details), so it is the environment's, not an agent's or a run's.
 FREE_BACKLOG_ENV = "CATANRL_FREE_BACKLOG"
 
+#: Environment variable setting the megabytes of an MCTS agent's evaluation cache (the engine's,
+#: :class:`NetworkCache`: one table per agent and network): :data:`EVAL_CACHE_MB` when unset, and
+#: 0 for the Python path the agents had before it (``DedupEvaluator``, catanrl.search.dedup).
+#: Which rows reach the network, never what a row's outputs are (strict evaluator: the games are
+#: the same to the bit at any size), so like ``threads`` it is the environment's and in no key.
+EVAL_CACHE_ENV = "CATANRL_EVAL_CACHE_MB"
+#: The megabytes of an MCTS agent's evaluation cache when :data:`EVAL_CACHE_ENV` is unset.
+EVAL_CACHE_MB = 256.0
+
 
 def free_backlog() -> dict[str, int]:
     """``SearchConfig``'s ``free_backlog`` argument from :data:`FREE_BACKLOG_ENV`; none when it
@@ -53,6 +64,22 @@ def free_backlog() -> dict[str, int]:
     if nodes < 0:
         raise ValueError(f"{FREE_BACKLOG_ENV} must be a number of tree nodes (0 or more), not {text!r}")
     return {"free_backlog": nodes}
+
+
+def eval_cache_mb() -> float:
+    """The megabytes of an MCTS agent's evaluation cache: :data:`EVAL_CACHE_ENV`'s, or
+    :data:`EVAL_CACHE_MB` when it is unset; 0 is no engine cache (the Python dedup instead)."""
+    text = os.environ.get(EVAL_CACHE_ENV, "").strip()
+    if not text:
+        return EVAL_CACHE_MB
+    try:
+        megabytes = float(text)
+    except ValueError:
+        megabytes = -1.0
+    if not 0 <= megabytes < float("inf"):
+        raise ValueError(f"{EVAL_CACHE_ENV} must be a number of megabytes (0: the Python dedup, no engine "
+                         f"cache), not {text!r}")
+    return megabytes
 
 
 def search_config(params: Any, *, max_players: int, threads: int | None = None) -> cpp.SearchConfig:
@@ -125,7 +152,8 @@ class NetworkCache:
     tensors are the same objects on the same memory with the same version counters, which
     torch advances on every in-place write (an optimizer step, ``load_state_dict``). A caller
     therefore cannot forget to clear after a change it made by any of those means; a tensor
-    whose counter cannot be read (made in inference mode) clears on every sync. The counters
+    whose counter cannot be read (made in inference mode) clears on every sync, and so does an
+    evaluator that shows no network (no ``model``: a wrapper around one). The counters
     do not see a write through ``tensor.data`` or through a NumPy view of a tensor's memory
     (nothing in this package writes weights that way): ``table.clear()`` after one.
 
@@ -154,7 +182,8 @@ class NetworkCache:
     def sync(self, evaluator: Any) -> bool:
         """Clear the table unless it holds this evaluator's outputs for its network's weights
         as they are now; whether it was cleared."""
-        weights = self.weights(evaluator.model)
+        model = getattr(evaluator, "model", None)
+        weights = self.weights(model) if model is not None else None
         same = (self._evaluator is not None and self._evaluator() is evaluator
                 and weights is not None and weights == self._weights)
         if not same:

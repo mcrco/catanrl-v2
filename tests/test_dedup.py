@@ -1,7 +1,7 @@
 """Test 33: DedupEvaluator returns bitwise what the wrapped evaluator would: repeats
 within a batch and across batches get the first evaluation's outputs, so MCTS with
-``dedup`` (the default) searches exactly as without it; the golden and invariance tests
-run with it on."""
+``dedup`` on this path (``CATANRL_EVAL_CACHE_MB=0``; the default is the engine's cache,
+test_agent_cache.py) searches exactly as without it."""
 
 from __future__ import annotations
 
@@ -80,8 +80,9 @@ def test_a_recurrent_network_is_refused():
         DedupEvaluator(Recurrent())
 
 
-def test_mcts_searches_the_same_with_dedup_on_and_off():
+def test_mcts_searches_the_same_with_dedup_on_and_off(monkeypatch):
     """Choices and visits of the live searches (reuse keeps them inspectable), dedup on vs off."""
+    monkeypatch.setenv("CATANRL_EVAL_CACHE_MB", "0")  # the Python path
     on = agent("MCTS", MODEL, infer_rows=8, sims=12, dets=2, reuse=True)
     off = agent("MCTS", MODEL, infer_rows=8, sims=12, dets=2, reuse=True, dedup=False)
     assert on.dedup and isinstance(on.evaluator, DedupEvaluator)

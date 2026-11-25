@@ -417,10 +417,14 @@ def test_policy_belief_and_mcts_read_the_input_from_the_checkpoint(dice_ckpt):
 
 
 @pytest.mark.parametrize("spec", SEARCHERS)
-def test_a_warm_started_network_searches_as_its_source(tmp_path, spec):
+def test_a_warm_started_network_searches_as_its_source(tmp_path, monkeypatch, spec):
     """BELIEF and MCTS on a network warm-started with zero dice weights: the evaluator answers
     its source's logits and values bit for bit on every world and leaf, so the search visits
     the same nodes and chooses the same action."""
+    # The spy is to see every leaf's row. The engine's cache hands the evaluator only rows it has
+    # not answered, and those are fewer for the source: two leaves that differ in the dice state
+    # alone are one row to it and two to the dice network.
+    monkeypatch.setenv("CATANRL_EVAL_CACHE_MB", "0")
     source = model_of(False, seed=11)
     plain_ref = saved(tmp_path / "plain", source)
     target = model_of(True, seed=12)

@@ -6,8 +6,10 @@ lineup's agents and prints, per MCTS slot: the agent's counters (``decisions``,
 ``fresh``, ``reused``, ``dropped_first``, ``refused_diverged``,
 ``refused_engine``; the reuse rate is ``reused / decisions``), its search
 statistics per decision (nodes, evaluations, simulations, coalesced outcomes,
-transpositions, max depth), the dedup evaluator's ``rows``, ``forwarded``,
-``batch_hits`` and ``cache_hits`` as counts and fractions of the rows, the
+transpositions, max depth), the engine cache's ``leaves``, ``forwarded``,
+``hits`` and ``repeats`` as counts and fractions of the leaves (``cache``;
+with ``CATANRL_EVAL_CACHE_MB=0`` the dedup evaluator's ``rows``,
+``forwarded``, ``batch_hits`` and ``cache_hits`` instead, ``dedup``), the
 slot's score rate, and the wall time. Every counter is printed, zero or not,
 so the report's schema does not vary by run. Nothing is recorded. The probe
 sets ``CATANRL_DEDUP_FORCE=1`` before building the agents, so the dedup
@@ -53,10 +55,12 @@ from pathlib import Path
 
 COUNTERS = ("decisions", "fresh", "reused", "dropped_first", "refused_diverged", "refused_engine")
 DEDUP = ("rows", "forwarded", "batch_hits", "cache_hits")
+CACHE = ("leaves", "forwarded", "hits", "repeats", "stored", "replaced", "entries", "capacity", "clears")
 
 
 def probe(agent) -> dict:
-    """An MCTS agent's counters, per-decision search statistics and dedup fractions."""
+    """An MCTS agent's counters, per-decision search statistics and the fractions of its leaf
+    rows the engine cache (``cache``) or the dedup evaluator (``dedup``) answered."""
     from catanrl.search import DedupEvaluator
 
     counters, stats = agent.counters, agent.search_stats
@@ -71,6 +75,13 @@ def probe(agent) -> dict:
                         "batch_hit_fraction": dedup["batch_hits"] / rows,
                         "cache_hit_fraction": dedup["cache_hits"] / rows,
                         "forwarded_fraction": dedup["forwarded"] / rows}
+    if getattr(agent, "cache", None) is not None:
+        cache = agent.cache_stats
+        leaves = max(cache["leaves"], 1)
+        out["cache"] = {**{name: cache[name] for name in CACHE},
+                        "hit_fraction": cache["hits"] / leaves,
+                        "repeat_fraction": cache["repeats"] / leaves,
+                        "forwarded_fraction": cache["forwarded"] / leaves}
     return out
 
 

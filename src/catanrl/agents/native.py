@@ -77,7 +77,7 @@ from catanrl.models import CatanModel, build_model
 from catanrl.models.rows import feature_names
 from catanrl.search.dedup import DedupEvaluator
 from catanrl.search.evaluator import BatchEvaluator
-from catanrl.search.pool import make_pool, run_searches, search_config
+from catanrl.search.pool import NetworkCache, eval_cache_mb, make_pool, run_searches, search_config
 from catanrl.seeding import derive_seed as _derive_seed
 
 
@@ -438,8 +438,19 @@ class MctsAgent(NativeAgent):
     games are replayed from a seat's views with placeholder hidden cards and an RNG of
     their own, so only what the seat sees can be compared.
 
-    ``dedup`` (execution-only, on by default) evaluates byte-identical leaf rows once
-    (:class:`~catanrl.search.dedup.DedupEvaluator`, bitwise neutral).
+    ``dedup`` (execution-only, on by default) evaluates byte-identical leaf rows once, bitwise
+    neutral under a strict evaluator: in the engine's evaluation cache (``cache``, a
+    :class:`~catanrl.search.pool.NetworkCache` of ``CATANRL_EVAL_CACHE_MB`` megabytes, 256
+    unless set; ``cache_stats`` counts its leaves), which hashes the leaves' rows on the pool's
+    threads, keeps their outputs across rounds and decisions and hands the evaluator only the
+    rows it does not know. The table is this agent's and this network's alone: every
+    ``_set_model`` (the constructor, a ``bind`` to other dims) starts an empty one, and before
+    each decision's searches it is cleared if the evaluator is another object or a weight of
+    its network was written since (``NetworkCache.sync``). ``CATANRL_EVAL_CACHE_MB=0`` is the
+    path before it: :class:`~catanrl.search.dedup.DedupEvaluator` around the evaluator, which
+    hashes in Python, only where a merge can save a forward, and also merges the roots' rows
+    (the engine gives every root a row of its own). Neither the variable nor ``dedup`` is in
+    a key.
     """
 
     key = "MCTS"
@@ -468,7 +479,15 @@ class MctsAgent(NativeAgent):
 
     def _set_model(self, model) -> None:
         super()._set_model(model)
-        if self.dedup:
+        #: The engine's evaluation cache of this network's rows (None: ``dedup`` is off, or the
+        #: Python dedup stands in). A new one per model: nothing of another network is served.
+        self.cache: NetworkCache | None = None
+        megabytes = eval_cache_mb() if self.dedup else 0.0
+        # The pool's rows are stateless (a recurrent network's are not, and NativeAgent refuses
+        # one for MCTS before this); a table of under four entries would be no cache.
+        if megabytes > 0 and not self.evaluator.recurrent:
+            self.cache = NetworkCache(self.evaluator.num_actions, self.evaluator.num_players, megabytes)
+        elif self.dedup:
             self.evaluator = DedupEvaluator(self.evaluator)
         if hasattr(self, "config"):
             self._make_pool()
@@ -476,7 +495,7 @@ class MctsAgent(NativeAgent):
     def _make_pool(self) -> None:
         self.config.max_players = int(self.dims["max_players"])
         self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"],
-                              dice_state=self.dice_state)
+                              dice_state=self.dice_state, cache=self.cache.table if self.cache is not None else None)
         #: stream -> (search id, the game handed, the index played): a new pool drops them all.
         self._live: dict[int, tuple[int, cpp.Game, int]] = {}
         #: Streams that had a first decision: a later decision of any other stream is a harness error.
@@ -505,6 +524,10 @@ class MctsAgent(NativeAgent):
             stop = time.monotonic() + self.deadline if self.deadline else None
             if self.stop_at is not None:
                 stop = self.stop_at if stop is None else min(stop, self.stop_at)
+            if self.cache is not None:
+                # Nothing is pending here. Clears unless the table holds this evaluator's outputs
+                # for its network's weights as they are now.
+                self.cache.sync(self.evaluator)
             run_searches(self.pool, self.evaluator, batch_rows=len(ids) * self.config.max_pending, stop=stop)
             if stop is not None:
                 self.counters["cut"] += sum(not self.pool.done(sid) for sid in ids)
@@ -632,6 +655,20 @@ class MctsAgent(NativeAgent):
     def _live_in(self, env: int) -> list[int]:
         players = int(self.dims["max_players"])
         return [s for s in self._live if s // players == env]
+
+    @property
+    def cache_stats(self) -> dict[str, int]:
+        """The engine cache's counts since this model was set (empty without one): ``leaves``
+        searched, ``forwarded`` (those that took a row in a batch), ``hits`` (outputs from the
+        table), ``repeats`` (another leaf's row of their round), and the table's ``stored``,
+        ``replaced``, ``entries``, ``capacity`` and ``clears``."""
+        if self.cache is None:
+            return {}
+        table, stats = self.cache.table, self.cache.table.stats
+        counts = {name: int(getattr(stats, name)) for name in ("leaves", "hits", "repeats", "stored", "replaced",
+                                                               "entries", "clears")}
+        return {**counts, "forwarded": counts["leaves"] - counts["hits"] - counts["repeats"],
+                "capacity": int(table.capacity)}
 
     def _record(self, stats: cpp.SearchStats) -> None:
         for name in ("nodes", "evaluations", "simulations", "coalesced_outcomes", "transpositions", "max_depth"):
