@@ -273,7 +273,7 @@ def test_the_bot_tells_the_seat_what_openhex_said_and_a_refused_trade_action_cos
     told = []
 
     class Seat:
-        last_seq, stats = 0, {}
+        last_seq, stats, left_game = 0, {}, False
 
         def feed(self, _events):
             pass
@@ -394,4 +394,41 @@ def test_before_the_roll_the_seat_decides_between_the_roll_and_a_development_car
     monkeypatch.setattr(seat, "_choose", lambda game, tracker, share=1: roll)
     plan = seat.plan({"currentPlayer": "red", "pendingAction": {"type": "rollDice"}})
     assert plan.actions == [{"type": "rollDice"}] and not plan.trade
+    seat.close()
+
+
+def test_a_seat_that_leaves_is_followed_and_the_next_seat_plays(monkeypatch):
+    """Live game 2765add8 (2026-11-24): white missed three deadlines and OpenHex took it out
+    of the game as its turn began (``playerLeft``, then its turn's end). The bridge did not know
+    the event, stopped following the game, and red, next to roll, was taken out in turn."""
+    game = _recorded("live-4p-2765add8.json")
+    events = _redacted(game["events"], "red")
+    seat = OpenHexSeat(_native(), "fixture", game, "red")
+    seat.feed(events[:86])  # through white's leave and the end of its turn
+    replay = seat.replay.game
+    assert replay.has_left(3) and [c.name for c in replay.colors_in_play] == ["RED", "ORANGE", "BLUE"]
+    assert sum(replay.player(3).resources) == 0
+    assert replay.current_player_index == 0 and not seat.over
+    roll = next(a for a in replay.playable_actions if a.action_type.name == "ROLL")
+    monkeypatch.setattr(seat, "_choose", lambda game, tracker, share=1: roll)
+    plan = seat.plan({"currentPlayer": "red", "pendingAction": {"type": "rollDice"}})
+    assert plan.actions == [{"type": "rollDice"}]
+    # The game as it went: red is taken out too (a 7 rolled and the robber moved for it), and the
+    # replay follows the three, then two, seats left to the end.
+    seat.feed(events[86:90])
+    assert seat.left_game and seat.over and seat.plan(game["final"]) is None
+    seat.feed(events[90:])
+    assert seat.mismatches(game["final"]) == []
+    assert seat.log.won == "BLUE" and seat.log.left == {"WHITE", "RED"}
+    seat.close()
+
+
+def test_a_seat_that_leaves_after_its_seven_and_robber_move():
+    """Live game 6ba61913 (2026-11-24): blue rolled a 7, the robber was moved for it, and it
+    was taken out of the game before a steal."""
+    game = _recorded("live-4p-6ba61913.json")
+    seat = OpenHexSeat(_native(), "fixture", game, "orange")
+    seat.feed(_redacted(game["events"], "orange"))
+    assert seat.replay.game.has_left(3) and not seat.left_game
+    assert seat.mismatches(game["final"]) == [] and seat.log.won == "WHITE"
     seat.close()

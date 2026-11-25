@@ -366,6 +366,27 @@ record. Games still `active` are only counted as ongoing. Names from OpenHex
   `{"action": {...}, "duration_ms": n}`. A refused action can come back as HTTP 200
   with an error body; `/state` lags `/events` slightly.
 - **60 seconds per action; a missed deadline aborts the game** (a loss).
+- **A 3p/4p seat can leave** (three deadlines missed in a row, or `leaveGame`): the
+  event `playerLeft` returns its hand to the bank and the game goes on among the
+  seats in play (at least two; a 1v1 game still aborts). Its buildings stay and
+  produce nothing, it is no robber victim and no trade partner, its turn (or
+  placement) passes to the next seat in play, the awards are decided again among
+  the seats in play, and the balanced dice share the sevens among them. The
+  engine follows it (`Game.leave`), the bridge replays it (`Replay.leave`); a
+  game our seat was taken out of is recorded with `status: left`. A seat that
+  leaves after moving the robber and before its steal leaves the robber moved
+  (`Game.leave(seat, robber=)`); another seat's pending steal stays pending.
+- **Only the seat on turn wins; roads are OpenHex's.** OpenHex checks victory
+  after every action for the seat then on turn only: a seat that reaches the
+  points on another's turn (Longest Road falling to it after a cut or a leave)
+  wins when its turn comes. Its road may end at an opponent's building as well
+  as start at one (Catanatron's may only start there, so it counts some roads
+  one shorter), and Longest Road is decided again after every road and
+  settlement: the one longest road of five or more; on a tie the holder if it
+  is one of the tied, nobody otherwise (Catanatron gives a cut award to the
+  first longest road, even below five). The bridge plays OpenHex's forms:
+  `GameRules(win_on_turn=True, openhex_roads=True)`; the engine's defaults and
+  the nets' training are Catanatron's.
 - Rules: 1v1 is 15 VP, discard limit 9 (discard when holding 10+), friendly
   robber, balanced dice; 4p is 10 VP, limit 7, normal robber, random dice.
   Both engines carry OpenHex's forms of these as of open-hex `57e47d0`

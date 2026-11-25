@@ -550,7 +550,7 @@ def test_a_draining_bot_with_no_game_in_play_stops_without_queueing(monkeypatch)
 class _TimedSeat:
     """A seat whose one plan (two actions) takes 7 s of a fake clock to decide."""
 
-    last_seq = 0
+    last_seq, left_game = 0, False
     stats: dict = {}  # noqa: RUF012
 
     def __init__(self, clock, *_args):

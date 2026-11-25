@@ -309,6 +309,32 @@ class Replay:
         return Transition(index=index, entry=entry, player=player, kind=kind, action=action,
                           before=before, after=after, **extra)
 
+    def leave(self, entry: Any) -> Transition:
+        """Replay ``[[color, "LEAVE", cards], robber]``: the seat leaves the game
+        (``Game.leave``) giving back ``cards`` (five counts, its whole hand,
+        which the game shows). ``robber``: the tile it had moved the robber to,
+        the steal not made, or None."""
+        index = len(self.entries)
+        (color, _kind, value), robber = entry
+        player = self.colors.index(color)
+        cards = [int(x) for x in value]
+        held = list(self.game.player(player).resources)
+        if player == self.seat:
+            if held != cards:
+                raise ReplayError(f"entry {index}: the seat left holding {cards}, the replay has {held}")
+        elif sum(held) != sum(cards):
+            raise ReplayError(f"entry {index}: {color} left with {sum(cards)} cards, the replay has {sum(held)}")
+        elif held != cards:
+            self._redeal_resources(exact={player: dict(enumerate(cards))})
+        before = Counts.of(self.game)
+        try:
+            self.game.leave(player, None if robber is None else tuple(robber))
+        except (ValueError, RuntimeError) as error:
+            raise ReplayError(f"entry {index} {entry!r} is not playable in the replay: {error}") from None
+        self.entries.append(entry)
+        return Transition(index=index, entry=entry, player=player, kind="LEAVE", action=None,
+                          before=before, after=Counts.of(self.game))
+
     def _check_roll(self, index: int, player: int, dice: tuple[int, ...]) -> None:
         """Balanced dice: refuse (:class:`DiceRefused`) a roll the public dice
         state cannot give ``player``; random dice take any faces."""

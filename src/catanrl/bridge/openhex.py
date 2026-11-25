@@ -75,7 +75,7 @@ import numpy as np
 
 from catanrl.bridge.position import DEVELOPMENT_CARDS, RESOURCES
 from catanrl.bridge.replay import BankShort, DiceRefused, Replay
-from catanrl.bridge.tracking import points_event, transition_events
+from catanrl.bridge.tracking import transition_events
 from catanrl.seeding import derive_seed
 
 logger = logging.getLogger(__name__)
@@ -257,7 +257,8 @@ def openhex_rules(config: Mapping[str, Any], bank_margin: Sequence[int] = (0, 0,
         roads_per_player=int(config.get("maxRoads", 15)),
         settlements_per_player=int(config.get("maxSettlements", 5)),
         cities_per_player=int(config.get("maxCities", 4)),
-        dice_mode=cpp.DiceMode.BALANCED if balanced else cpp.DiceMode.RANDOM)
+        dice_mode=cpp.DiceMode.BALANCED if balanced else cpp.DiceMode.RANDOM, win_on_turn=True,
+        openhex_roads=True)
 
 
 def color_of(name: str) -> str:
@@ -304,6 +305,9 @@ class EventLog:
     entry (the creator's ten counts and the partner), which the seat replays
     as the current player's offer, the answers and the confirmation; the rest
     of a negotiation (:data:`NEGOTIATION`) moves nothing and yields nothing.
+    A seat that leaves (``playerLeft``: three deadlines missed in a row) is one
+    ``LEAVE`` entry with the cards it gave back; the end of its turn, which
+    OpenHex reports after it, is the engine's own doing and yields nothing.
     """
 
     def __init__(self, board: Board, colors: Sequence[str], rates: Any = None) -> None:
@@ -315,6 +319,10 @@ class EventLog:
         self.discards: dict[str, list[str]] = {}
         self.won: str | None = None
         self.roll: Entry | None = None
+        #: The seats that left the game.
+        self.left: set[str] = set()
+        #: The game ended on a knight whose robber move the replay never made.
+        self.robber_dropped = False
 
     def feed(self, event: Mapping[str, Any]) -> list[Entry]:
         kind = event.get("type")
@@ -325,6 +333,7 @@ class EventLog:
             # The game can end on a knight (Largest Army) before its steal:
             # whatever was pending never happens.
             self.won = color_of(event["player"])
+            self.robber_dropped = self.robber is not None
             self.robber, self.discards = None, {}
             return self._flush_roll(None)
         if self.roll is not None:
@@ -332,11 +341,21 @@ class EventLog:
                                     else [[0] * 5 for _ in self.colors])
             if kind == "resourcesProduced":
                 return out
+        color = color_of(event["player"]) if event.get("player") else None
+        if kind == "playerLeft" and color not in self.discards:
+            # It leaves owing its discard (or none): the others' discards so far
+            # stay held, in seat order, until the rest have come. A robber it
+            # moved without a steal yet goes with the leave; another seat's
+            # stays held for its steal.
+            robber = None
+            if self.robber is not None and self.robber[0] == color:
+                robber, self.robber = list(self.robber[1]), None
+            self.left.add(color)
+            return [*out, Entry([[color, "LEAVE", _counts(event.get("resources") or {})], robber])]
         if kind != "resourcesDiscarded":
             out += self._flush_discards()
         if self.robber is not None and kind != "resourceStolen" and kind not in AWARDS:
             out += self._flush_robber(None, None)
-        color = color_of(event["player"]) if event.get("player") else None
         if kind in ("setupSettlementPlaced", "settlementBuilt"):
             out.append(Entry([[color, "BUILD_SETTLEMENT", self.board.node_of(event["vertex"])], None]))
         elif kind == "cityBuilt":
@@ -379,8 +398,12 @@ class EventLog:
         elif kind == "tradeExecuted":
             value = [*_counts(event["offering"]), *_counts(event["requesting"]), color_of(event["partner"])]
             out.append(Entry([[color, "TRADE", value], None]))
+        elif kind == "playerLeft":
+            self.left.add(color)
+            out.append(Entry([[color, "LEAVE", _counts(event.get("resources") or {})], None]))
         elif kind == "turnEnded":
-            out.append(Entry([[color, "END_TURN", None], None]))
+            if color not in self.left:  # (a seat that left: its turn ended as it left)
+                out.append(Entry([[color, "END_TURN", None], None]))
         elif kind == "resourcesProduced":
             logger.warning("openhex: production after its roll was replayed (the events came apart); "
                            "the engine's own payout stands")
@@ -628,6 +651,7 @@ class OpenHexSeat:
         self.closing: dict[int, float] = {}
         self.victim: str | None = None
         self.discarded_at: int | None = None
+        self.left_game = False  # OpenHex took our seat out of the game
         self.waited = 0
         self.owed = 0  # polls a discard still owed has been waited for (plan)
         #: The kinds of difference from OpenHex's state at the last poll, and the polls they have lasted.
@@ -665,6 +689,16 @@ class OpenHexSeat:
     def _negotiation(self, event: Mapping[str, Any]) -> None:
         """Keep :attr:`offers` as the trading events say."""
         kind = event.get("type")
+        if kind == "playerLeft":
+            # Its offers are gone with it, and its answers to the others'.
+            gone = color_of(event["player"])
+            for trade_id in [t for t, offer in self.offers.items() if offer.proposer == gone]:
+                self.offers.pop(trade_id)
+                self.closing.pop(trade_id, None)
+            for offer in self.offers.values():
+                offer.accepting.discard(gone)
+                offer.rejected.discard(gone)
+            return
         if kind == "turnEnded":
             self.offers.clear()
             self.closing.clear()
@@ -747,6 +781,8 @@ class OpenHexSeat:
     def _apply(self, entry: Entry) -> None:
         if entry.record[0][1] == "TRADE":
             self._apply_trade(entry)
+        elif entry.record[0][1] == "LEAVE":
+            self._apply_leave(entry)
         else:
             self._apply_record(entry.record, entry)
         self.entries.append(entry)
@@ -779,6 +815,26 @@ class OpenHexSeat:
                                plain)
         self._apply_record([[mover, "CONFIRM_TRADE", [*give, *get, other]], None], plain)
 
+    def _points_event(self) -> Any:
+        """The game goes on: what that says of each seat's hidden victory point
+        cards (nothing of a seat off its turn: OpenHex's win is the turn's)."""
+        game = self.replay.game
+        return cpp.TrackerEvent.public_victory_points(
+            [game.points_short_of_win(i) for i in range(len(self.colors))])
+
+    def _apply_leave(self, entry: Entry) -> None:
+        """A seat left the game: its cards, which the event shows, go back to
+        the bank, and the game goes on among the others (``Game.leave``)."""
+        tr = self.replay.leave(entry.record)
+        if sum(tr.before.resources[tr.player]):
+            self.tracker.apply(cpp.TrackerEvent.lose(tr.player, list(tr.before.resources[tr.player])))
+        if self.replay.game.winning_color is None:
+            self.tracker.apply(self._points_event())
+        if tr.player == self.seat:
+            self.left_game = True
+            logger.warning("game %s: OpenHex took our seat out of the game (three deadlines missed in a row)",
+                           self.game_id)
+
     def _apply_record(self, record: list, entry: Entry) -> None:
         sizes = None
         if entry.amounts is not None:
@@ -792,13 +848,13 @@ class OpenHexSeat:
             self.stats["production_mismatch"] = self.replay.repairs["production"]
         events = transition_events(tr, self.seat, amounts=entry.amounts)
         if self.replay.game.winning_color is None:
-            events.append(points_event(tr))
+            events.append(self._points_event())
         for event in events:
             self.tracker.apply(event)
 
     @property
     def over(self) -> bool:
-        return self.log.won is not None or self.replay.game.winning_color is not None
+        return self.left_game or self.log.won is not None or self.replay.game.winning_color is not None
 
     @property
     def search(self) -> dict[str, int]:
@@ -844,7 +900,7 @@ class OpenHexSeat:
             elif sum(ours.resources) != int(size):
                 out.append(f"{p['color']} hand size {sum(ours.resources)} vs {size}")
         robber = (state.get("board") or {}).get("robberHex") or (state.get("board") or {}).get("robber")
-        if robber and tuple(game.board.robber_coordinate) != cube(robber):
+        if robber and not self.log.robber_dropped and tuple(game.board.robber_coordinate) != cube(robber):
             out.append(f"robber {tuple(game.board.robber_coordinate)} vs {cube(robber)}")
         # A view shows the balanced dice's deck size only (the rest follows from the rolls).
         # A deck of fewer than 13 cards is refilled before its next draw, so it is the full
@@ -1112,7 +1168,10 @@ class OpenHexSeat:
         of what the move has left: a discard spreads it over its cards, and a knight's robber
         has what the knight left (at least one round, in the knight's reused tree)."""
         native = self.native
-        legal = list(game.playable_actions)
+        # OpenHex's Year of Plenty takes exactly two cards: Catanatron's one card
+        # from a short bank is no move there.
+        legal = [a for a in game.playable_actions
+                 if a.action_type.name != "PLAY_YEAR_OF_PLENTY" or len(a.value) == 2]
         if len(legal) == 1:
             return legal[0]
         self._bind(game)
@@ -1210,7 +1269,7 @@ class OpenHexSeat:
             tracker = self.tracker.copy()
             tracker.apply(cpp.TrackerEvent.play_development_card(self.seat, cpp.DevelopmentCard.KNIGHT))
             tracker.apply(cpp.TrackerEvent.public_victory_points(
-                [int(ahead.player(i).victory_points) for i in range(len(self.colors))]))
+                [int(ahead.points_short_of_win(i)) for i in range(len(self.colors))]))
             robber = self._choose(ahead, tracker)
             coordinate, victim = self._robber(robber)
             self.victim = victim
@@ -1504,6 +1563,9 @@ class OpenHexBot:
                 info, state = reply["game"], reply["state"]
                 if info.get("status") != "active":
                     return self._record(game_id, seat, info)
+                if seat.left_game:
+                    # The game goes on without us: nothing more to play in it.
+                    return self._record(game_id, seat, {**info, "status": "left"})
                 # The search runs in plan(): a plan's first action reports it, the rest
                 # the time since the action before them (OpenHex's per-move duration).
                 started = time.monotonic()
