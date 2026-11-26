@@ -452,11 +452,76 @@ python tools/search_probe.py --pair $E/cfba69278af79d33.json $E/af97f7595f82b53d
 - *The Python hashing is expensive.* It skips 13% of the positions and costs 16% of the time. The engine's cache (@exp:az-eval-cache) does the same skipping in C++.
 - *Evals forward far fewer positions a second than self-play:* 10,600 here on the full-precision kernels against 38,000 in self-play on the half-precision ones (different batch sizes, so not a clean comparison).
 
-*Next* (Claude's suggestions, not queued). Move the search agent's repeat-skipping to the engine's cache (about 15% of a row's time). Allow the half-precision kernels in evals; rows would then no longer be bit-identical to the stored ones, so the baselines would be replayed.
+*Next.* The two levers this pointed to (Claude's suggestions, approved by Marco): the engine's cache in place of the Python hashing, and the half-precision kernels in evals. Built and measured in @exp:search-eval-speed: 2.1×.
 
 #repro(```sh
 # in the wt/eval-groups worktree
 python tools/eval_groups_check.py --json OUT.json
+```)
+
+=== Faster eval rows: the engine's cache and half-precision kernels in the search agent #chip("done") <exp:search-eval-speed>
+#meta(
+  dates: "2026-11-24 – 2026-11-25",
+  owner: "Marco (\"i want the speed levers\"; the two levers were Claude's suggestions in the block above)",
+  config: "MCTS spec kernels=fused16; CATANRL_EVAL_CACHE_MB (256 by default, 0 for the old path); main at 850b408",
+  wandb: (),
+  records: ("00823d23", "e0d783da"),
+)
+#tldr[Two changes to the evals' search agent. It now skips repeated positions with the engine's cache (@exp:az-eval-cache) in place of hashing rows in Python, and it can run the half-precision kernels self-play uses (`kernels=fused16`). Together a standard row is *2.1× as fast*: 18.4 games a minute against 8.7, so 2,000 games take 1.8 h in place of 3.8 h. The cache plays identical games. Half precision is a slightly different agent with its own record ids: on `2p-graph-m-3` and the same 2,000 games it scores 70.10% against 69.40% in full precision (p = 0.42, no detectable difference). The standard row uses `kernels=fused16` from now on (Marco, 2026-11-25); its baseline is `2p-graph-m-3`'s row `00823d23`.]
+
+*Question.* How much faster is an eval row with each lever, and does either change the play?
+
+#lead[What changed.]
+- *Engine cache in the agent.* One cache per agent model (256 MB, 207,124 `graph-m` positions), emptied when the model changes. It is not part of a spec or a record id: stored records keep theirs. `CATANRL_EVAL_CACHE_MB=0` gives the Python path back. The default applies to every search agent, the deployed bots' too (Marco: fine).
+- *`kernels=fused16`* is a value of the search spec with its own ids; specs with `kernels=fused` or none keep theirs (tested on 80 stored records).
+- *Why half precision was not allowed before.* A forward whose halves overflow was evaluated again in float32 as a whole chunk, so a position's answer depended on what shared its chunk. In strict mode the agent now halves a flagged chunk until each overflowing position is alone; only those take the float32 answer.
+- *A check before the first search.* Half and float32 values are compared on up to 64 positions and the agent refuses a difference above 0.01 (measured: 0.0015 at most).
+
+#lead[Timing] (2026-11-25, an idle GPU; `2p-graph-m-2` in the 1,024-sim search against fr3's fair raw bot, held-out games, strict determinism, 12 threads; each arm in its own process).
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([64 games, 64 in flight], [Today's path], [Cache], [Half precision], [Both]),
+    [Games a minute], [7.10], [8.35], [11.09], [*14.12*],
+    [Against today's path], [1.00×], [1.18×], [1.56×], [*1.99×*],
+    [Positions searched a second], [11,664], [13,715], [17,949], [22,851],
+    [Share sent to the GPU], [88.4%], [84.0%], [88.2%], [83.7%],
+    [Waiting for the GPU], [393 s], [388 s], [204 s], [201 s],
+    [Hashing rows in Python], [83 s], [0 s], [80 s], [0 s],
+    [Engine (collect, apply, its cache)], [56 s], [62 s], [53 s], [61 s],
+    [Peak GPU memory], [0.58 GB], [0.58 GB], [0.38 GB], [0.38 GB],
+    [Peak host memory], [2.71 GB], [2.84 GB], [2.77 GB], [2.92 GB],
+  ),
+  caption: [The four arms. Today's path and the cache arm played the same games from the same search statistics; so did the two half-precision arms.],
+) <tab:search-eval-speed>
+- *At the real row's 256 games in flight:* 8.78 → 18.15 games a minute, *2.07×* (256 games; hashing was 23% of the old path's time there).
+- *The cache is exact.* Identical games and identical search statistics with it on and off, on both kernels. It skips more positions than the Python hashing (16% against 12%) and costs 6 s of engine time for 83 s of hashing.
+- *Half precision halves the wait for the card* (393 s → 204 s). No position needed the float32 answer in 25 million evaluated.
+
+#lead[The first real row] (`2p-graph-m-3`, 2,000 held-out games, 2026-11-25 17:31 to 19:20).
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([`2p-graph-m-3` in the 1,024-sim search], [Score], [95% interval], [Wall time], [Record]),
+    [Full precision, Python hashing], [69.40%], [#ci[67.3][71.4]], [3.8 h], [`e0d783da`],
+    [Half precision, engine cache], [70.10%], [#ci[68.1][72.1]], [*1.8 h*], [`00823d23`],
+  ),
+  caption: [The same net on the same 2,000 games. 1,746 games end the same way; 134 are won only in half precision and 120 only in full, +0.7 pp, exact McNemar p = 0.42.],
+) <tab:search-eval-speed-row>
+- *2.1× on the real row* (18.4 against 8.7 games a minute), with the CPU test suite running beside its first 40 minutes.
+- *No detectable difference in strength.* The two precisions search slightly different trees, so rows are paired only within one precision.
+- *From now on* the standard row is `kernels=fused16`, and a new net is paired with `00823d23`. Full-precision rows stay valid among themselves (`b68edd64`, `e0d783da` on the rules of 2026-11-24).
+
+#lead[Tests.] 14 new CPU tests and 2 on the GPU; the CPU suite passes (1,338, and 6 that failed only because another session edited the vendored server during the run pass when run again); the 49 GPU kernel tests pass. Not checked: the seat networks' half-precision kernels in strict mode, and a real overflow on a production net (the path is tested on a stub and a scaled `graph-s`).
+
+#repro(```sh
+python tools/eval_speed_check.py --json OUT.json                     # the four arms, 64 games
+python tools/eval_speed_check.py --games 256 --envs 256 --arms python fused16+cache
+catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --num-envs 256 --threads 12 --infer-rows 512 \
+  "MCTS:ckpt=az-2p-graph-m-uniform/main+900@e1800#313282dc2c53:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused16" \
+  "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
 ```)
 
 == Sampling noise at chance nodes

@@ -1246,7 +1246,7 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 - *The net moved.* Agreement with the iteration-900 net fell from 85.3% to 82.9% over the leg (25-iteration means); policy loss rose from 0.342 to 0.380 with the entropy of its targets (0.272 to 0.315 nats): the targets got softer, the fit to them did not get worse by more than that. Value loss flat (0.495 to 0.497). No truncated games; 21% of positions answered from the cache throughout.
 - *The rules moved the baseline little:* `2p-graph-m-2` scores 66.40% on the new rules against 67.00% on the old (different games, not paired).
 - *Not separated:* leg two differs from leg one by its learning rate and by 600 against 300 iterations; whether 300 more at 1.5e-5 would also have gained is not known.
-- *Registered* as `2p-graph-m-3` (`az-2p-graph-m-uniform/main+900@e1800#313282dc2c53`). Not deployed; best-2p unchanged.
+- *Registered* as `2p-graph-m-3` (`az-2p-graph-m-uniform/main+900@e1800#313282dc2c53`). Not deployed; best-2p unchanged. Its row on the half-precision kernels, the baseline for later nets: 70.10% (`00823d23`; @exp:search-eval-speed).
 
 #repro(```sh
 catanrl fork az-2p-graph-m-uniform/main --as main+300 --set train.iterations=1200 \
