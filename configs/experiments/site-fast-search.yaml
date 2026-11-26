@@ -1,0 +1,46 @@
+# does a short search beat the policy the site's house bots play now? (marco, 2026-11-26: "yes,
+# queue it", after 2,048 sims measured 8.4 s a move for graph-m and 4.8 s for gen-base on the bot vm,
+# too slow for live play). the vm's one-search-at-a-time cost is ~4.1 ms a simulation for graph-m and
+# ~2.4 ms for gen-base, so these budgets are the ones that fit about 1-2 s a move there:
+# graph-m 256 sims 1.3 s, 512 ~2.6 s; gen-base 256 sims 0.6 s.
+#
+# rows (each searcher against the same checkpoint's site spec, gumbel root as in the review):
+#   - 1v1, graph-m 256 and 512 sims vs BELIEF:worlds=16 (the site's 1v1 bot), heldout-2p-fr (the
+#     site's 1v1 room plays these openhex rules; main's engine has the 2026-11-24 rule changes the
+#     site does not), first 1,000 boards in both seat orders, 2,000 games a row: +-2.2 pp at 50%,
+#     80% power for a ~3.1 pp edge.
+#   - 4p, gen-base 256 sims in one seat vs three POLICY seats (the site's 4p bot), heldout-4p first
+#     500 boards in all four rotations, 2,000 games: +-1.9 pp around the 25% even share. no trades
+#     (the site's 4p tables trade).
+#
+# decision (fixed before launch): a budget is a deploy candidate if its row is above the even share
+# (50%, 25%) at 95%. deploying still waits for marco's go, and the house bot would then grade near
+# 100% in the reviews (it would play the reviewer's own search).
+#
+# cost (estimate): search-depth-2p's 1,024-sim cells took ~1.1 h a 1,000 games on the fused kernels;
+# graph-m is ~3.4x slower a simulation, fused16 ~1.5x faster, so ~1.5 h at 256 and ~3 h at 512;
+# the 4p row ~1-2 h. ~6 h in all.
+#
+# launch (main; the gpu alone, after leg three's `run done`):
+#   catanrl run configs/experiments/site-fast-search.yaml
+name: site-fast-search
+kind: eval
+eval:
+  final:
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup:
+        - "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=256:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16:pending=64:kernels=fused16"
+        - "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"
+    - suite: {name: heldout-2p-fr, boards: 1000}
+      lineup:
+        - "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=512:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16:pending=64:kernels=fused16"
+        - "BELIEF:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:worlds=16"
+    - suite: {name: heldout-4p, boards: 500}
+      lineup:
+        - "MCTS:ckpt=gen-base-2/main@e3800#ac792590f9f1:sims=256:dets=1:root=gumbel:c_puct=0.75:gumbel_m=16:pending=64"
+        - "POLICY:ckpt=gen-base-2/main@e3800#ac792590f9f1"
+        - "POLICY:ckpt=gen-base-2/main@e3800#ac792590f9f1"
+        - "POLICY:ckpt=gen-base-2/main@e3800#ac792590f9f1"
+runtime: {device: cuda, threads: 12, num_envs: 256, infer_rows: 512}
+meta:
+  wandb: {project: catanrl-v2, entity: myang2-california-institute-of-technology-caltech}
