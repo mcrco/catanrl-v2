@@ -1,0 +1,14 @@
+# The house's game reviews (catanrl analyst; deploy/catanrl-analyst.service on the bot VM).
+# The first engine whose `when` matches a finished game's room config reviews it: the
+# nets the house plays on the site (the VM's tree encodes rows as they were trained;
+# 2p-graph-m-3's newer rows need a newer tree, whose rules are OpenHex's, not the site's).
+# Every decision of a game is searched together and the network runs in ONNX Runtime
+# (onnx_threads; "auto": 2 when onnxruntime is installed, else torch).
+server: wss://catan.marcoya.ng
+poll_s: 30
+engines:
+  - label: 2p-graph-m-1
+    when: {num_players: 2}
+    spec: "MCTS:ckpt=graph-m-2p-lr/main@e22711#673425d606b5:sims=256:dets=2:root=gumbel:gumbel_m=64:threads=2"
+  - label: mix-graph-seat-s-2
+    spec: "MCTS:ckpt=gen-base-2/main@e3800#ac792590f9f1:sims=256:dets=2:root=gumbel:gumbel_m=64:threads=2"

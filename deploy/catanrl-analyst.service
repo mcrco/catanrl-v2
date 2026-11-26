@@ -1,0 +1,31 @@
+# /etc/systemd/system/catanrl-analyst.service
+# Game review for catan.marcoya.ng, on the OCI VM beside the house: analyzes
+# the site's finished games that people played (deploy/analyst.yaml, see
+# src/catanrl/bridge/analysis.py) and sends each analysis to the server.
+# Same token as the house (/etc/catanrl/house.env). Two threads, low
+# priority: the house's moves come first.
+[Unit]
+Description=catanrl analyst: game review on catan.marcoya.ng
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=catanrl
+Group=catanrl
+EnvironmentFile=/etc/catanrl/house.env
+Environment=OMP_NUM_THREADS=2
+Environment=CATANRL_RUNS_DIR=/opt/catanrl-v2-1123/runs
+WorkingDirectory=/opt/catanrl-v2-1123
+ExecStart=/opt/catanrl-v2-1123/.venv/bin/catanrl analyst deploy/analyst.yaml --state /var/lib/catanrl/analyst
+Nice=15
+CPUQuota=200%
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/catanrl
+
+[Install]
+WantedBy=multi-user.target

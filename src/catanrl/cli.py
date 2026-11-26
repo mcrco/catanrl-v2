@@ -150,6 +150,14 @@ def _parser() -> argparse.ArgumentParser:
     house.add_argument("--state", default="house", help="keys, transcripts and games.jsonl go here")
     house.add_argument("--device", default="cpu")
 
+    analyst = sub.add_parser("analyst", help="analyze the site's finished games for its replays (game review)")
+    analyst.add_argument("config", help="a YAML file: server, poll_s and engines (label, spec, when)")
+    analyst.add_argument("--server", help="override the file's server URL")
+    analyst.add_argument("--state", default="analyst", help="analyses.jsonl goes here")
+    analyst.add_argument("--device", default="cpu")
+    analyst.add_argument("--once", action="store_true", help="analyze what is queued, then exit")
+    analyst.add_argument("--game", help="analyze this game only (even if analyzed before), then exit")
+
     oh = sub.add_parser("openhex", help="keep our bots queued on OpenHex (open-hex.web.app)",
                         description="catanrl openhex CONFIG [--check | --describe NAME], catanrl openhex stats "
                                     "CONFIG, catanrl openhex release CONFIG TAG, or catanrl openhex fetch CONFIG "
@@ -317,6 +325,21 @@ def _cmd_house(args) -> int:
     house = House(args.server or settings["server"], tables, state_dir=args.state,
                   server_key=settings.get("server_key"), think_s=settings.get("think_s", 0.8), device=args.device)
     asyncio.run(house.run())
+    return 0
+
+
+def _cmd_analyst(args) -> int:
+    import logging
+
+    from catanrl.bridge.analysis import Service, load_engines
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+    settings, engines = load_engines(args.config)
+    service = Service(args.server or settings["server"], engines, state_dir=args.state, device=args.device,
+                      poll_s=settings.get("poll_s", 120))
+    if args.game:
+        return 0 if service.analyze(args.game) is not None else 1
+    service.run(once=args.once)
     return 0
 
 
@@ -565,6 +588,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_house(args)
         if args.command == "openhex":
             return _cmd_openhex(args)
+        if args.command == "analyst":
+            return _cmd_analyst(args)
         if args.command == "play":
             from catanrl.bridge.server_bot import play_tui
 
