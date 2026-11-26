@@ -157,6 +157,8 @@ def _parser() -> argparse.ArgumentParser:
     analyst.add_argument("--device", default="cpu")
     analyst.add_argument("--once", action="store_true", help="analyze what is queued, then exit")
     analyst.add_argument("--game", help="analyze this game only (even if analyzed before), then exit")
+    analyst.add_argument("--redo-all", action="store_true",
+                         help="analyze again every listed game people played (after the analysis changed), then exit")
 
     oh = sub.add_parser("openhex", help="keep our bots queued on OpenHex (open-hex.web.app)",
                         description="catanrl openhex CONFIG [--check | --describe NAME], catanrl openhex stats "
@@ -339,6 +341,9 @@ def _cmd_analyst(args) -> int:
                       poll_s=settings.get("poll_s", 120))
     if args.game:
         return 0 if service.analyze(args.game) is not None else 1
+    if args.redo_all:
+        logging.getLogger(__name__).info("%d games analyzed again", service.redo_all())
+        return 0
     service.run(once=args.once)
     return 0
 

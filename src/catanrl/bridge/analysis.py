@@ -23,15 +23,24 @@ actions, so every one of them is visited and the action played has a value
 whatever its prior: a PUCT root leaves a move the network dislikes
 unvisited, which is exactly the move a review is for.
 
+The mover's information, not hindsight: the hidden hands are the worlds of the mover's
+tracker, so a move is judged on what its player could know. With ``world_choice=likely``
+those are the ``dets`` most likely deals, each weighted by its probability, not a couple
+of random draws; a position with too many deals to list (some 3- and 4-player ones) is
+searched on sampled worlds. A move graded ``inaccuracy`` or
+worse is searched again with ``recheck`` simulations (2048), and that grade stands: a
+single small search can call a fine move a blunder.
+
 The result is integers only (the lobby takes no floats)::
 
-    {"version": 1,
-     "engine": {"label": ..., "spec": ...},
+    {"version": 2,
+     "engine": {"label": ..., "spec": ..., "recheck": simulations},
      "evals": [[index, [per-mille win probability per seat, in state.colors order]], ...],
      "moves": [{"i": index, "c": color, "p": played, "b": best, "a": best action,
-                "g": grade, "n": legal actions, "top": [[action, value, visits], ...]}, ...],
+                "g": grade, "n": legal actions, "s": stakes, "d": recheck simulations (if any),
+                "top": [[action, value, visits], ...]}, ...],
      "summary": {"label": ..., "accuracy": {color: percent}, "grades": {color: {grade: n}},
-                 "decisions": n}}
+                 "decisions": n, "rechecked": n}}
 
 ``index`` is the number of log entries before the decision (the replay's
 frame). A Catan move moves the odds far less than a chess move (most cost
@@ -40,7 +49,10 @@ times as large: grades by the loss in percentage points, ``best`` (the
 search's own choice), ``excellent`` (< 0.5), ``good`` (< 1.25),
 ``inaccuracy`` (< 2.5), ``mistake`` (< 5), ``blunder``; accuracy the mean
 per move of chess.com's curve ``103.17 exp(-0.04354 x) - 3.17`` at
-``x = 4 loss``. (Preliminary: set from the first games' losses.)
+``x = 4 loss``, each move weighted by its decision's stakes (``s``: the best searched
+action's win chance over the mean of the searched actions', capped at 10 points), so a
+choice between equal options, or any move in a decided position, counts for next to
+nothing. (Preliminary: set from the first games' losses.)
 
 Speed: a game's decisions are independent, so they are searched together (a
 chunk at a time), each forward carrying a leaf of every search; and on a CPU
@@ -68,7 +80,7 @@ from catanrl.bridge.agent import ViewAgent, action_key
 
 logger = logging.getLogger(__name__)
 
-VERSION = 1
+VERSION = 2
 TRADE_TYPES = {"OFFER_TRADE", "ACCEPT_TRADE", "REJECT_TRADE", "CONFIRM_TRADE", "CANCEL_TRADE"}
 TRADE_PROMPTS = {"DECIDE_TRADE", "DECIDE_ACCEPTEES"}
 #: (grade, the loss in percentage points it stays under).
@@ -87,11 +99,29 @@ def grade(loss_pp: float, best: bool) -> str:
     return "blunder"
 
 
-def accuracy(losses_pp: Sequence[float]) -> int | None:
+def accuracy(losses_pp: Sequence[float], weights: Sequence[float] | None = None) -> int | None:
+    """The mean of chess.com's per-move score (on losses ``SCALE`` times as large), each
+    move weighted by ``weights`` (its decision's stakes) when given."""
     if not losses_pp:
         return None
     scores = [min(100.0, max(0.0, 103.1668 * math.exp(-0.04354 * SCALE * loss) - 3.1669)) for loss in losses_pp]
+    if weights is not None and sum(weights) > 0:
+        return int(round(sum(w * x for w, x in zip(weights, scores)) / sum(weights)))
     return int(round(sum(scores) / len(scores)))
+
+
+def stakes(actions: Mapping[str, Sequence[Any]], seats: int) -> float:
+    """What the choice was worth, in percentage points of win chance: the best searched
+    action's value over the mean of every searched action's. Near zero where the options
+    are alike, or the position is decided (won or lost, nothing moves the odds)."""
+    values = [_win(q, seats) for _, q, visits in actions.values() if visits > 0 and math.isfinite(q)]
+    if len(values) < 2:
+        return 0.0
+    return max(0.0, max(values) - sum(values) / len(values)) * 100.0
+
+
+#: The most a decision weighs in a seat's accuracy (percentage points of stakes).
+MAX_WEIGHT = 10.0
 
 
 def _key(action: Sequence[Any]) -> str:
@@ -111,6 +141,12 @@ class _Searcher(ViewAgent):
 
     queued: dict | None = None
     _onnx: Any = None
+    #: The simulations of the searches added now (None: the spec's).
+    sims: int | None = None
+    #: The spec takes the likely worlds: a position with too many deals to list is refused
+    #: (``refused``), for the analyst's sampling searcher.
+    likely: bool = False
+    refused: bool = False
 
     def _act(self, row: np.ndarray, mask: np.ndarray, seed: int, game: Any, tracker: Any) -> int:
         native = self.native
@@ -122,8 +158,14 @@ class _Searcher(ViewAgent):
                 logger.exception("ONNX Runtime could not run the network: torch runs it")
         trackers = tracker.tracker if native.needs_trackers else None
         game = game.copy()
-        sid = native.pool.add(game, seed=int(seed), tracker=trackers,
-                              deal=native.tracker_mode if trackers is not None else None)
+        try:
+            sid = native.pool.add(game, seed=int(seed), tracker=trackers,
+                                  deal=native.tracker_mode if trackers is not None else None, simulations=self.sims)
+        except ValueError as error:
+            if not (self.likely and "likely worlds need" in str(error)):
+                raise
+            self.refused = True
+            return int(np.flatnonzero(mask)[0])
         self.queued = {"sid": sid, "game": game, "mask": mask.copy(), "seat": int(tracker.seat),
                        "colors": list(tracker.colors)}
         return int(np.flatnonzero(mask)[0])  # (the replay plays the logged move whatever this is)
@@ -266,22 +308,49 @@ def onnx_available() -> bool:
 
 class Analyst:
     """Analyzes archive records with one search spec (an ``MCTS:`` spec;
-    ``root=gumbel`` recommended, see the module doc). ``onnx``: run the network in ONNX
-    Runtime with that many threads (None: torch; the default when onnxruntime is
-    installed). ``chunk``: decisions searched together."""
+    ``root=gumbel`` recommended, see the module doc).
+
+    ``onnx``: run the network in ONNX Runtime with that many threads (None: torch; the
+    default when onnxruntime is installed). ``chunk``: decisions searched together.
+    With ``world_choice=likely`` in the spec, a position with too many deals to list is
+    searched on sampled worlds instead (the same spec without it). ``recheck``: the
+    simulations of a second, deeper search of every move graded ``recheck_from`` or
+    worse, whose grade replaces the first (None: no second search)."""
 
     def __init__(self, spec: Any, *, label: str = "", device: str = "cpu", infer_rows: int = 256,
-                 onnx: int | None | str = "auto", chunk: int = 128) -> None:
+                 onnx: int | None | str = "auto", chunk: int = 128, recheck: int | None = 2048,
+                 recheck_from: str = "inaccuracy") -> None:
         if isinstance(spec, str) and not spec.startswith("MCTS:"):
             raise ValueError("an analysis searches: give an MCTS spec")
         self.spec = spec if isinstance(spec, str) else "MCTS"
         self.label = label or self.spec
         self.chunk = int(chunk)
-        # mode=fast: rows are batched (a strict CPU evaluator forwards them one at a time).
-        self.agent = _Searcher(spec, device=device, infer_rows=infer_rows, mode="fast", max_games=8)
+        self.recheck = int(recheck) if recheck else None
+        names = [name for name, _ in GRADES] + ["blunder"]
+        if recheck_from not in names:
+            raise ValueError(f"recheck_from is one of {names}")
+        self.recheck_from = names.index(recheck_from)
         if onnx == "auto":
             onnx = 2 if device == "cpu" and onnx_available() else None
-        self.agent._onnx = onnx
+        # mode=fast: rows are batched (a strict CPU evaluator forwards them one at a time).
+        self.agent = self._searcher(spec, device, infer_rows, onnx)
+        self.fallback: _Searcher | None = None
+        if isinstance(spec, str) and ":world_choice=likely" in spec:
+            self.agent.likely = True
+            sampled = spec.replace(":world_choice=likely", "")
+            self._fallback_args = (sampled, device, infer_rows, onnx)
+
+    @staticmethod
+    def _searcher(spec: Any, device: str, infer_rows: int, onnx: Any) -> _Searcher:
+        searcher = _Searcher(spec, device=device, infer_rows=infer_rows, mode="fast", max_games=8)
+        searcher._onnx = onnx
+        return searcher
+
+    def _sampler(self) -> _Searcher:
+        """The searcher of positions the likely worlds cannot list (built at first need)."""
+        if self.fallback is None:
+            self.fallback = self._searcher(*self._fallback_args)
+        return self.fallback
 
     def analyze(self, record: Mapping[str, Any], progress: Callable[[int, int], None] | None = None) -> dict:
         playable: list = []
@@ -289,58 +358,112 @@ class Analyst:
         log = record["final_state"]["action_records"]
         game_id = record["final_state"]["game"]["id"]
         supply = (record["room"].get("config") or {}).get("supply")
-        self.agent.supply = supply
+        for searcher in (self.agent, self.fallback):
+            if searcher is not None:
+                searcher.supply = supply
+        self._supply = supply
+        started = time.monotonic()
+        decisions = [i for i, (doc, legal) in enumerate(zip(docs, playable)) if self._decision(doc, legal, log[i][0])]
+        flagged_estimate = len(decisions) // 8 if self.recheck else 0
+        total = len(decisions) + flagged_estimate
+
+        def first(done: int) -> None:
+            if progress is not None:
+                progress(done, total)
+
+        graded = {}
+        for index, last in self._pass(game_id, docs, playable, log, decisions, None, first).items():
+            graded[index] = self._grade(docs[index], log[index][0], last)
+        rechecked = 0
+        if self.recheck:
+            worst = [i for i, (_, move) in graded.items() if move is not None and self._rank(move["g"]) >= self.recheck_from]
+
+            def second(done: int) -> None:
+                if progress is not None:
+                    progress(len(decisions) + done * flagged_estimate // max(1, len(worst)), total)
+
+            for index, last in self._pass(game_id, docs, playable, log, worst, self.recheck, second).items():
+                evaluation, move = self._grade(docs[index], log[index][0], last)
+                if move is not None:
+                    move["d"] = self.recheck
+                graded[index] = (evaluation, move)
+                rechecked += 1
         evals, moves = [], []
         losses: dict[str, list] = {}
+        weights: dict[str, list] = {}
         grades: dict[str, Counter] = {}
-        started = time.monotonic()
-        # Decisions to search: (index, the decision's document, its queued search).
-        pending: list[tuple[int, dict, dict]] = []
-        decisions = [i for i, (doc, legal) in enumerate(zip(docs, playable)) if self._decision(doc, legal, log[i][0])]
+        for index in sorted(graded):
+            evaluation, move = graded[index]
+            evals.append(evaluation)
+            if move is None:
+                continue
+            moves.append(move)
+            losses.setdefault(move["c"], []).append((move["b"] - move["p"]) / 10)
+            weights.setdefault(move["c"], []).append(min(MAX_WEIGHT, move["s"] / 10))
+            grades.setdefault(move["c"], Counter())[move["g"]] += 1
+        summary = {
+            "label": self.label,
+            "accuracy": {c: accuracy(v, weights[c]) for c, v in losses.items()},
+            "grades": {c: dict(v) for c, v in grades.items()},
+            "decisions": len(moves),
+            "rechecked": rechecked,
+            "seconds": int(time.monotonic() - started),
+        }
+        return {"version": VERSION, "engine": {"label": self.label, "spec": self.spec, "recheck": self.recheck},
+                "evals": evals, "moves": moves, "summary": summary}
+
+    @staticmethod
+    def _rank(name: str) -> int:
+        return ([n for n, _ in GRADES] + ["blunder"]).index(name) if name != "best" else -1
+
+    def _pass(self, game_id: str, docs: list, playable: list, log: list, indices: Sequence[int],
+              sims: int | None, progress: Callable[[int], None]) -> dict:
+        """Search the decisions at ``indices`` (``sims`` simulations, None: the spec's), a
+        chunk at a time: {index: the root's statistics}."""
+        results: dict[int, dict] = {}
+        pending: list[tuple[int, _Searcher, dict]] = []
         done = 0
 
-        def search(batch: list[tuple[int, dict, dict]]) -> None:
+        def search(batch: list[tuple[int, _Searcher, dict]]) -> None:
             nonlocal done
-            try:
-                results = self.agent.flush([queued for _, _, queued in batch])
-            except Exception:
-                logger.exception("game %s: the searches of actions %d to %d failed", game_id, batch[0][0],
-                                 batch[-1][0])
-                results = [None] * len(batch)
-            for (index, doc, _), last in zip(batch, results):
-                if last is not None:
-                    self._grade(index, doc, log[index][0], last, evals, moves, losses, grades)
+            for searcher in {id(s): s for _, s, _ in batch}.values():
+                part = [(index, queued) for index, s, queued in batch if s is searcher]
+                try:
+                    found = searcher.flush([queued for _, queued in part])
+                except Exception:
+                    logger.exception("game %s: the searches of actions %d to %d failed", game_id, part[0][0],
+                                     part[-1][0])
+                    continue
+                for (index, _), last in zip(part, found):
+                    results[index] = last
             done += len(batch)
-            if progress is not None:
-                progress(done, len(decisions))
+            progress(done)
 
-        for index in decisions:
-            doc, action = docs[index], log[index][0]
+        for index in indices:
+            action = log[index][0]
             legal = json.loads(json.dumps(playable[index]))
-            view = client_view(doc, action[0])
-            self.agent.queued = None
+            view = client_view(docs[index], action[0])
+            searcher = self.agent
+            searcher.queued, searcher.refused, searcher.sims = None, False, sims
             try:
-                self.agent.decide(view, legal)
+                searcher.decide(view, legal)
+                if searcher.queued is None and searcher.refused:
+                    searcher = self._sampler()
+                    searcher.supply = self._supply
+                    searcher.queued, searcher.sims = None, sims
+                    searcher.decide(view, legal)
             except Exception:
                 logger.exception("game %s: the position at action %d failed", game_id, index)
                 continue
-            if self.agent.queued is None:  # a fallback (no position): nothing to search
+            if searcher.queued is None:  # a fallback (no position): nothing to search
                 continue
-            pending.append((index, doc, self.agent.queued))
+            pending.append((index, searcher, searcher.queued))
             if len(pending) >= self.chunk:
                 search(pending)
                 pending = []
         if pending:
             search(pending)
-        summary = {
-            "label": self.label,
-            "accuracy": {c: accuracy(v) for c, v in losses.items()},
-            "grades": {c: dict(v) for c, v in grades.items()},
-            "decisions": len(moves),
-            "seconds": int(time.monotonic() - started),
-        }
-        return {"version": VERSION, "engine": {"label": self.label, "spec": self.spec},
-                "evals": evals, "moves": moves, "summary": summary}
+        return results
 
     @staticmethod
     def _decision(doc: Mapping[str, Any], legal: Sequence[Any], action: Sequence[Any]) -> bool:
@@ -349,8 +472,9 @@ class Analyst:
                     or action[0] != doc["colors"][doc["current_player_index"]])
 
     @staticmethod
-    def _grade(index: int, doc: Mapping[str, Any], action: Sequence[Any], last: Mapping[str, Any], evals: list,
-               moves: list, losses: dict, grades: dict) -> None:
+    def _grade(doc: Mapping[str, Any], action: Sequence[Any], last: Mapping[str, Any]) -> tuple[list, dict | None]:
+        """(the eval at the decision, the graded move or None)."""
+        index = len(doc["action_records"])
         color = action[0]
         seats = len(doc["colors"])
         root, colors = last["seat"], last["colors"]
@@ -359,25 +483,24 @@ class Analyst:
         absolute = [0.0] * seats
         for k in range(seats):
             absolute[doc["colors"].index(_color(colors[(root + k) % seats]))] = float(value[k])
-        evals.append([index, _per_mille(absolute)])
+        evaluation = [index, _per_mille(absolute)]
         actions = last["actions"]
         played = actions.get(_key(action))
         ranked = sorted(actions.values(), key=lambda a: (-a[2], -_finite(a[1])))
         best_action, best_q, _ = ranked[0]
         if played is None or not math.isfinite(played[1]):
-            return  # not in the action space, or never visited
+            return evaluation, None  # not in the action space, or never visited
         is_best = _key(action) == action_key(best_action)
         loss = 0.0 if is_best else max(0.0, _win(best_q, seats) - _win(played[1], seats)) * 100.0
-        g = grade(loss, is_best)
-        losses.setdefault(color, []).append(loss)
-        grades.setdefault(color, Counter())[g] += 1
-        moves.append({
+        return evaluation, {
             # (The most visited action's value can sit a little under the one played.)
             "i": index, "c": color, "p": _pm(_win(played[1], seats)),
             "b": max(_pm(_win(best_q, seats)), _pm(_win(played[1], seats))),
-            "a": best_action, "g": g, "n": len(actions),
+            "a": best_action, "g": grade(loss, is_best), "n": len(actions),
+            # The decision's stakes, per mille of win chance: its weight in accuracy.
+            "s": int(round(10 * stakes(actions, seats))),
             "top": [[a, _pm(_win(q, seats)), v] for a, q, v in ranked[:TOP]],
-        })
+        }
 
 
 def _color(color: Any) -> str:
@@ -475,6 +598,20 @@ class Service:
             self._analysts[label] = Analyst(str(engine["spec"]), label=label, device=self.device,
                                             onnx=engine.get("onnx_threads", "auto"))
         return self._analysts[label]
+
+    def redo_all(self) -> int:
+        """Analyze again every game the server lists that people played (20 actions or more),
+        newest first, e.g. after the analysis changed; returns how many were sent."""
+        games = self._get("/api/games?limit=200").get("games", [])
+        sent = 0
+        for game in games:
+            if game.get("actions", 0) < 20:
+                continue
+            try:
+                sent += self.analyze(game["game_id"]) is not None
+            except Exception:
+                logger.exception("game %s: the analysis failed", game["game_id"])
+        return sent
 
     def analyze(self, game_id: str) -> dict | None:
         """Analyze one game and send the result; returns the log line."""
