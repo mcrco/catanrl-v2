@@ -8,7 +8,7 @@
 # weights, parents included. Roles point at a name and move when a better net replaces it.
 # Docs only for now: `ckpt=<name>` resolves after graph-m-2p-lr ends (runner code freeze).
 roles:
-  best-2p: 2p-graph-m-1        # the yardstick every new 1v1 net plays (Marco, 2026-11-10; fr3 before)
+  best-2p: 2p-graph-m-3        # the yardstick every new 1v1 net plays (Marco, 2026-11-25; 2p-graph-m-1 from 2026-11-10, fr3 before)
   best-4p: 4p-graph-s-1
 models:
   2p-graph-s-1:
@@ -64,19 +64,19 @@ models:
     rules: base-2p-fr
     from: scratch
     steps: 3_000_032_256
-    use: graph-m from scratch at half graph-s's learning rate; 56.5% vs 2p-graph-s-3 (fr3) on heldout-2p-fr; best-2p since 2026-11-10
+    use: graph-m from scratch at half graph-s's learning rate; 56.5% vs 2p-graph-s-3 (fr3) on heldout-2p-fr; best-2p from 2026-11-10 to 2026-11-25
   2p-graph-m-2:
     ref: "az-2p-graph-m-uniform/main@e900#73249d10e959"
     rules: base-2p-fr
     from: 2p-graph-m-1
     steps: 3_029_523_456
-    use: 2p-graph-m-1 after 900 iterations (152,862 games) of search training (az-2p-tricks' recipe without the surprise weighting, dice-state input, outcome and soft policy heads); in the 1,024-sim search 67.0% vs fr3's raw bot against 64.65% with 2p-graph-s-8 (p = 0.086) and 57.25% with 2p-graph-m-1; raw policy level with 2p-graph-m-1; OpenHex 1v1-search-v4 (released 2026-11-21)
+    use: 2p-graph-m-1 after 900 iterations (152,862 games) of search training (az-2p-tricks' recipe without the surprise weighting, dice-state input, outcome and soft policy heads); in the 1,024-sim search 67.0% vs fr3's raw bot against 64.65% with 2p-graph-s-8 (p = 0.086) and 57.25% with 2p-graph-m-1; raw policy 52.2% vs 2p-graph-m-1's on the rules of 2026-11-24 (5,000 games, p = 0.002; 51.0% on the old rules); OpenHex 1v1-search-v4 (released 2026-11-21)
   2p-graph-m-3:
     ref: "az-2p-graph-m-uniform/main+900@e1800#313282dc2c53"
     rules: base-2p-fr
     from: 2p-graph-m-2
     steps: 3_059_014_656
-    use: 2p-graph-m-2 after 900 more iterations (152,460 games) on 1,600-sim recorded searches, 300 at lr 1.5e-5 (no gain) then 600 at 5e-5 on the rules of 2026-11-24; in the 1,024-sim search 69.40% vs fr3's raw bot against 66.40% with 2p-graph-m-2 on the same games (p = 0.017); 70.10% on the half-precision kernels (record 00823d23, the baseline for later rows); the best 1v1 search net; not deployed
+    use: 2p-graph-m-2 after 900 more iterations (152,460 games) on 1,600-sim recorded searches, 300 at lr 1.5e-5 (no gain) then 600 at 5e-5 on the rules of 2026-11-24; in the 1,024-sim search 69.40% vs fr3's raw bot against 66.40% with 2p-graph-m-2 on the same games (p = 0.017); 70.10% on the half-precision kernels (record 00823d23, the baseline for later rows); raw policy 52.1% vs 2p-graph-m-1's (5,000 games, p = 0.003), level with 2p-graph-m-2's; the best 1v1 search net; best-2p since 2026-11-25; not deployed
   4p-graph-s-1:
     ref: "ppo-4p/main@e3650#813b2c61338f"
     rules: base-4p
