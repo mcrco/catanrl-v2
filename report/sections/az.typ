@@ -1149,15 +1149,15 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 
 #lead[Cost.] Planned: the bundle ran 42.7 iterations an hour, which would make 900 iterations 21 h. With piece 4 the run makes about 53: about 17 h on the local GPU, plus 2.4 h for the final row (an eighth of the wall-clock). Launched at 07:15 on 2026-11-17 after `horizon-2p` was stopped (@exp:recipe-horizon) and the branches were merged. Actual: 18.0 h of self-play (51.5 iterations an hour) and 2.4 h for the row, 12% of the 20.4 h.
 
-=== 900 more iterations for `graph-m` on deeper recorded searches: `az-2p-graph-m-uniform/main+300` and `main+900` #chip("running") <exp:az-graph-m-deeper>
+=== 900 more iterations for `graph-m` on deeper recorded searches, and 600 that added nothing: `az-2p-graph-m-uniform/main+300`, `main+900`, `main+1500` #chip("done") <exp:az-graph-m-deeper>
 #meta(
-  dates: "2026-11-23 19:30 – 2026-11-25 16:10; leg three since 2026-11-25 20:13",
+  dates: "2026-11-23 19:30 – 2026-11-26 17:42",
   owner: "Marco (from a list of recommendations by another model, which Marco passed on)",
   config: "configs/experiments/az-2p-graph-m-uniform.yaml, forked with the overrides below",
   wandb: (("az-2p-graph-m-uniform-main-300-b441114b", "az-2p-graph-m-uniform/main+300"), ("az-2p-graph-m-uniform-main-900-5728c09a", "az-2p-graph-m-uniform/main+900"), ("az-2p-graph-m-uniform-main-1500-62ba2db7", "az-2p-graph-m-uniform/main+1500")),
-  records: ("af97f759", "348e9bb4", "e0d783da", "b68edd64", "bfa482f5", "bac68ddb"),
+  records: ("af97f759", "348e9bb4", "e0d783da", "b68edd64", "bfa482f5", "bac68ddb", "00823d23", "5340d1ac"),
 )
-#tldr[`2p-graph-m-2` (@exp:az-graph-m) continued from iteration 900 with three changes kept from the list (Marco, 2026-11-23: "ok yes lets do it"): recorded searches of 1,600 simulations on a tenth of the moves (were 600 on a quarter), a quarter of the fast-searched moves stored as value-only rows (were none), and learning rate 1.5e-5 (was 5e-5). *Leg one (300 iterations at 1.5e-5, 11.8 h): no gain*, 65.45% against 67.00% on the same 2,000 games (p = 0.17); the net hardly moved. *Leg two (600 more at the parent's 5e-5, 19.8 h; Marco: "lets do higher lr"): +3.0 pp.* On the rules the engine plays since 2026-11-24, iteration 1,800 scores *69.40%* in the 1,024-sim search against 66.40% for `2p-graph-m-2` on the same 2,000 games (337 games won only by the new net, 277 only by the old; p = 0.017). Registered as `2p-graph-m-3`: the best 1v1 search net so far.]
+#tldr[`2p-graph-m-2` (@exp:az-graph-m) continued from iteration 900 with three changes kept from the list (Marco, 2026-11-23: "ok yes lets do it"): recorded searches of 1,600 simulations on a tenth of the moves (were 600 on a quarter), a quarter of the fast-searched moves stored as value-only rows (were none), and learning rate 1.5e-5 (was 5e-5). *Leg one (300 iterations at 1.5e-5, 11.8 h): no gain*, 65.45% against 67.00% on the same 2,000 games (p = 0.17); the net hardly moved. *Leg two (600 more at the parent's 5e-5, 19.8 h; Marco: "lets do higher lr"): +3.0 pp.* On the rules the engine plays since 2026-11-24, iteration 1,800 scores *69.40%* in the 1,024-sim search against 66.40% for `2p-graph-m-2` on the same 2,000 games (337 games won only by the new net, 277 only by the old; p = 0.017). Registered as `2p-graph-m-3`: the best 1v1 search net so far. *Leg three (600 more on the same settings, 19.3 h): no further gain*, 69.00% against `2p-graph-m-3`'s 70.10% on the same 2,000 games (p = 0.37); `2p-graph-m-3` stays the best.]
 
 *Question.* Does `2p-graph-m-2` (67.00% in the 1,024-sim search against fr3's fair raw bot) gain from 900 more iterations on this recipe, and is the gain already visible after 300?
 
@@ -1263,9 +1263,24 @@ python tools/explore_diag.py report --search search.npz --referee referee.npz --
 - *Leg one and two did not move the raw policy* (52.2% → 52.1%); their +3.0 pp is in the search.
 - *best-2p moved to `2p-graph-m-3`* (Marco, 2026-11-25): ahead of `2p-graph-m-1` by 2 pp raw and by about 13 pp in the 1,024-sim search (57.25% → 67.00% on the old rules, then +3.0 pp). The search line's rows keep fr3's fair raw bot as their opponent, so that they pair with the stored baseline.
 
-#lead[Leg three: 600 more iterations, the same settings] (Marco, 2026-11-25: "just do 1 and 3 for now"; launched 2026-11-25 20:13). #chip("running")
+#lead[Leg three: 600 more iterations, the same settings] (Marco, 2026-11-25: "just do 1 and 3 for now"; 2026-11-25 20:13 to 2026-11-26 15:53, then the row until 17:42).
 - *Setup.* A fork of leg two's end (weights, optimizer moments, replay) to iteration 2,400. Nothing else changes: learning rate 5e-5, 1,600-sim recorded searches, the position cache on. Estimate from leg two: 119 s an iteration, about 20 h.
 - *Eval.* One row at the end, in the run: the last checkpoint in the 1,024-sim search on the half-precision kernels against fr3's fair raw bot, the lineage's 2,000 held-out games, paired by game with `2p-graph-m-3`'s row `00823d23` (70.10%). The row is #sym.plus.minus 2.0 pp and detects a paired difference of about 2.7 pp; about 1.8 h, 8% of the run's time.
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([Net in the 1,024-sim search, half-precision kernels], [Score against fr3's fair raw bot], [95% interval], [Record]),
+    [*`2p-graph-m-3`* (iteration 1,800, the start)], [*70.10%*], [#ci[68.1][72.1]], [`00823d23`],
+    [Leg three's end (iteration 2,400)], [69.00%], [#ci[66.9][71.0]], [`5340d1ac`],
+  ),
+  caption: [The same 2,000 held-out games on the rules of 2026-11-24. Paired by game: 267 won only by the new net, 289 only by `2p-graph-m-3`, −1.1 pp, exact McNemar p = 0.37.],
+) <tab:az-graph-m-deeper-leg3>
+- *No further gain.* 19.3 h of self-play (600 iterations at 116 s, 101,000 games) and a 1.8 h row; the row would have shown a gain of leg two's size. Leg two's +3.0 pp did not repeat on the same settings.
+- *The net kept moving, slowly.* Agreement with the iteration-900 net fell from 82.7% to 81.6% (25-iteration means, first to last); leg two moved it 2.4 points.
+- *Health steady:* policy loss 0.383 to 0.384, entropy of its targets 0.317 to 0.322 nats, value loss 0.493 to 0.495, the search's top move differing from the net's on 7% of full searches, 21% of positions answered from the cache, no truncated games. Nothing collapsed; nothing improved.
+- *Not registered.* `2p-graph-m-3` stays best-2p and the baseline row. The checkpoint is kept (`az-2p-graph-m-uniform/main+1500@e2400#6c3f1e5194f0`).
+- *What it means for a next leg.* More iterations on these settings alone are not a good use of 20 h. Changes on the table, none decided: 128 learning steps per iteration instead of 64 (about 30% of the rows carry a policy target, so each target is drawn about 4 times), a longer temperature schedule, more training boards.
 
 #repro(```sh
 catanrl fork az-2p-graph-m-uniform/main --as main+300 --set train.iterations=1200 \
