@@ -212,7 +212,9 @@ def on_l40s_32_together(runs: list[list[str]], capacity: bool = False) -> dict:
     return _bench(runs, capacity, together=True)
 
 
-B1 = ["b1", "--iterations", str(ITERATIONS)]
+# gpu_bench.py's B1 now defaults to the graph-m run; these jobs stay on the graph-s run the image is
+# seeded with (START_FILES) and the earlier tables were measured on
+B1 = ["b1", "--iterations", str(ITERATIONS), "--b1-run", START, "--b1-start", f"{START}@e1800#7c44ec80540a"]
 
 
 def _together(processes: int, threads: int) -> list[list[str]]:
