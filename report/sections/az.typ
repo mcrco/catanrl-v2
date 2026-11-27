@@ -662,6 +662,75 @@ modal run tools/modal_bench.py --job l40s-b1 --out OUT   # cpu | a10g-a | l40s-a
 perf record -F 149 -t <pid of catanrl run> --call-graph dwarf,32768 -- sleep 20
 ```)
 
+=== What a new card would buy: the GPU's time by operation on `graph-m` #chip("done") <exp:az-gpu-profile>
+#meta(
+  dates: "2026-11-27",
+  owner: "Marco (\"profile the gpu passes in general so that ik how to pick out a new graphics card to buy\")",
+  config: "tools/gpu_bench.py all (main at aecf706); 2p-graph-m-3; leg three's self-play config",
+  wandb: (),
+  records: (),
+)
+#tldr[One 29-minute run on this box's RTX 2070 Super times every workload on today's `graph-m` nets and splits the card's time by operation. Self-play now keeps the card busy 87–91% of the time (it was the CPU's main thread on `graph-s`, @exp:az-hardware), but the CPU's share is a floor: a card twice as fast gives *1.62×* an iteration, three times as fast 1.77×, an infinitely fast one 1.84×. The card's time in a forward is 40% our own gather kernels, 35% half-precision matrix products and 19% small float32 products. Memory is not a limit: 3.2 GB at peak in self-play, 4.6 GB in PPO.]
+
+*Question.* Where does the card's time go in each workload, and what would a faster card give?
+
+#lead[Setup.]
+- *Machine.* RTX 2070 Super (8 GB, PCIe gen 3 ×16), Ryzen 3700X, 12 engine threads, nothing else on the GPU.
+- *Self-play.* Leg three's config (@exp:az-graph-m-deeper) from `2p-graph-m-3` for 7 iterations; medians of the last four. The position cache is on.
+- *Eval row.* The standard row's search agent (1,024 sims, half-precision kernels, 512 positions a forward) on 64 held-out games with 64 in flight.
+- *Deployed-style search.* One game, 32,768 sims, full-precision kernels, 64 positions a forward.
+- *PPO.* `graph-m-2p-lr`'s config from scratch, full and half precision.
+- *One forward by operation.* Each call of a recorded forward is issued again many times between two device timestamps; the parts sum to 100% of the forward.
+- *Prediction.* The recorded forwards made s times as fast, everything else (engine, Python, transfers) as measured.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto, auto, auto),
+    align: (left, right, right, right, right, right, right),
+    header: ([Workload], [Now], [Card busy], [2× card], [3× card], [Any card, at most], [Peak memory]),
+    [Self-play iteration (with its learning step)], [113.2 s], [85–89%], [1.62×], [1.77×], [1.84×], [3.2 GB],
+    [Standard eval row's search agent], [14.5 games/min], [70–75%], [1.54×], [1.87×], [3.33×], [0.9 GB],
+    [Deployed-style search], [13,672 sims/s], [67–72%], [1.51×], [1.82×], [3.08×], [0.4 GB],
+    [`graph-m` PPO, full precision], [6,092 steps/s], [98%], [1.96×], [], [], [4.6 GB],
+    [`graph-m` PPO, half precision], [11,719 steps/s], [96%], [1.92×], [], [], [3.7 GB],
+  ),
+  caption: [Each workload now and with a faster card (predicted). Card busy: the forwards alone, and with the transfers around them. The PPO shares and speedups are upper bounds.],
+) <tab:az-gpu-profile>
+
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto),
+    align: (left, right, right, right),
+    header: ([One half-precision forward of 512 positions], [ms], [Share], [GFLOP/s]),
+    [Our kernels (gather neighbours, sum, normalise)], [4.24], [40.4%], [],
+    [Half-precision matrix products, the four layers], [2.95], [28.2%], [20,400],
+    [Half-precision matrix products, the heads], [0.77], [7.3%], [24,100],
+    [Float32 matrix products, the first layer], [1.72], [16.5%], [],
+    [Float32 matrix products, the heads], [0.29], [2.8%], [],
+    [Other (mostly `relu`)], [0.51], [4.9%], [],
+    [*The forward*], [*10.47*], [*100%*], [],
+  ),
+  caption: [The card's time in one forward of `2p-graph-m-3` (49,064 positions a second). Moving the 512 positions to the card (5.5 MB) takes 0.50 ms more and the answers back 0.14 ms.],
+) <tab:az-gpu-profile-ops>
+
+*Reading.*
+- *Self-play is limited by the card up to a CPU floor.* Of an iteration's 113.2 s, 61.4 s is engine and Python work that no card removes. A card three times as fast already gets 1.77× of the possible 1.84×; beyond that only a faster CPU or engine work helps.
+- *PPO scales with the card.* On the rented L40S (@exp:az-hardware) the update ran 2.8× as fast and the whole epoch 3.0×.
+- *What in a card matters.* Two things carry three quarters of the forward: half-precision matrix products (tensor cores) and our kernels, which copy and sum rows and so follow the card's memory speed (the memory controller is busy 55% of the time). The float32 products are small ones the card runs far below its peak rate.
+- *What does not matter.* Memory beyond 8 GB (peak 4.6 GB), and the slot: transfers are 4–6% of the card's busy time.
+- *Half precision is worth 1.8×.* At 64 positions a forward: 1.70 ms in half precision, 3.07 ms in float32. A card or driver that cannot run half-precision products inside the recorded forward (the open question for AMD's ROCm, Marco's 2026-11-24 question) loses most of that.
+- *Power.* 117 W mean in self-play, 132 W in PPO, 168 W at peak.
+- *Two kernel ideas from the list Marco pasted, sized.* Bias-free head products: the head products already run as fast as the layers' (24,100 against 20,400 GFLOP/s), so there is little to win. Folding the dice weights into the first layer touches about 1% of the forward. Neither is worth a new baseline row.
+- *Limits.* Predictions scale the forwards only and assume the CPU side stays as measured; the rented-card ratios of @exp:az-hardware are on `graph-s` forwards and `graph-m` updates, not this forward; no other card was measured here.
+
+*Next* (Claude's suggestion, not queued). The same per-operation run on a rented A10G and L40S (under \$1) would turn "a card s times as fast" into measured cards.
+
+#repro(```sh
+python tools/gpu_bench.py all --out OUT          # 29 min; --quick: a few seconds a part
+python tools/gpu_bench.py summary --out OUT      # the tables again from OUT's JSON
+```)
+
 === Freeing search trees on the pool's threads #chip("done") <exp:az-free-trees>
 #meta(
   dates: "2026-11-21",
