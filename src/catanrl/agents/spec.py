@@ -129,6 +129,12 @@ class MctsParams:
     #: keyed through the engine SearchConfig (``max_pending`` in ``key_dict()["search"]``),
     #: not the canonical spec, which stays as it was for every record made at 1.
     pending: int = field(default=1, metadata={"execution": True})
+    #: Search groups: the games in flight split into that many pools, which take turns on the
+    #: device while the engine collects and applies the others' leaves (catanrl.search.pipeline,
+    #: as self-play's ``runtime.search_groups``), on one evaluation cache. Every search is its
+    #: own seed and tree, so under a strict evaluator the games are those of one group to the
+    #: bit: like ``dedup`` it is how the searches run, and in no key.
+    groups: int = field(default=1, metadata={"execution": True})
     device: str = field(default="auto", metadata={"execution": True})
     threads: int = field(default=0, metadata={"execution": True})
 
@@ -374,6 +380,8 @@ def _build_params(key: str, args: Sequence[Any], named: Mapping[str, Any]) -> An
             raise SpecError("MCTS: pending counts leaves per forward (>= 1)")
         if params.deadline < 0:
             raise SpecError("MCTS: deadline is seconds a decision may search (> 0; 0 for none)")
+        if params.groups < 1:
+            raise SpecError("MCTS: groups counts search groups (>= 1; 1 for one pool)")
     if key == "BELIEF" and params.worlds < 1:
         raise SpecError("BELIEF: worlds must be positive")
     if key == "PREDICT" and not params.predictor:

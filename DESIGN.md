@@ -696,6 +696,13 @@ Examples: `POLICY:arch-lineage/graph-s-s42.g1@ref`,
   `fused16` (their half-precision variant, about 1.5x the rows a second;
   outputs within half's rounding of `fused`'s, so another agent with a key
   and eval ids of its own, compared with `fused` like any other agent).
+  `groups` (execution-only like `dedup`, default 1) splits the games in
+  flight into that many search groups, which take turns on the device and
+  share the evaluation cache. On CUDA the rounds go through self-play's
+  pipeline (page-locked rows, a round's forwards queued, one wait a round;
+  `CATANRL_EVAL_PIPELINE=0` holds them to the serial loop, in no key): the
+  same games from the same searches in strict mode, whatever the loop and
+  the groups, so neither is in a key or a record.
 * **`tracker`** (MCTS with dets, BELIEF): `pool` (default) or `exact`, the
   hand tracker mode the worlds are dealt from (1.5). It is in the canonical
   spec and `key_dict()`, so eval records tell the two apart. The native

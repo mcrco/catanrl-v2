@@ -1,4 +1,4 @@
-"""Throughput of an MCTS eval row on the two speed levers of its search agent, alone and together.
+"""Throughput of an MCTS eval row on the speed levers of its search agent, alone and together.
 
 Plays the first ``--games`` games of a suite with the row's lineup through the native harness,
 once per arm, each in a process of its own so the peaks are that arm's:
@@ -9,24 +9,38 @@ once per arm, each in a process of its own so the peaks are that arm's:
   (``CATANRL_EVAL_CACHE_MB=--cache-mb``, 256);
 * ``fused16``: the half-precision kernels (``kernels=fused16`` in the spec, another agent with a
   key of its own), the Python dedup;
-* ``fused16+cache``: both.
+* ``fused16+cache``: both;
+* ``pipeline``: ``fused16+cache`` with the search's rounds through self-play's pipeline
+  (``run_groups``: page-locked rows, a round's forwards queued, one wait a round) instead of
+  the serial loop (``run_pools``), which the four arms above are held to
+  (``CATANRL_EVAL_PIPELINE=0`` there, ``1`` here);
+* ``pipeline+groups``: ``pipeline`` with the games in flight in two search groups
+  (``groups=2`` in the spec, execution-only: the same agent, key and canonical spec), which
+  take turns on the device.
+
+The first four are played unless ``--arms`` names others; the loop's comparison is
+``--arms fused16+cache pipeline pipeline+groups``.
 
 Per arm it prints games a minute, decisions a second, leaf rows a second (searched by the
 engine, and forwarded to the network), the share forwarded, where the wall time went (the
-search's rounds: waiting for the device, hashing in Python, the engine's collect and apply,
-which hashes for the engine's cache; the rest of the search agent's ``act``; the opponent's
-``act``; the harness and the environment), peak GPU memory, peak host RSS, the search's score,
+search's rounds: waiting for the device, which is the evaluator's call in the serial loop and
+the pipeline's ``result`` in the other; queueing a round's forwards on the pipeline; hashing
+in Python; the engine's collect and apply, which hashes for the engine's cache; the rest of
+the search agent's ``act``; the opponent's ``act``; the harness and the environment), peak
+GPU memory, peak host RSS, the search's score,
 a digest over every game's row and one over the searches (the rows' digest with the search
 agent's summed search statistics and counters: two networks a rounding apart can play the same
 moves over a few games from searches that differ). A progress line with a rate and an ETA is
 printed every ``--every`` seconds. Nothing is recorded and nothing is written under the runs
 directory.
 
-The games are the same in every arm. In strict mode (the suite's determinism) the cache must
-not change a row or a search: ``python`` and ``cache`` must share both digests, and ``fused16``
-and ``fused16+cache`` theirs (the half-precision network is within rounding of the float32 one,
-not its bits, so its searches are its own). The check says which arms played identical games,
-which searched identically, and fails (exit 1) if a pair that must agree does not.
+The games are the same in every arm. In strict mode (the suite's determinism) neither the
+cache, the loop nor the groups may change a row or a search: ``python`` and ``cache`` must
+share both digests, and ``fused16``, ``fused16+cache``, ``pipeline`` and ``pipeline+groups``
+theirs (the half-precision network is within rounding of the float32 one, not its bits, so its
+searches are its own). The check says which arms played identical games, which searched
+identically, and fails (exit 1) if a pair that must agree does not, or if an arm's searches
+ran in the other loop than its own.
 The defaults are the standard row (the eval of
 ``configs/experiments/az-2p-graph-m-uniform.yaml``) on 64 games in flight, to be run on a GPU
 nothing else is using::
@@ -40,7 +54,9 @@ starts and refuses an arm that would leave less than ``--min-free-gb`` available
 once (checked twice a second) if the machine falls under it while playing.
 
 ``--device cpu`` is for a smoke of the tool itself (small ``--games``, a spec with few
-simulations and no ``kernels``, ``--arms python cache``): the fused kernels are CUDA's.
+simulations and no ``kernels``): the fused kernels are CUDA's, so there every arm leaves the
+spec's kernels alone, and nothing is asynchronous, so the pipeline's forwards run while they
+are queued.
 """
 
 from __future__ import annotations
@@ -56,15 +72,30 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 SPEC = ("MCTS:ckpt=az-2p-graph-m-uniform/main@e900#73249d10e959:sims=1024:dets=1:pending=64:reuse=true"
         ":transpositions=true:kernels=fused")
 OPPONENT = "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
-#: arm -> (the spec's kernels, None: the spec's own; whether the engine's cache is on).
-ARMS = {"python": (None, False), "cache": (None, True), "fused16": ("fused16", False), "fused16+cache": ("fused16", True)}
-#: Arms that must play identical games in strict mode: the cache changes no row.
-PAIRS = (("python", "cache"), ("fused16", "fused16+cache"))
+
+
+class Arm(NamedTuple):
+    kernels: str | None  # the spec's kernels on a CUDA device (None: the spec's own)
+    cache: bool  # the engine's cache (else the Python dedup)
+    pipeline: bool = False  # the rounds through the pipeline (else the serial loop)
+    groups: int = 1  # the spec's search groups
+
+
+ARMS = {"python": Arm(None, False), "cache": Arm(None, True), "fused16": Arm("fused16", False),
+        "fused16+cache": Arm("fused16", True), "pipeline": Arm("fused16", True, pipeline=True),
+        "pipeline+groups": Arm("fused16", True, pipeline=True, groups=2)}
+#: The arms played unless --arms names others: the two levers before the pipeline.
+DEFAULT_ARMS = ("python", "cache", "fused16", "fused16+cache")
+#: Arms that must play identical games in strict mode: the cache, the loop and the groups change no row.
+PAIRS = (("python", "cache"), ("fused16", "fused16+cache"), ("fused16+cache", "pipeline"),
+         ("fused16+cache", "pipeline+groups"), ("pipeline", "pipeline+groups"))
 CACHE_ENV = "CATANRL_EVAL_CACHE_MB"
+PIPELINE_ENV = "CATANRL_EVAL_PIPELINE"
 TREE_MB = 11.0  # a kept tree at 1,024 simulations (measured on the standard row's evals)
 PROCESS_GB = 2.5  # the process without trees (torch, CUDA's host side, the networks): an allowance
 #: The search seat's decisions in a game of the standard row, for the ETA before games finish.
@@ -92,17 +123,23 @@ def tree_gb(spec: str, in_flight: int) -> float:
     return in_flight * TREE_MB * max(1.0, (sims / 1024) ** 1.6) / 1024  # 11 MB at 1,024, ~100 MB at 4,096
 
 
-def arm_spec(spec: str, arm: str) -> str:
-    """``spec`` with the arm's kernels in place of its own (a spec without any gains the part)."""
-    kernels = ARMS[arm][0]
-    if kernels is None:
-        return spec
-    parts = [part for part in spec.split(":") if not part.startswith("kernels=")]
-    return ":".join([*parts, f"kernels={kernels}"])
+def arm_spec(spec: str, arm: str, device: str = "cuda") -> str:
+    """``spec`` with the arm's kernels in place of its own (a spec without any gains the part;
+    on a CPU, where there are no kernels to choose, the spec's are left) and the arm's groups."""
+    kernels, groups = ARMS[arm].kernels, ARMS[arm].groups
+    parts = [part for part in spec.split(":") if not part.startswith("groups=")]
+    if kernels is not None and device.startswith("cuda"):
+        parts = [*(part for part in parts if not part.startswith("kernels=")), f"kernels={kernels}"]
+    return ":".join([*parts, f"groups={groups}"] if groups != 1 else parts)
 
 
 def arm_cache_mb(args, arm: str) -> float:
-    return float(args.cache_mb) if ARMS[arm][1] else 0.0
+    return float(args.cache_mb) if ARMS[arm].cache else 0.0
+
+
+def arm_env(args, arm: str) -> dict[str, str]:
+    """The variables an arm's agent is built under: the cache's megabytes and the search's loop."""
+    return {CACHE_ENV: repr(arm_cache_mb(args, arm)), PIPELINE_ENV: str(int(ARMS[arm].pipeline))}
 
 
 class Clock:
@@ -131,7 +168,7 @@ class Clock:
 def measure(args, arm: str) -> dict:
     """Play the games on ``arm``; the numbers of the run."""
     megabytes = arm_cache_mb(args, arm)
-    os.environ[CACHE_ENV] = repr(megabytes)  # read when the agent is built
+    os.environ.update(arm_env(args, arm))  # read when the agent is built
     import torch
 
     from catanrl import canon
@@ -139,12 +176,12 @@ def measure(args, arm: str) -> dict:
     from catanrl.agents.spec import resolve_agent
     from catanrl.eval.harness import play_schedule
     from catanrl.eval.suites import Suite, load_suite
-    from catanrl.search import BatchEvaluator, DedupEvaluator
+    from catanrl.search import BatchEvaluator, DedupEvaluator, Pipeline
 
     base = load_suite(args.suite)
     players = max(game.num_players for game in base.games())
     suite = Suite(**{**base.__dict__, "boards": min(base.boards, -(-args.games // players))})
-    spec = arm_spec(args.spec, arm)
+    spec = arm_spec(args.spec, arm, args.device)
     resolved = [resolve_agent(spec), resolve_agent(args.opponent)]
     games = suite.schedule(len(resolved))[: args.games]
     in_flight = min(args.envs, len(games))
@@ -159,18 +196,23 @@ def measure(args, arm: str) -> dict:
         raise SystemExit(f"{arm}: that would leave {free - need:.1f} GB available, under --min-free-gb "
                          f"{args.min_free_gb}: lower --envs or free memory")
 
-    # The clocks go on the classes before the agents are built.
+    # The clocks go on the classes before the agents are built. The device is waited for in the
+    # evaluator's call (the serial loop) and in the pipeline's result, behind forwards that its
+    # submit queued (on a CPU they run there).
     clock = Clock()
     BatchEvaluator.__call__ = clock.timed(lambda c: f"forward/{c.slot}", BatchEvaluator.__call__)
     DedupEvaluator.__call__ = _hashing(clock, DedupEvaluator.__call__)
-    native.run_searches = clock.timed("rounds", native.run_searches, count=lambda rows: rows)
+    Pipeline.result = clock.timed(lambda c: f"forward/{c.slot}", Pipeline.result)
+    Pipeline.submit = clock.timed(lambda c: f"queue/{c.slot}", Pipeline.submit)
+    native.run_pools = clock.timed("rounds/serial", native.run_pools, count=lambda rows: rows)
+    native.run_groups = clock.timed("rounds/pipeline", native.run_groups, count=lambda result: result[0])
 
     agents = [agent.native(device=args.device, infer_rows=args.infer_rows, mode=suite.determinism)
               for agent in resolved]
     search, opponent = agents
     if not hasattr(search, "search_stats"):
         raise SystemExit("--spec must be an MCTS spec")
-    if (search.cache is not None) != ARMS[arm][1]:
+    if (search.cache is not None) != ARMS[arm].cache:
         raise SystemExit(f"{arm}: the agent's cache is {'on' if search.cache is not None else 'off'} "
                          f"(dedup=false in the spec, or --cache-mb 0?)")
     python = isinstance(search.evaluator, DedupEvaluator)
@@ -178,9 +220,13 @@ def measure(args, arm: str) -> dict:
     search.act = clock.timed("act/search", _in_slot(clock, "search", search.act))
     opponent.act = clock.timed("act/opponent", _in_slot(clock, "opponent", opponent.act))
 
+    if search.groups != ARMS[arm].groups:
+        raise SystemExit(f"{arm}: the agent searches in {search.groups} groups, not {ARMS[arm].groups}")
+
     def leaves() -> int:
         """Leaf rows the engine asked for: the cache's count, or what the rounds handed the evaluator."""
-        return int(search.cache_stats["leaves"]) if search.cache is not None else clock.counts["rounds"]
+        return int(search.cache_stats["leaves"]) if search.cache is not None else \
+            clock.counts["rounds/serial"] + clock.counts["rounds/pipeline"]
 
     rows: list[dict] = []
     stop = threading.Event()
@@ -224,7 +270,14 @@ def measure(args, arm: str) -> dict:
     print(line(), flush=True)
 
     seconds = clock.seconds
+    # The loop the searches ran in: the arm's own, or the comparison is not the one it is named for.
+    ran = sorted(name for name in ("serial", "pipeline") if seconds[f"rounds/{name}"] > 0)
+    if ran != ["pipeline" if ARMS[arm].pipeline else "serial"]:
+        raise SystemExit(f"{arm}: the searches ran in the {' and the '.join(ran) or 'no'} loop "
+                         f"({PIPELINE_ENV}={os.environ[PIPELINE_ENV]}, {type(search.evaluator).__name__})")
+    rounds = seconds["rounds/serial"] + seconds["rounds/pipeline"]
     waiting = seconds["forward/search"]
+    queueing = seconds["queue/search"]
     hashing = seconds["hashing/search"]
     cache = search.cache_stats or None
     counters = {name: int(value) for name, value in sorted(search.counters.items())}
@@ -232,7 +285,8 @@ def measure(args, arm: str) -> dict:
     rows_digest = canon.digest(sorted(rows, key=lambda row: row["game_id"]))
     return {
         "arm": arm, "spec": spec, "canonical": resolved[0].canonical, "opponent": args.opponent,
-        "cache_mb": megabytes, "kernels": inner.kernels, "suite": suite.name, "mode": suite.determinism,
+        "cache_mb": megabytes, "kernels": inner.kernels, "loop": ran[0], "groups": int(search.groups),
+        "suite": suite.name, "mode": suite.determinism,
         "device": args.device, "games": len(rows), "in_flight": in_flight, "wall_s": wall,
         "games_per_min": len(rows) * 60 / wall,
         "decisions": int(search.counters["decisions"]), "decisions_per_s": search.counters["decisions"] / wall,
@@ -247,11 +301,12 @@ def measure(args, arm: str) -> dict:
         "float32_chunks": int(inner.exact_forwards), "float32_rows": int(getattr(inner, "exact_rows", 0)),
         "seconds": {
             "search_act": seconds["act/search"],
-            "search_rounds": seconds["rounds"],
+            "search_rounds": rounds,
             "search_rounds_device_wait": waiting,
+            "search_rounds_queueing": queueing,
             "search_rounds_hashing": hashing,
-            "search_rounds_engine": seconds["rounds"] - waiting - hashing,
-            "search_act_rest": seconds["act/search"] - seconds["rounds"],
+            "search_rounds_engine": rounds - waiting - queueing - hashing,
+            "search_act_rest": seconds["act/search"] - rounds,
             "opponent_act": seconds["act/opponent"],
             "opponent_forwards": seconds["forward/opponent"],
             "harness_and_env": wall - seconds["act/search"] - seconds["act/opponent"],
@@ -320,6 +375,7 @@ def report(results: list[dict]) -> str:
             result["arm"],
             result["kernels"],
             f"engine, {result['cache_mb']:g} MB" if cache else "Python" if result["dedup"] else "none",
+            result["loop"] if result["groups"] == 1 else f"{result['loop']}, {result['groups']} groups",
             f"{result['games']} in {wall / 60:.1f} min",
             f"{result['games_per_min']:.2f}",
             f"{result['decisions_per_s']:.1f}",
@@ -330,7 +386,7 @@ def report(results: list[dict]) -> str:
             f"{result['float32_rows']:,} rows in {result['float32_chunks']:,} chunks"
             if result["kernels"] == "fused16" else "n/a",
             share("search_act"), share("search_rounds"), share("search_rounds_device_wait"),
-            share("search_rounds_hashing"), share("search_rounds_engine"),
+            share("search_rounds_queueing"), share("search_rounds_hashing"), share("search_rounds_engine"),
             share("search_act_rest"), share("opponent_act"), share("opponent_forwards"), share("harness_and_env"),
             "n/a" if gpu is None else f"{gpu:.2f} GB ({result['gpu_peak_reserved_gb']:.2f} reserved)",
             f"{result['rss_peak_gb']:.2f} GB",
@@ -339,9 +395,10 @@ def report(results: list[dict]) -> str:
             result["searches_digest"],
         ]
 
-    names = ["", "kernels", "repeated rows", "games", "games/min", "decisions/s", "leaf rows/s (searched)",
-             "leaf rows/s (forwarded)", "share forwarded", "cache entries", "float32 again (half overflow)",
-             "search act", "  rounds", "    waiting for the device", "    hashing (Python dedup)",
+    names = ["", "kernels", "repeated rows", "rounds' loop", "games", "games/min", "decisions/s",
+             "leaf rows/s (searched)", "leaf rows/s (forwarded)", "share forwarded", "cache entries",
+             "float32 again (half overflow)", "search act", "  rounds", "    waiting for the device",
+             "    queueing forwards (pipeline)", "    hashing (Python dedup)",
              "    engine (collect, apply, its cache)", "  rest (add, re-root, select)", "opponent act",
              "  its forwards", "harness and environment", "peak GPU memory", "peak host RSS", "search's score",
              "rows digest", "searches digest"]
@@ -356,7 +413,8 @@ def report(results: list[dict]) -> str:
         lines.append(f"searched identically (the same games from the same search statistics): {', '.join(group)}"
                      if len(group) > 1 else f"searched on its own: {group[0]}")
     for a, b in disagreeing(results):
-        lines.append(f"{a.upper()} AND {b.upper()} DISAGREE: strict rows and searches must not depend on the cache")
+        lines.append(f"{a.upper()} AND {b.upper()} DISAGREE: strict rows and searches must not depend on the "
+                     f"cache, the loop or the groups")
     if any(result["mode"] != "strict" for result in results):
         lines.append("(fast mode: rows may differ between arms, forwards of other sizes)")
     first = results[0]
@@ -370,10 +428,11 @@ def report(results: list[dict]) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--spec", default=SPEC, help="the MCTS spec (the fused16 arms replace its kernels)")
+    parser.add_argument("--spec", default=SPEC, help="the MCTS spec (the fused16 and pipeline arms replace its "
+                        "kernels, pipeline+groups sets its groups)")
     parser.add_argument("--opponent", default=OPPONENT)
-    parser.add_argument("--arms", nargs="+", default=list(ARMS), choices=list(ARMS), metavar="ARM",
-                        help=f"the arms, in the order played (default: {' '.join(ARMS)})")
+    parser.add_argument("--arms", nargs="+", default=list(DEFAULT_ARMS), choices=list(ARMS), metavar="ARM",
+                        help=f"the arms, in the order played, of {' '.join(ARMS)} (default: {' '.join(DEFAULT_ARMS)})")
     parser.add_argument("--suite", default="heldout-2p-fr", help="its determinism is the evaluators' mode "
                         "(dev-2p-fr plays fast)")
     parser.add_argument("--games", type=int, default=64, help="the suite's first games")
@@ -414,7 +473,7 @@ def main(argv: list[str] | None = None) -> None:
             # A process per arm: its peak RSS and GPU memory are its own, its trees and its cache are freed.
             done = subprocess.run([sys.executable, str(Path(__file__).resolve()), *passed, "--one", arm,
                                    "--out", str(out)], check=False,
-                                  env={**os.environ, "WANDB_MODE": "disabled", CACHE_ENV: repr(arm_cache_mb(args, arm))})
+                                  env={**os.environ, "WANDB_MODE": "disabled", **arm_env(args, arm)})
             if done.returncode == LOW_MEMORY:
                 raise SystemExit(f"{arm} stopped for memory (--min-free-gb {args.min_free_gb})")
             if done.returncode:

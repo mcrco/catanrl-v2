@@ -77,7 +77,8 @@ from catanrl.models import CatanModel, build_model
 from catanrl.models.rows import feature_names
 from catanrl.search.dedup import DedupEvaluator
 from catanrl.search.evaluator import BatchEvaluator
-from catanrl.search.pool import NetworkCache, eval_cache_mb, make_pool, run_searches, search_config
+from catanrl.search.pipeline import Group, Pipeline, eval_pipeline, run_groups
+from catanrl.search.pool import NetworkCache, eval_cache_mb, make_pool, run_pools, search_config
 from catanrl.seeding import derive_seed as _derive_seed
 
 
@@ -468,6 +469,27 @@ class MctsAgent(NativeAgent):
     :data:`HALF_CHECK_ROWS` of the rows it is asked to act on against the float32 kernels' own
     (``evaluator.exact``) and refuses to search past :data:`HALF_VALUE_TOLERANCE`: weights on
     which half's rounding is no longer small are told at once, not found in a score.
+
+    On a CUDA device the searches' rounds go through self-play's pipeline
+    (:func:`~catanrl.search.pipeline.run_groups`): the leaves are collected into page-locked
+    rows, a round's forwards are queued without a wait between them, and the outputs are
+    waited for once a round. The chunks, their padding and the graphs are the evaluator's
+    own, and a strict evaluator's half overflow is resolved row by row there too
+    (``Pipeline(resolve=True)``), so the games are those of the serial loop
+    (:func:`~catanrl.search.pool.run_pools`). That loop stays for what the pipeline does not
+    queue (:meth:`_queue`: an evaluator that is not ``BatchEvaluator`` itself, such as the
+    Python dedup's wrapper or the analyst's ONNX session, and a CPU, where nothing is
+    asynchronous), and ``CATANRL_EVAL_PIPELINE=0`` sends every search through it (``=1``:
+    the pipeline on a CPU too). The variable is in no key.
+
+    ``groups`` (execution-only, 1 unless set) splits the searches of one ``act`` over that
+    many pools (``pools``; ``pool`` is the first), all on the one cache, which the pipeline
+    runs as its groups: the device evaluates one pool's leaves while the engine collects and
+    applies the others', as self-play's searches do. With ``reuse`` a stream's searches are
+    its env's pool's (env ``%`` groups, streams being ``env * max_players + seat``), so a
+    kept tree stays where it lives; without it the rows of a batch alternate. Every search
+    is its own seed and tree, so under a strict evaluator the games are those of one group,
+    bit for bit. Where the pipeline does not serve, the pools run in lockstep (``run_pools``).
     """
 
     key = "MCTS"
@@ -476,6 +498,12 @@ class MctsAgent(NativeAgent):
     def __init__(self, model, params, *, device, infer_rows, mode="strict") -> None:
         self.reuse = bool(_param(params, "reuse", False))
         self.dedup = bool(_param(params, "dedup", True))
+        #: Search groups (the spec's ``groups``; 1: every search in one pool).
+        self.groups = int(_param(params, "groups", 1))
+        if self.groups < 1:
+            raise ValueError("MCTS: groups counts search groups (>= 1)")
+        #: The pipeline's page-locked rows by group, kept across models and binds.
+        self._batches: dict = {}
         super().__init__(model, params, device=device, infer_rows=infer_rows, mode=mode, heads="both")
         # After super().__init__, which refuses a recurrent network while needs_memory is off.
         self.needs_memory = self.reuse
@@ -508,13 +536,20 @@ class MctsAgent(NativeAgent):
             self.cache = NetworkCache(self.evaluator.num_actions, self.evaluator.num_players, megabytes)
         elif self.dedup:
             self.evaluator = DedupEvaluator(self.evaluator)
+        #: ``CATANRL_EVAL_PIPELINE`` as the agent found it (None: unset; see :meth:`_queue`).
+        self.piped = eval_pipeline()
+        self._pipeline: Pipeline | None = None  # the evaluator's, built at its first searches
         if hasattr(self, "config"):
             self._make_pool()
 
     def _make_pool(self) -> None:
         self.config.max_players = int(self.dims["max_players"])
-        self.pool = make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"],
-                              dice_state=self.dice_state, cache=self.cache.table if self.cache is not None else None)
+        table = self.cache.table if self.cache is not None else None
+        #: A pool per search group, all on the one cache; ``pool`` is the first (the only one
+        #: without groups).
+        self.pools = [make_pool(self.dims, self.level, self.config, critic_level=self._levels["critic_level"],
+                                dice_state=self.dice_state, cache=table) for _ in range(self.groups)]
+        self.pool = self.pools[0]
         #: stream -> (search id, the game handed, the index played): a new pool drops them all.
         self._live: dict[int, tuple[int, cpp.Game, int]] = {}
         #: Streams that had a first decision: a later decision of any other stream is a harness error.
@@ -532,6 +567,10 @@ class MctsAgent(NativeAgent):
         if not self._halves_checked:
             self._check_halves(rows)
         ids: list[int | None] = [None] * len(games)
+        # Each row's pool: its stream's with reuse (a kept tree stays in its pool), else by turns.
+        every = self._pools
+        pools = [self._pool_of(stream) for stream in streams] if self.reuse else \
+            [every[i % len(every)] for i in range(len(games))]
         try:
             if self.reuse:
                 # Advance before adding: add() balances lanes by the live searches.
@@ -539,8 +578,8 @@ class MctsAgent(NativeAgent):
             for i, (game, seed) in enumerate(zip(games, decision_seeds)):
                 if ids[i] is None:
                     tracker = trackers[i] if self.needs_trackers else None
-                    ids[i] = self.pool.add(game, seed=int(seed), tracker=tracker,
-                                           deal=self.tracker_mode if tracker is not None else None)
+                    ids[i] = pools[i].add(game, seed=int(seed), tracker=tracker,
+                                          deal=self.tracker_mode if tracker is not None else None)
                     self.counters["fresh"] += 1
             stop = time.monotonic() + self.deadline if self.deadline else None
             if self.stop_at is not None:
@@ -549,30 +588,72 @@ class MctsAgent(NativeAgent):
                 # Nothing is pending here. Clears unless the table holds this evaluator's outputs
                 # for its network's weights as they are now.
                 self.cache.sync(self.evaluator)
-            run_searches(self.pool, self.evaluator, batch_rows=len(ids) * self.config.max_pending, stop=stop)
+            self._search(pools, stop)
             if stop is not None:
-                self.counters["cut"] += sum(not self.pool.done(sid) for sid in ids)
-            choices = [int(self.pool.select(sid, self.temperature)) for sid in ids]
+                self.counters["cut"] += sum(not pool.done(sid) for pool, sid in zip(pools, ids))
+            choices = [int(pool.select(sid, self.temperature)) for pool, sid in zip(pools, ids)]
             self.counters["decisions"] += len(ids)
-            for sid in ids:
-                self._record(self.pool.stats(sid))
+            for pool, sid in zip(pools, ids):
+                self._record(pool.stats(sid))
             if self.reuse:
                 for i, stream in enumerate(streams):
                     self._live[stream] = (ids[i], games[i], choices[i])
             else:
-                for sid in ids:
-                    self.pool.remove(sid)
+                for pool, sid in zip(pools, ids):
+                    pool.remove(sid)
             return np.array(choices, dtype=np.int64)
         except BaseException:
-            # Leave the pool empty whatever failed (the live searches too: their streams are
-            # out of step with the pool), so the error is the real one and the agent keeps working.
-            if self.pool.pending:
-                self.pool.cancel()
-            for sid in list(self.pool.ids):
-                self.pool.remove(sid)
+            # Leave the pools empty whatever failed (the live searches too: their streams are
+            # out of step with the pools), so the error is the real one and the agent keeps working.
+            for pool in every:
+                if pool.pending:
+                    pool.cancel()
+                for sid in list(pool.ids):
+                    pool.remove(sid)
             self._live.clear()
             self._started.clear()
             raise
+
+    @property
+    def _pools(self) -> Sequence[cpp.SearchPool]:
+        """The groups' pools: ``pool`` alone without groups."""
+        return [self.pool] if self.groups == 1 else self.pools
+
+    def _pool_of(self, stream: int) -> cpp.SearchPool:
+        """The pool of ``stream``'s searches: its env's group (env ``%`` groups, as self-play's
+        games), at every decision of the stream, so its kept tree is found where it was left."""
+        return self._pools[stream // int(self.dims["max_players"]) % self.groups]
+
+    def _queue(self) -> Pipeline | None:
+        """The pipeline the next searches' forwards are queued on, or None where they run in
+        the serial loop: ``CATANRL_EVAL_PIPELINE=0``; a CPU, unless the variable is 1; and an
+        evaluator whose forwards the pipeline does not queue (anything but ``BatchEvaluator``
+        itself: the Python dedup's wrapper, the analyst's ONNX session, a subclass with a call
+        of its own). Asked at every decision, of the evaluator as it is then (callers swap
+        it), and built once per evaluator, on the agent's page-locked rows."""
+        evaluator = self.evaluator
+        if self.piped is False or not isinstance(evaluator, BatchEvaluator) or evaluator.recurrent:
+            return None
+        if self.piped is None and evaluator.device.type != "cuda":
+            return None
+        if self._pipeline is None or self._pipeline.evaluator is not evaluator:
+            # resolve: a strict half overflow row by row, as the evaluator's own call (fused16).
+            self._pipeline = Pipeline(evaluator, self._batches, resolve=True)
+        return self._pipeline if self._pipeline.queued else None
+
+    def _search(self, pools: Sequence[cpp.SearchPool], stop: float | None) -> None:
+        """Run the searches of one ``act`` (``pools``: each row's pool) to the end or to
+        ``stop``. Every pool with a row takes its searches' leaves per round: as the groups of
+        the pipeline (one group without ``groups``), or in lockstep where it does not serve
+        (``run_pools``: the one pool's serial loop without ``groups``)."""
+        every = self._pools
+        active = [pool for pool in every if any(p is pool for p in pools)] or every[:1]
+        batch_rows = [sum(p is pool for p in pools) * self.config.max_pending for pool in active]
+        pipeline = self._queue()
+        if pipeline is None:
+            run_pools(active, self.evaluator, batch_rows=batch_rows, stop=stop)
+        else:
+            run_groups([Group([pool], [rows]) for pool, rows in zip(active, batch_rows)], pipeline, stop=stop)
 
     def _check_halves(self, rows) -> None:
         """``kernels=fused16``, once per model and before anything is searched with it: the half
@@ -618,7 +699,7 @@ class MctsAgent(NativeAgent):
         for i, (game, stream, fresh) in enumerate(zip(games, streams, first)):
             if fresh:
                 for stale in self._stale(stream):
-                    self.pool.remove(self._live.pop(stale)[0])
+                    self._pool_of(stale).remove(self._live.pop(stale)[0])
                     self.counters["dropped_first"] += 1
                 self._started.add(stream)
                 continue
@@ -640,12 +721,13 @@ class MctsAgent(NativeAgent):
                 same = self._same_view(prev, expected, game)
             else:
                 raise ValueError(f"reuse_check must be exact or view, not {self.reuse_check!r}")
-            if same and self.pool.advance(sid, chosen):
+            pool = self._pool_of(stream)
+            if same and pool.advance(sid, chosen):
                 ids[i] = sid
                 self.counters["reused"] += 1
             else:
                 self.counters["refused_engine" if same else "refused_diverged"] += 1
-                self.pool.remove(sid)
+                pool.remove(sid)
 
     def _same_view(self, prev: cpp.Game, expected: cpp.Game, game: cpp.Game) -> bool:
         """Whether ``game`` is ``expected`` (``prev`` plus the action played) as far as
@@ -687,7 +769,7 @@ class MctsAgent(NativeAgent):
         drops them alike; the server bridge sees the game's last message and calls this,
         so a finished game's searches do not linger until a new game takes its slot."""
         for stream in self._live_in(env):
-            self.pool.remove(self._live.pop(stream)[0])
+            self._pool_of(stream).remove(self._live.pop(stream)[0])
             self.counters["dropped_over"] += 1
         players = int(self.dims["max_players"])
         self._started -= {s for s in self._started if s // players == env}

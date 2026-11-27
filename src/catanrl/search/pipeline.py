@@ -43,10 +43,18 @@ the CUDA graphs are the evaluator's own, captured by it (``BatchEvaluator._graph
 this thread with nothing queued on the device: :meth:`Pipeline.submit` waits for what is
 queued before a bucket's first use (torch 2.14 lets the graphs of a stream share a cuBLAS
 workspace, and a capture may free or move it under a running replay).
+
+An MCTS agent's searches come here too (catanrl.agents.native.MctsAgent: one group, or its
+``groups``), with ``resolve`` set: a flagged chunk of a strict evaluator is then resolved
+row by row, as the evaluator's own call resolves it, so the agent's rows are the ones of
+``run_pools`` with ``kernels=fused16`` as well. :data:`EVAL_PIPELINE_ENV` sends them back
+through ``run_pools``.
 """
 
 from __future__ import annotations
 
+import os
+import time
 from collections import deque
 from collections.abc import Sequence
 from contextlib import suppress
@@ -57,6 +65,27 @@ import numpy as np
 import torch
 
 from catanrl.search.evaluator import BatchEvaluator
+
+#: Environment variable choosing the loop an MCTS agent's searches run in
+#: (catanrl.agents.native.MctsAgent): unset, :func:`run_groups` on a CUDA device and
+#: ``run_pools`` on a CPU, where nothing here is asynchronous; ``0``, ``run_pools`` everywhere
+#: (the agents' loop before this one, kept so that the two can be timed against each other);
+#: ``1``, :func:`run_groups` on a CPU too. The same forwards of the same rows either way (a
+#: strict evaluator: the games are the same to the bit), so like ``CATANRL_EVAL_CACHE_MB`` it is
+#: the environment's and in no key.
+EVAL_PIPELINE_ENV = "CATANRL_EVAL_PIPELINE"
+
+
+def eval_pipeline() -> bool | None:
+    """:data:`EVAL_PIPELINE_ENV`'s choice: True or False, or None when it is unset (the
+    pipeline where it pays: on a CUDA device)."""
+    text = os.environ.get(EVAL_PIPELINE_ENV, "").strip()
+    if not text:
+        return None
+    if text not in ("0", "1"):
+        raise ValueError(f"{EVAL_PIPELINE_ENV} must be 0 (run_pools everywhere) or 1 (the pipeline on a CPU "
+                         f"too), not {text!r}")
+    return text == "1"
 
 
 class Batch:
@@ -77,17 +106,19 @@ class Batch:
         self.observations: np.ndarray = self._rows.numpy()
         self.ids = np.empty(self.capacity, dtype=np.int64)
         self._step = 1  # the rows of a chunk (a forward) of the last submit
-        self._event: torch.cuda.Event | None = None
+        self._event: torch.cuda.Event | None = None  # recorded behind the queued rows' last download
+        self._marker: torch.cuda.Event | None = None  # the batch's one event, recorded again by every submit
         self._called: tuple[np.ndarray, np.ndarray] | None = None  # the outputs of an evaluator that is called
         self.rows = 0  # submitted and not yet returned by result()
 
     @staticmethod
     def _shape_for(evaluator: BatchEvaluator) -> tuple:
         return (evaluator.obs_size, evaluator.num_actions, evaluator.num_players, evaluator.infer_rows,
-                evaluator.device.type == "cuda")
+                str(evaluator.device))
 
     def fits(self, evaluator: BatchEvaluator) -> bool:
-        """Whether the buffers are ``evaluator``'s shapes (and page-locked if it needs them so)."""
+        """Whether the buffers are ``evaluator``'s shapes on its device (page-locked for a CUDA
+        one, whose streams the batch's event is recorded on)."""
         return self._shape == self._shape_for(evaluator)
 
 
@@ -99,13 +130,19 @@ class Pipeline:
 
     ``batches`` keeps the page-locked buffers by index: pass the same dict to the pipelines of
     successive evaluators of one network shape (self-play rebuilds its evaluator after every
-    learning step) and they are allocated once."""
+    learning step) and they are allocated once.
 
-    def __init__(self, evaluator: BatchEvaluator, batches: dict[int, Batch] | None = None) -> None:
+    ``resolve``: a strict evaluator's chunk whose forward flagged a half overflow
+    (``kernels=fused16``) is resolved row by row, as the evaluator's own call does, so a row's
+    outputs are the row's whatever was queued with it (see :meth:`flagged`)."""
+
+    def __init__(self, evaluator: BatchEvaluator, batches: dict[int, Batch] | None = None, *,
+                 resolve: bool = False) -> None:
         if evaluator.recurrent:
             raise ValueError("the pipeline evaluates single positions (a recurrent network has a memory per row)")
         self.evaluator = evaluator
         self.batches: dict[int, Batch] = {} if batches is None else batches
+        self.resolve = bool(resolve)
         #: Whether the forwards are BatchEvaluator's own, queued here. A subclass that evaluates
         #: its own way (its __call__, _evaluate or _run) or a wrapper is called instead, a group
         #: at a time.
@@ -130,7 +167,7 @@ class Pipeline:
             raise ValueError(f"{rows} rows for a batch of {batch.capacity} with {batch.rows} queued")
         if torch.is_autocast_enabled() or (ev.device.type == "cuda" and torch.is_autocast_enabled("cuda")):
             raise RuntimeError("evaluate with autocast off (PuffeRL leaks bf16 autocast)")
-        step = 1 if ev.mode == "strict" and ev.device.type == "cpu" else ev.infer_rows  # BatchEvaluator._evaluate's
+        step = ev.chunk_rows  # BatchEvaluator._evaluate's chunks
         batch.rows, batch._flagged, batch._step = rows, 0, step
         if not self.queued:
             batch._called = ev(batch.observations[:rows])
@@ -162,8 +199,12 @@ class Pipeline:
                     batch._flags[chunk : chunk + 1].copy_(outputs[2].reshape(-1)[:1], non_blocking=True)
                     batch._flagged = chunk + 1
             if ev.device.type == "cuda":
-                batch._event = torch.cuda.Event()
-                batch._event.record(torch.cuda.current_stream(ev.device))
+                # One event per batch: nothing waits on it here (result() took the last rows),
+                # and a record replaces what it marked.
+                if batch._marker is None:
+                    batch._marker = torch.cuda.Event()
+                batch._marker.record(torch.cuda.current_stream(ev.device))
+                batch._event = batch._marker
 
     def result(self, batch: Batch) -> tuple[np.ndarray, np.ndarray]:
         """(logits [rows, A], values [rows, P]) of the rows submitted: views of the batch's
@@ -192,16 +233,22 @@ class Pipeline:
 
         - bit 2 with ``kernels=fused16`` (a half overflowed in the forward): the chunk again on
           the float32 kernels (the evaluator's ``_exact``), counted in its ``exact_forwards``
-          and ``exact_rows``. The whole chunk, in strict mode too: self-play's searches, the
-          pipeline's only callers, need no row to be its batch's stranger, where the
-          evaluator's own strict call resolves row by row (``BatchEvaluator._resolve``);
-          the flag is then the one that forward returns;
+          and ``exact_rows``. The whole chunk, in strict mode too, without ``resolve``:
+          self-play's searches need no row to be its batch's stranger. With ``resolve`` (an
+          MCTS agent's searches, whose records replay) a strict evaluator's chunk is resolved
+          row by row as its own call resolves it (``BatchEvaluator._resolve``: the same
+          forwards and counts; they run behind whatever is queued, on the one stream, and
+          leave the queued batches' outputs alone, which are downloaded before them). The
+          flag is then the one those forwards return;
         - any flag left (bit 1: a node with more neighbours than the kernels take) raises."""
         ev = self.evaluator
         if flag & 2 and ev.kernels == "fused16":
             ev.exact_forwards += 1
-            ev.exact_rows += rows
-            results = ev._exact(batch.observations[start : start + rows], ev.bucket(rows))
+            if self.resolve and ev.mode == "strict":
+                results = ev._resolve(batch.observations[start : start + rows], ev.bucket(rows))
+            else:
+                ev.exact_rows += rows
+                results = ev._exact(batch.observations[start : start + rows], ev.bucket(rows))
             batch._logits.numpy()[start : start + rows] = results[0]
             batch._values.numpy()[start : start + rows] = results[1]
             flag = int(np.any(results[-1]))
@@ -256,13 +303,18 @@ class Group:
         self.leaves += start
 
 
-def run_groups(groups: Sequence[Group], pipeline: Pipeline) -> tuple[int, int]:
+def run_groups(groups: Sequence[Group], pipeline: Pipeline, *, stop: float | None = None) -> tuple[int, int]:
     """Run every group's searches to the end, the groups taking turns on the device (see the
     module); returns (leaf rows, rounds: the most any group took, what ``run_pools`` would
     take for all the pools at once).
 
     One group is ``run_pools`` with the pipeline's buffers. On an error the collected leaves
     are withdrawn, so the pools stay usable (as ``run_pools`` leaves them).
+
+    ``stop`` (a ``time.monotonic()`` instant) is ``run_pools``'s: once it has passed no group
+    collects again, so the run ends between rounds, after at least one round of every group,
+    with nothing pending (the rounds queued when it passed are applied): the searches are cut
+    short but whole. One group is cut where ``run_pools`` cuts it.
     """
     ev = pipeline.evaluator
     for group in groups:
@@ -283,6 +335,8 @@ def run_groups(groups: Sequence[Group], pipeline: Pipeline) -> tuple[int, int]:
         while queue:
             group, batch = queue.popleft()
             group.apply(*pipeline.result(batch))
+            if stop is not None and time.monotonic() >= stop:
+                continue  # cut short: the groups still queued are applied and none collects again
             n = group.collect(batch)
             if n:
                 pipeline.submit(batch, n)

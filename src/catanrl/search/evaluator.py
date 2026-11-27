@@ -117,6 +117,12 @@ class BatchEvaluator:
             size *= 2
         return min(size, self.infer_rows)
 
+    @property
+    def chunk_rows(self) -> int:
+        """The most rows of one forward (a chunk of a call, padded to its :meth:`bucket`):
+        ``infer_rows``, and a row at a time in strict mode on a CPU (see the module)."""
+        return 1 if self.mode == "strict" and self.device.type == "cpu" else self.infer_rows
+
     def _forward(self, obs: torch.Tensor, state: tuple[torch.Tensor, torch.Tensor] | None = None
                  ) -> tuple[torch.Tensor, ...]:
         """(logits, values) or, with a memory, (logits, values, h', c')."""
@@ -210,7 +216,7 @@ class BatchEvaluator:
         logits = np.empty((n, self.num_actions), dtype=np.float32)
         values = np.empty((n, self.num_players), dtype=np.float32)
         out_memory = None if memory is None else tuple(np.empty_like(m) for m in memory)
-        step = 1 if self.mode == "strict" and self.device.type == "cpu" else self.infer_rows
+        step = self.chunk_rows
         for start in range(0, n, step):
             end = start + step
             chunk = observations[start:end]
