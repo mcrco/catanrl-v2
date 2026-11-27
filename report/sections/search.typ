@@ -452,7 +452,7 @@ python tools/search_probe.py --pair $E/cfba69278af79d33.json $E/af97f7595f82b53d
 - *The Python hashing is expensive.* It skips 13% of the positions and costs 16% of the time. The engine's cache (@exp:az-eval-cache) does the same skipping in C++.
 - *Evals forward far fewer positions a second than self-play:* 10,600 here on the full-precision kernels against 38,000 in self-play on the half-precision ones (different batch sizes, so not a clean comparison).
 
-*Next.* The two levers this pointed to (Claude's suggestions, approved by Marco): the engine's cache in place of the Python hashing, and the half-precision kernels in evals. Built and measured in @exp:search-eval-speed: 2.1×.
+*Next.* The two levers this pointed to (Claude's suggestions, approved by Marco): the engine's cache in place of the Python hashing, and the half-precision kernels in evals. Built and measured in @exp:search-eval-speed: 2.1×. With both in, two groups do pay at 256 games in flight (1.22×; @exp:search-eval-pipeline).
 
 #repro(```sh
 # in the wt/eval-groups worktree
@@ -522,6 +522,59 @@ python tools/eval_speed_check.py --games 256 --envs 256 --arms python fused16+ca
 catanrl eval --suite heldout-2p-fr --boards 1000 --device cuda --num-envs 256 --threads 12 --infer-rows 512 \
   "MCTS:ckpt=az-2p-graph-m-uniform/main+900@e1800#313282dc2c53:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused16" \
   "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
+```)
+
+=== Evals through self-play's GPU pipeline, and two groups again #chip("done") <exp:search-eval-pipeline>
+#meta(
+  dates: "2026-11-26 – 2026-11-27",
+  owner: "Marco (approved from a list of speedups: \"down for 2 and 3\")",
+  config: "MCTS spec parameter groups; CATANRL_EVAL_PIPELINE (0 for the old loop); main at 286e9de",
+  wandb: (),
+  records: (),
+)
+#tldr[The evals' search agent now sends its positions to the card the way self-play does: page-locked memory, a round's forwards queued, one wait a round. Alone that is worth 2–3%. With the games split into two groups that alternate on the card (`groups=2`, slower in @exp:search-eval-groups before the cache and half precision) a standard row runs *1.22× as fast* at 256 games in flight: 22.3 games a minute against 18.2, so 2,000 games take about 90 minutes in place of 110. Every arm plays identical games. Three and four groups are slower than two, and at 64 games in flight two groups do not help (0.98×).]
+
+*Question.* Self-play forwards about 49,000 positions per second of card time and an eval row about 26,000. Does self-play's pipeline close the gap for evals?
+
+#lead[Setup.]
+- *Agents.* The standard row's two (`2p-graph-m-3` in the 1,024-sim half-precision search against fr3's fair raw bot), held-out games, strict determinism, 12 threads, the 256 MB position cache, each arm in its own process on an idle GPU.
+- *Arms.* The loop before this change; the pipeline; the pipeline with two, three and four groups.
+- *`groups` is not part of the agent's identity:* the same record id, so rows with and without it pair with stored rows.
+- *Where it applies.* CUDA devices with the batched evaluator. CPU runs, recurrent nets and the game-review bridge keep the old loop.
+
+#lead[Result.]
+#figure(
+  btable(
+    columns: (1fr, auto, auto, auto, auto),
+    align: (left, right, right, right, right),
+    header: ([], [Games a minute], [Against the old loop], [Waiting for the GPU], [Engine]),
+    tgroup(5)[256 games in flight (the standard row)],
+    [Old loop], [18.17], [], [568 s], [230 s],
+    [Pipeline], [18.74], [1.03×], [537 s], [226 s],
+    [Pipeline, two groups], [*22.25*], [*1.22×*], [395 s], [243 s],
+    [Pipeline, three groups (second session)], [20.59], [1.13×], [444 s], [250 s],
+    [Pipeline, four groups (second session)], [18.69], [1.03×], [513 s], [263 s],
+    tgroup(5)[64 games in flight],
+    [Old loop], [14.14], [], [], [],
+    [Pipeline], [14.45], [1.02×], [], [],
+    [Pipeline, two groups], [13.88], [0.98×], [], [],
+  ),
+  caption: [The standard row's agents on 256 and on 64 held-out games. Two groups scored 22.29 games a minute in the second session, where three and four were measured. Within each size all arms played the same games from the same search statistics (one digest over every game's rows, one over every search).],
+) <tab:search-eval-pipeline>
+- *Two groups is the setting for a standard row.* One group's engine work overlaps the other's forward, which cuts the wait for the card by 30%. More groups make each forward smaller (424 positions with one group, 370 with two, 329 with three, 295 with four) and the wait grows again.
+- *The pipeline alone is small.* My estimate before building was 1.3×; the measured gain without groups is 1.03×.
+- *Self-play is not slower.* The change touches code self-play shares: 111.7 s an iteration on the branch against 111.6 s (@exp:az-gpu-profile).
+- *Memory.* Host peak 7.5 GB with two groups against 7.2 GB; under 1 GB on the card.
+
+#lead[Tests.] 25 new CPU tests and 5 on the GPU. The CPU suite passes except one release test that fails only when pytest's temp directory is under `/home` (it passes elsewhere); 159 GPU tests pass.
+
+*Next.* New standard rows add `groups=2` to the search agent's spec.
+
+#repro(```sh
+python tools/eval_speed_check.py --games 256 --envs 256 --arms fused16+cache pipeline pipeline+groups --json OUT.json
+python tools/eval_speed_check.py --games 256 --envs 256 --arms pipeline+groups pipeline+groups3 pipeline+groups4
+python tools/eval_speed_check.py --arms fused16+cache pipeline pipeline+groups     # 64 games
+# a standard row: the spec of the block above with :groups=2 appended
 ```)
 
 == Sampling noise at chance nodes
