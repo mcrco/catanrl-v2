@@ -88,12 +88,15 @@ class Arm(NamedTuple):
 
 ARMS = {"python": Arm(None, False), "cache": Arm(None, True), "fused16": Arm("fused16", False),
         "fused16+cache": Arm("fused16", True), "pipeline": Arm("fused16", True, pipeline=True),
-        "pipeline+groups": Arm("fused16", True, pipeline=True, groups=2)}
+        "pipeline+groups": Arm("fused16", True, pipeline=True, groups=2),
+        "pipeline+groups3": Arm("fused16", True, pipeline=True, groups=3),
+        "pipeline+groups4": Arm("fused16", True, pipeline=True, groups=4)}
 #: The arms played unless --arms names others: the two levers before the pipeline.
 DEFAULT_ARMS = ("python", "cache", "fused16", "fused16+cache")
 #: Arms that must play identical games in strict mode: the cache, the loop and the groups change no row.
 PAIRS = (("python", "cache"), ("fused16", "fused16+cache"), ("fused16+cache", "pipeline"),
-         ("fused16+cache", "pipeline+groups"), ("pipeline", "pipeline+groups"))
+         ("fused16+cache", "pipeline+groups"), ("pipeline", "pipeline+groups"),
+         ("pipeline+groups", "pipeline+groups3"), ("pipeline+groups", "pipeline+groups4"))
 CACHE_ENV = "CATANRL_EVAL_CACHE_MB"
 PIPELINE_ENV = "CATANRL_EVAL_PIPELINE"
 TREE_MB = 11.0  # a kept tree at 1,024 simulations (measured on the standard row's evals)
