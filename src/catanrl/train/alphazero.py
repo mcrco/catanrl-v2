@@ -1645,6 +1645,17 @@ def train_alphazero(variant: Any, writer: Any, *, monitors: bool = True) -> None
         _train(cfg, writer, check_train(cfg["train"]), runtime, strict, monitors)
 
 
+def parents_state(cfg: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    """Whether ``state`` is the one catanrl fork copied from the parent: a continued run
+    (``restore: weights+optimizer``) that has not committed yet, so the state is at the epoch of
+    the checkpoint it continues. Such a launch may play another map pool than the parent's (a
+    fork with ``--set env.scenarios=...``): the replay holds positions, not boards, and the
+    fork's first commit stores its own pool, which its resumes must then match."""
+    init = cfg.get("init_from") or {}
+    return (init.get("restore") == "weights+optimizer"
+            and str(init.get("ckpt", "")).partition("#")[0].endswith(f"@e{int(state['epoch'])}"))
+
+
 def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: Mapping[str, Any], strict: bool,
            monitoring: bool = True) -> None:
     seed = int(cfg["seed"])
@@ -1701,7 +1712,7 @@ def _train(cfg: Mapping[str, Any], writer: Any, train: dict[str, Any], runtime: 
 
     state = writer.load_trainer_state() if writer.mode == "resume" else None
     if state is not None:
-        if state.get("map_pool") != plan.pool["hash"]:
+        if state.get("map_pool") != plan.pool["hash"] and not parents_state(cfg, state):
             raise RuntimeError("the map pool changed since the run started; refusing to resume")
         model.load_state_dict(state["model"])
         optimizer.load_state_dict(state["optimizer"])

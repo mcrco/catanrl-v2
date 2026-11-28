@@ -303,6 +303,38 @@ def test_a_fork_trains_at_its_own_learning_rate_and_weight_decay(monkeypatch):
     assert [m["learning_rate"] for m in parent.metrics()] == [TRAIN["learning_rate"]]
 
 
+def test_a_fork_may_play_a_larger_map_pool_and_its_resumes_keep_it(monkeypatch):
+    """The parent's state names the parent's pool. A fork that sets its scenarios starts from that
+    state on its own pool (map j keeps its seed, so a larger pool holds the parent's boards), and
+    stores the pool at its first commit: a later launch on yet another pool is refused."""
+    import catanrl.train.alphazero as az
+    from catanrl.seeding import derive_seed
+
+    assert run(variant(iterations=1)).status == "finished"
+    parent = load_experiment("az/t")
+    child = runs.fork("az/t", as_="t+maps", overrides=[
+        "train.iterations=3", "env.scenarios=[{game: base-2p, maps: 8, turn_limit: 8}]"])
+    real = RunWriter.should_stop
+
+    def stop_after_one(self):
+        if len(canon.read_jsonl(self.path / "metrics.jsonl")) >= 1:
+            self.stop_reason = "interrupted"
+            return True
+        return real(self)
+
+    monkeypatch.setattr(RunWriter, "should_stop", stop_after_one)
+    assert run(child).status == "interrupted"
+    forked = load_experiment("az/t+maps")
+    pools = [plan_env(v.config["env"], pool_seed=derive_seed(3, "map_pool")).pool for v in (parent, forked)]
+    assert pools[1]["scenarios"][0]["maps"][:4] == pools[0]["scenarios"][0]["maps"]
+    assert [m["map_pool"] for m in parent.metrics()] == [pools[0]["hash"]]
+    assert [m["map_pool"] for m in forked.metrics()] == [pools[1]["hash"]] and pools[0]["hash"] != pools[1]["hash"]
+    state = torch.load(forked.path / "trainer_state.pt", weights_only=False)
+    assert state["map_pool"] == pools[1]["hash"] and not az.parents_state(child.config, state)
+    with RunWriter.open(child, argv=["test"]) as writer, pytest.raises(RuntimeError, match="map pool"):
+        train_alphazero(SimpleNamespace(config={**child.config, "env": parent.config["env"]}), writer)
+
+
 def test_a_resume_keeps_its_optimizer_and_takes_a_changed_learning_rate(monkeypatch):
     """A resume under the run's own config restores the optimizer as it was saved, bit for bit.
     The launch paths refuse a resume under another config (check_stored); handed one all the
