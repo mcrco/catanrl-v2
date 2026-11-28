@@ -1373,3 +1373,71 @@ catanrl eval --suite heldout-2p-fr --boards 1000 --num-envs 256 --threads 12 --i
   "MCTS:ckpt=az-2p-graph-m-uniform/main@e900#73249d10e959:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused" \
   "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"
 ```)
+
+=== A wider leg from `2p-graph-m-3`: twice the learning steps, a longer temperature schedule, four times the boards: `az-2p-graph-m-uniform/main+1500-wide` #chip("running") <exp:az-graph-m-wide>
+#meta(
+  dates: "2026-11-27 16:19 – (running)",
+  owner: "Marco (2026-11-27: \"im down to to do 128 updates, longer temp, and more boards\"; the values were proposed by Claude and approved: \"go with those values\")",
+  config: "configs/experiments/az-2p-graph-m-uniform.yaml, forked with the overrides below",
+  wandb: (("az-2p-graph-m-uniform-main-1500-wide-df3d8cb7", "az-2p-graph-m-uniform/main+1500-wide"),),
+  records: ("00823d23",),
+)
+#tldr[Leg three repeated leg two's settings for 600 iterations and added nothing (@exp:az-graph-m-deeper). This leg starts again from `2p-graph-m-3` (iteration 1,800) for 600 iterations with three changes, all Marco's picks from the options left on the table: 128 learning steps per iteration (64), moves sampled from the search over a game's first 60 decisions (30), and 16,384 training boards (4,096). *Running since 2026-11-27 16:19.* First iterations: 120 s against leg three's 114 s (+6%, all of it the learning step); tree reuse, cache hits and game length unchanged. Expected end of self-play about 2026-11-28 13:00, then one 2,000-game row to pair with `2p-graph-m-3`'s 70.10%.]
+
+*Question.* Does `2p-graph-m-3` gain from 600 more iterations when each position is learned from twice as often and the games cover more openings and more boards? Leg three's 600 iterations on the old settings did not gain (69.00% against 70.10%, p = 0.37).
+
+#lead[Setup.] A fork of `az-2p-graph-m-uniform/main+900` at iteration 1,800 (`2p-graph-m-3`: the same weights, optimizer moments and replay of 500,000 positions), not of leg three's end. The config is leg three's except:
+#figure(
+  btable(
+    columns: (1.15fr, auto, auto, 2.4fr, 1.1fr),
+    align: (left, left, left, left, left),
+    header: ([Change], [Leg three], [Now], [Why], [Cost in time]),
+    [1. Learning steps per iteration], [64], [128], [An iteration adds about 7,650 rows and only 30% of them carry a policy target. 64 steps of 512 rows draw each row about 4.3 times before it leaves the replay; 128 draw it 8.6 times.], [The learning step doubles, 6.6 s to about 13 s of a 116 s iteration: about +6%.],
+    [2. Temperature schedule (`temperature_moves`)], [30 decisions], [60 decisions], [The schedule is per game, not over training: in every game the move is sampled from the search's visits with a temperature that falls from 1 to 0 over the game's first decisions, and after that both seats play the most visited move. A game is about 193 decisions. With a sharp net (the search's top move differs from the net's on 7% of full searches) the games after decision 30 follow a narrow band of lines; 60 widens the set of mid-game positions the net sees. The price is noisier game results as value targets for the early rows.], [None directly. Indirect effects (less tree reuse, longer games) were to be read off the first iterations.],
+    [3. Training boards], [4,096], [16,384], [The held-out rows are played on boards the net never trained on. Board $j$ keeps its seed, so the new pool holds the old 4,096 boards and 12,288 new ones.], [None expected; the position cache's hit rate was to be read off the first iterations.],
+  ),
+  caption: [The three changes. Everything else is leg three's config: learning rate 5e-5, 1,600-sim recorded searches on a tenth of the moves, a quarter of the fast moves stored as value-only rows, 512 games in flight, the 256 MB position cache.],
+) <tab:az-graph-m-wide>
+- *Not included:* a floor on the temperature (Claude's suggestion; Marco chose the three above). The temperature still ends at 0.
+- *Not separated.* The three changes run together (Marco: bundle first, ablate later). A gain would not say which of them made it.
+- *The replay starts as `2p-graph-m-3`'s:* positions from the old boards and the old schedule, which leave it within about 65 iterations.
+
+#lead[One code change first] (in main at `3e53460`, tests pass). A resume refuses a run whose board pool differs from the one in its stored state, and a fork starts from its parent's state, so a fork could not change its boards. Now the fork's first launch plays its own config's pool while the state is still the parent's; its first commit stores the new pool, which later resumes must match.
+
+#lead[Eval.] No in-run selects. One row at the end, in the run: the last checkpoint in the 1,024-sim search on the half-precision kernels against fr3's fair raw bot, the lineage's 2,000 held-out games, paired by game (exact McNemar) with `2p-graph-m-3`'s row `00823d23` (70.10%). The row is #sym.plus.minus 2.0 pp and detects a paired difference of about 2.7 pp. It runs with two search groups (@exp:search-eval-pipeline; the same games as with one): about 1.5 h, 7% of the run's time.
+
+#lead[Cost.] Local GPU. 600 iterations at about 123 s are 20.5 h, and the row 1.5 h: about 22 h.
+
+#lead[First iterations] (1,802 to 1,808; both runs restart their games at the fork, so the same iterations are compared).
+#figure(
+  btable(
+    columns: (1fr, auto, auto),
+    align: (left, right, right),
+    header: ([Mean of iterations 1,802 to 1,808], [Leg three], [This leg]),
+    [Iteration (s)], [113.8], [120.4],
+    [of it self-play (s)], [105.7], [105.8],
+    [Decisions that start from the last search's tree], [45.8%], [45.8%],
+    [Positions answered from the cache], [20.7%], [20.8%],
+    [Simulations per decision], [150], [150],
+    [Policy loss], [0.383], [0.382],
+    [Value loss], [0.494], [0.493],
+    [Entropy of the search targets (nats)], [0.316], [0.314],
+    [Full searches whose top move is not the net's], [7.2%], [7.4%],
+    [Truncated games], [0], [0],
+  ),
+  caption: [Seven iterations of each run from the same start. Learning rate 5e-5 in every logged row; board pool `f8a801667b7e18a7` (leg three: `89b41ee04292bc42`).],
+) <tab:az-graph-m-wide-first>
+- *Speed as predicted:* +6.6 s an iteration (+6%), all in the learning step; self-play itself is level.
+- *The longer schedule and the larger pool cost no speed:* tree reuse, cache hits and simulations per decision are where leg three's were.
+- *Health as at the start of leg three.* Too early to see the changes in the losses: the replay still holds the parent's rows.
+- *Memory:* 8.9 GB of RAM left free during self-play, at most 3.2 GB on the GPU.
+
+*Next.* The row at the end, paired with `00823d23`. A new named net only if it wins.
+
+#repro(```sh
+catanrl fork az-2p-graph-m-uniform/main+900 --as main+1500-wide --set train.iterations=2400 \
+  --set train.updates_per_iteration=128 --set train.temperature_moves=60 \
+  --set 'env.scenarios=[{game: base-2p-fr, turn_limit: 1000, maps: 16384}]' \
+  --set 'eval.final=[{suite: {name: heldout-2p-fr, boards: 1000}, lineup: ["MCTS:ckpt=az-2p-graph-m-uniform/main+1500-wide@latest:sims=1024:dets=1:pending=64:reuse=true:transpositions=true:kernels=fused16:groups=2", "BELIEF:ckpt=ppo-2p-fr3/full@e4350#43eca7ffdd41:worlds=16"]}]'
+catanrl run az-2p-graph-m-uniform/main+1500-wide     # 600 iterations, then the row
+```)
